@@ -327,6 +327,8 @@ export interface VariablesPanelProps {
   onChangeWith?: (update: WorkflowUpdater) => void;
   workflowJsonDrafts?: WorkflowJsonDrafts;
   onWorkflowJsonText?: (field: WorkflowJsonField, text: string) => void;
+  /** Editor-owned title-bar action (the §6.0 收起左栏 key). */
+  headerAction?: React.ReactNode;
 }
 
 export function VariablesPanel({
@@ -334,7 +336,8 @@ export function VariablesPanel({
   readOnly = false,
   onChangeWith,
   workflowJsonDrafts,
-  onWorkflowJsonText
+  onWorkflowJsonText,
+  headerAction
 }: VariablesPanelProps): React.ReactElement {
   const [messageApi, messageHolder] = message.useMessage();
   const brokenParams = Boolean(workflowJsonDrafts?.params?.error);
@@ -361,6 +364,7 @@ export function VariablesPanel({
   const credentials = workflow.credentials ?? {};
   const paramNames = Object.keys(params);
   const credentialNames = Object.keys(credentials);
+  const titleCount = paramNames.length + Object.keys(vars).length + Object.keys(config).length;
 
   const write = (update: WorkflowUpdater) => {
     if (!readOnly) onChangeWith?.(update);
@@ -432,11 +436,11 @@ export function VariablesPanel({
 
   return (
     <EditorPanel
-      ariaLabel="变量"
+      actions={headerAction}
       bodyClassName="xflow-editor-variables__body"
       className="xflow-editor-variables"
+      count={readOnly ? `${titleCount} · 只读` : titleCount}
       icon={<FunctionOutlined />}
-      subtitle={readOnly ? "只读" : `${paramNames.length} 个输入参数 · ${Object.keys(vars).length + Object.keys(config).length} 个变量`}
       title="变量"
     >
       {messageHolder}

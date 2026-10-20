@@ -7,6 +7,11 @@
       "node_version": 1,
       "kind": "action",
       "display_name": "Approval",
+      "category": "human",
+      "card_summary": [
+        "approvers",
+        "mode+timeout"
+      ],
       "ports": {
         "inputs": [
           {
@@ -153,6 +158,11 @@
       "node_version": 1,
       "kind": "action",
       "display_name": "Browser Harvest (CDP)",
+      "category": "action",
+      "card_summary": [
+        "entry_url",
+        "target_host"
+      ],
       "capabilities": [
         "browser.cdp.v1"
       ],
@@ -319,6 +329,12 @@
       "node_version": 1,
       "kind": "action",
       "display_name": "Database",
+      "category": "action",
+      "card_summary": [
+        "operation+table",
+        "credential",
+        "where"
+      ],
       "credentials": [
         "db_conn"
       ],
@@ -491,6 +507,7 @@
       "node_version": 1,
       "kind": "action",
       "display_name": "End",
+      "category": "control",
       "ports": {
         "inputs": [
           {
@@ -507,6 +524,11 @@
       "node_version": 1,
       "kind": "action",
       "display_name": "Function",
+      "category": "code",
+      "card_summary": [
+        "function_name",
+        "code"
+      ],
       "ports": {
         "inputs": [
           {
@@ -580,6 +602,11 @@
       "node_version": 1,
       "kind": "action",
       "display_name": "gRPC Call",
+      "category": "action",
+      "card_summary": [
+        "service+method",
+        "host"
+      ],
       "ports": {
         "inputs": [
           {
@@ -694,6 +721,11 @@
       "node_version": 1,
       "kind": "action",
       "display_name": "HTTP Request",
+      "category": "action",
+      "card_summary": [
+        "method+url",
+        "authentication"
+      ],
       "credentials": [
         "http_auth"
       ],
@@ -888,6 +920,10 @@
       "node_version": 1,
       "kind": "action",
       "display_name": "IF Condition",
+      "category": "control",
+      "card_summary": [
+        "condition"
+      ],
       "ports": {
         "inputs": [
           {
@@ -933,6 +969,11 @@
       "node_version": 1,
       "kind": "action",
       "display_name": "Map",
+      "category": "control",
+      "card_summary": [
+        "items",
+        "batch_size"
+      ],
       "ports": {
         "inputs": [
           {
@@ -1047,6 +1088,11 @@
       "node_version": 1,
       "kind": "action",
       "display_name": "Merge",
+      "category": "control",
+      "card_summary": [
+        "mode",
+        "on_others"
+      ],
       "ports": {
         "outputs": [
           {
@@ -1115,6 +1161,11 @@
       "node_version": 1,
       "kind": "action",
       "display_name": "Notification",
+      "category": "action",
+      "card_summary": [
+        "channel",
+        "to"
+      ],
       "ports": {
         "inputs": [
           {
@@ -1194,6 +1245,11 @@
       "node_version": 1,
       "kind": "action",
       "display_name": "Script",
+      "category": "code",
+      "card_summary": [
+        "language+runtime",
+        "code"
+      ],
       "ports": {
         "inputs": [
           {
@@ -1414,6 +1470,7 @@
       "node_version": 1,
       "kind": "action",
       "display_name": "Start",
+      "category": "control",
       "ports": {
         "outputs": [
           {
@@ -1430,6 +1487,11 @@
       "node_version": 1,
       "kind": "action",
       "display_name": "Sub-workflow",
+      "category": "control",
+      "card_summary": [
+        "workflow+version",
+        "entry"
+      ],
       "ports": {
         "inputs": [
           {
@@ -1510,6 +1572,11 @@
       "node_version": 1,
       "kind": "action",
       "display_name": "Switch",
+      "category": "control",
+      "card_summary": [
+        "rules",
+        "expression"
+      ],
       "ports": {
         "inputs": [
           {
@@ -1660,6 +1727,11 @@
       "node_version": 1,
       "kind": "action",
       "display_name": "Aggregate",
+      "category": "transform",
+      "card_summary": [
+        "items",
+        "operations"
+      ],
       "ports": {
         "inputs": [
           {
@@ -1777,6 +1849,11 @@
       "node_version": 1,
       "kind": "action",
       "display_name": "Filter",
+      "category": "transform",
+      "card_summary": [
+        "items",
+        "condition"
+      ],
       "ports": {
         "inputs": [
           {
@@ -1836,6 +1913,11 @@
       "node_version": 1,
       "kind": "action",
       "display_name": "Limit",
+      "category": "transform",
+      "card_summary": [
+        "items",
+        "max"
+      ],
       "ports": {
         "inputs": [
           {
@@ -1894,6 +1976,10 @@
       "node_version": 1,
       "kind": "action",
       "display_name": "Pick",
+      "category": "transform",
+      "card_summary": [
+        "fields"
+      ],
       "ports": {
         "inputs": [
           {
@@ -1934,6 +2020,11 @@
       "node_version": 1,
       "kind": "action",
       "display_name": "Remove Duplicates",
+      "category": "transform",
+      "card_summary": [
+        "items",
+        "fields"
+      ],
       "ports": {
         "inputs": [
           {
@@ -1991,6 +2082,10 @@
       "node_version": 1,
       "kind": "action",
       "display_name": "Rename",
+      "category": "transform",
+      "card_summary": [
+        "mapping"
+      ],
       "ports": {
         "inputs": [
           {
@@ -2026,6 +2121,11 @@
       "node_version": 1,
       "kind": "action",
       "display_name": "Set",
+      "category": "transform",
+      "card_summary": [
+        "fields",
+        "expressions"
+      ],
       "ports": {
         "inputs": [
           {
@@ -2070,6 +2170,11 @@
       "node_version": 1,
       "kind": "action",
       "display_name": "Sort",
+      "category": "transform",
+      "card_summary": [
+        "items",
+        "fields"
+      ],
       "ports": {
         "inputs": [
           {
@@ -2150,6 +2255,11 @@
       "node_version": 1,
       "kind": "trigger",
       "display_name": "Cron Trigger",
+      "category": "trigger",
+      "card_summary": [
+        "expression",
+        "timezone"
+      ],
       "ports": {
         "outputs": [
           {
@@ -2282,6 +2392,11 @@
       "node_version": 1,
       "kind": "trigger",
       "display_name": "Kafka Trigger",
+      "category": "trigger",
+      "card_summary": [
+        "brokers",
+        "topic+group"
+      ],
       "ports": {
         "outputs": [
           {
@@ -2753,6 +2868,11 @@
       "node_version": 1,
       "kind": "trigger",
       "display_name": "Redis Trigger",
+      "category": "trigger",
+      "card_summary": [
+        "addr",
+        "stream+channel"
+      ],
       "ports": {
         "outputs": [
           {
@@ -2991,6 +3111,10 @@
       "node_version": 1,
       "kind": "trigger",
       "display_name": "Timer Trigger",
+      "category": "trigger",
+      "card_summary": [
+        "interval"
+      ],
       "ports": {
         "outputs": [
           {
@@ -3026,6 +3150,11 @@
       "node_version": 1,
       "kind": "trigger",
       "display_name": "Webhook Trigger",
+      "category": "trigger",
+      "card_summary": [
+        "method+path",
+        "secret_supply"
+      ],
       "ports": {
         "outputs": [
           {
@@ -3079,6 +3208,7 @@
           "path": "/parameters/secret_supply",
           "label": "Secret Supply",
           "type": "string",
+          "widget": "credential-select",
           "expression": {
             "mode": "template"
           }
@@ -3091,6 +3221,12 @@
       "node_version": 1,
       "kind": "action",
       "display_name": "Wait",
+      "category": "control",
+      "card_summary": [
+        "mode",
+        "signal_name",
+        "timeout"
+      ],
       "ports": {
         "inputs": [
           {

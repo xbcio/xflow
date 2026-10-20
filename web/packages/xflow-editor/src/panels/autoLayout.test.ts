@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { WorkflowDef } from "@xflow/core";
+import { foundationTokens, type WorkflowDef } from "@xflow/core";
 import { defaultNodeBox, layoutGraph, layoutWorkflowPositions, type NodeBox } from "./autoLayout";
 
 const box = (width = 200, height = 60): NodeBox => ({ width, height });
@@ -137,5 +137,11 @@ describe("layered auto layout", () => {
     };
     const positions = layoutWorkflowPositions(workflow);
     expect(positions.get("b")!.x).toBeGreaterThanOrEqual(defaultNodeBox.width);
+  });
+
+  it("falls back to the width the card is drawn at", () => {
+    // The card's CSS width is core's --xflow-node-width; an unmeasured card laid out
+    // at any other width overlaps or gaps against the cards that were measured.
+    expect(defaultNodeBox.width).toBe(parseInt(foundationTokens.nodeWidth, 10));
   });
 });

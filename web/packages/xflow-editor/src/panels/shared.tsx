@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Card, Input } from "antd";
+import { Input } from "antd";
 import type { WorkflowDef } from "@xflow/core";
 
 /**
@@ -25,11 +25,6 @@ export const editorSelectClassNames = {
     root: "xflow-editor-select__popup"
   },
   root: "xflow-editor-select__root"
-};
-
-export const editorTagClassNames = {
-  content: "xflow-editor-runtime-tag__content",
-  root: "xflow-editor-runtime-tag__root"
 };
 
 export const editorTooltipClassNames = {
@@ -134,56 +129,44 @@ export function WorkflowJsonTextArea({
 }
 
 export interface EditorPanelProps {
-  ariaLabel: string;
+  actions?: React.ReactNode;
   bodyClassName?: string;
   children: React.ReactNode;
   className?: string;
-  extra?: React.ReactNode;
+  count?: React.ReactNode;
   icon: React.ReactNode;
-  iconAriaLabel?: string;
-  subtitle?: React.ReactNode;
   title: React.ReactNode;
 }
 
+/**
+ * The 40px panel title bar of §6.0. The section is a landmark named by the
+ * visible heading itself (`aria-labelledby`), so the region name and the title
+ * can never drift apart; the icon is decorative and hidden from assistive tech.
+ */
 export function EditorPanel({
-  ariaLabel,
+  actions,
   bodyClassName,
   children,
   className,
-  extra,
+  count,
   icon,
-  iconAriaLabel,
-  subtitle,
   title
 }: EditorPanelProps): React.ReactElement {
+  const titleId = React.useId();
   return (
-    <Card
-      aria-label={ariaLabel}
-      className={`xflow-editor-panel-card ${className ?? ""}`}
-      rootClassName="xflow-editor-panel-card__root"
-      classNames={{
-        body: `xflow-editor-panel-card__body ${bodyClassName ?? ""}`,
-        extra: "xflow-editor-panel-card__extra",
-        header: "xflow-editor-panel-card__header",
-        title: "xflow-editor-panel-card__title"
-      }}
-      extra={extra}
-      role="region"
-      size="small"
-      title={
-        <div className="xflow-editor-panel-title">
-          <span className="xflow-editor-panel-title__icon" aria-label={iconAriaLabel}>
-            {icon}
-          </span>
-          <div className="xflow-editor-panel-title__text">
-            <strong>{title}</strong>
-            {subtitle ? <span>{subtitle}</span> : null}
-          </div>
-        </div>
-      }
-    >
-      {children}
-    </Card>
+    <section aria-labelledby={titleId} className={`xflow-editor-panel ${className ?? ""}`}>
+      <header className="xflow-editor-panel-title">
+        <span aria-hidden="true" className="xflow-editor-panel-title__icon">
+          {icon}
+        </span>
+        <h3 className="xflow-editor-panel-title__heading" id={titleId}>
+          {title}
+        </h3>
+        {count === undefined ? null : <span className="xflow-editor-panel-title__count">{count}</span>}
+        {actions ? <span className="xflow-editor-panel-title__actions">{actions}</span> : null}
+      </header>
+      <div className={`xflow-editor-panel__body ${bodyClassName ?? ""}`}>{children}</div>
+    </section>
   );
 }
 

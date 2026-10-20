@@ -6379,12 +6379,16 @@ exports[`A6-generated node-types fixture > xflow.trigger.webhook@1 snapshot 1`] 
       },
       "f.parameters.secret_supply:control": {
         "props": {
+          "credentials": {
+            "$state": "/$ctx/credentials",
+          },
           "label": "Secret Supply",
+          "multiple": false,
           "value": {
             "$bindState": "/parameters/secret_supply",
           },
         },
-        "type": "Input",
+        "type": "CredentialSelect",
       },
       "form": {
         "children": [

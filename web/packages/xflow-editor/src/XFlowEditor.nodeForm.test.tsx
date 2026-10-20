@@ -11,7 +11,7 @@ import type { NodeFormField } from "./node-form/schema";
 import generated from "./node-form/testdata/node-types.generated.json";
 import { change, fieldOf, one, pickOption } from "./node-form/testdata/testkit";
 
-/** The canvas node's own select button (the outline is gone; the canvas is the list). */
+/** The canvas node's own select button: the canvas cards stay a selectable list beside the outline tree. */
 const canvasNode = (name: string): HTMLElement => {
   const node = document.querySelector<HTMLElement>(`.xflow-preview-node__select[aria-label^="${name} node "]`);
   if (!node) throw new Error(`canvas node ${name} not found`);
@@ -22,7 +22,7 @@ const nodeTypes = generated as unknown as NodeTypesResponse;
 const enforce: NodeTypesResponse = { ...nodeTypes, param_validation_mode: "enforce" };
 
 const serialize = (value: unknown) => JSON.stringify(value);
-const inspector = () => screen.getByRole("region", { name: "属性" });
+const inspector = () => screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
 const selectNode = (name: string) => {
   fireEvent.click(canvasNode(name));
   return inspector();
@@ -50,6 +50,9 @@ const lastWorkflow = (spy: ReturnType<typeof vi.fn>) => spy.mock.calls.at(-1)?.[
 let consoleError: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
   consoleError = vi.spyOn(console, "error");
+  // Panel collapse is persisted per workflow id (§6.0); a case that ends with
+  // the inspector collapsed must not hand that state to the next case.
+  window.localStorage?.clear();
 });
 afterEach(() => consoleError.mockRestore());
 
@@ -121,7 +124,10 @@ function chunk<T>(items: T[], size: number): T[][] {
 function chunkWorkflow(family: Family, schemas: (typeof nodeTypes.node_types)[number][], offset: number): WorkflowDef {
   const [name] = family;
   const nodes = schemas.map((schema, index) => nodeFor(family, schema, offset + index));
-  return { id: `wf-${name}-${offset}`, name, nodes, connections: {} };
+  // No id: the baseline only lets a saved definition be saved when something
+  // changed, and this case saves the bytes as loaded. An unsaved draft keeps
+  // 保存 usable without an edit, so the payload equality stays meaningful.
+  return { name, nodes, connections: {} };
 }
 
 const chunkedCases = families.flatMap(([name, ...rest]) => {
@@ -247,8 +253,8 @@ describe("node form: the patch reducer (Doc C §6.1)", () => {
     expect(lastWorkflow(handleChange).connections).toEqual({ start: { main: [{ node: "hold" }] } });
     expect((within(inspector()).getByLabelText("节点名称") as HTMLInputElement).value).toBe("hold");
     // The header follows the rename: the display name and the type badge.
-    expect(within(inspector()).getByText("hold", { selector: ".xflow-editor-inspector-node__text strong" })).toBeTruthy();
-    expect(within(inspector()).getByText("xflow.wait · v1", { selector: ".xflow-editor-inspector-node__type" })).toBeTruthy();
+    expect(within(inspector()).getByText("hold", { selector: ".xflow-editor-inspector-head__name" })).toBeTruthy();
+    expect(within(inspector()).getByText("hold · xflow.wait · v1", { selector: ".xflow-editor-inspector-head__type" })).toBeTruthy();
   });
 });
 
@@ -256,7 +262,8 @@ describe("node form: the patch reducer (Doc C §6.1)", () => {
 
 describe("node form: validation mode (Doc C §1 rule 3)", () => {
   const missingUrl: WorkflowDef = {
-    id: "wf-http",
+    // No id: a draft that was never persisted keeps 保存 usable (baseline clean
+    // state), so the issue count is the only thing blocking anything here.
     name: "http",
     nodes: [{ name: "api", type: "xflow.http", parameters: { method: "GET" } }],
     connections: {}
@@ -280,6 +287,11 @@ describe("node form: validation mode (Doc C §1 rule 3)", () => {
 
     const save = screen.getByRole("button", { name: /保存/ });
     expect(save.getAttribute("data-blocked")).toBe("true");
+    // §6.3: blocked swaps the icon to danger but keeps the quiet default button.
+    expect(save.className).not.toContain("ant-btn-color-primary");
+    expect(save.className).not.toContain("ant-btn-variant-solid");
+    expect(save.className).not.toContain("ant-btn-color-dangerous");
+    expect(save.className).not.toContain("ant-btn-dangerous");
     fireEvent.click(save);
     fireEvent.click(screen.getByRole("button", { name: "运行工作流" }));
     await settle();
@@ -294,7 +306,7 @@ describe("node form: validation mode (Doc C §1 rule 3)", () => {
 
 describe("node form: backend param_issues land on their field", () => {
   const workflow: WorkflowDef = {
-    id: "wf-issues",
+    // No id: an unsaved draft keeps 保存 usable without an edit.
     name: "issues",
     nodes: [{ name: "api", type: "xflow.http", parameters: { url: "https://example.com" } }],
     connections: {}
@@ -327,7 +339,6 @@ describe("node form: backend param_issues land on their field", () => {
 
   it("rolls a sub-graph body member's issue up onto the parent's body field", async () => {
     const mapWorkflow: WorkflowDef = {
-      id: "wf-body-issues",
       name: "body-issues",
       nodes: [
         {
@@ -438,8 +449,8 @@ describe("node form: the JSON tab (Doc C §6.2)", () => {
     expect(within(root).getByRole("button", { name: "以 JSON 编辑参数" }).getAttribute("aria-pressed")).toBe("true");
     expect((within(root).getByLabelText("参数 JSON") as HTMLTextAreaElement).value).toBe("{ broken");
     // The header names the node the JSON view belongs to.
-    expect(within(root).getByText("api", { selector: ".xflow-editor-inspector-node__text strong" })).toBeTruthy();
-    expect(within(root).getByText("xflow.http · v1", { selector: ".xflow-editor-inspector-node__type" })).toBeTruthy();
+    expect(within(root).getByText("api", { selector: ".xflow-editor-inspector-head__name" })).toBeTruthy();
+    expect(within(root).getByText("api · xflow.http · v1", { selector: ".xflow-editor-inspector-head__type" })).toBeTruthy();
   });
 
   it("keeps drafts across a real unmount: panel collapse and the compact drawer", async () => {
@@ -447,16 +458,118 @@ describe("node form: the JSON tab (Doc C §6.2)", () => {
     fireEvent.change(jsonTab(selectNode("api")), { target: { value: "{ broken" } });
 
     fireEvent.click(screen.getByRole("button", { name: "收起属性面板" }));
-    expect(screen.queryByRole("region", { name: "属性" })).toBeNull();
+    expect(screen.queryByRole("region", { name: /^(属性|工作流设置)$/ })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "展开属性面板" }));
     expect(jsonTab().value).toBe("{ broken");
 
     // Compact layout: the Inspector lives in a destroyOnHidden drawer.
-    fireEvent.click(screen.getByRole("button", { name: "进入沉浸布局" }));
-    expect(screen.queryByRole("region", { name: "属性" })).toBeNull();
-    fireEvent.click(within(screen.getByRole("complementary", { name: "紧凑属性" })).getByRole("button", { name: "属性" }));
-    await waitFor(() => expect(screen.getByRole("region", { name: "属性" })).toBeTruthy());
+    fireEvent.click(within(screen.getByRole("toolbar", { name: "编辑器工具栏" })).getByRole("button", { name: "更多操作" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "进入沉浸布局" }));
+    expect(screen.queryByRole("region", { name: /^(属性|工作流设置)$/ })).toBeNull();
+    fireEvent.click(within(screen.getByRole("complementary", { name: "紧凑导航" })).getByRole("button", { name: "属性面板" }));
+    await waitFor(() => expect(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).toBeTruthy());
     expect(jsonTab().value).toBe("{ broken");
     expect(within(inspector()).getByText("参数 JSON 格式错误")).toBeTruthy();
+  });
+});
+
+// ------------------------------------------- (k) error location (P1-c S5)
+
+describe("node form: the diagnostics locate a parameter field", () => {
+  const workflow: WorkflowDef = {
+    // No id: an unsaved draft keeps 保存 usable without an edit.
+    name: "locate",
+    nodes: [
+      { name: "api", type: "xflow.http", parameters: { url: "https://example.com" } },
+      { name: "tail", type: "xflow.end" }
+    ],
+    connections: {}
+  };
+  const issue: ParamIssue = { node: "api", path: "/parameters/url", code: "format.url", message: "server rejects this url", severity: "error" };
+
+  it("selects the node, activates the 参数 tab and focuses the field", async () => {
+    const handleSave = vi.fn(async (next: WorkflowDef): Promise<XFlowEditorSaveResult> => ({ workflow: next, paramIssues: [issue] }));
+    const { container } = render(<XFlowEditor value={workflow} nodeTypes={nodeTypes} onSave={handleSave} />);
+    selectNode("tail");
+    fireEvent.click(screen.getByRole("button", { name: /保存/ }));
+    await waitFor(() => expect(handleSave).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "展开诊断台" }));
+    const locate = await screen.findByRole("button", { name: "定位字段 api /parameters/url" });
+    // Walk away from the target node and its parameters tab first: locating
+    // has to select api, come back to 参数 and focus the field.
+    fireEvent.click(within(inspector()).getByRole("tab", { name: "设置" }));
+    expect(within(inspector()).getByRole("tab", { name: "设置" }).getAttribute("aria-selected")).toBe("true");
+    // §6.0: collapsing the inspector must not swallow a locate request — this
+    // entry exists specifically to look at the field.
+    fireEvent.click(screen.getByRole("button", { name: "收起属性面板" }));
+    expect(screen.queryByRole("region", { name: /^(属性|工作流设置)$/ })).toBeNull();
+    fireEvent.click(locate);
+    await settle();
+
+    expect(within(inspector()).getByText("api", { selector: ".xflow-editor-inspector-head__name" })).toBeTruthy();
+    expect(within(inspector()).getByRole("tab", { name: "参数" }).getAttribute("aria-selected")).toBe("true");
+    await waitFor(() => {
+      const field = one<HTMLElement>(container, '[data-composer-path="/parameters/url"]');
+      expect(field.contains(document.activeElement)).toBe(true);
+    });
+  });
+
+  /** Opens the diagnostics board with the server's param_issue in place. */
+  const mountWithServerIssue = async () => {
+    const handleSave = vi.fn(async (next: WorkflowDef): Promise<XFlowEditorSaveResult> => ({ workflow: next, paramIssues: [issue] }));
+    const utils = render(<XFlowEditor value={workflow} nodeTypes={nodeTypes} onSave={handleSave} />);
+    selectNode("tail");
+    fireEvent.click(screen.getByRole("button", { name: /保存/ }));
+    await waitFor(() => expect(handleSave).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "展开诊断台" }));
+    await screen.findByRole("button", { name: "定位字段 api /parameters/url" });
+    return utils;
+  };
+  const clickLocate = async () => {
+    fireEvent.click(screen.getByRole("button", { name: "定位字段 api /parameters/url" }));
+    await settle();
+  };
+
+  it("clears a handled request: a later remount does not re-focus the field", async () => {
+    const { container } = await mountWithServerIssue();
+    await clickLocate();
+    const field = one<HTMLElement>(container, '[data-composer-path="/parameters/url"]');
+    await waitFor(() => expect(field.contains(document.activeElement)).toBe(true));
+    (document.activeElement as HTMLElement | null)?.blur();
+
+    // A fresh 定位字段 still reaches the field: the cleared state must not
+    // let the next request repeat the last nonce and be de-duplicated away
+    // by the Composer that is still mounted.
+    await clickLocate();
+    await waitFor(() =>
+      expect(one<HTMLElement>(container, '[data-composer-path="/parameters/url"]').contains(document.activeElement)).toBe(true)
+    );
+    (document.activeElement as HTMLElement | null)?.blur();
+
+    // The request was consumed and cleared: leaving the 参数 tab and coming
+    // back remounts the form, but must not steal the focus again.
+    fireEvent.click(within(inspector()).getByRole("tab", { name: "设置" }));
+    fireEvent.click(within(inspector()).getByRole("tab", { name: "参数" }));
+    await settle();
+    expect(one<HTMLElement>(container, '[data-composer-path="/parameters/url"]').contains(document.activeElement)).toBe(false);
+  });
+
+  it("clears a handled request: another node has no stale path left to warn about", async () => {
+    const { container } = await mountWithServerIssue();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await clickLocate();
+      await waitFor(() =>
+        expect(one<HTMLElement>(container, '[data-composer-path="/parameters/url"]').contains(document.activeElement)).toBe(true)
+      );
+      // Selecting a node whose form has no /parameters/url must not replay the
+      // consumed request (which would log a focus-target-not-found warning).
+      selectNode("tail");
+      await settle();
+      expect(warn.mock.calls.some((call) => String(call[0]).includes("focus-target-not-found"))).toBe(false);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

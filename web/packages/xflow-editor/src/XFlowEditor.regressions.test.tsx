@@ -4,7 +4,7 @@ import type { NodeTypesResponse, WorkflowDef } from "@xflow/core";
 import { XFlowEditor } from "./index";
 import generated from "./node-form/testdata/node-types.generated.json";
 
-/** The canvas node's own select button (the outline is gone; the canvas is the list). */
+/** The canvas node's own select button: the canvas cards stay a selectable list beside the outline tree. */
 const canvasNode = (name: string): HTMLElement => {
   const node = document.querySelector<HTMLElement>(`.xflow-preview-node__select[aria-label^="${name} node "]`);
   if (!node) throw new Error(`canvas node ${name} not found`);
@@ -13,7 +13,7 @@ const canvasNode = (name: string): HTMLElement => {
 
 const nodeTypes = generated as unknown as NodeTypesResponse;
 
-const inspector = () => screen.getByRole("region", { name: "属性" });
+const inspector = () => screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
 const selectNode = (name: string) => {
   fireEvent.click(canvasNode(name));
   return inspector();
@@ -46,12 +46,20 @@ const workflow: WorkflowDef = {
 
 describe("US-001 save in-flight guard", () => {
   it("ignores a second save (button, then shortcut) while the first is pending, and clears loading when it settles", async () => {
-    let resolveSave: ((value: WorkflowDef) => void) | undefined;
+    let resolveSave: (() => void) | undefined;
     const handleSave = vi.fn((next: WorkflowDef) => new Promise<WorkflowDef>((resolve) => {
       resolveSave = () => resolve(next);
     }));
     render(<XFlowEditor value={workflow} onSave={handleSave} />);
-    const save = screen.getByRole("button", { name: "保存" });
+    // A clean draft keeps 保存 disabled (baseline: the publish key is unusable
+    // until there is something to save), so dirty the draft first.
+    const settings = inspector();
+    if (settings.querySelector(".xflow-editor-inspector-head")) fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.change(within(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).getByLabelText("工作流名称"), {
+      target: { value: "Regressions edited" }
+    });
+    const save = screen.getByRole("button", { name: "保存" }) as HTMLButtonElement;
+    expect(save.disabled).toBe(false);
 
     fireEvent.click(save);
     fireEvent.keyDown(document.body, { key: "s", metaKey: true });
@@ -60,11 +68,18 @@ describe("US-001 save in-flight guard", () => {
     expect(handleSave).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(save.className).toContain("ant-btn-loading"));
 
-    await act(async () => resolveSave?.(workflow));
+    await act(async () => resolveSave?.());
     await waitFor(() => expect(save.className).not.toContain("ant-btn-loading"));
-    expect(screen.getByText("已保存")).toBeTruthy();
+    expect(screen.getByText("已保存", { selector: ".xflow-editor-chip span" })).toBeTruthy();
 
-    // Settled: the next save goes through again.
+    // Settled clean: the shortcut is a no-op, as on the disabled baseline key.
+    fireEvent.keyDown(document.body, { key: "s", metaKey: true });
+    expect(handleSave).toHaveBeenCalledTimes(1);
+
+    // A fresh edit enables the next save again.
+    fireEvent.change(within(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).getByLabelText("工作流名称"), {
+      target: { value: "Regressions edited again" }
+    });
     fireEvent.keyDown(document.body, { key: "s", metaKey: true });
     expect(handleSave).toHaveBeenCalledTimes(2);
   });
@@ -141,9 +156,9 @@ describe("US-003 workflow-level JSON", () => {
     expect(handleSave).not.toHaveBeenCalled();
     expect(screen.getAllByText(/工作流 输入参数 JSON 未通过解析/).length).toBeGreaterThan(0);
 
-    fireEvent.click(screen.getByRole("button", { name: "收起左侧面板" }));
+    fireEvent.click(screen.getByRole("button", { name: "收起左栏" }));
     expect(screen.queryByRole("region", { name: "变量" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "展开左侧面板" }));
+    fireEvent.click(screen.getByRole("button", { name: "变量" }));
     // A broken draft reopens its section straight in the source view.
     const toggle = within(screen.getByRole("region", { name: "变量" })).getByRole("button", { name: "以 JSON 编辑输入参数" });
     expect(toggle.getAttribute("aria-pressed")).toBe("true");

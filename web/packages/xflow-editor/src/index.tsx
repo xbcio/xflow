@@ -1,18 +1,18 @@
 import {
-  AimOutlined,
   ApartmentOutlined,
   AppstoreAddOutlined,
   AppstoreOutlined,
+  ArrowLeftOutlined,
   AuditOutlined,
   BgColorsOutlined,
   BranchesOutlined,
+  CaretRightOutlined,
   CheckCircleOutlined,
+  CheckOutlined,
   CloudServerOutlined,
-  CloudUploadOutlined,
   ClockCircleOutlined,
   CodeOutlined,
   CompressOutlined,
-  ConsoleSqlOutlined,
   DatabaseOutlined,
   DeleteOutlined,
   DesktopOutlined,
@@ -20,62 +20,78 @@ import {
   EditOutlined,
   ExportOutlined,
   EyeOutlined,
-  FileAddOutlined,
   FileSearchOutlined,
   FunctionOutlined,
-  InfoCircleOutlined,
   GlobalOutlined,
-  ImportOutlined,
-  LeftOutlined,
+  HistoryOutlined,
   LinkOutlined,
+  MenuFoldOutlined,
+  MenuUnfoldOutlined,
   MergeCellsOutlined,
+  MoreOutlined,
   MoonOutlined,
   NotificationOutlined,
   PartitionOutlined,
   PlayCircleOutlined,
-  PlaySquareOutlined,
+  PlusOutlined,
   QuestionCircleOutlined,
   RedoOutlined,
-  RightOutlined,
-  SaveOutlined,
+  SafetyCertificateOutlined,
   SearchOutlined,
-  SettingOutlined,
+  SlidersOutlined,
   StepForwardOutlined,
   SunOutlined,
   ThunderboltOutlined,
   UndoOutlined,
-  UpOutlined,
   WarningOutlined
 } from "@ant-design/icons";
 import * as React from "react";
 import {
   Button,
   ConfigProvider,
+  Divider,
   Drawer,
+  Dropdown,
   Input,
   Modal,
+  Popconfirm,
   Popover,
   Segmented,
-  Space,
   Tag,
   Tooltip,
-  theme,
   type InputRef,
-  type MenuProps,
-  type RefSelectProps,
-  type ThemeConfig
+  type MenuProps
 } from "antd";
 import type {
+  CardSummaryRow,
   Connections,
   NodeTypesResponse,
   ParamIssue,
   RuntimeSnapshot,
   Viewport,
   WorkflowDef,
-  WorkflowNode
+  WorkflowNode,
+  XFlowEditorCapabilities
 } from "@xflow/core";
-import { declaredOutputPorts, isSupplyNode, isTextEntryTarget } from "@xflow/core";
+import {
+  APPROVAL_NODE_TYPE,
+  approvalDecisions,
+  approvalParamsFrom,
+  approvalProgress,
+  approvalWaitText,
+  breakpoints,
+  cardSummaryRows,
+  declaredOutputPorts,
+  executionOpLabel,
+  isSupplyNode,
+  isTextEntryTarget,
+  missingCapabilityScopes,
+  nodeStatusMeta,
+  resolveAppearance,
+  workflowStatusMeta
+} from "@xflow/core";
 import type { Patch } from "@xflow/composer/core";
+import type { FocusRequest } from "@xflow/composer/react";
 import { XFlowPreview, XFLOW_NODE_DRAG_MIME, type PreviewConnection, type XFlowPreviewHandle } from "@xflow/preview";
 import {
   createNodeFormRegistry,
@@ -91,9 +107,27 @@ import {
   type DanglingEdge
 } from "./node-form";
 import type { NodeFormKind, NodeFormPort, NodeFormPorts, NodeFormSchema, NodeFormSource } from "./node-form/schema";
+import { statusGlyph } from "./panels/statusGlyph";
 import { VariablesPanel } from "./panels/variables";
+import type { WorkflowDiagnostic } from "./panels/diagnostics";
+import { DiagnosticsDock, type DiagnosticsDockController, type DockState } from "./panels/diagnostics";
 import { NodeSearch, type NodeSearchOption } from "./panels/nodeSearch";
-import { Inspector, type NodeFormHost, type NodePresentationHint } from "./panels/inspector";
+import { NodeCategoryIcon } from "./panels/categoryIcon";
+import { OutlinePanel } from "./panels/outlinePanel";
+import { RailKey } from "./panels/rail";
+import { BannerStack, editorBanners, isWorkflowConflictError } from "./panels/banner";
+import { Inspector, type NodeFormHost } from "./panels/inspector";
+import { RunBar, type ExecutionControlAction, type XFlowExecution } from "./panels/runBar";
+import {
+  ExecutionListPanel,
+  executionClock,
+  type XFlowExecutionListQuery,
+  type XFlowExecutionListState
+} from "./panels/executionList";
+import { RerunDialog, type XFlowRerunRequest, type XFlowRerunResult } from "./panels/rerunDialog";
+import { PublishDialog } from "./panels/publishDialog";
+import { ApprovalDialog, type XFlowApprovalSignal } from "./panels/approvalDialog";
+import { VersionHistory, type XFlowWorkflowVersions } from "./panels/versionHistory";
 import { CanvasContextMenu, ContextMenuLabel, type ContextMenuRequest } from "./panels/contextMenu";
 import { defaultNodeBox, layoutWorkflowPositions, type LayoutPoint } from "./panels/autoLayout";
 import {
@@ -117,7 +151,6 @@ import {
 } from "./panels/workflowOps";
 import {
   EditorPanel,
-  editorInputClassNames,
   editorTooltipClassNames,
   serializeJson,
   workflowJsonLabels,
@@ -125,13 +158,24 @@ import {
   type WorkflowJsonField,
   type WorkflowUpdater
 } from "./panels/shared";
+import { operationStatusFromRuntime } from "./operationStatus";
+import { versionChipState } from "./unsavedChanges";
+import { workflowChanges } from "./workflowChanges";
 import {
-  editorThemePalettes,
-  type ResolvedXFlowEditorAppearance,
-  type XFlowEditorAppearance,
-  type XFlowEditorThemeVariant
-} from "./theme";
-// Composer form styles first so the editor's scoped overrides win on equal specificity.
+  bareVersion,
+  publishErrorText,
+  rollbackErrorText,
+  suggestNextVersion,
+  versionLabel,
+  versionUnavailableReason
+} from "./versioning";
+import { createEditorThemeConfig, type ResolvedXFlowEditorAppearance, type XFlowEditorAppearance } from "./theme";
+// Tokens declare the --xflow-* variables every stylesheet below reads. Both sheets are
+// layered — the composer's in `@layer xflow.composer`, this editor's in `@layer
+// xflow.editor`. The host declares the order (tailwind.css) with xflow.editor after
+// xflow.composer, so the editor overrides the composer's variable values; Tailwind
+// utilities are declared after both and win the layout. Import order decides nothing.
+import "@xflow/core/tokens.css";
 import "@xflow/composer/form/styles.css";
 import "./styles.css";
 
@@ -142,9 +186,23 @@ import "./styles.css";
  */
 const nodeFormCatalog = nodeFormCatalogs["zh-CN"];
 
-export type { XFlowEditorAppearance, XFlowEditorThemeVariant } from "./theme";
+export type { XFlowEditorAppearance } from "./theme";
+export type {
+  ExecutionControlAction,
+  XFlowExecution,
+  XFlowExecutionNode
+} from "./panels/runBar";
+export type {
+  XFlowExecutionListQuery,
+  XFlowExecutionListState,
+  XFlowExecutionListItem
+} from "./panels/executionList";
+export type { XFlowRerunRequest, XFlowRerunResult } from "./panels/rerunDialog";
+export type { XFlowApprovalSignal } from "./panels/approvalDialog";
+export type { XFlowWorkflowVersion, XFlowWorkflowVersions } from "./panels/versionHistory";
 type LayoutPolicy = "auto" | "compact";
-type EditorLayout = "a" | "c";
+/** a = both panels docked, b = left rail + docked inspector, c = both as rails. */
+type EditorLayout = "a" | "b" | "c";
 type CanvasTool = "select" | "connect";
 
 interface WorkflowHistory {
@@ -152,9 +210,7 @@ interface WorkflowHistory {
   redo: WorkflowDef[];
 }
 
-const compactViewportQuery = "(max-width: 1399px)";
 const historyLimit = 80;
-const rulerMarks = [0, 100, 200, 300, 400, 500, 600, 700];
 
 /**
  * Which keystrokes survive focus landing in a text field. Canvas bindings defer
@@ -232,10 +288,32 @@ const editorShortcuts: EditorShortcut[] = [
   },
   {
     id: "toggleLeftPanel",
-    label: "收起 / 展开左侧面板",
+    label: "收起 / 展开左栏",
     keys: "⌘ / Ctrl + B",
     scope: "canvas",
     match: (event) => isModifiedKey(event, "b")
+  },
+  {
+    id: "toggleDiagnostics",
+    label: "收起 / 展开诊断台",
+    keys: "⌘ / Ctrl + J",
+    // Global like ⌘K: J has no text-editing meaning, and the browser's own
+    // ⌘J (downloads) is no use inside a workflow editor.
+    scope: "global",
+    // The physical key, so a layout that composes another character still hits.
+    match: (event) => isPrimaryModifier(event) && !event.altKey && !event.shiftKey && event.code === "KeyJ"
+  },
+  {
+    id: "toggleRightPanel",
+    label: "收起 / 展开属性面板",
+    keys: "⌥⌘B / Ctrl + Alt + B",
+    scope: "canvas",
+    // Option composes the produced character on macOS (⌥B reports "∫"), so the
+    // physical key is the reliable discriminator; `key` stays as the fallback
+    // for layouts that report "b" with Alt held.
+    match: (event) =>
+      isPrimaryModifier(event) && event.altKey && !event.shiftKey
+      && (event.code === "KeyB" || event.key.toLowerCase() === "b")
   },
   {
     id: "selectTool",
@@ -250,6 +328,20 @@ const editorShortcuts: EditorShortcut[] = [
     keys: "L",
     scope: "canvas",
     match: (event) => isBareKey(event) && event.key.toLowerCase() === "l"
+  },
+  {
+    id: "addNode",
+    label: "添加节点",
+    keys: "A",
+    scope: "canvas",
+    match: (event) => isBareKey(event) && event.key.toLowerCase() === "a"
+  },
+  {
+    id: "searchLibrary",
+    label: "搜索节点库",
+    keys: "/",
+    scope: "canvas",
+    match: (event) => isBareKey(event) && event.key === "/"
   },
   {
     id: "escape",
@@ -268,7 +360,19 @@ const editorShortcuts: EditorShortcut[] = [
   }
 ];
 
-const rulerStepPx = 100;
+/** Whether the key event came from inside an open popup that owns its own Esc. */
+const isInsidePopup = (target: EventTarget | null): boolean =>
+  target instanceof Element && target.closest('[role="menu"], [role="listbox"], [role="dialog"], [role="tooltip"]') !== null;
+
+/** The shortcuts that stay live while an expanded diagnostics drawer covers the workbench. */
+const expandedDockShortcuts: ReadonlySet<string> = new Set([
+  "save",
+  "run",
+  "findNode",
+  "toggleDiagnostics",
+  "escape",
+  "shortcutsHelp"
+]);
 
 /**
  * What `onSave` may resolve to besides the saved definition itself: the
@@ -293,10 +397,32 @@ export interface XFlowEditorSaveError {
   paramIssues?: ParamIssue[];
 }
 
+/**
+ * What `onRollback` resolves to: the version the server installed and whether
+ * it was already the current one (the server's idempotent no-op).
+ */
+export interface XFlowRollbackResult {
+  version: string;
+  unchanged: boolean;
+}
+
+/**
+ * The workbench's two views (§6.8). 编辑 is the definition editor; 运行记录
+ * replays one execution's snapshot. The preview switch P2 carried here was
+ * replaced by 运行记录 (user ruling 2026-10-19, default ruling 10): a read-only
+ * definition is the editing canvas with the 只读 banner, not a third mode.
+ */
+export type XFlowEditorMode = "edit" | "runs";
+
 export interface XFlowEditorProps {
   value: WorkflowDef;
   /** Optional host layout class; useful when the workbench lives below an app header. */
   className?: string;
+  /**
+   * Back to the workflow list. The top bar renders the ← button only when the
+   * host supplies this handler; the editor does not own routing.
+   */
+  onBack?: () => void;
   runtime?: RuntimeSnapshot;
   onChange?: (value: WorkflowDef) => void;
   /**
@@ -324,14 +450,10 @@ export interface XFlowEditorProps {
    * fields only, parameters edited on the JSON tab.
    */
   nodeTypes?: NodeTypesResponse;
-  /** Preferred color mode. Omit to use the editor's local setting. */
+  /** Preferred color mode. Omit to use the editor's local setting (default `system`). */
   appearance?: XFlowEditorAppearance;
-  /** Preferred workbench visual language. Omit to use the editor's local setting. */
-  themeVariant?: XFlowEditorThemeVariant;
   /** Called whenever the user selects a color mode. Persistence belongs to the host. */
   onAppearanceChange?: (appearance: XFlowEditorAppearance) => void;
-  /** Called whenever the user selects a workbench visual language. */
-  onThemeVariantChange?: (themeVariant: XFlowEditorThemeVariant) => void;
   /**
    * Restores the canvas pan/zoom saved in `WorkflowEditorMetadata.viewport`
    * (ADR-D4 §2.3), e.g. after `mergeEditorMetadata` on load. Omit it to keep
@@ -346,6 +468,162 @@ export interface XFlowEditorProps {
    * `WorkflowDef`, since the viewport has no field there).
    */
   onViewportChange?: (viewport: Viewport) => void;
+  /**
+   * The host's GET /v1/node-types failed. Shows the 节点类型加载失败 banner;
+   * the Inspector already falls back to JSON parameter editing when `nodeTypes`
+   * is absent, and the canvas and connections are unaffected.
+   */
+  nodeTypesError?: { message?: string };
+  /** Re-fetches node types. The banner's 重试 button exists only with it. */
+  onRetryNodeTypes?: () => void;
+  /**
+   * Fetches the latest saved definition and replaces `value` with it, for the
+   * 保存失败：工作流已被更新 banner (a rejected `onSave` with status 409 and
+   * code `workflow_conflict`). The 重新加载 button exists only with it.
+   */
+  onReloadLatest?: () => void;
+  /** Saves the current draft as a new workflow. The 另存为副本 button exists only with it. */
+  onSaveAsCopy?: (definition: WorkflowDef) => void;
+  /**
+   * Publishes the draft under a new version label (§6.10): the host PUTs
+   * `value` — whose `version` the publish dialog set — and resolves like
+   * `onSave`. Omit and 发布 stays disabled; `capabilities.workflow === false`
+   * hides it with the rest of the write actions.
+   */
+  onPublish?: (value: WorkflowDef) => Promise<WorkflowDef | XFlowEditorSaveResult> | WorkflowDef | XFlowEditorSaveResult;
+  /**
+   * GET /v1/workflows/{id}/versions. The version chip opens the history panel
+   * only when this is present; the publish dialog also reads the online
+   * version and hash from it. Called each time the panel or dialog opens.
+   */
+  onLoadVersions?: () => Promise<XFlowWorkflowVersions> | XFlowWorkflowVersions;
+  /**
+   * 查看 on a history row. The host replaces `value` with that version's
+   * definition and sets `historicalVersion`; the editor turns read-only.
+   */
+  onViewVersion?: (version: string) => void;
+  /**
+   * 回滚到此, after the history panel's confirmation. Rejection with 409
+   * `workflow_version_unavailable` disables that row and keeps the reason on
+   * it. Omit and every row's rollback stays disabled.
+   */
+  onRollback?: (version: string) => Promise<XFlowRollbackResult> | XFlowRollbackResult;
+  /**
+   * The archived version the host loaded into `value`. A value makes the
+   * editor read-only and switches the version chip to 「vX · 历史」; the
+   * history banner carries the return entry.
+   */
+  historicalVersion?: string;
+  /** Leaves the archived view. The history banner's 退出历史 exists only with it. */
+  onExitHistory?: () => void;
+  /**
+   * Why the viewer may not edit (e.g. no write scope in the namespace). A value
+   * shows the 只读 banner, closes every editing surface and hides 保存 / 发布 /
+   * 运行 rather than disabling them (§6.5.1 / §6.10).
+   */
+  readOnlyReason?: string;
+  /**
+   * The capability bits the host derived from GET /v1/current-user's scopes
+   * (`capabilitiesFromScopes` in `@xflow/core`). The editor never requests
+   * them itself. Omit the prop to keep every control enabled, preserving the
+   * pre-capabilities host contract; `workflow: false` makes the editor
+   * read-only exactly like `readOnlyReason`, without needing a reason string.
+   */
+  capabilities?: XFlowEditorCapabilities;
+  /**
+   * The execution the host is tracking (structurally an `@xflow/api`
+   * `ExecutionDetail`). A value floats the §6.3 run bar over the canvas; the
+   * host polls GET /v1/executions/{id} and answers actions by replacing this
+   * prop. Omit it and the bar does not exist.
+   */
+  execution?: XFlowExecution;
+  /**
+   * Asks the host to run one pause / resume / cancel on the tracked execution.
+   * The host calls the API and feeds the refreshed detail back through
+   * `execution`; a rejection surfaces as the editor's operation error (the host
+   * owns the 403 toast and capability refresh). Omit and the bar's buttons are
+   * disabled.
+   */
+  onExecutionAction?: (
+    executionId: string,
+    action: ExecutionControlAction
+  ) => Promise<void> | void;
+  /** Called after a run-bar count selects a node on the canvas (host-side locate). */
+  onLocateNode?: (nodeName: string) => void;
+  /** 查看运行记录. The host owns routing; omit and the link stays disabled. */
+  onOpenRunHistory?: () => void;
+  /** 打开子执行 from the Inspector's 运行 tab. Omit and the link is disabled. */
+  onOpenExecution?: (executionId: string) => void;
+  /**
+   * The console user's verified subject (GET /v1/current-user). The approval
+   * dialog uses it only to choose the signal name and to decide whether this
+   * person may act; the server injects `_actor` into the payload, so the editor
+   * never sends an identity.
+   */
+  currentUserSubject?: string;
+  /**
+   * Delivers an approval signal (POST /v1/executions/{id}/signals). Omit and
+   * the dialog is read-only: the editor never fakes a submitted decision.
+   */
+  onSignal?: (executionId: string, signal: XFlowApprovalSignal) => Promise<void> | void;
+  /**
+   * Revokes a delivered-but-unconsumed signal (DELETE /signals/{name}).
+   * Omit and the dialog has no 撤回 entry.
+   */
+  onRevokeSignal?: (executionId: string, name: string) => Promise<void> | void;
+  /**
+   * How long a terminal run bar stays before hiding itself, in ms. The editor
+   * times it (default 5000); `null` keeps the bar until the user closes it.
+   */
+  runBarDismissMs?: number | null;
+  /**
+   * The active view. Omit to let the switch keep its own state; the host owns
+   * `?exec=` and passes this so a reload or a shared URL lands in the same
+   * view. `编辑` is the definition (read-only when the viewer may not write).
+   */
+  mode?: XFlowEditorMode;
+  /** Reports a switch. The host may reject it by not changing `mode`. */
+  onModeChange?: (mode: XFlowEditorMode) => void;
+  /**
+   * The accumulated GET /v1/executions pages for the current filter, keyed by
+   * the host to this workflow (`workflow_id`). Page 1 replaces the rows; later
+   * pages append. Omit it and 运行记录 shows its empty state.
+   */
+  executionList?: XFlowExecutionListState;
+  /**
+   * Asks the host for one execution-list page. Called on mount, on a filter
+   * change (page 1) and when the scrolled list nears its end. The editor never
+   * requests the API itself.
+   */
+  onLoadExecutions?: (query: XFlowExecutionListQuery) => void;
+  /** The execution whose snapshot the run-record mode replays. */
+  selectedExecution?: XFlowExecution;
+  /** Row click in the execution list; the host loads the detail and owns `?exec=`. */
+  onSelectExecution?: (executionId: string) => void;
+  /**
+   * The definition captured for {@link selectedExecution} — the host reads
+   * `GET /v1/workflows/{id}/versions/{workflow_version}` and passes it here.
+   * When the version is unavailable the host passes the current definition and
+   * sets {@link executionDefinitionStale}.
+   */
+  executionSnapshotWorkflow?: WorkflowDef;
+  /**
+   * The requested version could not be resolved, so the canvas is replaying
+   * the current definition: the status bar says 定义已变化，仅供参考.
+   */
+  executionDefinitionStale?: boolean;
+  /**
+   * The replay runtime the host derived with
+   * `executionDetailToRuntimeSnapshot(selectedExecution)`. Kept separate from
+   * `runtime` so switching back to 编辑 keeps the live run's colours.
+   */
+  executionSnapshotRuntime?: RuntimeSnapshot;
+  /**
+   * §6.9 重跑…. The host owns POST /v1/executions/{id}/rerun and the follow-up
+   * (select the new execution, toast a queue position). Omit and every rerun
+   * entry stays hidden — the editor never fakes a submitted rerun.
+   */
+  onRerun?: (request: XFlowRerunRequest) => Promise<XFlowRerunResult> | XFlowRerunResult;
 }
 
 function systemAppearance(): ResolvedXFlowEditorAppearance {
@@ -378,183 +656,79 @@ function useResolvedAppearance(
     return () => mediaQuery.removeListener?.(sync);
   }, []);
 
-  return appearance === "system" ? systemMode : appearance;
+  return resolveAppearance(appearance, systemMode === "dark");
 }
 
-function compactViewport(): boolean {
-  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
-    return false;
-  }
-  return window.matchMedia(compactViewportQuery).matches;
+/** Content-box inline size: the same box an `@container` size query reads. */
+function contentInlineSize(element: HTMLElement): number {
+  const rect = element.getBoundingClientRect();
+  const style = window.getComputedStyle(element);
+  const px = (value: string) => Number.parseFloat(value) || 0;
+  return Math.max(
+    0,
+    rect.width -
+      px(style.borderLeftWidth) -
+      px(style.borderRightWidth) -
+      px(style.paddingLeft) -
+      px(style.paddingRight)
+  );
 }
 
-function useCompactViewport(): boolean {
-  const [isCompact, setIsCompact] = React.useState(compactViewport);
+/**
+ * Inline size of the editor's own box (the `.xflow-editor` root, which is the
+ * named inline-size container). The breakpoints are measured here rather than
+ * on the window, so an editor embedded in a narrow host collapses with the box
+ * it was given. The size is the content box, the same measurement `@container`
+ * uses, so JS and CSS compare identical numbers (no rounding). 0 means "not
+ * measured yet": SSR and hosts without ResizeObserver stay on the wide layout
+ * instead of guessing.
+ */
+function useEditorWidth(ref: React.RefObject<HTMLElement | null>): number {
+  const [width, setWidth] = React.useState(0);
 
-  React.useEffect(() => {
-    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+  React.useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element || typeof ResizeObserver === "undefined") {
       return undefined;
     }
+    const commit = (next: number) => setWidth((current) => (current === next ? current : next));
+    // Seed before the first paint: a ResizeObserver callback lands after it, so
+    // a narrow editor would otherwise paint one frame of the wide layout.
+    commit(contentInlineSize(element));
+    const observer = new ResizeObserver(([entry]) => commit(entry.contentRect.width));
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [ref]);
 
-    const mediaQuery = window.matchMedia(compactViewportQuery);
-    const sync = () => setIsCompact(mediaQuery.matches);
-    sync();
-
-    if (typeof mediaQuery.addEventListener === "function") {
-      mediaQuery.addEventListener("change", sync);
-      return () => mediaQuery.removeEventListener("change", sync);
-    }
-
-    mediaQuery.addListener?.(sync);
-    return () => mediaQuery.removeListener?.(sync);
-  }, []);
-
-  return isCompact;
+  return width;
 }
 
-function createEditorThemeConfig(
-  themeVariant: XFlowEditorThemeVariant,
-  appearance: ResolvedXFlowEditorAppearance
-): ThemeConfig {
-  // `editorThemePalettes` mirrors the --xflow-* custom properties declared in
-  // styles.css. ConfigProvider owns AntD's interaction states; the root CSS
-  // variables own editor-only surfaces such as rulers and the React Flow canvas.
-  const palette = editorThemePalettes[themeVariant][appearance];
-  const focusOutline = `${palette.primary}33`;
-
-  return {
-    algorithm: appearance === "dark" ? theme.darkAlgorithm : theme.defaultAlgorithm,
-    cssVar: {
-      prefix: "xflow-ant",
-      key: `xflow-editor-${themeVariant}-${appearance}`
-    },
-    token: {
-      borderRadius: 6,
-      borderRadiusSM: 4,
-      colorBgBase: palette.app,
-      colorBgContainer: palette.panel,
-      colorBgContainerDisabled: palette.panelRaised,
-      colorBgElevated: palette.panelRaised,
-      colorBgLayout: palette.app,
-      colorBgTextActive: palette.hover,
-      colorBgTextHover: palette.hover,
-      colorBorder: palette.border,
-      colorBorderBg: palette.border,
-      colorBorderSecondary: palette.border,
-      colorError: palette.error,
-      colorFillAlter: palette.field,
-      colorFillContent: palette.field,
-      colorFillContentHover: palette.hover,
-      colorFillSecondary: palette.field,
-      colorIcon: palette.textTertiary,
-      colorIconHover: palette.text,
-      colorInfo: palette.primary,
-      colorLink: palette.primary,
-      colorPrimary: palette.primary,
-      colorSplit: palette.border,
-      colorSuccess: palette.success,
-      colorText: palette.text,
-      colorTextBase: palette.text,
-      colorTextDescription: palette.textTertiary,
-      colorTextLabel: palette.textSecondary,
-      colorTextPlaceholder: palette.textTertiary,
-      colorTextSecondary: palette.textSecondary,
-      colorTextTertiary: palette.textTertiary,
-      colorWarning: palette.warning,
-      controlHeight: 32,
-      controlItemBgActive: palette.hover,
-      controlItemBgActiveHover: palette.hover,
-      controlItemBgHover: palette.hover,
-      controlOutline: focusOutline,
-      controlOutlineWidth: 2,
-      fontSize: 12,
-      fontSizeSM: 11
-    },
-    components: {
-      Button: {
-        dangerColor: palette.error,
-        dangerShadow: "none",
-        defaultActiveBg: palette.hover,
-        defaultActiveBorderColor: palette.primary,
-        defaultActiveColor: palette.text,
-        defaultBg: palette.field,
-        defaultBorderColor: palette.border,
-        defaultColor: palette.text,
-        defaultHoverBg: palette.hover,
-        defaultHoverBorderColor: palette.primary,
-        defaultHoverColor: palette.primary,
-        defaultShadow: "none",
-        fontWeight: 600,
-        iconGap: 4,
-        onlyIconSizeSM: 14,
-        paddingInlineSM: 9,
-        primaryColor: "#ffffff",
-        primaryShadow: "none",
-        solidTextColor: "#ffffff"
-      },
-      Card: {
-        bodyPaddingSM: 10,
-        headerBg: palette.panelRaised,
-        headerHeightSM: 42,
-        headerPaddingSM: 10
-      },
-      Input: {
-        activeBg: palette.field,
-        activeBorderColor: palette.primary,
-        activeShadow: `0 0 0 2px ${focusOutline}`,
-        hoverBg: palette.field,
-        hoverBorderColor: palette.primary,
-        inputFontSizeSM: 11,
-        paddingBlockSM: 0,
-        paddingInlineSM: 7
-      },
-      Segmented: {
-        itemActiveBg: palette.hover,
-        itemColor: palette.textSecondary,
-        itemHoverBg: palette.hover,
-        itemHoverColor: palette.text,
-        itemSelectedBg: palette.field,
-        itemSelectedColor: palette.text,
-        trackBg: palette.panelRaised,
-        trackPadding: 2
-      },
-      Select: {
-        activeBorderColor: palette.primary,
-        activeOutlineColor: focusOutline,
-        hoverBorderColor: palette.primary,
-        optionActiveBg: palette.hover,
-        optionFontSize: 11,
-        optionHeight: 28,
-        optionLineHeight: "20px",
-        optionPadding: "4px 8px",
-        optionSelectedBg: palette.hover,
-        optionSelectedColor: palette.text,
-        optionSelectedFontWeight: 600,
-        selectorBg: palette.field
-      },
-      Switch: {
-        handleBg: palette.field,
-        handleShadow: "none",
-        handleSizeSM: 12,
-        trackHeightSM: 16,
-        trackMinWidthSM: 28,
-        trackPadding: 2
-      },
-      Tag: {
-        defaultBg: palette.panelRaised,
-        defaultColor: palette.textSecondary,
-        solidTextColor: "#ffffff"
-      }
-    }
-  };
+/**
+ * Layout tier from the container width; `xflow-core`'s `breakpoints` is the
+ * single source shared with the stylesheet's `@container` rules. Below
+ * `compact` only the left panel collapses (layout "b"); below `narrow` both do
+ * (layout "c"). That band split mirrors the ui-preview baseline's
+ * COMPACT_LEFT / COMPACT_RIGHT pair.
+ */
+function layoutTier(width: number): "wide" | "compact" | "narrow" {
+  if (width <= 0) return "wide";
+  if (width < breakpoints.narrow) return "narrow";
+  if (width < breakpoints.compact) return "compact";
+  return "wide";
 }
-
-
 
 /** The "Runner" badge on a runner-reported library tile; colored by --xflow-node-source-*. */
 const editorNodeSourceTagClassNames = {
   content: "xflow-editor__node-tile-source-label",
   root: "xflow-editor__node-tile-source-root"
+};
+
+/** The library's always-on search box (baseline `.xflow-pv-search`): prefix icon, "/" key hint as suffix. */
+const editorLibrarySearchClassNames = {
+  input: "xflow-editor-field__control",
+  prefix: "xflow-editor-library-search__prefix",
+  root: "xflow-editor-library-search",
+  suffix: "xflow-editor-library-search__suffix"
 };
 
 const editorCompactDrawerClassNames = {
@@ -566,16 +740,23 @@ const editorCompactDrawerClassNames = {
   wrapper: "xflow-editor-compact-drawer__wrapper"
 };
 
+// The side modifier carries the divider on the canvas side, as the baseline's
+// floating panes draw it (border-right on the left pane, border-left on the right).
+const editorCompactDrawerClassNamesStart = {
+  ...editorCompactDrawerClassNames,
+  wrapper: "xflow-editor-compact-drawer__wrapper xflow-editor-compact-drawer__wrapper--start"
+};
+const editorCompactDrawerClassNamesEnd = {
+  ...editorCompactDrawerClassNames,
+  wrapper: "xflow-editor-compact-drawer__wrapper xflow-editor-compact-drawer__wrapper--end"
+};
+
 function ThemeSettings({
   appearance,
-  onAppearanceChange,
-  onThemeVariantChange,
-  themeVariant
+  onAppearanceChange
 }: {
   appearance: XFlowEditorAppearance;
   onAppearanceChange: (appearance: XFlowEditorAppearance) => void;
-  onThemeVariantChange: (themeVariant: XFlowEditorThemeVariant) => void;
-  themeVariant: XFlowEditorThemeVariant;
 }): React.ReactElement {
   return (
     <div className="xflow-editor-theme-settings">
@@ -597,33 +778,8 @@ function ThemeSettings({
             { icon: <MoonOutlined />, label: "深色", value: "dark" },
             { icon: <DesktopOutlined />, label: "跟随系统", value: "system" }
           ]}
-          size="small"
           value={appearance}
           onChange={(nextAppearance) => onAppearanceChange(nextAppearance as XFlowEditorAppearance)}
-        />
-      </div>
-      <div className="xflow-editor-theme-settings__row">
-        <div>
-          <span className="xflow-editor-theme-settings__label">工作台风格</span>
-          <span className="xflow-editor-theme-settings__hint">Graphite 注重层级，Blueprint 强化连线</span>
-        </div>
-        <Segmented
-          aria-label="工作台风格"
-          classNames={{
-            item: "xflow-editor-theme-segmented__item",
-            label: "xflow-editor-theme-segmented__label",
-            root: "xflow-editor-theme-segmented__root"
-          }}
-          rootClassName="xflow-editor-theme-segmented"
-          options={[
-            { label: "石墨", value: "graphite" },
-            { label: "蓝图", value: "blueprint" }
-          ]}
-          size="small"
-          value={themeVariant}
-          onChange={(nextThemeVariant) =>
-            onThemeVariantChange(nextThemeVariant as XFlowEditorThemeVariant)
-          }
         />
       </div>
     </div>
@@ -645,6 +801,8 @@ interface NodeDescriptor {
   kind?: NonNullable<WorkflowNode["kind"]>;
   description?: string;
   ports?: NodeFormPorts;
+  /** The category its descriptor declares (spec §6.13); absent keeps the prefix fallback. */
+  category?: string;
   /** "runner" for a type live runners reported; absent = server registry or offline list. */
   source?: NodeFormSource;
   /** Pool names reporting a runner type; empty when its runners have no pool. */
@@ -724,6 +882,7 @@ const nodePresentation: ReadonlyMap<string, NodePresentation> = new Map<string, 
   ...fallbackNodeDescriptors.map(({ type, group, tone, icon }): [string, NodePresentation] => [type, { group, tone, icon }]),
   ["xflow.trigger.redis", { group: "触发器", tone: "green", icon: <DatabaseOutlined /> }],
   ["xflow.map", { group: "流程控制", tone: "violet", icon: <ApartmentOutlined /> }],
+  ["xflow.subworkflow", { group: "流程控制", tone: "cyan", icon: <ApartmentOutlined /> }],
   ["xflow.notification", { group: "动作与人工", tone: "amber", icon: <NotificationOutlined /> }],
   ["xflow.browser.cdp", { group: "动作与人工", tone: "cyan", icon: <DesktopOutlined /> }],
   ["xflow.transform.rename", { group: "数据转换", tone: "violet", icon: <CodeOutlined /> }],
@@ -777,6 +936,7 @@ function nodeLibraryDescriptors(nodeTypes: NodeTypesResponse | undefined): NodeD
       type: schema.node_type,
       kind,
       ...(schema.description ? { description: schema.description } : {}),
+      ...(typeof schema.category === "string" && schema.category ? { category: schema.category } : {}),
       ...(schema.ports ? { ports: schema.ports } : {}),
       // Runner types usually have no presentation entry, so they keep the
       // kind-based fallback group; the tile badges where they came from.
@@ -794,6 +954,37 @@ function nodeLibraryDescriptors(nodeTypes: NodeTypesResponse | undefined): NodeD
   return descriptors;
 }
 
+const derivedNodeCategories = new WeakMap<NodeTypesResponse, Readonly<Record<string, string>>>();
+
+/**
+ * The category each node type's descriptor declares (spec §6.13), from
+ * GET /v1/node-types. The latest version of a type wins, like the library, and
+ * an undeclared or empty category is left out so `categoryOf` keeps its prefix
+ * fallback. Feeds the preview, the outline, the library and the diagnostics mix,
+ * so all four name a type's category the same way.
+ */
+function nodeCategoriesFromTypes(nodeTypes: NodeTypesResponse | undefined): Readonly<Record<string, string>> {
+  if (!nodeTypes || !Array.isArray(nodeTypes.node_types)) return {};
+  const cached = derivedNodeCategories.get(nodeTypes);
+  if (cached) return cached;
+  const latestVersion = new Map<string, number>();
+  // Null-prototype: a node type named `constructor` must not read an inherited
+  // member back out of the map (the same hazard as a node named `constructor`).
+  const categories: Record<string, string> = Object.create(null);
+  for (const schema of nodeTypes.node_types) {
+    if (!schema || typeof schema.node_type !== "string" || !schema.node_type) continue;
+    const version = schema.node_version ?? 0;
+    const seen = latestVersion.get(schema.node_type);
+    if (seen !== undefined && seen >= version) continue;
+    latestVersion.set(schema.node_type, version);
+    const category = typeof schema.category === "string" ? schema.category.trim() : "";
+    if (category) categories[schema.node_type] = category;
+    else delete categories[schema.node_type];
+  }
+  derivedNodeCategories.set(nodeTypes, categories);
+  return categories;
+}
+
 /** One-line port summary for a library tile's tooltip, from the schema's ports. */
 function describePorts(ports: NodeFormPorts | undefined): string | undefined {
   if (!ports) return undefined;
@@ -805,32 +996,102 @@ function describePorts(ports: NodeFormPorts | undefined): string | undefined {
   return parts.length ? parts.join(" · ") : undefined;
 }
 
-function groupIcon(group: NodeDescriptor["group"]): React.ReactNode {
-  if (group === "触发器") return <ThunderboltOutlined />;
-  if (group === "流程控制") return <BranchesOutlined />;
-  if (group === "数据转换") return <CodeOutlined />;
-  if (group === "供应") return <DatabaseOutlined />;
-  if (group === "其他") return <AppstoreOutlined />;
-  return <AuditOutlined />;
-}
-
 function defaultSelectedKey(nodes: WorkflowNode[]): string | undefined {
   const switchIndex = nodes.findIndex((node) => node.type?.includes("switch"));
   if (switchIndex >= 0) return nodeKey(nodes[switchIndex], switchIndex);
   return nodes[0] ? nodeKey(nodes[0], 0) : undefined;
 }
 
-interface WorkflowDiagnostic {
-  status: "pass" | "warn" | "error";
-  area: string;
-  message: string;
-  /** The node the finding is about, set where it is created (never inferred from the message). */
-  nodeName?: string;
+/**
+ * Every node upstream of `start`, following data connections backwards (§6.8).
+ * These are the nodes a rerun copies instead of re-executing; the set is
+ * walked from the graph, never listed by hand, so an edited connection changes
+ * the annotations with it. Dependency ports are not dataflow and are skipped.
+ */
+function upstreamNodeNames(workflow: WorkflowDef, start: string): Set<string> {
+  const incoming = new Map<string, string[]>();
+  for (const [source, ports] of Object.entries(workflow.connections ?? {})) {
+    for (const targets of Object.values(ports)) {
+      const list = Array.isArray(targets) ? targets : targets?.targets ?? [];
+      for (const target of list) {
+        if (!target.node || target.node === source) continue;
+        incoming.set(target.node, [...(incoming.get(target.node) ?? []), source]);
+      }
+    }
+  }
+  const upstream = new Set<string>();
+  const queue = [start];
+  while (queue.length > 0) {
+    const current = queue.pop() as string;
+    for (const source of incoming.get(current) ?? []) {
+      if (source === start || upstream.has(source)) continue;
+      upstream.add(source);
+      queue.push(source);
+    }
+  }
+  return upstream;
+}
+
+/**
+ * Panel collapse is a workflow-level view preference (§6.0): remembered per
+ * workflow id in localStorage. An unsaved workflow has no id and therefore no
+ * stored state; a browser that denies storage simply starts expanded every time.
+ */
+const PANEL_STORAGE_PREFIX = "xflow-editor:panels:";
+
+interface PanelCollapseState {
+  leftCollapsed: boolean;
+  rightCollapsed: boolean;
+}
+
+function readPanelCollapse(id: string | undefined): PanelCollapseState | undefined {
+  if (!id || typeof window === "undefined") return undefined;
+  try {
+    const raw = window.localStorage.getItem(`${PANEL_STORAGE_PREFIX}${id}`);
+    if (!raw) return undefined;
+    const parsed = JSON.parse(raw) as Record<string, unknown> | null;
+    if (!parsed || typeof parsed !== "object") return undefined;
+    if (typeof parsed.leftCollapsed !== "boolean" || typeof parsed.rightCollapsed !== "boolean") return undefined;
+    return { leftCollapsed: parsed.leftCollapsed, rightCollapsed: parsed.rightCollapsed };
+  } catch {
+    return undefined;
+  }
+}
+
+function writePanelCollapse(id: string | undefined, state: PanelCollapseState): void {
+  if (!id || typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(`${PANEL_STORAGE_PREFIX}${id}`, JSON.stringify(state));
+  } catch {
+    // Storage can be full or blocked; the in-memory state still works.
+  }
+}
+
+/**
+ * param_issues (Doc C §1 rule 3) as diagnostics rows: one per issue, on the
+ * parent node, with the same pointer externalIssuesByNode places it on — so
+ * the panel can offer 定位字段 next to every locatable finding.
+ */
+function paramIssueDiagnostics(issues: readonly ParamIssue[] | undefined): WorkflowDiagnostic[] {
+  const rows: WorkflowDiagnostic[] = [];
+  for (const [node, byPath] of externalIssuesByNode(issues)) {
+    for (const [path, list] of Object.entries(byPath)) {
+      for (const issue of list) {
+        rows.push({
+          status: issue.severity === "warning" ? "warn" : "error",
+          area: "parameters",
+          message: issue.message,
+          nodeName: node,
+          path
+        });
+      }
+    }
+  }
+  return rows;
 }
 
 function validateWorkflow(
   workflow: WorkflowDef,
-  runtime?: RuntimeSnapshot,
   operationError?: string,
   nodeTypes?: NodeTypesResponse
 ): WorkflowDiagnostic[] {
@@ -995,14 +1256,15 @@ function validateWorkflow(
     }
   }
 
-  const edgeDiagnostics = diagnostics.slice(diagnosticsBeforeEdges);
-  diagnostics.push({
-    status: edgeDiagnostics.some((item) => item.status === "error") ? "error" : "pass",
-    area: "edges",
-    message: edgeDiagnostics.some((item) => item.status === "error")
-      ? `${dataEdgeCount} 条数据连接和 ${dependencyEdgeCount} 条依赖连接存在错误`
-      : `${dataEdgeCount} 条数据连接和 ${dependencyEdgeCount} 条依赖连接已解析`
-  });
+  // The edge check reads as passed only when none of its findings is an error;
+  // the findings themselves are the errors, so a failing check adds no second row.
+  if (!diagnostics.slice(diagnosticsBeforeEdges).some((item) => item.status === "error")) {
+    diagnostics.push({
+      status: "pass",
+      area: "edges",
+      message: `${dataEdgeCount} 条数据连接和 ${dependencyEdgeCount} 条依赖连接已解析`
+    });
+  }
   const credentialNames = Object.keys(workflow.credentials ?? {});
   diagnostics.push({
     status: credentialNames.length > 0 ? "pass" : "warn",
@@ -1018,11 +1280,6 @@ function validateWorkflow(
       message: unknownPinDataNames.length > 0 ? `Pin Data 节点不存在: ${unknownPinDataNames.join(", ")}` : `${pinDataNames.length} 个节点配置了 Pin Data`
     });
   }
-  diagnostics.push({
-    status: "warn",
-    area: "runtime",
-    message: runtime ? "运行态数据来自最近一次执行快照" : "尚未运行，运行态数据为空"
-  });
   if (operationError) {
     diagnostics.push({
       status: "error",
@@ -1195,14 +1452,15 @@ function NodeLibrary({
   descriptors: libraryDescriptors,
   onAddNode,
   autoFocusSearch = false,
-  searchInputRef
+  searchInputRef,
+  headerAction
 }: {
   descriptors: NodeDescriptor[];
   onAddNode: (descriptor: NodeDescriptor) => void;
   autoFocusSearch?: boolean;
   searchInputRef?: React.Ref<InputRef>;
+  headerAction?: React.ReactNode;
 }): React.ReactElement {
-  const [searchVisible, setSearchVisible] = React.useState(autoFocusSearch);
   const [query, setQuery] = React.useState("");
   const [collapsedGroups, setCollapsedGroups] = React.useState<ReadonlySet<NodeDescriptor["group"]>>(
     () => new Set()
@@ -1231,38 +1489,27 @@ function NodeLibrary({
 
   return (
     <EditorPanel
-      ariaLabel="节点"
+      actions={headerAction}
       bodyClassName="xflow-editor-library__body"
       className="xflow-editor-library"
-      icon={<AppstoreAddOutlined />}
-      iconAriaLabel="添加节点图标"
-      subtitle="拖入画布或点击添加"
+      count={libraryDescriptors.length}
+      icon={<AppstoreOutlined />}
       title="节点"
-      extra={
-        <Button
-          aria-label="搜索节点"
-          className="xflow-editor-library-search-toggle"
-          color="default"
-          data-active={searchVisible}
-          size="small"
-          variant="text"
-          onClick={() => setSearchVisible((visible) => !visible)}
-        >
-          <SearchOutlined />
-        </Button>
-      }
     >
-      {searchVisible ? (
+      {/* Always shown, as in the baseline; "/" focuses it (the shortcut list). */}
+      <div className="xflow-editor-library__search">
         <Input
           autoFocus={autoFocusSearch}
           ref={searchInputRef}
-          className="xflow-editor-library-search"
-          classNames={editorInputClassNames}
-          placeholder="搜索 Start / Switch / HTTP"
+          classNames={editorLibrarySearchClassNames}
+          placeholder="搜索 Webhook / If / HTTP…"
+          prefix={<SearchOutlined />}
+          suffix={<kbd className="xflow-editor-kbd">/</kbd>}
           value={query}
           onChange={(event) => setQuery(event.target.value)}
         />
-      ) : null}
+      </div>
+      <div className="xflow-editor-library__list">
       {nodeLibraryGroups.map((group) => {
         const descriptors = descriptorsForGroup(group);
         const collapsed = !normalizedQuery && collapsedGroups.has(group);
@@ -1279,13 +1526,10 @@ function NodeLibrary({
               onClick={() => toggleGroup(group)}
             >
               <span className="xflow-editor-node-group__heading">
-                <span className="xflow-editor-block-title">
-                  {groupIcon(group)}
-                  {group}
-                </span>
+                <span className="xflow-editor-block-title">{group}</span>
+                <DownOutlined aria-hidden="true" className={collapsed ? "xflow-editor-node-group__chevron is-collapsed" : "xflow-editor-node-group__chevron"} />
                 <span className="xflow-editor-node-group__count">{descriptors.length}</span>
               </span>
-              <DownOutlined className={collapsed ? "xflow-editor-node-group__chevron is-collapsed" : "xflow-editor-node-group__chevron"} />
             </button>
             {collapsed ? null : (
               <div className="xflow-editor-node-list">
@@ -1296,7 +1540,6 @@ function NodeLibrary({
                       className="xflow-editor-node-tile"
                       data-node-type={descriptor.type}
                       data-source={descriptor.source}
-                      data-tone={descriptor.tone}
                       draggable
                       type="button"
                       onClick={() => onAddNode(descriptor)}
@@ -1307,10 +1550,16 @@ function NodeLibrary({
                         event.dataTransfer.effectAllowed = "copy";
                       }}
                     >
-                      <span className="xflow-editor-node-tile__icon">{descriptor.icon}</span>
+                      <NodeCategoryIcon category={descriptor.category} type={descriptor.type} />
                       <span className="xflow-editor-node-tile__content">
                         <strong>{descriptor.label}</strong>
-                        <small>{descriptor.type}</small>
+                        {/* The schema's description, or the type id when it has none; the id stays in the tooltip and the search. */}
+                        <small
+                          className="xflow-editor-node-tile__hint"
+                          title={descriptor.description || descriptor.type}
+                        >
+                          {descriptor.description || descriptor.type}
+                        </small>
                       </span>
                       {descriptor.source === "runner" ? (
                         <Tag
@@ -1322,7 +1571,6 @@ function NodeLibrary({
                           Runner
                         </Tag>
                       ) : null}
-                      <span aria-hidden="true" className="xflow-editor-node-tile__add">＋</span>
                     </button>
                   </Tooltip>
                 ))}
@@ -1334,220 +1582,36 @@ function NodeLibrary({
       {normalizedQuery && !libraryDescriptors.some(matchesQuery) ? (
         <p className="xflow-editor-empty">没有匹配节点。</p>
       ) : null}
+      </div>
     </EditorPanel>
   );
 }
 
-function UnavailableControl({
-  ariaLabel,
-  children,
-  className,
-  reason
-}: {
-  ariaLabel: string;
-  children: React.ReactNode;
-  className?: string;
-  reason: string;
+/**
+ * §6.2 empty canvas: shown only while the workflow has no nodes, centred on the
+ * canvas (the preview places it and keeps the pane a drop target around it).
+ * 导入 DSL has no host hook yet, so it is offered disabled with the reason.
+ */
+function EmptyCanvasCard({ editable, onPickTrigger }: {
+  editable: boolean;
+  onPickTrigger: () => void;
 }): React.ReactElement {
   return (
-    <Tooltip classNames={editorTooltipClassNames} title={reason}>
-      <span className="xflow-editor-disabled-control" title={reason}>
-        <button aria-label={ariaLabel} className={className} disabled title={reason} type="button">
-          {children}
-        </button>
-      </span>
-    </Tooltip>
-  );
-}
-
-function Diagnostics({
-  workflow,
-  runtime,
-  diagnostics: allDiagnostics,
-  operationError,
-  blockedDraftNodes,
-  collapsed,
-  onToggle,
-  onSelectNode,
-  onRevealJson
-}: {
-  workflow: WorkflowDef;
-  runtime?: RuntimeSnapshot;
-  diagnostics: WorkflowDiagnostic[];
-  operationError?: string;
-  /** Nodes whose unparseable parameters JSON blocked the last save/run. */
-  blockedDraftNodes?: string[];
-  collapsed: boolean;
-  onToggle: () => void;
-  onSelectNode?: (nodeName: string) => void;
-  onRevealJson?: (nodeName: string) => void;
-}): React.ReactElement {
-  const nodes = workflow.nodes ?? [];
-  const connectionsCount = Object.values(workflow.connections ?? {}).reduce(
-    (count, ports) => count + Object.values(ports).reduce((inner, portConnections) => inner + targetsFor(portConnections).length, 0),
-    0
-  );
-  const runtimeNodes = Object.entries(runtime?.nodes ?? {});
-  const runningNode = runtimeNodes.find(([, snapshot]) => snapshot.status === "running")?.[0];
-  const failedCount = runtimeNodes.filter(([, snapshot]) => snapshot.status === "failed").length;
-  const isWaitingForDefinition = nodes.length === 0 && !operationError;
-  const diagnostics = isWaitingForDefinition ? [] : allDiagnostics;
-  const errorCount = diagnostics.filter((item) => item.status === "error").length;
-  const warningCount = diagnostics.filter((item) => item.status === "warn").length;
-  const workflowValid = !isWaitingForDefinition && errorCount === 0;
-  const lastDuration = runtimeNodes.reduce(
-    (maxDuration, [, snapshot]) => Math.max(maxDuration, snapshot.durationMs ?? 0),
-    0
-  );
-
-  return (
-    <footer
-      className="xflow-editor-diagnostics"
-      role="region"
-      aria-label="诊断台"
-      data-collapsed={collapsed}
-    >
-      <div className="xflow-editor-diagnostics__bar">
-        <div className="xflow-editor-diagnostics__tabs" role="toolbar" aria-label="诊断视图">
-          <strong className="xflow-editor-block-title">
-            <ConsoleSqlOutlined />
-            诊断台
-          </strong>
-          <span className="xflow-editor-diagnostics__tab active">
-            <WarningOutlined />
-            问题
-          </span>
-          <UnavailableControl ariaLabel="运行日志" reason="运行日志尚未接入执行记录。">
-            <FileSearchOutlined />运行日志
-          </UnavailableControl>
-          <UnavailableControl ariaLabel="输入" reason="运行输入快照尚未接入。">
-            <ImportOutlined />输入
-          </UnavailableControl>
-          <UnavailableControl ariaLabel="输出" reason="运行输出快照尚未接入。">
-            <ExportOutlined />输出
-          </UnavailableControl>
+    <div className="xflow-editor-empty-canvas">
+      <span className="xflow-editor-empty-canvas__icon" data-cat="trigger"><LinkOutlined /></span>
+      <h2 className="xflow-editor-empty-canvas__title">添加触发器开始</h2>
+      <p className="xflow-editor-empty-canvas__text">从 Webhook、Cron、Kafka 等入口开始，或导入已有 DSL。</p>
+      {editable ? (
+        <div className="xflow-editor-empty-canvas__actions">
+          <Button size="small" type="primary" onClick={onPickTrigger}>选择触发器</Button>
+          <Tooltip classNames={editorTooltipClassNames} title="未接入">
+            <span className="xflow-editor-disabled-control">
+              <Button disabled size="small">导入 DSL</Button>
+            </span>
+          </Tooltip>
         </div>
-        <div className="xflow-editor-diagnostics__status">
-          {isWaitingForDefinition ? (
-            <>
-              <span className="waiting"><ClockCircleOutlined /> 等待工作流数据</span>
-              <span>0 nodes · 0 connections</span>
-              <span>尚未运行</span>
-            </>
-          ) : (
-            <>
-              <span className={workflowValid ? "ok" : "warn"}>
-                {workflowValid ? <CheckCircleOutlined /> : <WarningOutlined />} DSL {workflowValid ? "valid" : "invalid"}
-              </span>
-              <span>{errorCount} errors</span>
-              <span>{warningCount} warnings</span>
-              <span>last run {lastDuration > 0 ? `${(lastDuration / 1000).toFixed(1)}s` : "-"}</span>
-            </>
-          )}
-          <button
-            aria-label={collapsed ? "展开诊断台" : "收起诊断台"}
-            className="xflow-editor-diagnostics-toggle"
-            title={collapsed ? "展开诊断台" : "收起诊断台"}
-            type="button"
-            onClick={onToggle}
-          >
-            {collapsed ? <UpOutlined /> : <DownOutlined />}
-          </button>
-        </div>
-      </div>
-      {collapsed ? null : (
-        <div className="xflow-editor-diagnostics__body">
-          <section className="xflow-editor-diagnostics-log" aria-label="诊断问题">
-            <div className="xflow-editor-diagnostics-section-title">
-              <span className="xflow-editor-block-title">
-                <CheckCircleOutlined />
-                诊断问题
-              </span>
-              <span>{isWaitingForDefinition ? "等待节点" : `${errorCount} errors / ${warningCount} warnings`}</span>
-            </div>
-            <div className="xflow-editor-diagnostics-log__list">
-              {isWaitingForDefinition ? (
-                <p className="xflow-editor-diagnostics-waiting">
-                  <span>waiting</span>
-                  <span>载入或编辑真实工作流后，这里将列出 DSL、节点和连接的校验结果。</span>
-                </p>
-              ) : diagnostics.map((item, index) => (
-                  <p
-                    className="xflow-editor-diagnostics-log__row"
-                    key={`${item.area}-${index}`}
-                  >
-                    <span className={item.status === "pass" ? "ok" : item.status === "warn" ? "warn" : "error"}>
-                      {item.status === "pass" ? "pass" : item.status}
-                    </span>
-                    <span>{item.area}</span>
-                    <span>
-                      {item.message}
-                      {item.area === "operation" && blockedDraftNodes?.length ? (
-                        blockedDraftNodes.map((blockedName) => (
-                          <button
-                            className="xflow-editor-diagnostics-locate"
-                            key={blockedName}
-                            type="button"
-                            onClick={() => onRevealJson?.(blockedName)}
-                          >
-                            修正 {blockedName} 的参数 JSON
-                          </button>
-                        ))
-                      ) : item.nodeName && nodes.some((node, index) => nodeName(node, index) === item.nodeName) ? (
-                        <button
-                          className="xflow-editor-diagnostics-locate"
-                          type="button"
-                          onClick={() => onSelectNode?.(item.nodeName!)}
-                        >
-                          定位节点 {item.nodeName}
-                        </button>
-                      ) : null}
-                    </span>
-                  </p>
-                ))}
-            </div>
-          </section>
-          <section className="xflow-editor-diagnostics-summary">
-            <div className="xflow-editor-diagnostics-section-title">
-              <span className="xflow-editor-block-title">
-                <CodeOutlined />
-                DSL 摘要
-              </span>
-              <span>{isWaitingForDefinition ? "等待" : workflow.version ?? "spec 1.0"}</span>
-            </div>
-            <div className="xflow-editor-diagnostics-meter">
-              <div><span>节点</span><span>{nodes.length}</span></div>
-              <i style={{ width: `${isWaitingForDefinition ? 0 : Math.min(Math.max(nodes.length * 10, 16), 100)}%` }} />
-            </div>
-            <div className="xflow-editor-diagnostics-meter">
-              <div><span>连接</span><span>{isWaitingForDefinition ? "0 / 0" : connectionsCount > 0 ? "完整" : "待连接"}</span></div>
-              <i className="green" style={{ width: isWaitingForDefinition ? "0%" : connectionsCount > 0 ? "100%" : "18%" }} />
-            </div>
-            <div className="xflow-editor-diagnostics-kv">
-              <span>凭据</span>
-              <strong>{isWaitingForDefinition ? "等待真实数据" : nodes.length === 0 ? "未配置" : "运行时注入"}</strong>
-            </div>
-            <pre className="xflow-editor-diagnostics-dsl" aria-label="DSL 预览">
-              {serializeJson(workflow)}
-            </pre>
-          </section>
-          <section className="xflow-editor-diagnostics-run">
-            <div className="xflow-editor-diagnostics-section-title">
-              <span className="xflow-editor-block-title">
-                <ClockCircleOutlined />
-                最近运行
-              </span>
-              <span>{runtime ? "execution-local" : "尚未运行"}</span>
-            </div>
-            <div><span>状态</span><strong data-status={runtime?.status ?? "pending"}>{runtime?.status ?? "尚未运行"}</strong></div>
-            <div><span>当前节点</span><code>{runningNode ?? "-"}</code></div>
-            <div><span>失败节点</span><code>{failedCount}</code></div>
-            <div><span>跟踪节点</span><code>{runtimeNodes.length}</code></div>
-            <p><InfoCircleOutlined /> {runtime ? "后续接运行日志、输入和输出快照。" : "运行真实工作流后，这里显示执行摘要和输出入口。"}</p>
-          </section>
-        </div>
-      )}
-    </footer>
+      ) : null}
+    </div>
   );
 }
 
@@ -1598,6 +1662,7 @@ function ShortcutsHelp({ open, onClose }: { open: boolean; onClose: () => void }
 export function XFlowEditor({
   value,
   className,
+  onBack,
   runtime,
   onChange,
   onSave,
@@ -1605,25 +1670,51 @@ export function XFlowEditor({
   onRunNode,
   nodeTypes: sourceNodeTypes,
   appearance: controlledAppearance,
-  themeVariant: controlledThemeVariant,
   onAppearanceChange,
-  onThemeVariantChange,
   defaultViewport,
-  onViewportChange
+  onViewportChange,
+  nodeTypesError,
+  onRetryNodeTypes,
+  onReloadLatest,
+  onSaveAsCopy,
+  onPublish,
+  onLoadVersions,
+  onViewVersion,
+  onRollback,
+  historicalVersion,
+  onExitHistory,
+  readOnlyReason,
+  capabilities,
+  execution,
+  onExecutionAction,
+  onLocateNode,
+  onOpenRunHistory,
+  onOpenExecution,
+  currentUserSubject,
+  onSignal,
+  onRevokeSignal,
+  runBarDismissMs,
+  mode: controlledMode,
+  onModeChange,
+  executionList,
+  onLoadExecutions,
+  selectedExecution,
+  onSelectExecution,
+  executionSnapshotWorkflow,
+  executionDefinitionStale,
+  executionSnapshotRuntime,
+  onRerun
 }: XFlowEditorProps): React.ReactElement {
   // Memoised per response inside localizeNodeTypes, so identity-keyed caches
   // downstream (node library, form compiler) keep hitting.
   const nodeTypes = localizeNodeTypes(sourceNodeTypes, nodeFormCatalog);
   const [uncontrolledAppearance, setUncontrolledAppearance] =
-    React.useState<XFlowEditorAppearance>("dark");
-  const [uncontrolledThemeVariant, setUncontrolledThemeVariant] =
-    React.useState<XFlowEditorThemeVariant>("graphite");
+    React.useState<XFlowEditorAppearance>("system");
   const activeAppearance = controlledAppearance ?? uncontrolledAppearance;
-  const activeThemeVariant = controlledThemeVariant ?? uncontrolledThemeVariant;
   const resolvedAppearance = useResolvedAppearance(activeAppearance);
   const editorThemeConfig = React.useMemo(
-    () => createEditorThemeConfig(activeThemeVariant, resolvedAppearance),
-    [activeThemeVariant, resolvedAppearance]
+    () => createEditorThemeConfig(resolvedAppearance),
+    [resolvedAppearance]
   );
   const changeAppearance = React.useCallback(
     (nextAppearance: XFlowEditorAppearance) => {
@@ -1634,66 +1725,348 @@ export function XFlowEditor({
     },
     [controlledAppearance, onAppearanceChange]
   );
-  const changeThemeVariant = React.useCallback(
-    (nextThemeVariant: XFlowEditorThemeVariant) => {
-      if (controlledThemeVariant === undefined) {
-        setUncontrolledThemeVariant(nextThemeVariant);
-      }
-      onThemeVariantChange?.(nextThemeVariant);
-    },
-    [controlledThemeVariant, onThemeVariantChange]
-  );
   const [draftWorkflow, setDraftWorkflow] = React.useState<WorkflowDef>(value);
+  // The definition the version chip counts against: the last `value` the host
+  // replaced, or the definition the last successful save persisted. Never
+  // updated by ordinary edits, so undo back to it reports zero changes.
+  const [baselineWorkflow, setBaselineWorkflow] = React.useState<WorkflowDef>(value);
   const draftRevisionRef = React.useRef(0);
+  /** Counts the definitions the host has replaced `value` with, to tell a stale save answer from a current one. */
+  const valueEpochRef = React.useRef(0);
   const latestDraftRef = React.useRef<WorkflowDef>(value);
   const historyRef = React.useRef<WorkflowHistory>({ undo: [], redo: [] });
   const [history, setHistory] = React.useState<WorkflowHistory>({ undo: [], redo: [] });
   const [canvasTool, setCanvasTool] = React.useState<CanvasTool>("select");
   const [localRuntime, setLocalRuntime] = React.useState<RuntimeSnapshot | undefined>(runtime);
-  const compactViewport = useCompactViewport();
+  const editorRootRef = React.useRef<HTMLElement | null>(null);
+  const editorWidth = useEditorWidth(editorRootRef);
+  const widthTier = layoutTier(editorWidth);
   const [layoutPolicy, setLayoutPolicy] = React.useState<LayoutPolicy>("auto");
-  const layout: EditorLayout = layoutPolicy === "compact" || compactViewport ? "c" : "a";
+  const layout: EditorLayout =
+    layoutPolicy === "compact" ? "c" : widthTier === "narrow" ? "c" : widthTier === "compact" ? "b" : "a";
+  // §6.3: below 1280 (layout b/c, manual immersive included) the secondary
+  // history / validate / theme actions fold into the ⋯ menu.
+  const compactToolbar = layout !== "a";
   const [compactDrawer, setCompactDrawer] = React.useState<"left" | "right" | undefined>();
-  const [leftDrawerTab, setLeftDrawerTab] = React.useState<"library" | "variables">("library");
+  const [leftDrawerTab, setLeftDrawerTab] = React.useState<"library" | "variables" | "executions">("library");
   const [desktopRailSection, setDesktopRailSection] = React.useState<"library" | "variables">("library");
   const nodeLibrarySearchRef = React.useRef<InputRef | null>(null);
+  // Bumped by the "/" shortcut; the effect below focuses the search once the
+  // library column (re)mounted by the same gesture is in the DOM.
+  const [librarySearchFocusNonce, setLibrarySearchFocusNonce] = React.useState(0);
   const [nodeSearchOpen, setNodeSearchOpen] = React.useState(false);
-  const nodeSearchRef = React.useRef<RefSelectProps | null>(null);
+  /** Bumped per open so the panel starts with an empty query (E2b review). */
+  const [nodeSearchNonce, setNodeSearchNonce] = React.useState(0);
+  const nodeSearchRef = React.useRef<InputRef | null>(null);
+  /** The element to focus again when the locate panel closes. */
+  const locateTriggerRef = React.useRef<HTMLElement | null>(null);
   const title = draftWorkflow.name ?? "Untitled workflow";
   const nodes = draftWorkflow.nodes ?? [];
-  const [viewMode, setViewMode] = React.useState<"edit" | "preview">("edit");
-  const [leftCollapsed, setLeftCollapsed] = React.useState(false);
-  const [rightCollapsed, setRightCollapsed] = React.useState(false);
+  // §6.13: one declared-category map from the schemas, shared by the canvas, the
+  // outline, the node library and the diagnostics mix.
+  const nodeCategories = React.useMemo(() => nodeCategoriesFromTypes(nodeTypes), [nodeTypes]);
+  // §6.1.1 card summaries, resolved once per definition: the preview only
+  // draws rows it is handed, so field labels and formatting stay on this side
+  // of the package boundary (and follow the localized schemas). The replay
+  // resolves them against the snapshot's definition, not the live draft.
+  const summariesFor = React.useCallback((workflow: WorkflowDef | undefined) => {
+    if (!nodeTypes || !workflow) return undefined;
+    // Null-prototype: a node keyed `constructor` would otherwise read an
+    // inherited function where the card expects an array of rows.
+    const byNode: Record<string, readonly CardSummaryRow[]> = Object.create(null);
+    for (const node of workflow.nodes ?? []) {
+      const schema = formSchemaForNode(nodeTypes, node);
+      // An undeclared card_summary still draws the spec's required fallback.
+      const rows = schema ? cardSummaryRows(schema, node.parameters) : [];
+      if (rows.length > 0) byNode[nodeKey(node)] = rows;
+    }
+    return byNode;
+  }, [nodeTypes]);
+  const nodeSummaries = React.useMemo(
+    () => summariesFor(draftWorkflow),
+    [draftWorkflow, summariesFor]
+  );
+  // The publish diff's 摘要 row (§6.10): the same rows the card would draw, as
+  // one line. A node whose card shows nothing has no summary to compare.
+  const cardSummaryText = React.useCallback((node: WorkflowNode): string | undefined => {
+    const schema = formSchemaForNode(nodeTypes, node);
+    if (!schema) return undefined;
+    const rows = cardSummaryRows(schema, node.parameters);
+    return rows.length > 0 ? rows.map((row) => `${row.label} ${row.value}`).join(" · ") : undefined;
+  }, [nodeTypes]);
+  // The chip counts against the loaded/saved baseline, so an undo that returns
+  // the draft to that baseline reports zero changes again (§6.3). The very same
+  // array is the publish dialog's structured diff (§6.10 requires one source).
+  const changes = React.useMemo(
+    () => workflowChanges(baselineWorkflow, draftWorkflow, { cardSummary: cardSummaryText }),
+    [baselineWorkflow, draftWorkflow, cardSummaryText]
+  );
+  const unsavedChanges = changes.length;
+  // "基于 vX" names the definition the changes are measured against, so the
+  // version comes from the baseline, not the draft: editing the version field
+  // must not make the chip claim the edit is based on the new, unsaved value.
+  const versionChip = versionChipState({
+    persisted: Boolean(baselineWorkflow.id),
+    version: baselineWorkflow.version,
+    changes: unsavedChanges,
+    historicalVersion
+  });
+  const titleTooltip = [draftWorkflow.id, draftWorkflow.version ? `v${draftWorkflow.version}` : undefined]
+    .filter((part): part is string => Boolean(part))
+    .join(" · ") || undefined;
+  // §6.8: the switch is 编辑 | 运行记录. A controlled `mode` is the host's
+  // (it owns `?exec=`); without one the editor keeps its own state.
+  const [uncontrolledMode, setUncontrolledMode] = React.useState<XFlowEditorMode>("edit");
+  const viewMode: XFlowEditorMode = controlledMode ?? uncontrolledMode;
+  const runsMode = viewMode === "runs";
+  /** The canvas instance is remounted per mode so a saved edit viewport can be restored. */
+  const [canvasEpoch, setCanvasEpoch] = React.useState(0);
+  const [restoreViewport, setRestoreViewport] = React.useState<Viewport | undefined>(defaultViewport);
+  const editViewportRef = React.useRef<Viewport | undefined>(defaultViewport);
+  const editSelectionRef = React.useRef<string | undefined>(undefined);
+  const previousModeRef = React.useRef<XFlowEditorMode>(viewMode);
+  // Panel collapse is restored per workflow (§6.0). `panelStateKey` tracks the
+  // workflow the two flags belong to, so a rename does not write the previous
+  // workflow's flags under the new id and an id swap cannot race the restore.
+  const [panelStateKey, setPanelStateKey] = React.useState(value.id);
+  const [leftCollapsed, setLeftCollapsed] = React.useState(() => readPanelCollapse(value.id)?.leftCollapsed ?? false);
+  const [rightCollapsed, setRightCollapsed] = React.useState(() => readPanelCollapse(value.id)?.rightCollapsed ?? false);
+
+  React.useEffect(() => {
+    if (panelStateKey === value.id) return;
+    // A workflow's first save adopts the id on the same mounted editor. That is
+    // not a workflow swap: keep the flags the user just set and start
+    // persisting them under the new id (the write effect below does that).
+    if (panelStateKey === undefined && value.id !== undefined) {
+      setPanelStateKey(value.id);
+      return;
+    }
+    const restored = readPanelCollapse(value.id);
+    setLeftCollapsed(restored?.leftCollapsed ?? false);
+    setRightCollapsed(restored?.rightCollapsed ?? false);
+    setPanelStateKey(value.id);
+  }, [panelStateKey, value.id]);
+
+  React.useEffect(() => {
+    if (!value.id || panelStateKey !== value.id) return;
+    writePanelCollapse(value.id, { leftCollapsed, rightCollapsed });
+  }, [leftCollapsed, panelStateKey, rightCollapsed, value.id]);
   const [shortcutsOpen, setShortcutsOpen] = React.useState(false);
-  // Keep the workbench canvas-first. Validation, execution, and failures expand
-  // this surface on demand so operational feedback is never hidden.
-  const [bottomCollapsed, setBottomCollapsed] = React.useState(true);
+  // Keep the workbench canvas-first. Validation, execution, and failures open
+  // this surface on demand so operational feedback is never hidden. In memory
+  // only: it always starts collapsed.
+  const [dock, setDock] = React.useState<DockState>("collapsed");
+  const dockControllerRef = React.useRef<DiagnosticsDockController | null>(null);
+  /** The canvas frame: the focus target for 定位 when the node's card is not rendered. */
+  const canvasFrameRef = React.useRef<HTMLDivElement | null>(null);
+  /** The run-bar row, measured against the preview's top floats (see the effect below). */
+  const runBarRowRef = React.useRef<HTMLDivElement | null>(null);
+  // A run bar wider than the gap between the canvas's top floats would cover
+  // 添加节点 / 定位节点 (the baseline's float row has the same collision below
+  // ~1400px). There is no allowed container breakpoint for "how wide is this
+  // execution's bar", so the row is measured and drops one float row instead.
+  const [runBarStacked, setRunBarStacked] = React.useState(false);
+  /** The auto-open points: a closed dock docks; an expanded one is never pressed back down. */
+  const revealDock = React.useCallback(() => setDock((current) => (current === "collapsed" ? "docked" : current)), []);
+  /** Where focus goes when the banner holding it goes away (重试 succeeded, 重新加载 replaced the value). */
+  const focusCanvasFrame = React.useCallback(() => canvasFrameRef.current?.focus({ preventScroll: true }), []);
   const [saving, setSaving] = React.useState(false);
   // Render state lags a same-tick second trigger (button + shortcut); the ref
   // is the in-flight guard, `saving` only drives the button's loading state.
   const savingRef = React.useRef(false);
   const [running, setRunning] = React.useState(false);
+  // §6.10 publish / version history. The editor never requests: the host owns
+  // `onLoadVersions` / `onPublish` / `onRollback`, these states only hold what
+  // came back and which surface is open.
+  const [publishOpen, setPublishOpen] = React.useState(false);
+  const [publishVersion, setPublishVersion] = React.useState("");
+  const [publishError, setPublishError] = React.useState<string>();
+  const [publishing, setPublishing] = React.useState(false);
+  const publishingRef = React.useRef(false);
+  /** The suggested label the field last adopted; a user-typed label is never overwritten. */
+  const publishSuggestedRef = React.useRef("");
+  const [versionsOpen, setVersionsOpen] = React.useState(false);
+  const [versionsState, setVersionsState] = React.useState<{
+    data?: XFlowWorkflowVersions;
+    error?: string;
+    loading?: boolean;
+  }>({});
+  const [versionLoadNonce, setVersionLoadNonce] = React.useState(0);
+  /** version → the reason the server refused its rollback, pinned to that row. */
+  const [blockedVersions, setBlockedVersions] = React.useState<Record<string, string>>({});
+  const [rollingBackVersion, setRollingBackVersion] = React.useState<string>();
+  const rollingBackRef = React.useRef(false);
   const [operationStatus, setOperationStatus] = React.useState(() => value.id ? "已保存" : "未保存");
-  const [isDirty, setIsDirty] = React.useState(() => !value.id);
   const [operationError, setOperationError] = React.useState<string>();
   const [selectedKey, setSelectedKey] = React.useState<string | undefined>(() => defaultSelectedKey(nodes));
   const selectedIndex = nodes.findIndex((node, index) => nodeKey(node, index) === selectedKey);
   const selectedNode = selectedIndex >= 0 ? nodes[selectedIndex] : undefined;
-  const editMode = viewMode === "edit";
-  // The node library only exists in edit mode; preview falls back to the read-only variables.
-  const leftSection = editMode ? desktopRailSection : "variables";
-  const leftDrawerSection = editMode ? leftDrawerTab : "variables";
+  const selectedKeyRef = React.useRef(selectedKey);
+  selectedKeyRef.current = selectedKey;
+  /** §6.9: the execution and optional node the rerun dialog was opened from. */
+  const [rerunTarget, setRerunTarget] = React.useState<{ executionId: string; node?: string }>();
+  const openRerun = React.useCallback((executionId: string, node?: string) => {
+    setRerunTarget({ executionId, node });
+  }, []);
+  /** The working view: the replay's definition while 运行记录 is active. */
+  const canvasWorkflow: WorkflowDef = runsMode
+    ? executionSnapshotWorkflow ?? {
+      name: draftWorkflow.name,
+      spec: draftWorkflow.spec,
+      nodes: [],
+      connections: {}
+    }
+    : draftWorkflow;
+  const canvasNodeSummaries = React.useMemo(
+    () => (runsMode ? summariesFor(executionSnapshotWorkflow) : nodeSummaries),
+    [executionSnapshotWorkflow, nodeSummaries, runsMode, summariesFor]
+  );
+  // §6.8 rerun derivation: the start node says 重跑起点, everything upstream of
+  // it says 沿用原执行结果. Both come from this run's lineage + snapshot graph.
+  const replayMetaNotes = React.useMemo(() => {
+    if (!runsMode || !selectedExecution?.rerunFrom) return undefined;
+    if (!executionSnapshotWorkflow) return undefined;
+    const notes: Record<string, string> = Object.create(null);
+    for (const name of upstreamNodeNames(executionSnapshotWorkflow, selectedExecution.rerunFrom)) {
+      notes[name] = "沿用原执行结果";
+    }
+    const nodes = executionSnapshotWorkflow.nodes ?? [];
+    if (nodes.some((node, index) => nodeName(node, index) === selectedExecution.rerunFrom)) {
+      notes[selectedExecution.rerunFrom] = "重跑起点";
+    }
+    return notes;
+  }, [executionSnapshotWorkflow, runsMode, selectedExecution?.rerunFrom]);
+  // The replay selects inside the snapshot definition, not the draft: the two
+  // graphs can differ, so a key present in one may be absent from the other.
+  const replayNodes = canvasWorkflow.nodes ?? [];
+  const replaySelectedIndex = runsMode
+    ? replayNodes.findIndex((node, index) => nodeKey(node, index) === selectedKey)
+    : -1;
+  const replaySelectedNode = replaySelectedIndex >= 0 ? replayNodes[replaySelectedIndex] : undefined;
+  const replaySelectedName = replaySelectedNode
+    ? nodeName(replaySelectedNode, replaySelectedIndex)
+    : undefined;
+  // §6.9 entry from the 运行 tab: only a rerunnable source execution offers it.
+  const selectedRerunnable = selectedExecution
+    ? workflowStatusMeta[selectedExecution.status].ops.includes("rerun")
+    : false;
+  const replayRerunFromNode =
+    runsMode && selectedExecution && selectedRerunnable && onRerun && replaySelectedName
+      ? () => openRerun(selectedExecution.executionId, replaySelectedName)
+      : undefined;
+  // Entering the replay keeps the edit selection and viewport for the way back;
+  // leaving it restores both and remounts the canvas so `defaultViewport` takes.
+  React.useEffect(() => {
+    if (previousModeRef.current === viewMode) return;
+    previousModeRef.current = viewMode;
+    if (viewMode === "runs") {
+      editSelectionRef.current = selectedKeyRef.current;
+      setSelectedKey(undefined);
+      // The replay renders its status bar in place of the diagnostics dock, so
+      // an expanded dock would leave the workbench inert with no control left
+      // on screen to collapse it. Converge to 停靠 before it is unmounted.
+      setDock((current) => (current === "expanded" ? "docked" : current));
+    } else {
+      setRestoreViewport(editViewportRef.current);
+      setSelectedKey(editSelectionRef.current);
+    }
+    setCanvasEpoch((epoch) => epoch + 1);
+  }, [viewMode]);
+  const changeMode = React.useCallback((next: XFlowEditorMode) => {
+    if (next === viewMode) return;
+    if (controlledMode === undefined) setUncontrolledMode(next);
+    onModeChange?.(next);
+  }, [controlledMode, onModeChange, viewMode]);
+  // §6.11: 查看执行 needs the `execution` scope. Undefined keeps the
+  // pre-capabilities host contract (everything enabled); only an explicit false
+  // hides the entry. A host can still hand over `mode="runs"` (a shared ?exec=
+  // URL, a scope refresh in flight), so the mode falls back as well: without
+  // the entry there would be no way back to 编辑.
+  const canViewExecutions = capabilities?.execution !== false;
+  React.useEffect(() => {
+    if (!canViewExecutions && viewMode === "runs") changeMode("edit");
+  }, [canViewExecutions, changeMode, viewMode]);
+  // Only the edit canvas's viewport is remembered and forwarded; a replay pans
+  // its own snapshot without moving the view the user returns to.
+  const handleViewportChange = React.useCallback((viewport: Viewport) => {
+    editViewportRef.current = viewport;
+    onViewportChange?.(viewport);
+  }, [onViewportChange]);
+  /**
+   * The §6.12 dialog's target: one node of the tracked execution. Keyed by the
+   * execution id too, so a new run can never leave the dialog over a node of
+   * the previous one.
+   */
+  const [approvalTarget, setApprovalTarget] = React.useState<{ executionId: string; nodeName: string }>();
+  const openApprovalFor = React.useCallback((approvalNodeName: string) => {
+    if (!execution) return;
+    setApprovalTarget({ executionId: execution.executionId, nodeName: approvalNodeName });
+  }, [execution]);
+  // A target whose node left the suspended state (a decision closed the gate,
+  // the run moved on) closes the dialog: it would otherwise show a stale wait.
+  React.useEffect(() => {
+    if (!approvalTarget) return;
+    if (!execution || execution.executionId !== approvalTarget.executionId) {
+      setApprovalTarget(undefined);
+      return;
+    }
+    const node = execution.nodes?.find((candidate) => candidate.name === approvalTarget.nodeName);
+    if (!node || node.status !== "suspended") setApprovalTarget(undefined);
+  }, [approvalTarget, execution]);
+  /**
+   * Suspended approval cards get the chain/progress line and a 处理 action
+   * (§6.12); every other suspended card keeps the preview's 等待信号.
+   */
+  const approvalNotes = React.useMemo(() => {
+    const notes: Record<string, { text: string; action: string }> = {};
+    for (const execNode of execution?.nodes ?? []) {
+      if (execNode.status !== "suspended") continue;
+      const def = workflowNodeByName(draftWorkflow, execNode.name);
+      if (!def || def.type !== APPROVAL_NODE_TYPE) continue;
+      const params = approvalParamsFrom(def.parameters);
+      const progress = approvalProgress(params.approvers ?? [], approvalDecisions(execNode.output));
+      notes[execNode.name] = { text: approvalWaitText(params.mode, progress), action: "处理" };
+    }
+    return notes;
+  }, [draftWorkflow, execution]);
+  /** The first suspended approval of the tracked execution, if there is one. */
+  const firstApprovalNode = React.useMemo(() => {
+    for (const execNode of execution?.nodes ?? []) {
+      if (execNode.status !== "suspended") continue;
+      if (workflowNodeByName(draftWorkflow, execNode.name)?.type === APPROVAL_NODE_TYPE) return execNode.name;
+    }
+    return undefined;
+  }, [draftWorkflow, execution]);
+  // An archived version is opened read-only (§6.10): 查看 must never edit history.
+  const readOnly = Boolean(readOnlyReason) || capabilities?.workflow === false || historicalVersion !== undefined;
+  // Writes stay available while viewing history (回滚 is the one write this
+  // state offers), so this is deliberately not `!readOnly`: it drops only the
+  // reasons that remove the workflow scope itself.
+  const canWriteWorkflow = !readOnlyReason && capabilities?.workflow !== false;
+  // A read-only viewer and the replay both take the closed-editing path.
+  const editMode = viewMode === "edit" && !readOnly;
+  const [saveConflict, setSaveConflict] = React.useState(false);
+  // The host's reason wins; without one, name the scopes the credential is
+  // missing. The editor never asks the server — the host already passed the
+  // bits, so this sentence is built from data already in the props.
+  const readOnlyBannerReason = readOnlyReason || (
+    capabilities?.workflow === false
+      ? `缺少 ${missingCapabilityScopes(capabilities).join("、")} 权限，编辑器为只读。`
+      : undefined
+  );
+  const editLockedTitle = runsMode
+    ? "运行记录模式为只读，请切换到编辑模式。"
+    : readOnlyBannerReason ?? "当前为只读模式。";
+  // 节点 and 变量 are the two left-column sections in every mode. Preview mode
+  // has no node library, so its 节点 section is the outline alone (spec §6.0.1);
+  // 变量 stays reachable from the rail.
+  const leftSection = desktopRailSection;
+  const leftDrawerSection = leftDrawerTab;
   const hostNotices = [
-    !onSave ? "保存不可用：宿主未提供 onSave 处理器" : undefined,
-    !onRun ? "运行不可用：宿主未提供 onRun 处理器" : undefined
+    !readOnly && !onSave ? "保存不可用：宿主未提供 onSave 处理器" : undefined,
+    !readOnly && !onRun ? "运行不可用：宿主未提供 onRun 处理器" : undefined,
+    !readOnly && !onPublish ? "发布不可用：宿主未提供 onPublish 处理器" : undefined
   ].filter((notice): notice is string => Boolean(notice));
-  const workflowSummary = [
-    `${nodes.length} 个节点`,
-    draftWorkflow.settings?.timezone ? `时区 ${draftWorkflow.settings.timezone}` : undefined,
-    draftWorkflow.settings?.timeout !== undefined ? `超时 ${draftWorkflow.settings.timeout}` : undefined
-  ]
-    .filter((detail): detail is string => Boolean(detail))
-    .join(" / ");
 
   React.useEffect(() => {
     if (serializeJson(latestDraftRef.current) === serializeJson(value)) {
@@ -1710,8 +2083,11 @@ export function XFlowEditor({
     replaceParameterDrafts({});
     replaceWorkflowJsonDrafts({});
     setParamIssues(undefined);
-    setIsDirty(!value.id);
+    setBaselineWorkflow(value);
     setOperationError(undefined);
+    // A replaced definition is the latest the host has: the stale-version warning is over.
+    valueEpochRef.current += 1;
+    setSaveConflict(false);
     setOperationStatus(value.id ? "已保存" : "未保存");
   }, [value]);
 
@@ -1732,7 +2108,6 @@ export function XFlowEditor({
       draftRevisionRef.current += 1;
       latestDraftRef.current = nextWorkflow;
       setDraftWorkflow(nextWorkflow);
-      setIsDirty(true);
       setOperationStatus("未保存");
       setOperationError(undefined);
       onChange?.(nextWorkflow);
@@ -1880,6 +2255,8 @@ export function XFlowEditor({
   const externalIssuesMap = React.useMemo(() => externalIssuesByNode(paramIssues), [paramIssues]);
   const [parameterTab, setParameterTab] = React.useState<ParameterTab>("form");
   const [inspectorRevealNonce, setInspectorRevealNonce] = React.useState(0);
+  /** Latest 定位字段 request for the Inspector's parameter form (P1-c S5). */
+  const [inspectorFocusRequest, setInspectorFocusRequest] = React.useState<FocusRequest>();
   const renameRef = React.useRef<((requestedName: string) => void) | undefined>(undefined);
   const formHost = React.useMemo<NodeFormHost>(() => {
     const registry = createNodeFormRegistry({ onRename: (name) => renameRef.current?.(name) });
@@ -1914,10 +2291,19 @@ export function XFlowEditor({
   const invalidDraftCount = Object.values(parameterDrafts).filter((draft) => draft.error).length;
   const invalidWorkflowJsonFields = (Object.keys(workflowJsonLabels) as WorkflowJsonField[])
     .filter((field) => workflowJsonDrafts[field]?.error);
+  // 没有未保存修改时保存不可用 (baseline: `publish.tsx` clean state). A definition
+  // that was never persisted reads 未保存 even at zero changes, and a pending
+  // parameters draft (debounced, or unparseable) is an edit the count has not
+  // seen yet, so neither counts as clean.
+  const saveClean = versionChip.tone === "success"
+    && Object.keys(parameterDrafts).length === 0
+    && invalidWorkflowJsonFields.length === 0;
   const saveBlocked = invalidDraftCount > 0 || invalidWorkflowJsonFields.length > 0
     || (validationMode === "enforce" && formIssueSummary.errors > 0);
   const saveTooltip = !onSave
     ? "保存不可用：宿主未提供 onSave 处理器"
+    : saveClean
+      ? "没有未保存的修改"
     : invalidDraftCount > 0
       ? `${invalidDraftCount} 个节点的参数 JSON 未通过解析，修正后才能保存`
       : invalidWorkflowJsonFields.length > 0
@@ -1933,7 +2319,7 @@ export function XFlowEditor({
    * live node holds an unparseable one (every mode: a local parse failure,
    * Doc C §6.2) or, in enforce mode, while node forms report errors (§1 rule 3).
    */
-  const blockedByParameterDraft = React.useCallback((action: "保存" | "运行"): boolean => {
+  const blockedByParameterDraft = React.useCallback((action: "保存" | "运行" | "发布"): boolean => {
     flushParameterDrafts();
     const nodesNow = latestDraftRef.current.nodes ?? [];
     const blocked = nodesNow
@@ -1944,7 +2330,7 @@ export function XFlowEditor({
       setBlockedDraftNodes(blocked);
       setOperationError(`节点 ${blocked.join("、")} 的参数 JSON 未通过解析，请修正后再${action}`);
       setOperationStatus(`${action}已阻止`);
-      setBottomCollapsed(false);
+      revealDock();
       return true;
     }
     setBlockedDraftNodes([]);
@@ -1956,14 +2342,14 @@ export function XFlowEditor({
     if (blockedFields.length > 0) {
       setOperationError(`工作流 ${blockedFields.join("、")} JSON 未通过解析，请修正后再${action}`);
       setOperationStatus(`${action}已阻止`);
-      setBottomCollapsed(false);
+      revealDock();
       return true;
     }
     const summary = formIssueSummaryRef.current;
     if (nodeTypesRef.current?.param_validation_mode === "enforce" && summary.errors > 0) {
       setOperationError(`节点 ${summary.nodes.join("、")} 的参数未通过校验（${summary.errors} 个错误），请修正后再${action}`);
       setOperationStatus(`${action}已阻止`);
-      setBottomCollapsed(false);
+      revealDock();
       return true;
     }
     return false;
@@ -1974,7 +2360,6 @@ export function XFlowEditor({
     draftRevisionRef.current += 1;
     latestDraftRef.current = nextWorkflow;
     setDraftWorkflow(nextWorkflow);
-    setIsDirty(true);
     setOperationStatus("未保存");
     setOperationError(undefined);
     onChange?.(nextWorkflow);
@@ -1985,6 +2370,10 @@ export function XFlowEditor({
   // it is not a new branch point. Redo then still applies, and one undo after
   // it gets the drafted text back.
   const undoWorkflow = React.useCallback(() => {
+    // Read-only (a missing workflow capability, or the preview view) must not
+    // reach onChange through history: the controls are hidden, but a shortcut
+    // or a stale toolbar click would still rewrite the definition.
+    if (!editMode) return;
     flushParameterDrafts(true);
     const previousWorkflow = historyRef.current.undo.at(-1);
     if (!previousWorkflow) return;
@@ -1992,9 +2381,10 @@ export function XFlowEditor({
       undo: historyRef.current.undo.slice(0, -1),
       redo: [...historyRef.current.redo, latestDraftRef.current].slice(-historyLimit)
     });
-  }, [flushParameterDrafts, restoreHistory]);
+  }, [editMode, flushParameterDrafts, restoreHistory]);
 
   const redoWorkflow = React.useCallback(() => {
+    if (!editMode) return;
     flushParameterDrafts(true);
     const nextWorkflow = historyRef.current.redo.at(-1);
     if (!nextWorkflow) return;
@@ -2002,25 +2392,143 @@ export function XFlowEditor({
       undo: [...historyRef.current.undo, latestDraftRef.current].slice(-historyLimit),
       redo: historyRef.current.redo.slice(0, -1)
     });
-  }, [flushParameterDrafts, restoreHistory]);
+  }, [editMode, flushParameterDrafts, restoreHistory]);
 
   const createWorkflow = React.useCallback(() => {
     const nextWorkflow = createDraftWorkflow();
     commitWorkflow(nextWorkflow);
+    // A new draft is a new unsaved document (§6.3): its own definition is the
+    // baseline, so the chip reads 未保存 (N=0) instead of counting the replaced
+    // workflow's nodes as deletions.
+    setBaselineWorkflow(nextWorkflow);
     setSelectedKey(undefined);
   }, [commitWorkflow]);
 
+  // 运行 ▾ is a placeholder until P3: one disabled item, no behaviour to hang.
+  const runOptionItems: MenuProps["items"] = [
+    { key: "more-run", label: "更多运行方式（未接入）", disabled: true }
+  ];
+
   // Computed once and shared by the Diagnostics panel and the validate button,
-  // so the button's verdict always matches the panel's findings.
+  // so the button's verdict always matches the panel's findings. param_issues
+  // join as area="parameters" rows, each carrying its node and field pointer.
   const diagnostics = React.useMemo(
-    () => validateWorkflow(draftWorkflow, localRuntime, operationError, nodeTypes),
-    [draftWorkflow, localRuntime, nodeTypes, operationError]
+    () => [...validateWorkflow(draftWorkflow, operationError, nodeTypes), ...paramIssueDiagnostics(paramIssues)],
+    [draftWorkflow, nodeTypes, operationError, paramIssues]
   );
+  // §6.10 publish gate: unparseable drafts and diagnostics errors block; node
+  // form findings are errors only where the server enforces them (everywhere
+  // else they are the warnings the dialog says may be published).
+  const publishDiagnostics = React.useMemo(() => {
+    const enforce = validationMode === "enforce";
+    // `area: "operation"` rows are the last failed save / run / rollback, not
+    // findings about this definition (validateWorkflow appends them). Counting
+    // them here would disable publish after an unrelated operation failed and
+    // only an edit that clears `operationError` would re-enable it.
+    const definitionErrors = diagnostics.filter(
+      (entry) => entry.status === "error" && entry.area !== "operation"
+    ).length;
+    return {
+      errors: invalidDraftCount
+        + invalidWorkflowJsonFields.length
+        + definitionErrors
+        + (enforce ? formIssueSummary.errors : 0),
+      warnings: diagnostics.filter((entry) => entry.status === "warn").length
+        + (enforce ? 0 : formIssueSummary.errors)
+    };
+  }, [diagnostics, formIssueSummary, invalidDraftCount, invalidWorkflowJsonFields.length, validationMode]);
   const validateCurrentWorkflow = React.useCallback(() => {
     const hasErrors = diagnostics.some((item) => item.status === "error");
     setOperationStatus(hasErrors ? "校验失败" : "校验通过");
-    setBottomCollapsed(false);
+    revealDock();
   }, [diagnostics]);
+
+  // §6.3 compact top bar (layout b/c): 撤销 / 重做 / 校验 / 主题 join the ⋯ menu
+  // in that order, keeping each button's disabled state and shortcut hint. The
+  // menu itself never moves: it sits just before 保存 at every width.
+  // rc-menu owns the item role and exposes no aria-checked, so the active row
+  // states the selection in its accessible name. Every row keeps an icon slot
+  // (hidden when inactive) so the three labels share one text column.
+  const themeMenuItem = (key: string, label: string, value: XFlowEditorAppearance) => {
+    const active = activeAppearance === value;
+    return {
+      key,
+      label: (
+        <>
+          {label}
+          {active ? <span className="xflow-editor-sr-only">（当前）</span> : null}
+        </>
+      ),
+      icon: (
+        <CheckOutlined
+          aria-hidden="true"
+          className={active ? undefined : "xflow-editor-menu-check-inactive"}
+        />
+      )
+    };
+  };
+  const banners = editorBanners({
+    nodeTypesError,
+    onRetryNodeTypes,
+    saveConflict,
+    onReloadLatest,
+    onSaveAsCopy: onSaveAsCopy ? () => onSaveAsCopy(latestDraftRef.current) : undefined,
+    readOnlyReason: readOnlyBannerReason,
+    historicalVersion,
+    onExitHistory
+  });
+  const moreMenuItems: MenuProps["items"] = compactToolbar
+    ? [
+        { key: "undo", label: "撤销", title: "撤销（⌘ / Ctrl + Z）", disabled: !editMode || history.undo.length === 0 },
+        { key: "redo", label: "重做", title: "重做（⌘ / Ctrl + Shift + Z）", disabled: !editMode || history.redo.length === 0 },
+        {
+          key: "validate",
+          label: "校验",
+          title: runsMode ? "运行记录模式不提供诊断台" : "校验当前工作流",
+          // A replay has no draft and no diagnostics dock: the action would
+          // change hidden state with no visible result.
+          disabled: runsMode
+        },
+        {
+          type: "group",
+          label: "主题",
+          children: [
+            themeMenuItem("theme-light", "浅色", "light"),
+            themeMenuItem("theme-dark", "深色", "dark"),
+            themeMenuItem("theme-system", "跟随系统", "system")
+          ]
+        },
+        { type: "divider" },
+        { key: "layout", label: layoutPolicy === "auto" ? "进入沉浸布局" : "恢复自动布局" },
+        {
+          key: "new",
+          label: "新建工作流",
+          disabled: !editMode,
+          title: editMode ? undefined : editLockedTitle
+        }
+      ]
+    : [
+        { key: "layout", label: layoutPolicy === "auto" ? "进入沉浸布局" : "恢复自动布局" },
+        {
+          key: "new",
+          label: "新建工作流",
+          disabled: !editMode,
+          title: editMode ? undefined : editLockedTitle
+        }
+      ];
+  const handleMoreMenuClick: MenuProps["onClick"] = ({ key }) => {
+    if (key === "undo") undoWorkflow();
+    else if (key === "redo") redoWorkflow();
+    else if (key === "validate") validateCurrentWorkflow();
+    else if (key === "theme-light") changeAppearance("light");
+    else if (key === "theme-dark") changeAppearance("dark");
+    else if (key === "theme-system") changeAppearance("system");
+    else if (key === "layout") {
+      setLayoutPolicy((policy) => (policy === "auto" ? "compact" : "auto"));
+    } else if (key === "new" && editMode) {
+      createWorkflow();
+    }
+  };
 
   const libraryDescriptors = React.useMemo(() => nodeLibraryDescriptors(nodeTypes), [nodeTypes]);
   // Doc C §4.3: the canvas marks edges of removed dynamic ports; they are never deleted.
@@ -2082,8 +2590,8 @@ export function XFlowEditor({
     setSelectedKey(nodeKey(node, (nextWorkflow.nodes ?? []).length - 1));
   }, [commitWorkflow, draftWorkflow, editMode, selectedIndex, selectedNode]);
 
-  // Compact layout has no collapsed rail, so the same intent opens or closes the
-  // drawer instead of collapsing a panel that is not there.
+  // A compact left panel is a rail, not a collapsible column, so the same
+  // intent opens or closes the drawer instead.
   const toggleLeftPanel = React.useCallback(() => {
     if (layout === "a") {
       setLeftCollapsed((current) => !current);
@@ -2092,8 +2600,47 @@ export function XFlowEditor({
     setCompactDrawer((current) => (current === "left" ? undefined : "left"));
   }, [layout]);
 
-  // Escape never clears the selection: it leaves a transient mode. Deselecting
-  // (to reach the workflow settings) is the Inspector header's explicit action.
+  // The right panel collapses only on the desktop layout; below that it is a
+  // docked column in "b" and a drawer in "c", so only "c" has a drawer to toggle.
+  const toggleRightPanel = React.useCallback(() => {
+    if (layout === "a") {
+      setRightCollapsed((current) => !current);
+      return;
+    }
+    if (layout === "c") {
+      setCompactDrawer((current) => (current === "right" ? undefined : "right"));
+    }
+  }, [layout]);
+
+  /**
+   * Desktop rail section keys (§6.0): selecting the section that is already on
+   * screen collapses the column; any other key expands it and switches section.
+   */
+  const selectLeftSection = React.useCallback(
+    (section: "library" | "variables") => {
+      if (layout !== "a") {
+        setLeftDrawerTab(section);
+        setCompactDrawer("left");
+        return;
+      }
+      if (leftCollapsed) {
+        setLeftCollapsed(false);
+        setDesktopRailSection(section);
+        return;
+      }
+      // Compare the section actually on screen.
+      if (leftSection === section) {
+        setLeftCollapsed(true);
+        return;
+      }
+      setDesktopRailSection(section);
+    },
+    [layout, leftSection, leftCollapsed]
+  );
+
+  // Escape leaves a transient mode first (dialog, drawer, connect tool); with
+  // none open it deselects, like a click on the empty canvas, which brings the
+  // workflow settings back. Text entry never gets here (the shortcut is canvas-scoped).
   const leaveTransientMode = React.useCallback(() => {
     if (shortcutsOpen) {
       setShortcutsOpen(false);
@@ -2103,8 +2650,13 @@ export function XFlowEditor({
       setCompactDrawer(undefined);
       return;
     }
-    setCanvasTool((current) => (current === "connect" ? "select" : current));
-  }, [compactDrawer, shortcutsOpen]);
+    if (canvasTool === "connect") {
+      setCanvasTool("select");
+      return;
+    }
+    if (nodeSearchOpen) return;
+    setSelectedKey(undefined);
+  }, [canvasTool, compactDrawer, nodeSearchOpen, shortcutsOpen]);
 
   const addCanvasConnection = React.useCallback(
     (connection: PreviewConnection) => {
@@ -2142,10 +2694,11 @@ export function XFlowEditor({
   );
 
   const saveWorkflow = React.useCallback(async () => {
+    if (readOnly) return;
     if (!onSave) {
       setOperationError("保存不可用：宿主未提供 onSave 处理器");
       setOperationStatus("保存不可用");
-      setBottomCollapsed(false);
+      revealDock();
       return;
     }
     if (savingRef.current) return;
@@ -2154,6 +2707,7 @@ export function XFlowEditor({
     // in this tick (the shortcut can fire from inside a text field).
     const workflowToSave = latestDraftRef.current;
     const revisionAtSave = draftRevisionRef.current;
+    const valueEpochAtSave = valueEpochRef.current;
     savingRef.current = true;
     setSaving(true);
     setOperationError(undefined);
@@ -2165,32 +2719,199 @@ export function XFlowEditor({
       // the user kept editing meanwhile (they are replaced on the next save).
       setParamIssues(isSaveResult(saved) && saved.paramIssues?.length ? saved.paramIssues : undefined);
       // A response for an older snapshot must never overwrite edits made while
-      // the save was in flight. Those edits remain dirty and can be saved next.
+      // the save was in flight, but the persisted definition is still the new
+      // baseline those edits are measured against.
+      setBaselineWorkflow(savedWorkflow);
+      // The save went through, so the version race is over even when edits made
+      // meanwhile keep the snapshot below from replacing the draft.
+      setSaveConflict(false);
       if (draftRevisionRef.current !== revisionAtSave) return;
       latestDraftRef.current = savedWorkflow;
       setDraftWorkflow(savedWorkflow);
-      setIsDirty(false);
       setOperationStatus("已保存");
     } catch (error) {
+      // Raised by a conflict and kept until a save succeeds or the host replaces
+      // `value`: another kind of failure says nothing about the stale version.
+      // A conflict answering a save the host has since replaced `value` under is
+      // about a definition that is gone, so it raises nothing.
+      if (isWorkflowConflictError(error) && valueEpochRef.current === valueEpochAtSave) {
+        setSaveConflict(true);
+        // The banner is the way out; an expanded drawer would cover and inert it.
+        setDock((current) => (current === "expanded" ? "docked" : current));
+      }
       const rejectedIssues = paramIssuesOf(error);
       if (rejectedIssues) setParamIssues(rejectedIssues.length > 0 ? rejectedIssues : undefined);
       if (draftRevisionRef.current === revisionAtSave) {
-        setOperationError(errorMessage(error, "保存失败"));
+        // A conflict's server message is an internal string; the issue row
+        // repeats the banner's wording instead.
+        setOperationError(isWorkflowConflictError(error) ? "保存失败：工作流已被更新" : errorMessage(error, "保存失败"));
         setOperationStatus("保存失败");
-        setBottomCollapsed(false);
+        revealDock();
       }
       // The host application owns error presentation.
     } finally {
       savingRef.current = false;
       setSaving(false);
     }
-  }, [blockedByParameterDraft, onSave]);
+  }, [blockedByParameterDraft, onSave, readOnly]);
+
+  // §6.10 versions. The current row is the online version; before the list
+  // answers, the baseline definition's own label is the fallback (the hash is
+  // only ever readable from the list, never from GET /workflows/{id}).
+  const onlineVersionRow = versionsState.data?.list.find((row) => row.current);
+  const onlineVersion = onlineVersionRow?.version ?? baselineWorkflow.version;
+  const suggestedVersion = React.useMemo(() => suggestNextVersion(onlineVersion), [onlineVersion]);
+  const usedVersions = React.useMemo(() => {
+    const labels = new Set<string>();
+    (versionsState.data?.list ?? []).forEach((row) => labels.add(bareVersion(row.version)));
+    if (baselineWorkflow.version) labels.add(bareVersion(baselineWorkflow.version));
+    return Array.from(labels);
+  }, [baselineWorkflow.version, versionsState.data]);
+  const versionsVisible = versionsOpen || publishOpen;
+  // A refused rollback is a property of a version label under one workflow id;
+  // the same label under the next workflow must start clean. Only an id swap
+  // resets these — a same-id value replacement (save / rollback refresh) keeps
+  // the list the panel just loaded.
+  const versionScopeRef = React.useRef(value.id);
+  React.useEffect(() => {
+    if (versionScopeRef.current === value.id) return;
+    versionScopeRef.current = value.id;
+    setBlockedVersions({});
+    setVersionsState({});
+  }, [value.id]);
+  const loadVersionsRef = React.useRef(onLoadVersions);
+  loadVersionsRef.current = onLoadVersions;
+  React.useEffect(() => {
+    const load = loadVersionsRef.current;
+    if (!load || !versionsVisible) return undefined;
+    let cancelled = false;
+    setVersionsState((current) => ({ ...current, error: undefined, loading: true }));
+    Promise.resolve(load()).then(
+      (data) => {
+        if (!cancelled) setVersionsState({ data });
+      },
+      (error: unknown) => {
+        if (!cancelled) setVersionsState({ error: errorMessage(error, "版本历史加载失败") });
+      }
+    );
+    return () => {
+      cancelled = true;
+    };
+    // `value.id` joins the key so an open panel reloads for the new workflow and
+    // the cleanup discards a response that belongs to the previous one.
+  }, [value.id, versionLoadNonce, versionsVisible]);
+  // The field starts at the patch+1 suggestion and follows a later load only
+  // while it still shows the previous suggestion — never a user-typed label.
+  React.useEffect(() => {
+    if (!publishOpen) return;
+    const previous = publishSuggestedRef.current;
+    publishSuggestedRef.current = suggestedVersion;
+    setPublishVersion((current) => (current === "" || current === previous ? suggestedVersion : current));
+  }, [publishOpen, suggestedVersion]);
+
+  const openPublishDialog = React.useCallback(() => {
+    const initial = suggestNextVersion(onlineVersion);
+    publishSuggestedRef.current = initial;
+    setPublishVersion(initial);
+    setPublishError(undefined);
+    setPublishOpen(true);
+  }, [onlineVersion]);
+
+  const publishWorkflow = React.useCallback(async () => {
+    if (readOnly || !onPublish || publishingRef.current) return;
+    const version = publishVersion.trim();
+    if (!version) {
+      setPublishError("请填写新版本号。");
+      return;
+    }
+    if (blockedByParameterDraft("发布")) {
+      setPublishError("参数未通过校验，修正后再发布。");
+      return;
+    }
+    const next = { ...latestDraftRef.current, version };
+    const revisionAtPublish = draftRevisionRef.current;
+    const valueEpochAtPublish = valueEpochRef.current;
+    publishingRef.current = true;
+    setPublishing(true);
+    setPublishError(undefined);
+    try {
+      const saved = await onPublish(next);
+      const savedWorkflow = isSaveResult(saved) ? saved.workflow : saved;
+      if (!savedWorkflow) throw new Error("发布处理器未返回工作流定义");
+      setParamIssues(isSaveResult(saved) && saved.paramIssues?.length ? saved.paramIssues : undefined);
+      setBaselineWorkflow(savedWorkflow);
+      setSaveConflict(false);
+      if (draftRevisionRef.current === revisionAtPublish) {
+        latestDraftRef.current = savedWorkflow;
+        setDraftWorkflow(savedWorkflow);
+      }
+      setOperationError(undefined);
+      setOperationStatus(`已发布 ${versionLabel(version)}`);
+      setPublishOpen(false);
+      // The list this session loaded predates the new version.
+      setVersionsState({});
+    } catch (error) {
+      // §6.10: a publish conflict is the save conflict (§6.5.1), so the banner
+      // with 重新加载 / 另存为副本 comes up behind the dialog — unless the host
+      // has replaced `value` since, in which case that definition is gone.
+      if (isWorkflowConflictError(error) && valueEpochRef.current === valueEpochAtPublish) {
+        setSaveConflict(true);
+        setDock((current) => (current === "expanded" ? "docked" : current));
+      }
+      if (draftRevisionRef.current === revisionAtPublish) {
+        setOperationStatus("发布失败");
+        revealDock();
+      }
+      const rejectedIssues = paramIssuesOf(error);
+      if (rejectedIssues) setParamIssues(rejectedIssues.length > 0 ? rejectedIssues : undefined);
+      setPublishError(publishErrorText(error));
+    } finally {
+      publishingRef.current = false;
+      setPublishing(false);
+    }
+  }, [blockedByParameterDraft, onPublish, publishVersion, readOnly]);
+
+  const rollbackToVersion = React.useCallback(async (version: string) => {
+    if (!canWriteWorkflow || !onRollback || rollingBackRef.current) return;
+    rollingBackRef.current = true;
+    setRollingBackVersion(version);
+    setOperationError(undefined);
+    try {
+      const result = await onRollback(version);
+      const installed = result?.version ?? version;
+      setOperationStatus(result?.unchanged ? `${versionLabel(installed)} 已是线上版本` : `已回滚到 ${versionLabel(installed)}`);
+      setVersionsOpen(false);
+      setVersionsState({});
+      setVersionLoadNonce((nonce) => nonce + 1);
+    } catch (error) {
+      // A version the compiler cannot reproduce is a property of that row, so
+      // the reason stays on it; every other failure is reported once.
+      const reason = versionUnavailableReason(error);
+      if (reason) {
+        setBlockedVersions((current) => ({ ...current, [version]: reason }));
+        setOperationError(reason);
+      } else {
+        setOperationError(rollbackErrorText(error));
+      }
+      setOperationStatus("回滚失败");
+      revealDock();
+    } finally {
+      rollingBackRef.current = false;
+      setRollingBackVersion(undefined);
+    }
+  }, [canWriteWorkflow, onRollback, revealDock]);
+
+  const viewVersion = React.useCallback((version: string) => {
+    setVersionsOpen(false);
+    onViewVersion?.(version);
+  }, [onViewVersion]);
 
   const runWorkflow = React.useCallback(async () => {
+    if (readOnly) return;
     if (!onRun) {
       setOperationError("运行不可用：宿主未提供 onRun 处理器");
       setOperationStatus("运行不可用");
-      setBottomCollapsed(false);
+      revealDock();
       return;
     }
     if (blockedByParameterDraft("运行")) return;
@@ -2200,17 +2921,89 @@ export function XFlowEditor({
       const nextRuntime = await onRun(latestDraftRef.current);
       if (!nextRuntime) throw new Error("运行处理器未返回运行状态快照");
       setLocalRuntime(nextRuntime);
-      setOperationStatus("运行完成");
-      setBottomCollapsed(false);
+      setOperationStatus(operationStatusFromRuntime(nextRuntime));
+      revealDock();
     } catch (error) {
       setOperationError(errorMessage(error, "运行失败"));
       setOperationStatus("运行失败");
-      setBottomCollapsed(false);
+      revealDock();
       // The host application owns error presentation.
     } finally {
       setRunning(false);
     }
-  }, [blockedByParameterDraft, onRun]);
+  }, [blockedByParameterDraft, onRun, readOnly]);
+
+  /**
+   * §6.3 run-bar actions. The host owns the request; the editor only reports a
+   * rejection in its dock (a host 403 toast and capability refresh happen on
+   * the host side before this promise settles). The refreshed execution comes
+   * back through the `execution` prop, never through a local guess.
+   */
+  const runExecutionAction = React.useCallback(
+    async (executionId: string, action: ExecutionControlAction) => {
+      if (!onExecutionAction) return;
+      // Clear the previous attempt first: a rejected pause must not keep the
+      // dock and status bar red after the next resume succeeds. The host owns
+      // the refreshed detail, so the top bar reports the submission only.
+      setOperationError(undefined);
+      try {
+        await onExecutionAction(executionId, action);
+        setOperationStatus("操作已提交");
+      } catch (error) {
+        setOperationError(errorMessage(error, "执行操作失败"));
+        setOperationStatus("操作失败");
+        revealDock();
+      }
+    },
+    [onExecutionAction, revealDock]
+  );
+
+  /**
+   * The run bar's 等待审批 count opens the dialog (§6.12). The count names the
+   * first suspended node, which need not be the approval: when it is not, the
+   * first suspended approval of the same execution is the one to handle.
+   */
+  const handleRunBarApproval = React.useCallback((suspendedName: string) => {
+    if (!firstApprovalNode) return;
+    const def = workflowNodeByName(latestDraftRef.current, suspendedName);
+    openApprovalFor(def?.type === APPROVAL_NODE_TYPE ? suspendedName : firstApprovalNode);
+  }, [firstApprovalNode, openApprovalFor]);
+
+  /** The canvas note's 处理 action; notes exist only for approval nodes. */
+  const handlePreviewNodeAction = React.useCallback((approvalNodeName: string) => {
+    openApprovalFor(approvalNodeName);
+  }, [openApprovalFor]);
+
+  // The bar's natural width (its id text ellipsizes when clamped, so the hidden
+  // remainder is scrollWidth - clientWidth). If centring that width would reach
+  // either of the preview's top floats, drop the row one float row: §6.3 keeps
+  // the bar centred, and the plan forbids covering 添加节点 / 定位节点. The
+  // editor width arrives through `editorWidth`, which re-renders on resize.
+  React.useLayoutEffect(() => {
+    const row = runBarRowRef.current;
+    const bar = row?.querySelector<HTMLElement>(".xflow-editor-runbar");
+    if (!execution || !row || !bar || editorWidth <= 0) {
+      setRunBarStacked(false);
+      return;
+    }
+    const canvas = canvasFrameRef.current;
+    const canvasRect = canvas?.getBoundingClientRect();
+    if (!canvas || !canvasRect || canvasRect.width === 0) return;
+    const idText = bar.querySelector<HTMLElement>(".xflow-editor-runbar__id-text");
+    const hiddenId = idText ? Math.max(0, idText.scrollWidth - idText.clientWidth) : 0;
+    const natural = bar.clientWidth + hiddenId;
+    const start = canvasRect.left + (canvasRect.width - natural) / 2;
+    const end = start + natural;
+    const root = editorRootRef.current;
+    const leftFloat = root?.querySelector<HTMLElement>(
+      ".xflow-preview-canvas-float:not(.xflow-preview-canvas-float--end)"
+    );
+    const rightFloat = root?.querySelector<HTMLElement>(".xflow-preview-canvas-float--end");
+    setRunBarStacked(Boolean(
+      (leftFloat && leftFloat.getBoundingClientRect().right + 8 > start) ||
+      (rightFloat && rightFloat.getBoundingClientRect().left - 8 < end)
+    ));
+  }, [editorWidth, execution]);
 
   React.useEffect(() => {
     if (nodes.length === 0) {
@@ -2225,7 +3018,13 @@ export function XFlowEditor({
   }, [nodes, selectedKey]);
 
   React.useEffect(() => {
-    if (layout === "a") setCompactDrawer(undefined);
+    // Drop drawers the new layout cannot show: the left drawer exists in "b"
+    // and "c", the right one only in "c".
+    setCompactDrawer((current) => {
+      if (current === "left" && layout === "a") return undefined;
+      if (current === "right" && layout !== "c") return undefined;
+      return current;
+    });
   }, [layout]);
 
   const focusNodeLibrarySearch = React.useCallback(() => {
@@ -2233,7 +3032,7 @@ export function XFlowEditor({
   }, []);
 
   React.useEffect(() => {
-    if (layout === "c" && compactDrawer === "left" && leftDrawerTab === "library" && editMode) {
+    if (layout !== "a" && compactDrawer === "left" && leftDrawerTab === "library" && editMode) {
       focusNodeLibrarySearch();
     }
   }, [compactDrawer, editMode, focusNodeLibrarySearch, layout, leftDrawerTab]);
@@ -2243,64 +3042,187 @@ export function XFlowEditor({
     if (index >= 0) setSelectedKey(nodeKey(nodes[index], index));
   }, [nodes]);
 
+  /**
+   * The diagnostics' 定位节点: select the node, pan the canvas to it and hand
+   * the keyboard to the canvas. The inspector is left as the user has it (same
+   * rule as the node search). The preview already follows a selection that is
+   * off screen; `fitNode` also covers the one that is on screen, and both land
+   * on the same viewport, so a node is never panned twice to two places.
+   */
+  const focusLocatedNode = React.useCallback((key: string) => {
+    const card = document.querySelector<HTMLElement>(
+      `.xflow-editor .react-flow__node[data-id="${key.replace(/["\\]/g, "\\$&")}"] .xflow-preview-node__select`
+    );
+    (card ?? canvasFrameRef.current)?.focus({ preventScroll: true });
+  }, []);
+  // The workbench is inert while the drawer is expanded, and inert elements
+  // cannot take focus: a locate from an expanded drawer finishes the focus
+  // hand-over in the commit that restores the drawer.
+  const pendingLocateFocusRef = React.useRef<string | undefined>(undefined);
+  React.useLayoutEffect(() => {
+    const key = pendingLocateFocusRef.current;
+    if (key === undefined) return;
+    pendingLocateFocusRef.current = undefined;
+    focusLocatedNode(key);
+  }, [dock, focusLocatedNode]);
+  const locateDiagnosticNode = React.useCallback((name: string) => {
+    const index = nodes.findIndex((node, nodeIndex) => nodeName(node, nodeIndex) === name);
+    if (index < 0) return;
+    const key = nodeKey(nodes[index], index);
+    setSelectedKey(key);
+    previewHandleRef.current?.fitNode(key);
+    if (dock === "expanded") pendingLocateFocusRef.current = key;
+    else focusLocatedNode(key);
+  }, [dock, focusLocatedNode, nodes]);
+
+  /**
+   * The run bar's 定位: the execution snapshot names nodes by name, while the
+   * canvas selects by key (`node.id ?? node.name`). Resolve the name first,
+   * then select and pan — the diagnostics' locate path without the keyboard
+   * hand-over, because the click came from a top float, not from the drawer.
+   */
+  const locateRuntimeNode = React.useCallback((name: string) => {
+    const index = nodes.findIndex((node, nodeIndex) => nodeName(node, nodeIndex) === name);
+    if (index < 0) return;
+    const key = nodeKey(nodes[index], index);
+    setSelectedKey(key);
+    previewHandleRef.current?.fitNode(key);
+    setDock((current) => (current === "expanded" ? "docked" : current));
+  }, [nodes]);
+
   const openCompactDrawer = React.useCallback((drawer: "left" | "right") => {
     setCompactDrawer(drawer);
   }, []);
 
+  /**
+   * §6.8: the execution list is the replay's only left-column content, so every
+   * entry has to prepare the column for it — a collapsed desktop column would
+   * hide the list with no surface left to reopen it, and a compact drawer left
+   * on 节点与大纲 would show the draft instead.
+   */
+  const enterRuns = React.useCallback(() => {
+    changeMode("runs");
+    if (layout === "a") {
+      setLeftCollapsed(false);
+      return;
+    }
+    setLeftDrawerTab("executions");
+    openCompactDrawer("left");
+  }, [changeMode, layout, openCompactDrawer]);
+
   /** Doc C §6.2: from a blocked save/run, jump to the node's parameters JSON. */
   const revealParameterJson = React.useCallback((name: string) => {
     selectNodeByName(name);
-    setViewMode("edit");
+    changeMode("edit");
     setParameterTab("json");
     setInspectorRevealNonce((nonce) => nonce + 1);
+    // Only the desktop flag is persisted: "b" docks the inspector and "c"
+    // opens its drawer, so neither may rewrite the desktop preference.
     if (layout === "a") setRightCollapsed(false);
-    else openCompactDrawer("right");
-  }, [layout, openCompactDrawer, selectNodeByName]);
+    else if (layout === "c") openCompactDrawer("right");
+  }, [changeMode, layout, openCompactDrawer, selectNodeByName]);
+
+  // Nonces stay monotonic across handled requests: the editor clears the
+  // request once the Composer reports it, and a next nonce derived from the
+  // (cleared) state could repeat the last one and be de-duplicated away.
+  const focusRequestNonceRef = React.useRef(0);
+  const handleFocusRequestHandled = React.useCallback((nonce: number) => {
+    setInspectorFocusRequest((current) => (current && current.nonce === nonce ? undefined : current));
+  }, []);
+
+  /** The diagnostics' 定位字段 (P1-c S5): node → parameters form → focus the field. */
+  const locateParameterField = React.useCallback((name: string, path: string) => {
+    selectNodeByName(name);
+    changeMode("edit");
+    setParameterTab("form");
+    focusRequestNonceRef.current += 1;
+    setInspectorFocusRequest({ path, nonce: focusRequestNonceRef.current });
+    setInspectorRevealNonce((nonce) => nonce + 1);
+    // Only the desktop flag is persisted: "b" docks the inspector and "c"
+    // opens its drawer, so neither may rewrite the desktop preference.
+    if (layout === "a") setRightCollapsed(false);
+    else if (layout === "c") openCompactDrawer("right");
+  }, [changeMode, layout, openCompactDrawer, selectNodeByName]);
+
+  /** §6.1.1: pressing a card-summary row selects the node and reveals that field. */
+  const locateSummaryField = React.useCallback((nodeId: string, path: string) => {
+    const nodes = draftWorkflow.nodes ?? [];
+    const index = nodes.findIndex((candidate, at) => nodeKey(candidate, at) === nodeId);
+    if (index < 0) return;
+    locateParameterField(nodeName(nodes[index], index), path);
+  }, [draftWorkflow.nodes, locateParameterField]);
 
   const openNodeLibrary = React.useCallback(() => {
-    setViewMode("edit");
-    setLeftCollapsed(false);
+    changeMode("edit");
     setDesktopRailSection("library");
-    if (layout === "c") {
-      setLeftDrawerTab("library");
-      openCompactDrawer("left");
+    if (layout === "a") {
+      setLeftCollapsed(false);
+      return;
     }
-  }, [layout, openCompactDrawer]);
+    // The compact drawer uses its own state; the persisted desktop flag stays
+    // as the user left it.
+    setLeftDrawerTab("library");
+    openCompactDrawer("left");
+  }, [changeMode, layout, openCompactDrawer]);
 
+  const focusLibrarySearchFromKey = React.useCallback(() => {
+    openNodeLibrary();
+    setLibrarySearchFocusNonce((nonce) => nonce + 1);
+  }, [openNodeLibrary]);
+  React.useEffect(() => {
+    if (librarySearchFocusNonce > 0) focusNodeLibrarySearch();
+  }, [focusNodeLibrarySearch, librarySearchFocusNonce]);
+
+  // The replay's ⌘K locates inside the snapshot: the draft's node set can
+  // differ from the one on screen (§6.8), so searching it would list nodes that
+  // are not drawn and miss nodes that are.
+  const searchNodes = runsMode ? replayNodes : nodes;
   const nodeSearchOptions = React.useMemo<NodeSearchOption[]>(
-    () => nodes.map((node, index) => ({
+    () => searchNodes.map((node, index) => ({
       key: nodeKey(node, index),
       name: nodeName(node, index),
       label: nodeLabel(node, index),
       type: node.type ?? "unknown"
     })),
-    [nodes]
+    [searchNodes]
   );
-  const openNodeSearch = React.useCallback(() => {
-    if (nodes.length === 0) return;
+  const openNodeSearch = React.useCallback((trigger?: HTMLElement) => {
+    if (nodeSearchOpen || searchNodes.length === 0) return;
+    // Remember who opened the panel so Esc (and a pick) returns focus there.
+    locateTriggerRef.current = trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    // Remount the search so a reopen never keeps the previous filter.
+    setNodeSearchNonce((nonce) => nonce + 1);
     setNodeSearchOpen(true);
-    nodeSearchRef.current?.focus();
-  }, [nodes.length]);
+  }, [nodeSearchOpen, searchNodes.length]);
+  const closeNodeSearch = React.useCallback(() => {
+    setNodeSearchOpen(false);
+    const trigger = locateTriggerRef.current;
+    locateTriggerRef.current = null;
+    // The dialog is still mounted while it animates closed; restore afterwards.
+    window.setTimeout(() => trigger?.focus(), 0);
+  }, []);
+  // Node search is a canvas locate, not an intent to edit: selecting the node
+  // updates the reopen chip's name but leaves a collapsed inspector closed.
+  // An expanded drawer would cover the node it just found, so it steps down.
   const locateNode = React.useCallback((key: string) => {
     setSelectedKey(key);
-    if (layout === "a") setRightCollapsed(false);
-  }, [layout]);
+    setDock((current) => (current === "expanded" ? "docked" : current));
+  }, []);
   const clearSelection = React.useCallback(() => setSelectedKey(undefined), []);
-
-  /** Look (icon, tone) of the selected node's type, from the node library. */
-  const selectedPresentation = React.useMemo<NodePresentationHint | undefined>(() => {
-    const type = selectedNode?.type;
-    if (!type) return undefined;
-    const descriptor = libraryDescriptors.find((candidate) => candidate.type === type);
-    return descriptor ? { icon: descriptor.icon, tone: descriptor.tone } : undefined;
-  }, [libraryDescriptors, selectedNode?.type]);
 
   // ---- Canvas context menu -------------------------------------------------
 
   const [contextMenu, setContextMenu] = React.useState<ContextMenuRequest>();
-  /** Bumped to ask the Inspector to put the caret in the node-name field. */
-  const [nameFocusNonce, setNameFocusNonce] = React.useState(0);
+  /**
+   * Bumped to ask the Inspector to start its header rename. Kept until a
+   * mounted Inspector consumes it: the same gesture may mount the panel first
+   * (desktop re-expand, compact drawer), so a mount must still see the request.
+   */
+  const [nameFocusNonce, setNameFocusNonce] = React.useState<number | undefined>(undefined);
   const closeContextMenu = React.useCallback(() => setContextMenu(undefined), []);
+  const handleNameFocusHandled = React.useCallback((nonce: number) => {
+    setNameFocusNonce((current) => (current === nonce ? undefined : current));
+  }, []);
 
   /** Right-click on a node: select it (the menu always acts on the node under the pointer). */
   const openNodeContextMenu = React.useCallback((nodeId: string, position: { clientX: number; clientY: number }) => {
@@ -2323,22 +3245,24 @@ export function XFlowEditor({
   /** 打开属性: bring the Inspector forward for a node (drawer in the compact layout). */
   const openInspectorFor = React.useCallback((key: string) => {
     setSelectedKey(key);
-    setViewMode("edit");
+    changeMode("edit");
     setInspectorRevealNonce((nonce) => nonce + 1);
+    // Only the desktop flag is persisted: "b" docks the inspector and "c"
+    // opens its drawer, so neither may rewrite the desktop preference.
     if (layout === "a") setRightCollapsed(false);
-    else openCompactDrawer("right");
-  }, [layout, openCompactDrawer]);
+    else if (layout === "c") openCompactDrawer("right");
+  }, [changeMode, layout, openCompactDrawer]);
 
-  /** 重命名: the same, on the parameters tab, with the caret in 节点名称. */
+  /** 重命名: select the node, reveal the Inspector and start its header rename. */
   const renameNodeFromMenu = React.useCallback((key: string) => {
     setSelectedKey(key);
-    setViewMode("edit");
-    setParameterTab("form");
-    setInspectorRevealNonce((nonce) => nonce + 1);
-    setNameFocusNonce((nonce) => nonce + 1);
+    changeMode("edit");
+    setNameFocusNonce((nonce) => (nonce ?? 0) + 1);
+    // Only the desktop flag is persisted: "b" docks the inspector and "c"
+    // opens its drawer, so neither may rewrite the desktop preference.
     if (layout === "a") setRightCollapsed(false);
-    else openCompactDrawer("right");
-  }, [layout, openCompactDrawer]);
+    else if (layout === "c") openCompactDrawer("right");
+  }, [changeMode, layout, openCompactDrawer]);
 
   /** 启用 / 禁用节点 goes through the node form's own patch path, so it is undoable. */
   const toggleNodeDisabled = React.useCallback((key: string) => {
@@ -2461,12 +3385,12 @@ export function XFlowEditor({
       const nextRuntime = await onRunNode(latestDraftRef.current, { node: name, mode });
       if (!nextRuntime) throw new Error("运行处理器未返回运行状态快照");
       setLocalRuntime(nextRuntime);
-      setOperationStatus("运行完成");
-      setBottomCollapsed(false);
+      setOperationStatus(operationStatusFromRuntime(nextRuntime));
+      revealDock();
     } catch (error) {
       setOperationError(errorMessage(error, "运行失败"));
       setOperationStatus("运行失败");
-      setBottomCollapsed(false);
+      revealDock();
       // The host application owns error presentation.
     } finally {
       setRunning(false);
@@ -2661,10 +3585,10 @@ export function XFlowEditor({
           redoWorkflow();
           return;
         case "save":
-          if (onSave) void saveWorkflow();
+          if (onSave && editMode && !saveClean) void saveWorkflow();
           return;
         case "run":
-          if (onRun && !running) void runWorkflow();
+          if (onRun && editMode && !running) void runWorkflow();
           return;
         case "duplicate":
           duplicateSelectedNode();
@@ -2675,11 +3599,25 @@ export function XFlowEditor({
         case "toggleLeftPanel":
           toggleLeftPanel();
           return;
+        case "toggleRightPanel":
+          toggleRightPanel();
+          return;
+        case "toggleDiagnostics":
+          dockControllerRef.current?.toggle();
+          return;
         case "selectTool":
           setCanvasTool("select");
           return;
         case "connectTool":
           setCanvasTool("connect");
+          return;
+        case "addNode":
+          // Advertised by the canvas float, which preview mode does not show.
+          if (editMode) openNodeLibrary();
+          return;
+        case "searchLibrary":
+          // The library only exists in edit mode; preview has nothing to search.
+          if (editMode) focusLibrarySearchFromKey();
           return;
         case "escape":
           leaveTransientMode();
@@ -2701,7 +3639,15 @@ export function XFlowEditor({
       for (const shortcut of editorShortcuts) {
         if (inTextEntry && shortcut.scope === "canvas") continue;
         if (!shortcut.match(event)) continue;
+        // Esc inside a popup (menu, listbox, dialog) closes that popup only.
+        if (shortcut.id === "escape" && isInsidePopup(event.target)) continue;
+        // The workbench behind an expanded drawer is inert: shortcuts that act on
+        // it (undo, duplicate, panels, tools...) must not reach what cannot be seen.
+        if (dock === "expanded" && !expandedDockShortcuts.has(shortcut.id)) continue;
         if (shortcut.preventDefault !== false) event.preventDefault();
+        // Holding the chord must not flicker the dock, and a dialog in front
+        // owns the keyboard: the browser default is still swallowed above.
+        if (shortcut.id === "toggleDiagnostics" && (event.repeat || shortcutsOpen || nodeSearchOpen)) return;
         runShortcut(shortcut.id);
         return;
       }
@@ -2710,38 +3656,219 @@ export function XFlowEditor({
     return () => window.removeEventListener("keydown", handleCanvasShortcut);
   }, [
     contextMenu,
+    dock,
     duplicateSelectedNode,
+    editMode,
     leaveTransientMode,
+    nodeSearchOpen,
     onRun,
     onSave,
+    focusLibrarySearchFromKey,
+    openNodeLibrary,
     openNodeSearch,
+    readOnly,
     redoWorkflow,
     running,
     runWorkflow,
+    saveClean,
     saveWorkflow,
+    shortcutsOpen,
     toggleLeftPanel,
+    toggleRightPanel,
     undoWorkflow
   ]);
 
+  // §6.0: desktop collapse flags. The compact bands are rails/drawers, so a
+  // persisted desktop preference never shrinks a compact pane.
+  const desktopLeftCollapsed = layout === "a" && leftCollapsed;
+  const desktopRightCollapsed = layout === "a" && rightCollapsed;
+  // Collapsing the column unmounts whatever held focus inside it (the 收起左栏
+  // key, a library row), which drops focus to <body>; the rail stays, so hand
+  // focus to its 节点 key. Focus that is anywhere else is left alone.
+  const wasLeftCollapsedRef = React.useRef(desktopLeftCollapsed);
+  React.useEffect(() => {
+    const was = wasLeftCollapsedRef.current;
+    wasLeftCollapsedRef.current = desktopLeftCollapsed;
+    if (!desktopLeftCollapsed || was) return;
+    if (document.activeElement && document.activeElement !== document.body) return;
+    editorRootRef.current
+      ?.querySelector<HTMLButtonElement>(".xflow-editor-desktop-rail button[aria-label='节点与大纲']")
+      ?.focus();
+  }, [desktopLeftCollapsed]);
+  // Leaving the desktop layout swaps the left column for the compact rail and
+  // closes the drawer, which unmounts a focused library row or outline item the
+  // same way; hand focus to the rail's 节点 key instead of <body>.
+  const wasDesktopLayoutRef = React.useRef(layout === "a");
+  React.useEffect(() => {
+    const was = wasDesktopLayoutRef.current;
+    wasDesktopLayoutRef.current = layout === "a";
+    if (layout === "a" || !was) return;
+    if (document.activeElement && document.activeElement !== document.body) return;
+    editorRootRef.current
+      ?.querySelector<HTMLButtonElement>(".xflow-editor-compact-rail--left button[aria-label='节点与大纲']")
+      ?.focus();
+  }, [layout]);
+  // The mirror: widening to the desktop layout closes the compact drawer and
+  // unmounts what held focus inside it (the drawer may still be animating out,
+  // so focus inside it counts as lost too); the desktop rail's 节点 key takes it.
+  const wasCompactLayoutRef = React.useRef(layout !== "a");
+  React.useEffect(() => {
+    const was = wasCompactLayoutRef.current;
+    wasCompactLayoutRef.current = layout !== "a";
+    if (layout !== "a" || !was) return;
+    const active = document.activeElement;
+    const inDrawer = active instanceof Element && active.closest(".xflow-editor-compact-drawer") !== null;
+    if (active && active !== document.body && !inDrawer) return;
+    editorRootRef.current
+      ?.querySelector<HTMLButtonElement>(".xflow-editor-desktop-rail button[aria-label='节点与大纲']")
+      ?.focus();
+  }, [layout]);
+  const collapseLeftAction = layout === "a" ? (
+    <Tooltip classNames={editorTooltipClassNames} title="收起左栏（⌘ / Ctrl + B）">
+      <Button
+        aria-label="收起左栏"
+        aria-pressed
+        className="xflow-editor-panel-collapse"
+        color="default"
+        icon={<MenuFoldOutlined />}
+        size="small"
+        variant="text"
+        onClick={() => setLeftCollapsed(true)}
+      />
+    </Tooltip>
+  ) : undefined;
+  const locateSelectedNode = React.useCallback(() => {
+    if (selectedKey !== undefined) previewHandleRef.current?.fitNode(selectedKey);
+  }, [selectedKey]);
+  /**
+   * An outline row: select the node and centre it, the same pair the
+   * diagnostics' 定位节点 runs. The inspector is left as the user has it
+   * (E1b), and focus stays on the row so the tree keeps its keyboard.
+   */
+  const selectOutlineNode = React.useCallback((key: string) => {
+    setSelectedKey(key);
+    previewHandleRef.current?.fitNode(key);
+  }, []);
+  // The last outline row was deleted while it held focus: nothing in the tree
+  // can take it (the empty note is not focusable), so hand it to the library
+  // search, else (preview, or no library on screen) the rail's 节点与大纲 key.
+  const handleOutlineFocusLost = React.useCallback(() => {
+    if (document.activeElement && document.activeElement !== document.body) return;
+    // Try the search for real and judge by where focus ended up, not by a
+    // pre-check of the ref: a library that is on screen takes focus, one that is
+    // not (preview, unmounted) leaves it on <body> and the rail key gets it.
+    nodeLibrarySearchRef.current?.focus({ preventScroll: true });
+    if (document.activeElement && document.activeElement !== document.body) return;
+    editorRootRef.current
+      ?.querySelector<HTMLButtonElement>(".xflow-editor-desktop-rail button[aria-label='节点与大纲'], .xflow-editor-compact-rail--left button[aria-label='节点与大纲']")
+      ?.focus();
+  }, []);
+  /**
+   * The 节点 state of the left column (§6.0.1): the node library over the
+   * outline, one region each. Preview has no library, so the outline fills the
+   * column alone and carries the collapse action itself. `inDrawer` is the
+   * compact drawer, which focuses the search on open.
+   */
+  const renderNodeZones = (headerAction: React.ReactNode, inDrawer = false): React.ReactElement => (
+    <aside aria-label="节点与大纲" className="xflow-editor-lib" data-zones={editMode ? "dual" : "single"}>
+      {editMode ? (
+        <NodeLibrary
+          autoFocusSearch={inDrawer}
+          descriptors={libraryDescriptors}
+          headerAction={headerAction}
+          searchInputRef={nodeLibrarySearchRef}
+          onAddNode={addNode}
+        />
+      ) : null}
+      <OutlinePanel
+        canLocate={selectedNode !== undefined}
+        headerAction={editMode ? undefined : headerAction}
+        nodeCategories={nodeCategories}
+        runtime={localRuntime}
+        selectedKey={selectedKey}
+        workflow={draftWorkflow}
+        onFocusLost={handleOutlineFocusLost}
+        onLocate={locateSelectedNode}
+        onSearch={openNodeSearch}
+        onSelectNode={selectOutlineNode}
+      />
+    </aside>
+  );
+  const collapseRightAction = layout === "a" ? (
+    <Tooltip classNames={editorTooltipClassNames} title="收起属性面板（⌥⌘B / Ctrl + Alt + B）">
+      <Button
+        aria-label="收起属性面板"
+        aria-pressed
+        className="xflow-editor-panel-collapse"
+        color="default"
+        icon={<MenuUnfoldOutlined />}
+        size="small"
+        variant="text"
+        onClick={() => setRightCollapsed(true)}
+      />
+    </Tooltip>
+  ) : undefined;
+  // §6.0: a double-click on a node is the "edit this node" gesture; a single
+  // click only selects, so a collapsed inspector stays out of the way.
+  const handleCanvasDoubleClick = React.useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    const target = event.target as Element | null;
+    const nodeId = target?.closest?.("[data-node-id]")?.getAttribute("data-node-id");
+    if (!nodeId) return;
+    setSelectedKey(nodeId);
+    if (layout === "a") setRightCollapsed(false);
+    else if (layout === "c") setCompactDrawer("right");
+  }, [layout]);
+
+  // The Inspector header's ⋯ menu toggles the selected node (header ≠ canvas:
+  // it names the node by key, the same way toggleNodeDisabled does).
+  const toggleSelectedNodeDisabled = React.useCallback(() => {
+    if (selectedKey) toggleNodeDisabled(selectedKey);
+  }, [selectedKey, toggleNodeDisabled]);
+
+  // §6.12 运行 tab: a suspended approval node offers 处理审批 for the tracked run.
+  const selectedApprovalName =
+    selectedNode?.type === APPROVAL_NODE_TYPE ? nodeName(selectedNode, selectedIndex) : undefined;
+  const selectedApprovalSuspended = Boolean(
+    selectedApprovalName &&
+      execution?.nodes?.some((candidate) => candidate.name === selectedApprovalName && candidate.status === "suspended")
+  );
+  const handleSelectedApproval = selectedApprovalSuspended && selectedApprovalName
+    ? () => openApprovalFor(selectedApprovalName)
+    : undefined;
+
   const inspectorElement = (
     <Inspector
-      externalIssues={selectedNode ? externalIssuesMap.get(nodeName(selectedNode, selectedIndex)) : undefined}
+      defaultTab={runsMode ? "run" : undefined}
+      editable={editMode}
+      headerAction={collapseRightAction}
+      externalIssues={
+        !runsMode && selectedNode ? externalIssuesMap.get(nodeName(selectedNode, selectedIndex)) : undefined
+      }
+      focusRequest={inspectorFocusRequest}
       formHost={formHost}
       nameFocusNonce={nameFocusNonce}
       nodeTypes={nodeTypes}
+      nodeCategories={nodeCategories}
       parameterDrafts={parameterDrafts}
       parameterTab={parameterTab}
-      presentation={selectedPresentation}
       revealNonce={inspectorRevealNonce}
-      runtime={localRuntime}
-      selectedIndex={selectedIndex}
-      selectedNode={selectedNode}
-      workflow={draftWorkflow}
+      runtime={runsMode ? executionSnapshotRuntime : localRuntime}
+      selectedIndex={runsMode ? replaySelectedIndex : selectedIndex}
+      selectedNode={runsMode ? replaySelectedNode : selectedNode}
+      workflow={canvasWorkflow}
       workflowJsonDrafts={workflowJsonDrafts}
       onApplyNodePatches={applyNodePatches}
       onChangeWith={commitWorkflowWith}
-      onClearSelection={clearSelection}
+      running={running}
+      onOpenExecution={onOpenExecution}
+      onHandleApproval={runsMode ? undefined : handleSelectedApproval}
+      onRerunFromNode={replayRerunFromNode}
+      onRunNode={!runsMode && onRunNode && selectedKey ? () => void runNode(selectedKey, "to") : undefined}
       onDeleteNode={deleteSelectedNode}
+      onDuplicateNode={duplicateSelectedNode}
+      onToggleNodeDisabled={toggleSelectedNodeDisabled}
+      onFocusRequestHandled={handleFocusRequestHandled}
+      onNameFocusHandled={handleNameFocusHandled}
       onNodeRenamed={handleNodeRenamed}
       onParameterCommit={commitParameterDraft}
       onParameterTabChange={setParameterTab}
@@ -2750,9 +3877,161 @@ export function XFlowEditor({
     />
   );
 
+  // §6.12 dialog inputs: the definition node (parameters, label) and the
+  // execution record (public ledger) of the same node name.
+  const approvalDefinitionNode = approvalTarget
+    ? workflowNodeByName(draftWorkflow, approvalTarget.nodeName)
+    : undefined;
+  const approvalExecutionNode = approvalTarget && execution?.executionId === approvalTarget.executionId
+    ? execution.nodes?.find((candidate) => candidate.name === approvalTarget.nodeName)
+    : undefined;
+
+  const moreMenuButton = (
+    <Dropdown
+      classNames={{ root: "xflow-editor-more-menu" }}
+      menu={{ items: moreMenuItems, onClick: handleMoreMenuClick }}
+      placement="bottomRight"
+      trigger={["click"]}
+    >
+      <Button
+        aria-label="更多操作"
+        className="xflow-editor-icon-button"
+        icon={<MoreOutlined />}
+        title="更多操作"
+        type="text"
+      />
+    </Dropdown>
+  );
+
+  // §6.8 top bar: execution id + status + lineage + the status table's control
+  // ops + 重跑…. The replay has no editing actions; the ⋯ menu stays for the
+  // view-level entries (布局 / 帮助) but 保存 / 运行 / 发布 are absent.
+  const runsStatusMeta = selectedExecution ? workflowStatusMeta[selectedExecution.status] : undefined;
+  const runsOps = runsStatusMeta
+    ? runsStatusMeta.ops.filter((op): op is ExecutionControlAction => op !== "rerun" && (
+      op === "cancel" ? capabilities?.execution !== false : capabilities?.executionControl !== false
+    ))
+    : [];
+  const runsCanRerun = Boolean(
+    selectedExecution &&
+      runsStatusMeta?.ops.includes("rerun") &&
+      capabilities?.executionRerun !== false &&
+      onRerun
+  );
+  const runsLineage = selectedExecution?.parentExecutionId
+    ? selectedExecution.rerunFrom
+      ? `重跑自 ${selectedExecution.parentExecutionId} · 起点 ${selectedExecution.rerunFrom}`
+      : selectedExecution.parentNode
+        ? `子流程 · 父执行 ${selectedExecution.parentExecutionId}`
+        : undefined
+    : undefined;
+  // §6.8 status bar counts, derived from this execution's node records so a
+  // status can only appear once and every count names a real node.
+  const runsCounts = React.useMemo(() => {
+    const counts: Partial<Record<string, number>> = {};
+    for (const node of selectedExecution?.nodes ?? []) {
+      counts[node.status] = (counts[node.status] ?? 0) + 1;
+    }
+    return (Object.keys(nodeStatusMeta) as (keyof typeof nodeStatusMeta)[])
+      .filter((status) => counts[status])
+      .map((status) => `${counts[status]} ${nodeStatusMeta[status].label}`)
+      .join(" · ");
+  }, [selectedExecution?.nodes]);
+  const rerunExecution = rerunTarget === undefined
+    ? undefined
+    : [selectedExecution, execution].find((candidate) => candidate?.executionId === rerunTarget.executionId);
+  const runsToolbar = (
+    <div className="xflow-editor-runmeta" aria-label="当前执行">
+      {selectedExecution ? (
+        <>
+          <span className="xflow-editor-runmeta__id" title={selectedExecution.executionId}>
+            {selectedExecution.executionId}
+          </span>
+          <span
+            className="xflow-editor-chip"
+            data-status={selectedExecution.status}
+            data-tone={runsStatusMeta?.tone}
+            role="status"
+          >
+            <span aria-hidden="true" className="xflow-editor-chip__icon">
+              {runsStatusMeta ? statusGlyph[runsStatusMeta.icon] : null}
+            </span>
+            <span>{runsStatusMeta?.label}</span>
+          </span>
+          {runsLineage ? (
+            selectedExecution?.rerunFrom && selectedExecution.parentExecutionId && onSelectExecution ? (
+              // §6.8: the rerun lineage jumps to the source execution it names.
+              // A subflow's parent belongs to another workflow's record, so it
+              // stays a plain label here.
+              <button
+                className="xflow-editor-runmeta__lineage xflow-editor-runmeta__lineage-link"
+                title={`查看来源执行 ${selectedExecution.parentExecutionId}`}
+                type="button"
+                onClick={() => onSelectExecution(selectedExecution.parentExecutionId!)}
+              >
+                {runsLineage}
+              </button>
+            ) : (
+              <span className="xflow-editor-runmeta__lineage" title={runsLineage}>
+                {runsLineage}
+              </span>
+            )
+          ) : null}
+          <Divider className="xflow-editor-sep" orientation="vertical" />
+          {runsOps.map((op) =>
+            op === "cancel" ? (
+              <Popconfirm
+                key={op}
+                cancelText="返回"
+                classNames={{ root: "xflow-editor-confirm" }}
+                description="在途节点提交后停止，已完成的结果保留。"
+                disabled={!onExecutionAction}
+                getPopupContainer={() => editorRootRef.current ?? document.body}
+                okButtonProps={{ danger: true }}
+                okText="取消执行"
+                onConfirm={() => void runExecutionAction(selectedExecution.executionId, "cancel")}
+                title={`取消执行 ${selectedExecution.executionId}？`}
+              >
+                <Button danger disabled={!onExecutionAction} size="small">
+                  {executionOpLabel[op]}
+                </Button>
+              </Popconfirm>
+            ) : (
+              <Button
+                disabled={!onExecutionAction}
+                key={op}
+                size="small"
+                onClick={() => void runExecutionAction(selectedExecution.executionId, op)}
+              >
+                {executionOpLabel[op]}
+              </Button>
+            )
+          )}
+          {runsCanRerun ? (
+            <Button
+              className="xflow-editor-rerun-button"
+              icon={<StepForwardOutlined />}
+              size="small"
+              type="primary"
+              onClick={() => openRerun(selectedExecution.executionId)}
+            >
+              重跑…
+            </Button>
+          ) : null}
+        </>
+      ) : (
+        <span className="xflow-editor-runmeta__empty">未选择执行</span>
+      )}
+      {moreMenuButton}
+    </div>
+  );
+
   return (
     <ConfigProvider
-      componentSize="small"
+      // AntD splits a two-character label into "发 布"; the baseline draws it
+      // tight, and the space is a rendering rule, so it is off for the whole
+      // editor instead of patched per button.
+      button={{ autoInsertSpace: false }}
       getPopupContainer={(trigger) => {
         // Inside a compact drawer, popups must live in the drawer: its focus
         // trap pulls focus back from anything outside and closes the popup.
@@ -2764,112 +4043,86 @@ export function XFlowEditor({
       <section
         className={`xflow-editor ${className ?? ""}`}
         aria-label={`${title} editor`}
+        ref={editorRootRef}
         data-appearance={activeAppearance}
         data-canvas-tool={canvasTool}
         data-layout={layout}
         data-layout-policy={layoutPolicy}
         data-theme={resolvedAppearance}
-        data-theme-variant={activeThemeVariant}
         data-view-mode={viewMode}
       >
       <header className="xflow-editor-toolbar" role="toolbar" aria-label="编辑器工具栏">
-        <div className="xflow-editor-title">
-          <span>X</span>
-          <div>
-            <div className="xflow-editor-title__heading">
-              <strong>{title}</strong>
-              <em>spec {draftWorkflow.spec ?? "未指定"}</em>
-              {draftWorkflow.version ? <em className="blue">v{draftWorkflow.version}</em> : null}
-              <em className="amber">草稿</em>
-              <em className={isDirty ? "amber" : "blue"}>{operationStatus}</em>
-            </div>
-            <p>{workflowSummary}</p>
-          </div>
-        </div>
-        <div
-          className="xflow-editor-tool-strip"
-          role="group"
-          aria-label="常用画布与历史工具"
-        >
-          <div className="xflow-editor-tool-group">
-            <button
-              aria-label="选择工具"
-              aria-pressed={canvasTool === "select"}
-              className={`xflow-editor-tool-button ${canvasTool === "select" ? "active" : ""}`}
-              title="选择工具（V）"
-              type="button"
-              onClick={() => setCanvasTool("select")}
-            >
-              <AimOutlined />
-            </button>
-            <button
-              aria-label="连线工具"
-              aria-pressed={canvasTool === "connect"}
-              className={`xflow-editor-tool-button ${canvasTool === "connect" ? "active" : ""}`}
-              title="连线工具（L）"
-              type="button"
-              onClick={() => setCanvasTool("connect")}
-            >
-              <ApartmentOutlined />
-            </button>
-            <span className="xflow-editor-tool-divider xflow-editor-tool-divider--history" aria-hidden="true" />
-            <button
-              aria-label="撤销"
-              className="xflow-editor-tool-button xflow-editor-tool-button--history"
-              disabled={history.undo.length === 0}
-              title="撤销（⌘ / Ctrl + Z）"
-              type="button"
-              onClick={undoWorkflow}
-            >
-              <UndoOutlined />
-            </button>
-            <button
-              aria-label="重做"
-              className="xflow-editor-tool-button xflow-editor-tool-button--history"
-              disabled={history.redo.length === 0}
-              title="重做（⌘ / Ctrl + Shift + Z）"
-              type="button"
-              onClick={redoWorkflow}
-            >
-              <RedoOutlined />
-            </button>
-          </div>
-          <div className="xflow-editor-tool-group xflow-editor-tool-group--search">
-            <NodeSearch
-              nodes={nodeSearchOptions}
-              open={nodeSearchOpen}
-              ref={nodeSearchRef}
-              onOpenChange={setNodeSearchOpen}
-              onSelect={locateNode}
-            />
-          </div>
-        </div>
-        <div className="xflow-editor-toolbar-actions">
-          {hostNotices.length > 0 ? <span className="xflow-editor-integration-notice" role="status">{hostNotices.join("；")}</span> : null}
-          <Popover
-            classNames={{
-              root: "xflow-editor-theme-popover",
-              content: "xflow-editor-theme-popover__content",
-              title: "xflow-editor-theme-popover__title"
-            }}
-            content={
-              <ThemeSettings
-                appearance={activeAppearance}
-                themeVariant={activeThemeVariant}
-                onAppearanceChange={changeAppearance}
-                onThemeVariantChange={changeThemeVariant}
-              />
-            }
-            placement="bottomRight"
-            title="主题设置"
-            trigger="click"
-          >
+        {onBack ? (
+          <Tooltip classNames={editorTooltipClassNames} title="返回工作流列表">
             <Button
-              aria-label="主题设置"
-              className="xflow-editor-theme-trigger"
-              icon={<BgColorsOutlined />}
+              aria-label="返回工作流列表"
+              className="xflow-editor-icon-button"
+              icon={<ArrowLeftOutlined />}
+              type="text"
+              onClick={onBack}
             />
-          </Popover>
+          </Tooltip>
+        ) : null}
+        <div className="xflow-editor-title">
+          <strong title={titleTooltip}>{title}</strong>
+          {runsMode ? (
+            <span className="xflow-editor-chip" data-tone="neutral">
+              <span aria-hidden="true" className="xflow-editor-chip__icon">
+                <ClockCircleOutlined />
+              </span>
+              <span>
+                运行版本{" "}
+                {selectedExecution?.workflowVersion
+                  ? versionLabel(selectedExecution.workflowVersion)
+                  : "-"}
+              </span>
+            </span>
+          ) : onLoadVersions ? (
+            <Popover
+              classNames={{
+                container: "xflow-editor-version-popover__container",
+                root: "xflow-editor-version-popover",
+                content: "xflow-editor-version-popover__content"
+              }}
+              content={
+                <VersionHistory
+                  blocked={blockedVersions}
+                  error={versionsState.error}
+                  loading={versionsState.loading}
+                  rollingBackVersion={rollingBackVersion}
+                  versions={versionsState.data}
+                  onReload={() => setVersionLoadNonce((nonce) => nonce + 1)}
+                  onRollback={onRollback && canWriteWorkflow ? (version) => void rollbackToVersion(version) : undefined}
+                  onViewVersion={onViewVersion ? viewVersion : undefined}
+                />
+              }
+              open={versionsOpen}
+              placement="bottomLeft"
+              trigger="click"
+              onOpenChange={setVersionsOpen}
+            >
+              <button
+                aria-label="版本历史"
+                className="xflow-editor-chip xflow-editor-version-chip"
+                data-tone={versionChip.tone}
+                type="button"
+              >
+                <span aria-hidden="true" className="xflow-editor-chip__icon">
+                  {versionChip.tone === "warning" ? <WarningOutlined /> : versionChip.tone === "neutral" ? <HistoryOutlined /> : <CheckOutlined />}
+                </span>
+                <span>{versionChip.label}</span>
+              </button>
+            </Popover>
+          ) : (
+            <span className="xflow-editor-chip" data-tone={versionChip.tone}>
+              <span aria-hidden="true" className="xflow-editor-chip__icon">
+                {versionChip.tone === "warning" ? <WarningOutlined /> : versionChip.tone === "neutral" ? <HistoryOutlined /> : <CheckOutlined />}
+              </span>
+              <span>{versionChip.label}</span>
+            </span>
+          )}
+        </div>
+        {canViewExecutions ? (
           <Segmented
             classNames={{
               item: "xflow-editor-mode-segmented__item",
@@ -2879,40 +4132,101 @@ export function XFlowEditor({
             rootClassName="xflow-editor-mode-segmented"
             value={viewMode}
             options={[
-              { icon: <EditOutlined />, label: "编辑", value: "edit" },
-              { icon: <EyeOutlined />, label: "预览", value: "preview" }
+              { label: "编辑", value: "edit" },
+              { label: "运行记录", value: "runs" }
             ]}
-            onChange={(nextView) => setViewMode(nextView as "edit" | "preview")}
+            onChange={(nextView) => {
+              if (nextView === "runs") enterRuns();
+              else changeMode("edit");
+            }}
           />
-          <Space className="xflow-editor-workflow-actions">
-            <Tooltip classNames={editorTooltipClassNames} title={layoutPolicy === "auto" ? "进入沉浸布局" : "恢复自动布局"}>
-              <Button
-                aria-label={layoutPolicy === "auto" ? "进入沉浸布局" : "恢复自动布局"}
-                className="xflow-editor-toolbar-icon-action xflow-editor-layout-toggle"
-                icon={<DesktopOutlined />}
-                onClick={() => setLayoutPolicy((policy) => policy === "auto" ? "compact" : "auto")}
-              />
-            </Tooltip>
-            <Tooltip classNames={editorTooltipClassNames} title={editMode ? "新建工作流" : "预览模式为只读，请切换到编辑模式。"}>
+        ) : null}
+        <div className="xflow-editor-toolbar-actions">
+          {runsMode ? runsToolbar : compactToolbar ? moreMenuButton : (
+            <>
+          <span aria-label="常用画布与历史工具" className="xflow-editor-history-group" role="group">
+            <Tooltip classNames={editorTooltipClassNames} title="撤销（⌘ / Ctrl + Z）">
               <span>
-                <Button aria-label="新建工作流" className="xflow-editor-toolbar-icon-action xflow-editor-new-button" disabled={!editMode} icon={<FileAddOutlined />} onClick={createWorkflow} />
+                <Button
+                  aria-label="撤销"
+                  className="xflow-editor-icon-button"
+                  disabled={!editMode || history.undo.length === 0}
+                  icon={<UndoOutlined />}
+                  type="text"
+                  onClick={undoWorkflow}
+                />
               </span>
             </Tooltip>
-            <Button aria-label="校验" className="xflow-editor-validate-button" icon={<CheckCircleOutlined />} onClick={validateCurrentWorkflow}>校验</Button>
+            <Tooltip classNames={editorTooltipClassNames} title="重做（⌘ / Ctrl + Shift + Z）">
+              <span>
+                <Button
+                  aria-label="重做"
+                  className="xflow-editor-icon-button"
+                  disabled={!editMode || history.redo.length === 0}
+                  icon={<RedoOutlined />}
+                  type="text"
+                  onClick={redoWorkflow}
+                />
+              </span>
+            </Tooltip>
+          </span>
+          <Divider className="xflow-editor-sep" orientation="vertical" />
+          <Tooltip classNames={editorTooltipClassNames} title="校验当前工作流">
+            <Button
+              aria-label="校验"
+              className="xflow-editor-validate-button"
+              icon={<SafetyCertificateOutlined />}
+              type="text"
+              onClick={validateCurrentWorkflow}
+            >
+              校验
+            </Button>
+          </Tooltip>
+          <Popover
+            classNames={{
+              container: "xflow-editor-theme-popover__container",
+              root: "xflow-editor-theme-popover",
+              content: "xflow-editor-theme-popover__content",
+              title: "xflow-editor-theme-popover__title"
+            }}
+            content={
+              <ThemeSettings
+                appearance={activeAppearance}
+                onAppearanceChange={changeAppearance}
+              />
+            }
+            placement="bottomRight"
+            title="主题设置"
+            trigger="click"
+          >
+            <Button
+              aria-label="主题设置"
+              className="xflow-editor-icon-button xflow-editor-theme-trigger"
+              icon={<BgColorsOutlined />}
+              type="text"
+            />
+          </Popover>
+              {moreMenuButton}
+              <Divider className="xflow-editor-sep" orientation="vertical" />
+            </>
+          )}
+          {/* §6.5.1 / §6.8 / §6.10: a read-only viewer and the run-record replay
+              both drop the editing actions instead of showing disabled copies. */}
+          {editMode ? (
+            <>
             <Tooltip classNames={editorTooltipClassNames} title={saveTooltip}>
               <span>
                 <Button
                   aria-label="保存"
                   className="xflow-editor-save-button"
-                  color={saveBlocked ? "danger" : isDirty ? "primary" : "default"}
                   data-blocked={saveBlocked || undefined}
-                  disabled={!onSave}
-                  icon={saveBlocked ? <WarningOutlined /> : <SaveOutlined />}
+                  disabled={!onSave || saveClean}
+                  icon={saveBlocked ? <WarningOutlined className="xflow-editor-save-button__icon" /> : undefined}
                   loading={saving}
-                  variant={isDirty || saveBlocked ? "solid" : "outlined"}
                   onClick={() => void saveWorkflow()}
                 >
                   保存
+                  <kbd className="xflow-editor-kbd">⌘S</kbd>
                   {formIssueSummary.errors > 0 ? (
                     <span className="xflow-editor-save-issues" data-testid="save-issue-count">
                       {formIssueSummary.errors}
@@ -2921,293 +4235,453 @@ export function XFlowEditor({
                 </Button>
               </span>
             </Tooltip>
-            <Tooltip classNames={editorTooltipClassNames} title={onRun ? "运行工作流（⌘ / Ctrl + Enter）" : "运行不可用：宿主未提供 onRun 处理器"}>
+            <span className="xflow-editor-run-split">
+              <Tooltip classNames={editorTooltipClassNames} title={onRun ? "运行工作流（⌘ / Ctrl + Enter）" : "运行不可用：宿主未提供 onRun 处理器"}>
+                <span>
+                  <Button
+                    aria-label="运行工作流"
+                    className="xflow-editor-run-split__main"
+                    disabled={running || !onRun}
+                    icon={<CaretRightOutlined />}
+                    loading={running}
+                    type="primary"
+                    onClick={() => void runWorkflow()}
+                  >
+                    运行
+                  </Button>
+                </span>
+              </Tooltip>
+              <Tooltip classNames={editorTooltipClassNames} title="运行选项尚未接入">
+                <span>
+                  <Dropdown
+                    classNames={{ root: "xflow-editor-run-menu" }}
+                    menu={{ items: runOptionItems }}
+                    placement="bottomRight"
+                    trigger={["click"]}
+                  >
+                    <Button
+                      aria-label="运行选项"
+                      className="xflow-editor-run-split__options"
+                      icon={<DownOutlined />}
+                      type="primary"
+                    />
+                  </Dropdown>
+                </span>
+              </Tooltip>
+            </span>
+            <Tooltip
+              classNames={editorTooltipClassNames}
+              title={onPublish
+                ? "发布新版本：归档当前线上版本，此后新触发的执行使用新版本"
+                : "发布不可用：宿主未提供 onPublish 处理器"}
+            >
               <span>
                 <Button
-                  aria-label="运行工作流"
-                  className="xflow-editor-run-button"
-                  color="primary"
-                  disabled={running || !onRun}
-                  icon={<PlaySquareOutlined />}
-                  loading={running}
-                  variant="solid"
-                  onClick={() => void runWorkflow()}
+                  aria-label="发布"
+                  className="xflow-editor-publish-button"
+                  disabled={!onPublish}
+                  onClick={openPublishDialog}
                 >
-                  运行
+                  发布
                 </Button>
               </span>
             </Tooltip>
-            <Tooltip classNames={editorTooltipClassNames} title="发布流程尚未接入。">
-              <span>
-                <Button aria-label="发布" className="xflow-editor-publish-button" color="primary" disabled icon={<CloudUploadOutlined />} variant="solid">发布</Button>
-              </span>
-            </Tooltip>
-          </Space>
+            </>
+          ) : null}
+          <span aria-live="polite" className="xflow-editor-sr-only" role="status">
+            <span>{operationStatus}</span>
+            {hostNotices.map((notice) => <span key={notice}>{notice}</span>)}
+          </span>
         </div>
       </header>
 
-      <div className="xflow-editor-main" data-left-collapsed={leftCollapsed} data-right-collapsed={rightCollapsed}>
+      {/* An expanded drawer is drawn over this whole region, so it leaves the tab
+          order and the accessibility tree until the drawer is restored (§6.5). */}
+      <div
+        className="xflow-editor-main"
+        data-left-collapsed={desktopLeftCollapsed}
+        data-right-collapsed={desktopRightCollapsed}
+        inert={dock === "expanded"}
+      >
         {layout === "a" ? (
-          <aside className="xflow-editor-left">
-            <Button
-              aria-label={leftCollapsed ? "展开左侧面板" : "收起左侧面板"}
-              className="xflow-editor-panel-handle xflow-editor-panel-handle--left"
-              size="small"
-              title="收起 / 展开左侧面板（⌘ / Ctrl + B）"
-              onClick={() => setLeftCollapsed((current) => !current)}
-            >
-              {leftCollapsed ? <RightOutlined /> : <LeftOutlined />}
-            </Button>
-            {leftCollapsed ? null : (
-              <>
-                <nav className="xflow-editor-rail xflow-editor-desktop-rail" aria-label="工作台导航">
-                  <button
-                    aria-label="节点"
-                    aria-pressed={leftSection === "library"}
-                    className={leftSection === "library" ? "active" : ""}
-                    disabled={!editMode}
-                    title={editMode ? "节点库" : "预览模式为只读，请切换到编辑模式。"}
-                    type="button"
-                    onClick={() => setDesktopRailSection("library")}
-                  >
-                    <AppstoreAddOutlined />
-                    <span>节点</span>
-                  </button>
-                  <button
-                    aria-label="变量"
-                    aria-pressed={leftSection === "variables"}
-                    className={leftSection === "variables" ? "active" : ""}
-                    type="button"
-                    onClick={() => setDesktopRailSection("variables")}
-                  >
-                    <FunctionOutlined />
-                    <span>变量</span>
-                  </button>
-                  <button
-                    aria-label="快捷键帮助"
-                    className="xflow-editor-rail-help"
-                    title="快捷键（?）"
-                    type="button"
-                    onClick={() => setShortcutsOpen(true)}
-                  >
-                    <QuestionCircleOutlined />
-                    <span>帮助</span>
-                  </button>
-                </nav>
-                <div className={`xflow-editor-left__content ${editMode ? "" : "xflow-editor-left__content--preview"}`}>
-                  {leftSection === "library" ? (
-                    <NodeLibrary descriptors={libraryDescriptors} onAddNode={addNode} />
-                  ) : (
-                    <VariablesPanel
-                      readOnly={!editMode}
-                      workflow={draftWorkflow}
-                      workflowJsonDrafts={workflowJsonDrafts}
-                      onChangeWith={commitWorkflowWith}
-                      onWorkflowJsonText={updateWorkflowJsonText}
-                    />
-                  )}
-                </div>
-              </>
+          <div className="xflow-editor-left">
+            <nav className="xflow-editor-rail xflow-editor-desktop-rail" aria-label="工作台导航">
+              <RailKey
+                icon={<AppstoreOutlined />}
+                label="节点与大纲"
+                pressed={!runsMode && !leftCollapsed && leftSection === "library"}
+                text="节点"
+                onClick={() => {
+                  // Coming back from the replay the column shows the execution
+                  // list, so 节点 must expand it: "same section on screen" is
+                  // not true even when the remembered edit section is 节点.
+                  if (runsMode) {
+                    changeMode("edit");
+                    setLeftCollapsed(false);
+                    setDesktopRailSection("library");
+                    return;
+                  }
+                  selectLeftSection("library");
+                }}
+              />
+              {canViewExecutions ? (
+                <RailKey
+                  icon={<HistoryOutlined />}
+                  label="执行记录"
+                  pressed={runsMode}
+                  text="执行"
+                  onClick={enterRuns}
+                />
+              ) : null}
+              <RailKey
+                icon={<FunctionOutlined />}
+                label="变量"
+                pressed={!runsMode && !leftCollapsed && leftSection === "variables"}
+                text="变量"
+                onClick={() => {
+                  if (runsMode) {
+                    changeMode("edit");
+                    setLeftCollapsed(false);
+                    setDesktopRailSection("variables");
+                    return;
+                  }
+                  selectLeftSection("variables");
+                }}
+              />
+              <span className="xflow-editor-rail__spacer" />
+              <RailKey
+                icon={<QuestionCircleOutlined />}
+                label="快捷键与帮助"
+                text="帮助"
+                title="快捷键（?）"
+                onClick={() => setShortcutsOpen(true)}
+              />
+            </nav>
+            {desktopLeftCollapsed ? null : (
+              <div className="xflow-editor-left__content">
+                {runsMode ? (
+                  <ExecutionListPanel
+                    selectedId={selectedExecution?.executionId}
+                    state={executionList}
+                    onLoad={onLoadExecutions}
+                    onSelect={onSelectExecution}
+                  />
+                ) : leftSection === "library" ? (
+                  renderNodeZones(collapseLeftAction)
+                ) : (
+                  <VariablesPanel
+                    headerAction={collapseLeftAction}
+                    readOnly={!editMode}
+                    workflow={draftWorkflow}
+                    workflowJsonDrafts={workflowJsonDrafts}
+                    onChangeWith={commitWorkflowWith}
+                    onWorkflowJsonText={updateWorkflowJsonText}
+                  />
+                )}
+              </div>
             )}
-          </aside>
+          </div>
         ) : (
           <aside className="xflow-editor-rail xflow-editor-compact-rail xflow-editor-compact-rail--left" aria-label="紧凑导航">
-            <button
-              aria-label="节点"
-              className={compactDrawer === "left" && leftDrawerSection === "library" ? "active" : ""}
-              disabled={!editMode}
-              title={editMode ? "节点库" : "预览模式为只读，请切换到编辑模式。"}
-              type="button"
+            <RailKey
+              icon={<AppstoreOutlined />}
+              label="节点与大纲"
+              pressed={!runsMode && compactDrawer === "left" && leftDrawerSection === "library"}
+              text="节点"
               onClick={() => {
+                if (runsMode) changeMode("edit");
+                if (compactDrawer === "left" && leftDrawerSection === "library") {
+                  setCompactDrawer(undefined);
+                  return;
+                }
                 setLeftDrawerTab("library");
                 openCompactDrawer("left");
               }}
-            >
-              <AppstoreAddOutlined />
-              <span>节点</span>
-            </button>
-            <button
-              aria-label="变量"
-              className={compactDrawer === "left" && leftDrawerSection === "variables" ? "active" : ""}
-              type="button"
+            />
+            {canViewExecutions ? (
+              <RailKey
+                icon={<HistoryOutlined />}
+                label="执行记录"
+                pressed={runsMode}
+                text="执行"
+                onClick={enterRuns}
+              />
+            ) : null}
+            <RailKey
+              icon={<FunctionOutlined />}
+              label="变量"
+              pressed={!runsMode && compactDrawer === "left" && leftDrawerSection === "variables"}
+              text="变量"
               onClick={() => {
+                if (runsMode) changeMode("edit");
+                if (compactDrawer === "left" && leftDrawerSection === "variables") {
+                  setCompactDrawer(undefined);
+                  return;
+                }
                 setLeftDrawerTab("variables");
                 openCompactDrawer("left");
               }}
-            >
-              <FunctionOutlined />
-              <span>变量</span>
-            </button>
-            <button
-              aria-label="快捷键帮助"
-              className="xflow-editor-rail-help"
+            />
+            <span className="xflow-editor-rail__spacer" />
+            {/* Below `narrow` the inspector has no column left; the rail opens it as an overlay. */}
+            {layout === "c" ? (
+              <RailKey
+                icon={<SlidersOutlined />}
+                label="属性面板"
+                pressed={compactDrawer === "right"}
+                text="属性"
+                onClick={() => setCompactDrawer((current) => (current === "right" ? undefined : "right"))}
+              />
+            ) : null}
+            <RailKey
+              icon={<QuestionCircleOutlined />}
+              label="快捷键与帮助"
+              text="帮助"
               title="快捷键（?）"
-              type="button"
               onClick={() => setShortcutsOpen(true)}
-            >
-              <QuestionCircleOutlined />
-              <span>帮助</span>
-            </button>
+            />
           </aside>
         )}
 
         <section className="xflow-editor-canvas" aria-label="画布">
-          <div className="xflow-editor-canvas__frame">
-            <div className="xflow-editor-canvas__ruler-corner" aria-hidden="true" />
-            <div className="xflow-editor-canvas__ruler xflow-editor-canvas__ruler--x" aria-hidden="true">
-            {rulerMarks.map((mark, index) => (
-              <span key={mark} style={{ left: `${index * rulerStepPx + 5}px` }}>{mark}</span>
-            ))}
-            </div>
-            <div className="xflow-editor-canvas__ruler xflow-editor-canvas__ruler--y" aria-hidden="true">
-              {rulerMarks.slice(0, 7).map((mark, index) => (
-                <span key={mark} style={{ top: `${index * rulerStepPx + 6}px` }}>{mark}</span>
-              ))}
-            </div>
-            <div className="xflow-editor-preview-frame">
-              {!editMode ? (
-                <div className="xflow-editor-canvas-mode" role="status">
-                  <strong>预览模式</strong>
-                  <span>画布为只读；切换到编辑模式后才能修改工作流</span>
-                </div>
-              ) : (
-                <div className="xflow-editor-canvas-context">
-                  <i />
-                  <strong>{canvasTool === "connect" ? "连线工具" : "编辑工作台"}</strong>
-                  <span>{canvasTool === "connect" ? "从输出端口拖至目标输入端口" : "从节点库开始构建真实工作流"}</span>
-                </div>
-              )}
-              {nodes.length === 0 ? (
-                <div className="xflow-editor-empty-canvas">
-                  <span className="xflow-editor-empty-canvas__icon"><AppstoreAddOutlined /></span>
-                  <h1>等待真实工作流数据</h1>
-                  <p>这里不会预置任何业务节点或连接。创建或载入工作流后，画布将按照真实定义呈现。</p>
-                  <button type="button" onClick={openNodeLibrary}>打开节点库</button>
-                </div>
-              ) : null}
-              <XFlowPreview
-                workflow={draftWorkflow}
-                runtime={localRuntime}
-                className="xflow-editor-preview"
-                editable={editMode}
-                interactionMode={canvasTool}
-                // "" rather than undefined: an empty editor selection must not
-                // fall back to the preview's own uncontrolled selection.
-                selectedNodeId={selectedKey ?? ""}
-                onSelectNode={setSelectedKey}
-                onNodePositionChange={updateNodePosition}
-                onConnect={addCanvasConnection}
-                onDeleteConnection={removeCanvasConnection}
-                onDeleteNode={deleteSelectedNode}
-                onDropNode={dropNode}
-                danglingPorts={canvasDanglingPorts}
-                defaultViewport={defaultViewport}
-                onViewportChange={onViewportChange}
-                // Preview mode keeps the browser's own menu: the editor has
-                // nothing to offer there.
-                onNodeContextMenu={editMode ? openNodeContextMenu : undefined}
-                onPaneContextMenu={editMode ? openPaneContextMenu : undefined}
-                onReady={handlePreviewReady}
+          {/* §6.3: the run bar owns the centre column of the canvas's top float
+              row; the banner stack starts below the shared float height. */}
+          {!runsMode && execution ? (
+            <div
+              className="xflow-editor-runbar-row"
+              data-stacked={runBarStacked ? "true" : undefined}
+              ref={runBarRowRef}
+            >
+              <RunBar
+                capabilities={capabilities}
+                dismissMs={runBarDismissMs}
+                execution={execution}
+                getPopupContainer={() => editorRootRef.current ?? document.body}
+                onAction={onExecutionAction ? runExecutionAction : undefined}
+                onRerun={onRerun ? (executionId) => openRerun(executionId) : undefined}
+                onHandleApproval={firstApprovalNode ? handleRunBarApproval : undefined}
+                onLocateNode={(name) => {
+                  // The snapshot names nodes; the canvas keys them by id ?? name.
+                  locateRuntimeNode(name);
+                  onLocateNode?.(name);
+                }}
+                onOpenRunHistory={onOpenRunHistory}
               />
             </div>
+          ) : null}
+          {runsMode ? null : <BannerStack banners={banners} onFocusLost={focusCanvasFrame} />}
+          <div
+            className="xflow-editor-preview-frame"
+            ref={canvasFrameRef}
+            tabIndex={-1}
+            onDoubleClick={handleCanvasDoubleClick}
+          >
+            <XFlowPreview
+              key={`${viewMode}-${canvasEpoch}`}
+              workflow={canvasWorkflow}
+              runtime={runsMode ? executionSnapshotRuntime : localRuntime}
+              className="xflow-editor-preview"
+              editable={editMode}
+              interactionMode={runsMode ? "select" : canvasTool}
+              // "" rather than undefined: an empty editor selection must not
+              // fall back to the preview's own uncontrolled selection.
+              selectedNodeId={selectedKey ?? ""}
+              onSelectNode={setSelectedKey}
+              onPaneClick={clearSelection}
+              onNodePositionChange={runsMode ? undefined : updateNodePosition}
+              onConnect={runsMode ? undefined : addCanvasConnection}
+              onDeleteConnection={runsMode ? undefined : removeCanvasConnection}
+              // The preview's Delete / Backspace listener is on the window: with the
+              // workbench inert behind an expanded drawer it must not delete a node.
+              onDeleteNode={runsMode || dock === "expanded" ? undefined : deleteSelectedNode}
+              onDropNode={runsMode ? undefined : dropNode}
+              danglingPorts={runsMode ? undefined : canvasDanglingPorts}
+              // A remount takes `defaultViewport`; the way back reuses the
+              // viewport captured from the edit canvas before entering the replay.
+              defaultViewport={runsMode ? undefined : restoreViewport ?? defaultViewport}
+              onViewportChange={runsMode ? undefined : handleViewportChange}
+              nodeNotes={runsMode ? undefined : approvalNotes}
+              nodeCategories={nodeCategories}
+              nodeSummaries={canvasNodeSummaries}
+              nodeMetaNotes={runsMode ? replayMetaNotes : undefined}
+              onLocateParameter={runsMode ? undefined : locateSummaryField}
+              onNodeAction={runsMode || !firstApprovalNode ? undefined : handlePreviewNodeAction}
+              // Preview mode keeps the browser's own menu: the editor has
+              // nothing to offer there.
+              onNodeContextMenu={editMode ? openNodeContextMenu : undefined}
+              onPaneContextMenu={editMode ? openPaneContextMenu : undefined}
+              onReady={handlePreviewReady}
+              // §6.2 / §7: the read-only canvas offers neither adding nor laying out.
+              onAutoLayout={editMode ? autoLayoutWorkflow : undefined}
+              canvasFloat={runsMode ? (
+                <div className="xflow-editor-canvas-mode" data-replay="true" role="status">
+                  <EyeOutlined />
+                  <strong>只读回放</strong>
+                  <span>· 节点不可拖动、不可连线</span>
+                </div>
+              ) : editMode ? (
+                <>
+                  <Tooltip classNames={editorTooltipClassNames} title="添加节点 (A)">
+                    <Button
+                      aria-label="添加节点 (A)"
+                      className="xflow-editor-canvas-add"
+                      icon={<PlusOutlined />}
+                      size="small"
+                      type="text"
+                      onClick={openNodeLibrary}
+                    >
+                      添加节点
+                    </Button>
+                  </Tooltip>
+                  <Tooltip classNames={editorTooltipClassNames} title="定位节点 ⌘K">
+                    <Button
+                      aria-label="定位节点 ⌘K"
+                      className="xflow-editor-canvas-locate"
+                      icon={<SearchOutlined />}
+                      size="small"
+                      type="text"
+                      onClick={(event) => openNodeSearch(event.currentTarget)}
+                    />
+                  </Tooltip>
+                </>
+              ) : (
+                <>
+                  {/* The 只读 banner already says it; the preview notice would repeat it. */}
+                  {readOnly ? null : (
+                    <div className="xflow-editor-canvas-mode" role="status">
+                      <EyeOutlined />
+                      <strong>预览模式</strong>
+                      <span>画布为只读；切换到编辑模式后才能修改工作流</span>
+                    </div>
+                  )}
+                  {/* Read-only still needs locate: the magnifier follows the notice. */}
+                  <Tooltip classNames={editorTooltipClassNames} title="定位节点 ⌘K">
+                    <Button
+                      aria-label="定位节点 ⌘K"
+                      className="xflow-editor-canvas-locate"
+                      icon={<SearchOutlined />}
+                      size="small"
+                      type="text"
+                      onClick={(event) => openNodeSearch(event.currentTarget)}
+                    />
+                  </Tooltip>
+                </>
+              )}
+              canvasFloatEnd={desktopRightCollapsed ? (
+                <Tooltip classNames={editorTooltipClassNames} title="展开属性面板（⌥⌘B / Ctrl + Alt + B）">
+                  <Button
+                    aria-label="展开属性面板"
+                    className="xflow-editor-canvas-reopen"
+                    icon={<MenuUnfoldOutlined />}
+                    size="small"
+                    type="text"
+                    onClick={() => setRightCollapsed(false)}
+                  >
+                    {selectedNode ? `属性 · ${nodeLabel(selectedNode, selectedIndex)}` : "属性"}
+                  </Button>
+                </Tooltip>
+              ) : undefined}
+              emptyState={runsMode ? (
+                <div className="xflow-editor-replay-empty">
+                  <h2 className="xflow-editor-empty-canvas__title">从左侧选择一条执行</h2>
+                  <p className="xflow-editor-empty-canvas__text">选中后在这里回放当次运行的画布与节点状态。</p>
+                </div>
+              ) : (
+                <EmptyCanvasCard editable={editMode} onPickTrigger={openNodeLibrary} />
+              )}
+            />
           </div>
         </section>
 
-        {layout === "a" ? (
+        {layout !== "c" ? (
           <aside className="xflow-editor-right">
-            <Button
-              aria-label={rightCollapsed ? "展开属性面板" : "收起属性面板"}
-              className="xflow-editor-panel-handle xflow-editor-panel-handle--right"
-              size="small"
-              onClick={() => setRightCollapsed((current) => !current)}
-            >
-              {rightCollapsed ? <LeftOutlined /> : <RightOutlined />}
-            </Button>
-            {rightCollapsed ? (
-              <div className="xflow-editor-right__strip">属性</div>
-            ) : !editMode ? (
-              <section className="xflow-editor-preview-inspector" aria-label="预览模式说明">
-                <EyeOutlined />
-                <strong>预览模式</strong>
-                <p>画布、节点属性和工作流定义均保持只读。切换到编辑模式后可继续修改。</p>
-              </section>
-            ) : (
+            {desktopRightCollapsed ? null : editMode || runsMode ? (
               inspectorElement
+            ) : (
+              <section className="xflow-editor-preview-inspector" aria-label="预览模式说明">
+                {/* §6.0: the collapse entry lives in the panel title bar in
+                    every mode, so the preview notice keeps one too. */}
+                <div className="xflow-editor-preview-inspector__header">
+                  <EyeOutlined />
+                  <strong>{readOnly ? "只读" : "预览模式"}</strong>
+                  {collapseRightAction}
+                </div>
+                <p>{readOnly ? "画布、节点属性和工作流定义均保持只读。" : "画布、节点属性和工作流定义均保持只读。切换到编辑模式后可继续修改。"}</p>
+              </section>
             )}
           </aside>
-        ) : (
-          <aside className="xflow-editor-rail xflow-editor-compact-rail xflow-editor-compact-rail--right" aria-label="紧凑属性">
-            <button
-              aria-label="属性"
-              className={compactDrawer === "right" ? "active" : ""}
-              type="button"
-              onClick={() => openCompactDrawer("right")}
-            >
-              <SettingOutlined />
-              <span>属性</span>
-            </button>
-          </aside>
-        )}
+        ) : null}
+
+        {/* Inside the workbench body, so it starts under the top bar and ends above the status bar (baseline). */}
+        {layout !== "a" ? (
+          <Drawer
+            destroyOnHidden
+            focusable={{ trap: true, focusTriggerAfterClose: true }}
+            afterOpenChange={(open) => {
+              if (open && leftDrawerTab === "library" && editMode) {
+                focusNodeLibrarySearch();
+              }
+            }}
+            getContainer={false}
+            keyboard
+            mask={false}
+            // No visible title (the panel's own title bar names it), but the dialog
+            // still needs an accessible name.
+            aria-label={leftDrawerSection === "library" ? "节点与大纲" : leftDrawerSection === "executions" ? "执行列表" : "变量"}
+            open={compactDrawer === "left"}
+            placement="left"
+            classNames={editorCompactDrawerClassNamesStart}
+            rootClassName="xflow-editor-compact-drawer"
+            closable={false}
+            rootStyle={{ left: 60, position: "absolute" }}
+            size={280}
+            onClose={() => setCompactDrawer(undefined)}
+          >
+            {leftDrawerSection === "executions" ? (
+              <ExecutionListPanel
+                selectedId={selectedExecution?.executionId}
+                state={executionList}
+                onLoad={onLoadExecutions}
+                onSelect={onSelectExecution}
+              />
+            ) : leftDrawerSection === "library" ? (
+              renderNodeZones(undefined, true)
+            ) : (
+              <VariablesPanel
+                readOnly={!editMode}
+                workflow={draftWorkflow}
+                workflowJsonDrafts={workflowJsonDrafts}
+                onChangeWith={commitWorkflowWith}
+                onWorkflowJsonText={updateWorkflowJsonText}
+              />
+            )}
+          </Drawer>
+        ) : null}
       </div>
 
       {layout === "c" ? (
         <Drawer
           destroyOnHidden
           focusable={{ trap: true, focusTriggerAfterClose: true }}
-          afterOpenChange={(open) => {
-            if (open && leftDrawerTab === "library" && editMode) {
-              focusNodeLibrarySearch();
-            }
-          }}
           getContainer={false}
           keyboard
           mask={false}
-          open={compactDrawer === "left"}
-          placement="left"
-          classNames={editorCompactDrawerClassNames}
-          rootClassName="xflow-editor-compact-drawer"
-          rootStyle={{ left: 52, position: "absolute" }}
-          title={leftDrawerSection === "library" ? "节点" : "变量"}
-          size={340}
-          onClose={() => setCompactDrawer(undefined)}
-        >
-          {leftDrawerSection === "library" ? (
-            <NodeLibrary autoFocusSearch descriptors={libraryDescriptors} onAddNode={addNode} searchInputRef={nodeLibrarySearchRef} />
-          ) : (
-            <VariablesPanel
-              readOnly={!editMode}
-              workflow={draftWorkflow}
-              workflowJsonDrafts={workflowJsonDrafts}
-              onChangeWith={commitWorkflowWith}
-              onWorkflowJsonText={updateWorkflowJsonText}
-            />
-          )}
-        </Drawer>
-      ) : null}
-
-      {layout === "c" ? (
-        <Drawer
-          destroyOnHidden
-          focusable={{ trap: true, focusTriggerAfterClose: true }}
-          getContainer={false}
-          keyboard
-          mask={false}
+          aria-label="属性"
           open={compactDrawer === "right"}
           placement="right"
-          classNames={editorCompactDrawerClassNames}
+          classNames={editorCompactDrawerClassNamesEnd}
           rootClassName="xflow-editor-compact-drawer"
           rootStyle={{ position: "absolute" }}
-          title="属性"
           size={360}
           onClose={() => setCompactDrawer(undefined)}
         >
-          {editMode ? (
+          {editMode || runsMode ? (
             inspectorElement
           ) : (
             <section className="xflow-editor-preview-inspector" aria-label="预览模式说明">
               <EyeOutlined />
-              <strong>预览模式</strong>
-              <p>画布、节点属性和工作流定义均保持只读。切换到编辑模式后可继续修改。</p>
+              <strong>{readOnly ? "只读" : "预览模式"}</strong>
+              <p>{readOnly ? "画布、节点属性和工作流定义均保持只读。" : "画布、节点属性和工作流定义均保持只读。切换到编辑模式后可继续修改。"}</p>
             </section>
           )}
         </Drawer>
@@ -3219,18 +4693,130 @@ export function XFlowEditor({
         onClose={closeContextMenu}
         onSelect={handleContextMenuSelect}
       />
-      <Diagnostics
+      {runsMode ? (
+        <div aria-label="执行状态栏" className="xflow-editor-runs-statusbar" role="group">
+          <span className="xflow-editor-runs-statusbar__item">
+            执行{" "}
+            <span className="xflow-editor-runs-statusbar__id">
+              {selectedExecution?.executionId ?? "未选择"}
+            </span>
+          </span>
+          {selectedExecution ? (
+            <>
+              <span aria-hidden="true" className="xflow-editor-statusbar__sep" />
+              <span className="xflow-editor-runs-statusbar__item" data-tone="faint">
+                创建 {selectedExecution.createdAt ? executionClock(selectedExecution.createdAt) : "—"}
+                {" · "}更新 {selectedExecution.updatedAt ? executionClock(selectedExecution.updatedAt) : "—"}
+              </span>
+            </>
+          ) : null}
+          <span className="xflow-editor-statusbar__spacer" />
+          {selectedExecution ? (
+            <span className="xflow-editor-runs-statusbar__item">
+              {(selectedExecution.nodes ?? []).length} 节点{runsCounts ? ` · ${runsCounts}` : ""}
+            </span>
+          ) : null}
+          <span className="xflow-editor-runs-statusbar__item" data-tone="faint">
+            {executionDefinitionStale ? "定义已变化，仅供参考" : "只读回放 · 定义为当次运行版本"}
+          </span>
+        </div>
+      ) : (
+        <DiagnosticsDock
+          workflow={draftWorkflow}
+          runtime={localRuntime}
+          diagnostics={diagnostics}
+          blockedDraftNodes={operationError ? blockedDraftNodes : undefined}
+          nodeCategories={nodeCategories}
+          onRevealJson={revealParameterJson}
+          onLocateField={locateParameterField}
+          operationError={operationError}
+          versionLabel={versionChip.label}
+          controllerRef={dockControllerRef}
+          dock={dock}
+          onDockChange={setDock}
+          onLocateNode={locateDiagnosticNode}
+        />
+      )}
+      <Modal
+        centered={false}
+        className="xflow-editor-locate"
+        classNames={{
+          body: "xflow-editor-locate__body",
+          container: "xflow-editor-locate__content",
+          header: "xflow-editor-locate__header"
+        }}
+        footer={null}
+        focusable={{ focusTriggerAfterClose: false }}
+        getContainer={() => editorRootRef.current ?? document.body}
+        open={nodeSearchOpen}
+        style={{ top: 64 }}
+        title="定位节点"
+        width={480}
+        afterOpenChange={(open) => {
+          if (open) nodeSearchRef.current?.focus();
+        }}
+        onCancel={closeNodeSearch}
+      >
+        <NodeSearch
+          key={nodeSearchNonce}
+          nodes={nodeSearchOptions}
+          ref={nodeSearchRef}
+          onSelect={(key) => {
+            locateNode(key);
+            closeNodeSearch();
+          }}
+        />
+      </Modal>
+      <PublishDialog
+        changes={changes}
+        error={publishError}
+        errorCount={publishDiagnostics.errors}
+        getContainer={() => editorRootRef.current ?? document.body}
+        onlineHash={onlineVersionRow?.definitionHash}
+        onlineVersion={onlineVersion}
+        open={publishOpen}
+        publishing={publishing}
+        suggestedVersion={suggestedVersion}
+        usedVersions={usedVersions}
+        version={publishVersion}
+        versionsError={versionsState.error}
+        warningCount={publishDiagnostics.warnings}
         workflow={draftWorkflow}
-        runtime={localRuntime}
-        diagnostics={diagnostics}
-        blockedDraftNodes={operationError ? blockedDraftNodes : undefined}
-        onRevealJson={revealParameterJson}
-        operationError={operationError}
-        collapsed={bottomCollapsed}
-        onToggle={() => setBottomCollapsed((current) => !current)}
-        onSelectNode={selectNodeByName}
+        onCancel={() => setPublishOpen(false)}
+        onPublish={() => void publishWorkflow()}
+        onReloadVersions={() => setVersionLoadNonce((nonce) => nonce + 1)}
+        onVersionChange={(next) => {
+          setPublishVersion(next);
+          setPublishError(undefined);
+        }}
       />
       <ShortcutsHelp open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+      {/* Keyed remount: closing or retargeting discards the previous node's
+          pending signal, choice and comment instead of carrying them across. */}
+      <ApprovalDialog
+        capabilities={capabilities}
+        currentUserSubject={currentUserSubject}
+        executionId={approvalTarget?.executionId ?? ""}
+        executionNode={approvalExecutionNode}
+        executionStatus={execution?.status ?? "running"}
+        getContainer={() => editorRootRef.current ?? document.body}
+        key={`${approvalTarget?.executionId ?? ""}:${approvalTarget?.nodeName ?? ""}`}
+        node={approvalDefinitionNode}
+        open={Boolean(approvalTarget && execution && approvalTarget.executionId === execution.executionId)}
+        onClose={() => setApprovalTarget(undefined)}
+        onRevokeSignal={onRevokeSignal}
+        onSignal={onSignal}
+      />
+      {/* §6.9 rerun dialog, opened from the run bar, the 运行 tab footer and the
+          run-record top bar. The host owns the API call and the new execution. */}
+      <RerunDialog
+        execution={rerunExecution}
+        getContainer={() => editorRootRef.current ?? document.body}
+        initialNode={rerunTarget?.node}
+        open={rerunTarget !== undefined}
+        onCancel={() => setRerunTarget(undefined)}
+        onSubmit={onRerun}
+      />
       </section>
     </ConfigProvider>
   );

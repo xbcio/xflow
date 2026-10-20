@@ -116,6 +116,17 @@ export function listConnectionReferences(workflow: WorkflowDef): ConnectionRefer
   return references;
 }
 
+/** The references that touch a node, in or out: what the 连接 tab lists. */
+export function connectionsOfNode(references: ConnectionReference[], name: string | undefined): ConnectionReference[] {
+  if (!name) return [];
+  return references.filter((reference) => reference.sourceName === name || reference.targetName === name);
+}
+
+/** Wired edges at a node (in + out), the number the 连接 tab label carries. */
+export function countNodeConnections(workflow: WorkflowDef, node: WorkflowNode | undefined): number {
+  return connectionsOfNode(listConnectionReferences(workflow), node ? nodeName(node) : undefined).length;
+}
+
 function renameConnectionTargets(
   portConnections: ConnectionTargets,
   previousName: string,

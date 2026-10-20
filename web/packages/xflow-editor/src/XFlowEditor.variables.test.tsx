@@ -1,5 +1,5 @@
 // The left column's 变量 panel (params / context.vars / context.config /
-// credential references), the ⌘K node search that replaced the outline, and
+// credential references), the ⌘K node search (jump by name, next to the outline), and
 // the Inspector's workflow settings shown with no node selected.
 
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -67,7 +67,7 @@ describe("VariablesPanel", () => {
     expect(screen.queryByRole("region", { name: "节点" })).toBeNull();
     expect(screen.getByRole("button", { name: "变量" }).getAttribute("aria-pressed")).toBe("true");
 
-    fireEvent.click(screen.getByRole("button", { name: "节点" }));
+    fireEvent.click(screen.getByRole("button", { name: "节点与大纲" }));
     expect(screen.getByRole("region", { name: "节点" })).toBeTruthy();
   });
 
@@ -185,10 +185,12 @@ describe("VariablesPanel", () => {
     expect((within(section("输入参数")).getByRole("button", { name: "复制 amount 的引用" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("shows the variables read-only, and by default, outside edit mode", () => {
+  it("shows the variables read-only outside edit mode, reached from the rail", () => {
     const handleChange = vi.fn();
-    render(<XFlowEditor value={workflow} onChange={handleChange} />);
-    fireEvent.click(screen.getByRole("radio", { name: /预览/ }));
+    render(<XFlowEditor value={workflow} readOnlyReason="没有写权限" onChange={handleChange} />);
+    // A read-only viewer opens on the outline alone; 变量 is one rail key away.
+    expect(screen.getByRole("region", { name: "大纲" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "变量" }));
 
     const variables = screen.getByRole("region", { name: "变量" });
     expect(screen.queryByRole("region", { name: "节点" })).toBeNull();
@@ -217,10 +219,10 @@ describe("node search and workflow settings", () => {
   it("deselects from the Inspector header into the workflow settings, and back by selecting a node", () => {
     const handleChange = vi.fn();
     render(<XFlowEditor value={workflow} onChange={handleChange} />);
-    const inspector = () => screen.getByRole("region", { name: "属性" });
+    const inspector = () => screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
     expect(within(inspector()).queryByLabelText("工作流名称")).toBeNull();
 
-    fireEvent.click(within(inspector()).getByRole("button", { name: "工作流设置" }));
+    fireEvent.keyDown(window, { key: "Escape" });
     expect(within(inspector()).getByRole("group", { name: "基本信息" })).toBeTruthy();
     // Runner and 执行设置 are structured rows; their JSON source view is one
     // `</>` click away. Pin Data has no rows to build, so it stays source-only.
@@ -242,7 +244,7 @@ describe("node search and workflow settings", () => {
 
     fireEvent.click(canvasNode("worker"));
     expect(within(inspector()).queryByLabelText("工作流名称")).toBeNull();
-    expect(within(inspector()).getByRole("button", { name: "工作流设置" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "属性" })).toBeTruthy();
   });
 
   it("writes the structured Runner and 执行设置 rows into the workflow", () => {
@@ -253,8 +255,8 @@ describe("node search and workflow settings", () => {
         onChange={handleChange}
       />
     );
-    const inspector = () => screen.getByRole("region", { name: "属性" });
-    fireEvent.click(within(inspector()).getByRole("button", { name: "工作流设置" }));
+    const inspector = () => screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
+    fireEvent.keyDown(window, { key: "Escape" });
 
     // Runner: a mode select plus one key/value row per match label.
     const mode = within(inspector()).getByLabelText("Runner 模式").closest(".xflow-editor-select__root");
@@ -302,8 +304,8 @@ describe("node search and workflow settings", () => {
     const handleChange = vi.fn();
     const onSave = vi.fn();
     render(<XFlowEditor value={workflow} onSave={onSave} onChange={handleChange} />);
-    const inspector = () => screen.getByRole("region", { name: "属性" });
-    fireEvent.click(within(inspector()).getByRole("button", { name: "工作流设置" }));
+    const inspector = () => screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
+    fireEvent.keyDown(window, { key: "Escape" });
 
     const toggle = within(inspector()).getByRole("button", { name: "以 JSON 编辑执行设置" });
     fireEvent.click(toggle);

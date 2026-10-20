@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { RuntimeSnapshot, WorkflowDef } from "@xflow/core";
 import { XFlowEditor } from "./index";
 
-/** The canvas node's own select button (the outline is gone; the canvas is the list). */
+/** The canvas node's own select button: the canvas cards stay a selectable list beside the outline tree. */
 const canvasNode = (name: string): HTMLElement => {
   const node = document.querySelector<HTMLElement>(`.xflow-preview-node__select[aria-label^="${name} node "]`);
   if (!node) throw new Error(`canvas node ${name} not found`);
@@ -50,6 +50,39 @@ describe("canvas context menu", () => {
 
     fireEvent.keyDown(window, { key: "Escape" });
     expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("rebases the menu onto an offset editor root instead of the viewport", () => {
+    const { container } = render(<XFlowEditor value={workflow} />);
+    const root = container.querySelector<HTMLElement>(".xflow-editor");
+    expect(root).toBeTruthy();
+    // An embedded host: the editor root starts 240px right / 80px down.
+    const bounds = {
+      bottom: 980,
+      height: 900,
+      left: 240,
+      right: 1440,
+      top: 80,
+      width: 1200,
+      x: 240,
+      y: 80
+    } as DOMRect;
+    if (root) root.getBoundingClientRect = () => bounds;
+
+    const pane = container.querySelector(".react-flow__pane");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    try {
+      fireEvent.contextMenu(pane as Element, { clientX: 640, clientY: 380 });
+
+      const anchor = screen.getByRole("menu").closest<HTMLElement>(".xflow-editor-context-menu__anchor");
+      expect(anchor).toBeTruthy();
+      expect(anchor?.style.left).toBe("400px");
+      expect(anchor?.style.top).toBe("300px");
+      // Focusing the first row must not scroll the editor root under the menu.
+      expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+    } finally {
+      focus.mockRestore();
+    }
   });
 
   it("duplicates the right-clicked node", () => {
@@ -132,13 +165,11 @@ describe("canvas context menu", () => {
     expect(onRunNode.mock.calls[0]?.[1]).toEqual({ node: "api", mode: "from" });
     // The snapshot lands where a whole-workflow run puts it: the Inspector's 运行 tab.
     fireEvent.click(screen.getByRole("tab", { name: "运行" }));
-    // The header pill and the 运行 tab both report it; this is the tab's own row.
-    await waitFor(() =>
-      expect(
-        within(within(screen.getByRole("region", { name: "属性" })).getByRole("tabpanel"))
-          .getByText("success", { selector: ".xflow-editor-runtime-tag" })
-      ).toBeTruthy()
-    );
+    // The header pill and the 运行 tab both read nodeStatusMeta (§6.4).
+    await waitFor(() => {
+      const panel = within(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).getByRole("tabpanel");
+      expect(panel.querySelector(".xflow-editor-chip")?.textContent).toBe("成功");
+    });
   });
 
   it("opens the pane menu with the node library and adds the chosen node", async () => {
@@ -162,9 +193,8 @@ describe("canvas context menu", () => {
     expect(Number.isFinite(added?.position?.y)).toBe(true);
   });
 
-  it("leaves the native menu alone in preview mode", () => {
-    render(<XFlowEditor value={workflow} />);
-    fireEvent.click(screen.getByRole("radio", { name: /预览/ }));
+  it("leaves the native menu alone in a read-only viewer", () => {
+    render(<XFlowEditor value={workflow} readOnlyReason="没有写权限" />);
 
     fireEvent.contextMenu(canvasNode("api"), { clientX: 420, clientY: 260 });
     expect(screen.queryByRole("menu")).toBeNull();
@@ -240,7 +270,7 @@ describe("canvas context menu", () => {
     expect(screen.getByText("该节点没有输出端口")).toBeTruthy();
   });
 
-  it("leaves the JSON source view for 重命名 and focuses the name field", async () => {
+  it("enters the header inline rename from 重命名 without leaving the JSON view", async () => {
     render(<XFlowEditor value={workflow} />);
 
     fireEvent.click(canvasNode("api"));
@@ -250,9 +280,40 @@ describe("canvas context menu", () => {
     openNodeMenu("api");
     fireEvent.click(menuItem(/重命名/));
 
-    await waitFor(() => expect(screen.queryByRole("textbox", { name: "参数 JSON" })).toBeNull());
     await waitFor(() => {
-      const field = screen.getByLabelText("节点名称");
+      const field = screen.getByLabelText("节点显示名") as HTMLInputElement;
+      expect(document.activeElement).toBe(field);
+      expect(field.value).toBe("api");
+    });
+    // The rename lives in the header now: the parameters tab is untouched.
+    expect(screen.getByRole("textbox", { name: "参数 JSON" })).toBeTruthy();
+  });
+
+  it("enters the header rename when 重命名 itself reopens a collapsed Inspector", async () => {
+    render(<XFlowEditor value={workflow} />);
+    fireEvent.click(screen.getByRole("button", { name: "收起属性面板" }));
+    expect(screen.queryByRole("region", { name: /^(属性|工作流设置)$/ })).toBeNull();
+
+    openNodeMenu("api");
+    fireEvent.click(menuItem(/重命名/));
+
+    await waitFor(() => {
+      const field = screen.getByLabelText("节点显示名") as HTMLInputElement;
+      expect(document.activeElement).toBe(field);
+    });
+  });
+
+  it("enters the header rename when 重命名 opens the compact drawer", async () => {
+    render(<XFlowEditor value={workflow} />);
+    fireEvent.click(within(screen.getByRole("toolbar", { name: "编辑器工具栏" })).getByRole("button", { name: "更多操作" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "进入沉浸布局" }));
+    expect(screen.queryByRole("region", { name: /^(属性|工作流设置)$/ })).toBeNull();
+
+    openNodeMenu("api");
+    fireEvent.click(menuItem(/重命名/));
+
+    await waitFor(() => {
+      const field = screen.getByLabelText("节点显示名") as HTMLInputElement;
       expect(document.activeElement).toBe(field);
     });
   });

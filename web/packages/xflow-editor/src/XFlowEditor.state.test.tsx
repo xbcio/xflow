@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { WorkflowDef } from "@xflow/core";
 import { XFlowEditor } from "./index";
 
-/** The canvas node's own select button (the outline is gone; the canvas is the list). */
+/** The canvas node's own select button: the canvas cards stay a selectable list beside the outline tree. */
 const canvasNode = (name: string): HTMLElement => {
   const node = document.querySelector<HTMLElement>(`.xflow-preview-node__select[aria-label^="${name} node "]`);
   if (!node) throw new Error(`canvas node ${name} not found`);
@@ -30,7 +30,7 @@ describe("XFlowEditor state commits", () => {
 
   const selectNode = (name: string) => {
     fireEvent.click(canvasNode(name));
-    return screen.getByRole("region", { name: "属性" });
+    return screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
   };
   /** The parameters JSON lives behind the 节点参数 card's </> toggle (the form is the default). */
   const jsonTab = (inspector: HTMLElement) => {
@@ -62,8 +62,9 @@ describe("XFlowEditor state commits", () => {
     // The workflow name lives in the Inspector's workflow settings (no node
     // selected), so the two writers come from two Inspector views in a row;
     // the second must still compose onto the first's commit.
-    fireEvent.click(within(selectNode("worker")).getByRole("button", { name: "工作流设置" }));
-    fireEvent.change(within(screen.getByRole("region", { name: "属性" })).getByLabelText("工作流名称"), {
+    selectNode("worker");
+    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.change(within(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).getByLabelText("工作流名称"), {
       target: { value: "Renamed flow" }
     });
     commitJson(jsonTab(selectNode("worker")), '{ "a": 2 }');
@@ -89,7 +90,7 @@ describe("XFlowEditor state commits", () => {
     expect(saved.nodes?.[1]).toMatchObject({ name: "executor", parameters: { a: 3 } });
     expect(saved.connections?.start?.main).toEqual([{ node: "executor" }]);
     // Selection is keyed by name for this id-less node; it must follow the rename.
-    expect((within(screen.getByRole("region", { name: "属性" })).getByLabelText("节点名称") as HTMLInputElement).value)
+    expect((within(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).getByLabelText("节点名称") as HTMLInputElement).value)
       .toBe("executor");
   });
 
@@ -106,9 +107,9 @@ describe("XFlowEditor state commits", () => {
     fireEvent.click(within(screen.getByRole("group", { name: "常用画布与历史工具" })).getByRole("button", { name: "撤销" }));
 
     expect(lastWorkflow(handleChange).nodes?.[1]?.parameters).toEqual({ a: 1 });
-    expect((within(screen.getByRole("region", { name: "属性" })).getByLabelText("参数 JSON") as HTMLTextAreaElement).value)
+    expect((within(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).getByLabelText("参数 JSON") as HTMLTextAreaElement).value)
       .toBe("{ broken");
-    expect(within(screen.getByRole("region", { name: "属性" })).getByText("参数 JSON 格式错误")).toBeTruthy();
+    expect(within(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).getByText("参数 JSON 格式错误")).toBeTruthy();
   });
 
   it("restores an unparseable draft after selecting another node and coming back", () => {
@@ -169,7 +170,7 @@ describe("XFlowEditor state commits", () => {
     fireEvent.change(field, { target: { value: name } });
     fireEvent.blur(field);
   };
-  const parametersText = () => jsonTab(screen.getByRole("region", { name: "属性" })).value;
+  const parametersText = () => jsonTab(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).value;
 
   // With an unparseable draft the whole node form is read-only (Doc C §6.2),
   // rename included, so a draft can no longer be carried through a rename
@@ -195,7 +196,8 @@ describe("XFlowEditor state commits", () => {
     render(<XFlowEditor value={workflow} onSave={handleSave} />);
     const inspector = selectNode("worker");
     fireEvent.change(jsonTab(inspector), { target: { value: "{ broken" } });
-    fireEvent.click(within(inspector).getByRole("button", { name: "删除节点" }));
+    fireEvent.click(within(inspector).getByRole("button", { name: "更多操作" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /删除/ }));
 
     renameSelected(selectNode("tail"), "worker");
 
@@ -211,7 +213,7 @@ describe("XFlowEditor state commits", () => {
     renameSelected(inspector, "executor");
     // A draft on the renamed node; undo puts the node back under "worker" and
     // the draft keyed "executor" then names no node.
-    fireEvent.change(jsonTab(screen.getByRole("region", { name: "属性" })), { target: { value: "{ broken" } });
+    fireEvent.change(jsonTab(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })), { target: { value: "{ broken" } });
     fireEvent.click(within(screen.getByRole("group", { name: "常用画布与历史工具" })).getByRole("button", { name: "撤销" }));
 
     renameSelected(selectNode("tail"), "executor");

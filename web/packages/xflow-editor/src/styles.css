@@ -1,454 +1,67 @@
 /*
- * Shared XFlow semantic theme contract.
- *
- * The editor owns the workspace shell and provides these variables to embedded
- * XFlow surfaces (including @xflow/preview). Generic Ant Design controls are
+ * Editor-only styles. Colours, radii, the font stacks and the control scale are
+ * the shared --xflow-* tokens from @xflow/core (tokens.css, imported by the
+ * entry), declared on the .xflow-editor root per data-theme; nothing in this
+ * file redeclares them. The --xflow-editor-* variables below are this
+ * package's own layout and component knobs. Generic Ant Design controls are
  * intentionally not restyled here: ConfigProvider component tokens own them.
- * The no-data-attribute fallback remains Graphite dark for existing hosts.
+ * The whole sheet is wrapped in `@layer xflow.editor`: the host declares that
+ * layer after `antd`, `xflow.preview` and `xflow.composer` (tailwind.css), so
+ * these rules win by layer order, never by out-weighing AntD's specificity.
  */
-.xflow-editor,
-.xflow-editor[data-theme-variant="graphite"][data-theme="dark"] {
-  /* surface */
-  --xflow-surface-app: #151617;
-  --xflow-surface-toolbar: #1e1f21;
-  --xflow-surface-panel: #24262a;
-  --xflow-surface-panel-raised: #2b2e33;
-  --xflow-surface-field: #1e2023;
-  --xflow-surface-canvas: #202225;
-  --xflow-surface-control: #18191b;
-  --xflow-surface-hover: #30343a;
-  --xflow-surface-overlay: rgba(23, 25, 28, .92);
-  --xflow-surface-overlay-subtle: rgba(24, 26, 29, .82);
-  --xflow-surface-highlight: rgba(255, 255, 255, .035);
-  --xflow-surface-hover-subtle: rgba(255, 255, 255, .03);
-  --xflow-surface-inset-shadow: rgba(0, 0, 0, .18);
-  --xflow-canvas-grid-minor: rgba(255, 255, 255, .04);
-  --xflow-canvas-grid-major: rgba(255, 255, 255, .14);
-  --xflow-canvas-grid-dot: rgba(255, 255, 255, .10);
-  --xflow-canvas-minimap-mask: rgba(20, 22, 25, .88);
-
-  /* content, borders, and focus */
-  --xflow-text: #f2f4f7;
-  --xflow-text-secondary: #c8cdd5;
-  --xflow-text-tertiary: #a4abb6;
-  --xflow-border: #3a3d43;
-  --xflow-border-strong: #4b5058;
-  --xflow-focus: #4c8dff;
-  --xflow-focus-text: #9bbcff;
-  --xflow-focus-subtle: rgba(76, 141, 255, .12);
-  --xflow-focus-border: rgba(76, 141, 255, .42);
-  --xflow-focus-border-strong: rgba(76, 141, 255, .72);
-  --xflow-focus-ring: rgba(76, 141, 255, .25);
-
-  /* workflow status */
-  --xflow-status-running: #4c8dff;
-  --xflow-status-success: #35c98b;
-  --xflow-status-warning: #f7b955;
-  --xflow-status-error: #ff5f57;
-  --xflow-status-disabled: #747b86;
-  --xflow-status-running-text: #9bbcff;
-  --xflow-status-success-text: #62d7a0;
-  --xflow-status-warning-text: #e7c174;
-  --xflow-status-error-text: #ff948e;
-  --xflow-status-running-border: rgba(76, 141, 255, .42);
-  --xflow-status-success-border: rgba(53, 201, 139, .40);
-  --xflow-status-warning-border: rgba(247, 185, 85, .38);
-  --xflow-status-error-border: rgba(255, 95, 87, .45);
-  --xflow-status-running-subtle: rgba(76, 141, 255, .12);
-  --xflow-status-success-subtle: rgba(53, 201, 139, .12);
-  --xflow-status-warning-subtle: rgba(247, 185, 85, .08);
-  --xflow-status-error-subtle: rgba(255, 95, 87, .12);
-
-  /* workflow nodes, ports, and edges */
-  --xflow-node-bg: #282b30;
-  --xflow-node-border: #3d424b;
-  --xflow-node-shadow: rgba(0, 0, 0, .18);
-  --xflow-node-meta-bg: #22262c;
-  --xflow-port-bg: #202329;
-  --xflow-port-border: #3d444f;
-  --xflow-port-disabled: #747b86;
-  --xflow-port-chip-bg: rgba(76, 141, 255, .12);
-  --xflow-port-chip-border: rgba(76, 141, 255, .32);
-  --xflow-port-text: #8993a1;
-  --xflow-edge: #69707a;
-  --xflow-edge-selected: #4c8dff;
-  --xflow-edge-running: #4c8dff;
-  --xflow-edge-error: #ff5f57;
-  --xflow-edge-label: #c8cdd5;
-  --xflow-edge-label-bg: #202226;
-
-  /* node category tones */
-  --xflow-node-tone-blue: #4c8dff;
-  --xflow-node-tone-cyan: #39c6e8;
-  --xflow-node-tone-green: #35c98b;
-  --xflow-node-tone-amber: #f7b955;
-  --xflow-node-tone-violet: #aa8cff;
-  --xflow-node-tone-blue-text: #9bbcff;
-  --xflow-node-tone-cyan-text: #82ddf2;
-  --xflow-node-tone-green-text: #62d7a0;
-  --xflow-node-tone-amber-text: #e7c174;
-  --xflow-node-tone-violet-text: #c2b0ff;
-  --xflow-node-tone-blue-bg: rgba(76, 141, 255, .12);
-  --xflow-node-tone-cyan-bg: rgba(57, 198, 232, .12);
-  --xflow-node-tone-green-bg: rgba(53, 201, 139, .12);
-  --xflow-node-tone-amber-bg: rgba(247, 185, 85, .08);
-  --xflow-node-tone-violet-bg: rgba(170, 140, 255, .12);
-  --xflow-node-tone-blue-border: rgba(76, 141, 255, .42);
-  --xflow-node-tone-cyan-border: rgba(57, 198, 232, .40);
-  --xflow-node-tone-green-border: rgba(53, 201, 139, .40);
-  --xflow-node-tone-amber-border: rgba(247, 185, 85, .38);
-  --xflow-node-tone-violet-border: rgba(170, 140, 255, .40);
-}
-
-.xflow-editor[data-theme-variant="graphite"][data-theme="light"] {
-  /* surface */
-  --xflow-surface-app: #f5f6f8;
-  --xflow-surface-toolbar: #ffffff;
-  --xflow-surface-panel: #ffffff;
-  --xflow-surface-panel-raised: #f7f8fa;
-  --xflow-surface-field: #ffffff;
-  --xflow-surface-canvas: #f0f2f5;
-  --xflow-surface-control: #f7f8fa;
-  --xflow-surface-hover: #edf3ff;
-  --xflow-surface-overlay: rgba(255, 255, 255, .92);
-  --xflow-surface-overlay-subtle: rgba(255, 255, 255, .84);
-  --xflow-surface-highlight: rgba(255, 255, 255, .78);
-  --xflow-surface-hover-subtle: rgba(47, 124, 255, .06);
-  --xflow-surface-inset-shadow: rgba(31, 35, 41, .08);
-  --xflow-canvas-grid-minor: rgba(31, 35, 41, .05);
-  --xflow-canvas-grid-major: rgba(31, 35, 41, .13);
-  --xflow-canvas-grid-dot: rgba(31, 35, 41, .12);
-  --xflow-canvas-minimap-mask: rgba(245, 247, 250, .88);
-
-  /* content, borders, and focus */
-  --xflow-text: #1f2329;
-  --xflow-text-secondary: #4e5969;
-  --xflow-text-tertiary: #86909c;
-  --xflow-border: #d9dee7;
-  --xflow-border-strong: #bcc5d0;
-  --xflow-focus: #2f7cff;
-  --xflow-focus-text: #1f6fe5;
-  --xflow-focus-subtle: rgba(47, 124, 255, .10);
-  --xflow-focus-border: rgba(47, 124, 255, .42);
-  --xflow-focus-border-strong: rgba(47, 124, 255, .68);
-  --xflow-focus-ring: rgba(47, 124, 255, .20);
-
-  /* workflow status */
-  --xflow-status-running: #2f7cff;
-  --xflow-status-success: #1a9b67;
-  --xflow-status-warning: #c98600;
-  --xflow-status-error: #d9363e;
-  --xflow-status-disabled: #a6afb9;
-  --xflow-status-running-text: #1f6fe5;
-  --xflow-status-success-text: #16875a;
-  --xflow-status-warning-text: #946200;
-  --xflow-status-error-text: #b4232b;
-  --xflow-status-running-border: rgba(47, 124, 255, .42);
-  --xflow-status-success-border: rgba(26, 155, 103, .38);
-  --xflow-status-warning-border: rgba(201, 134, 0, .38);
-  --xflow-status-error-border: rgba(217, 54, 62, .42);
-  --xflow-status-running-subtle: rgba(47, 124, 255, .10);
-  --xflow-status-success-subtle: rgba(26, 155, 103, .10);
-  --xflow-status-warning-subtle: rgba(201, 134, 0, .10);
-  --xflow-status-error-subtle: rgba(217, 54, 62, .10);
-
-  /* workflow nodes, ports, and edges */
-  --xflow-node-bg: #ffffff;
-  --xflow-node-border: #d7dee8;
-  --xflow-node-shadow: rgba(31, 35, 41, .10);
-  --xflow-node-meta-bg: #f5f7fa;
-  --xflow-port-bg: #ffffff;
-  --xflow-port-border: #c9d3df;
-  --xflow-port-disabled: #a6afb9;
-  --xflow-port-chip-bg: rgba(47, 124, 255, .10);
-  --xflow-port-chip-border: rgba(47, 124, 255, .30);
-  --xflow-port-text: #687586;
-  --xflow-edge: #8c9aaa;
-  --xflow-edge-selected: #2f7cff;
-  --xflow-edge-running: #2f7cff;
-  --xflow-edge-error: #d9363e;
-  --xflow-edge-label: #4e5969;
-  --xflow-edge-label-bg: #ffffff;
-
-  /* node category tones */
-  --xflow-node-tone-blue: #2f7cff;
-  --xflow-node-tone-cyan: #0899b8;
-  --xflow-node-tone-green: #1a9b67;
-  --xflow-node-tone-amber: #c98600;
-  --xflow-node-tone-violet: #7656d6;
-  --xflow-node-tone-blue-text: #1f6fe5;
-  --xflow-node-tone-cyan-text: #087e98;
-  --xflow-node-tone-green-text: #16875a;
-  --xflow-node-tone-amber-text: #946200;
-  --xflow-node-tone-violet-text: #6543bd;
-  --xflow-node-tone-blue-bg: rgba(47, 124, 255, .10);
-  --xflow-node-tone-cyan-bg: rgba(8, 153, 184, .10);
-  --xflow-node-tone-green-bg: rgba(26, 155, 103, .10);
-  --xflow-node-tone-amber-bg: rgba(201, 134, 0, .10);
-  --xflow-node-tone-violet-bg: rgba(118, 86, 214, .10);
-  --xflow-node-tone-blue-border: rgba(47, 124, 255, .42);
-  --xflow-node-tone-cyan-border: rgba(8, 153, 184, .38);
-  --xflow-node-tone-green-border: rgba(26, 155, 103, .38);
-  --xflow-node-tone-amber-border: rgba(201, 134, 0, .38);
-  --xflow-node-tone-violet-border: rgba(118, 86, 214, .38);
-  /* Darker than the cyan tone text so the 9px source badge clears 4.5:1. */
-  --xflow-node-source-text: #066377;
-}
-
-.xflow-editor[data-theme-variant="blueprint"][data-theme="dark"] {
-  /* surface */
-  --xflow-surface-app: #111827;
-  --xflow-surface-toolbar: #141e2d;
-  --xflow-surface-panel: #17202d;
-  --xflow-surface-panel-raised: #1e2a3a;
-  --xflow-surface-field: #121b28;
-  --xflow-surface-canvas: #17202d;
-  --xflow-surface-control: #111a28;
-  --xflow-surface-hover: #24344a;
-  --xflow-surface-overlay: rgba(15, 23, 42, .94);
-  --xflow-surface-overlay-subtle: rgba(18, 27, 40, .84);
-  --xflow-surface-highlight: rgba(203, 224, 255, .045);
-  --xflow-surface-hover-subtle: rgba(112, 161, 255, .08);
-  --xflow-surface-inset-shadow: rgba(4, 10, 20, .28);
-  --xflow-canvas-grid-minor: rgba(143, 169, 205, .08);
-  --xflow-canvas-grid-major: rgba(143, 169, 205, .18);
-  --xflow-canvas-grid-dot: rgba(143, 169, 205, .16);
-  --xflow-canvas-minimap-mask: rgba(10, 18, 31, .82);
-
-  /* content, borders, and focus */
-  --xflow-text: #e6edf7;
-  --xflow-text-secondary: #c0cddc;
-  --xflow-text-tertiary: #8fa0b5;
-  --xflow-border: #314158;
-  --xflow-border-strong: #465b76;
-  --xflow-focus: #5b8cff;
-  --xflow-focus-text: #9fbaff;
-  --xflow-focus-subtle: rgba(91, 140, 255, .14);
-  --xflow-focus-border: rgba(112, 161, 255, .45);
-  --xflow-focus-border-strong: rgba(112, 161, 255, .72);
-  --xflow-focus-ring: rgba(112, 161, 255, .28);
-
-  /* workflow status */
-  --xflow-status-running: #5b8cff;
-  --xflow-status-success: #48c78e;
-  --xflow-status-warning: #eab85b;
-  --xflow-status-error: #ff6b6b;
-  --xflow-status-disabled: #71829a;
-  --xflow-status-running-text: #9fbaff;
-  --xflow-status-success-text: #7fdcaf;
-  --xflow-status-warning-text: #f0ce8b;
-  --xflow-status-error-text: #ffaaa4;
-  --xflow-status-running-border: rgba(112, 161, 255, .45);
-  --xflow-status-success-border: rgba(72, 199, 142, .42);
-  --xflow-status-warning-border: rgba(234, 184, 91, .40);
-  --xflow-status-error-border: rgba(255, 107, 107, .45);
-  --xflow-status-running-subtle: rgba(91, 140, 255, .14);
-  --xflow-status-success-subtle: rgba(72, 199, 142, .12);
-  --xflow-status-warning-subtle: rgba(234, 184, 91, .10);
-  --xflow-status-error-subtle: rgba(255, 107, 107, .12);
-
-  /* workflow nodes, ports, and edges */
-  --xflow-node-bg: #1d2938;
-  --xflow-node-border: #3b4c63;
-  --xflow-node-shadow: rgba(3, 9, 18, .28);
-  --xflow-node-meta-bg: #162131;
-  --xflow-port-bg: #152132;
-  --xflow-port-border: #40536c;
-  --xflow-port-disabled: #71829a;
-  --xflow-port-chip-bg: rgba(91, 140, 255, .14);
-  --xflow-port-chip-border: rgba(112, 161, 255, .36);
-  --xflow-port-text: #a1b0c3;
-  --xflow-edge: #68798f;
-  --xflow-edge-selected: #70a1ff;
-  --xflow-edge-running: #5b8cff;
-  --xflow-edge-error: #ff6b6b;
-  --xflow-edge-label: #c0cddc;
-  --xflow-edge-label-bg: #17202d;
-
-  /* node category tones */
-  --xflow-node-tone-blue: #5b8cff;
-  --xflow-node-tone-cyan: #46c5e8;
-  --xflow-node-tone-green: #48c78e;
-  --xflow-node-tone-amber: #eab85b;
-  --xflow-node-tone-violet: #ae92ff;
-  --xflow-node-tone-blue-text: #9fbaff;
-  --xflow-node-tone-cyan-text: #86dbef;
-  --xflow-node-tone-green-text: #7fdcaf;
-  --xflow-node-tone-amber-text: #f0ce8b;
-  --xflow-node-tone-violet-text: #c5b5ff;
-  --xflow-node-tone-blue-bg: rgba(91, 140, 255, .14);
-  --xflow-node-tone-cyan-bg: rgba(70, 197, 232, .12);
-  --xflow-node-tone-green-bg: rgba(72, 199, 142, .12);
-  --xflow-node-tone-amber-bg: rgba(234, 184, 91, .10);
-  --xflow-node-tone-violet-bg: rgba(174, 146, 255, .12);
-  --xflow-node-tone-blue-border: rgba(112, 161, 255, .45);
-  --xflow-node-tone-cyan-border: rgba(70, 197, 232, .40);
-  --xflow-node-tone-green-border: rgba(72, 199, 142, .42);
-  --xflow-node-tone-amber-border: rgba(234, 184, 91, .40);
-  --xflow-node-tone-violet-border: rgba(174, 146, 255, .40);
-}
-
-.xflow-editor[data-theme-variant="blueprint"][data-theme="light"] {
-  /* surface */
-  --xflow-surface-app: #f6f8fc;
-  --xflow-surface-toolbar: #ffffff;
-  --xflow-surface-panel: #ffffff;
-  --xflow-surface-panel-raised: #f1f5fb;
-  --xflow-surface-field: #ffffff;
-  --xflow-surface-canvas: #f8fafd;
-  --xflow-surface-control: #f4f7fb;
-  --xflow-surface-hover: #ecf3ff;
-  --xflow-surface-overlay: rgba(255, 255, 255, .94);
-  --xflow-surface-overlay-subtle: rgba(248, 250, 253, .88);
-  --xflow-surface-highlight: rgba(255, 255, 255, .82);
-  --xflow-surface-hover-subtle: rgba(49, 109, 255, .06);
-  --xflow-surface-inset-shadow: rgba(27, 43, 63, .08);
-  --xflow-canvas-grid-minor: rgba(61, 87, 119, .06);
-  --xflow-canvas-grid-major: rgba(61, 87, 119, .14);
-  --xflow-canvas-grid-dot: rgba(61, 87, 119, .12);
-  --xflow-canvas-minimap-mask: rgba(246, 249, 253, .88);
-
-  /* content, borders, and focus */
-  --xflow-text: #1b2b3f;
-  --xflow-text-secondary: #50647d;
-  --xflow-text-tertiary: #8191a5;
-  --xflow-border: #d5dfeb;
-  --xflow-border-strong: #b7c7d9;
-  --xflow-focus: #316dff;
-  --xflow-focus-text: #2258d6;
-  --xflow-focus-subtle: rgba(49, 109, 255, .10);
-  --xflow-focus-border: rgba(49, 109, 255, .40);
-  --xflow-focus-border-strong: rgba(49, 109, 255, .66);
-  --xflow-focus-ring: rgba(49, 109, 255, .20);
-
-  /* workflow status */
-  --xflow-status-running: #316dff;
-  --xflow-status-success: #168b63;
-  --xflow-status-warning: #b87700;
-  --xflow-status-error: #cf3c45;
-  --xflow-status-disabled: #a0afc0;
-  --xflow-status-running-text: #2258d6;
-  --xflow-status-success-text: #137652;
-  --xflow-status-warning-text: #8b5900;
-  --xflow-status-error-text: #ae2932;
-  --xflow-status-running-border: rgba(49, 109, 255, .40);
-  --xflow-status-success-border: rgba(22, 139, 99, .38);
-  --xflow-status-warning-border: rgba(184, 119, 0, .38);
-  --xflow-status-error-border: rgba(207, 60, 69, .42);
-  --xflow-status-running-subtle: rgba(49, 109, 255, .10);
-  --xflow-status-success-subtle: rgba(22, 139, 99, .10);
-  --xflow-status-warning-subtle: rgba(184, 119, 0, .10);
-  --xflow-status-error-subtle: rgba(207, 60, 69, .10);
-
-  /* workflow nodes, ports, and edges */
-  --xflow-node-bg: #ffffff;
-  --xflow-node-border: #cbd8e8;
-  --xflow-node-shadow: rgba(27, 43, 63, .10);
-  --xflow-node-meta-bg: #f3f7fc;
-  --xflow-port-bg: #ffffff;
-  --xflow-port-border: #bfd0e3;
-  --xflow-port-disabled: #a0afc0;
-  --xflow-port-chip-bg: rgba(49, 109, 255, .10);
-  --xflow-port-chip-border: rgba(49, 109, 255, .30);
-  --xflow-port-text: #60758d;
-  --xflow-edge: #93a4bb;
-  --xflow-edge-selected: #316dff;
-  --xflow-edge-running: #316dff;
-  --xflow-edge-error: #cf3c45;
-  --xflow-edge-label: #50647d;
-  --xflow-edge-label-bg: #ffffff;
-
-  /* node category tones */
-  --xflow-node-tone-blue: #316dff;
-  --xflow-node-tone-cyan: #078eae;
-  --xflow-node-tone-green: #168b63;
-  --xflow-node-tone-amber: #b87700;
-  --xflow-node-tone-violet: #7154ce;
-  --xflow-node-tone-blue-text: #2258d6;
-  --xflow-node-tone-cyan-text: #08758f;
-  --xflow-node-tone-green-text: #137652;
-  --xflow-node-tone-amber-text: #8b5900;
-  --xflow-node-tone-violet-text: #5f42b8;
-  --xflow-node-tone-blue-bg: rgba(49, 109, 255, .10);
-  --xflow-node-tone-cyan-bg: rgba(7, 142, 174, .10);
-  --xflow-node-tone-green-bg: rgba(22, 139, 99, .10);
-  --xflow-node-tone-amber-bg: rgba(184, 119, 0, .10);
-  --xflow-node-tone-violet-bg: rgba(113, 84, 206, .10);
-  --xflow-node-tone-blue-border: rgba(49, 109, 255, .40);
-  --xflow-node-tone-cyan-border: rgba(7, 142, 174, .38);
-  --xflow-node-tone-green-border: rgba(22, 139, 99, .38);
-  --xflow-node-tone-amber-border: rgba(184, 119, 0, .38);
-  --xflow-node-tone-violet-border: rgba(113, 84, 206, .38);
-  /* Darker than the cyan tone text so the 9px source badge clears 4.5:1. */
-  --xflow-node-source-text: #066377;
-}
-
+@layer xflow.editor {
 .xflow-editor {
-  /* Legacy editor aliases retained while consumers move to the shared contract. */
-  --xflow-editor-app: var(--xflow-surface-app);
-  --xflow-editor-top: var(--xflow-surface-toolbar);
-  --xflow-editor-panel: var(--xflow-surface-panel);
-  --xflow-editor-panel-2: var(--xflow-surface-panel-raised);
-  --xflow-editor-field: var(--xflow-surface-field);
-  --xflow-editor-canvas: var(--xflow-surface-canvas);
-  --xflow-editor-line: var(--xflow-border);
-  --xflow-editor-line-2: var(--xflow-border-strong);
-  --xflow-editor-text: var(--xflow-text);
-  --xflow-editor-muted: var(--xflow-text-tertiary);
-  --xflow-editor-blue: var(--xflow-focus);
-  /*
-   * Derived from the active theme's own disabled fill and text color, so one
-   * definition serves all four themes. The fill is legible as a dot or a
-   * border but not as text — as a glyph color it measures 3.6:1 on the dark
-   * node meta background and 2.1:1 on the light ones, below the 4.5:1 a 10-11px
-   * label needs. The mixed text tone clears 4.5:1 in every theme while staying
-   * in the same muted family, which is what `expired` and the states without an
-   * Ant Design preset are read from.
-   */
-  --xflow-status-disabled-text: color-mix(in srgb, var(--xflow-status-disabled) 50%, var(--xflow-text));
-  --xflow-status-disabled-border: color-mix(in srgb, var(--xflow-status-disabled) 58%, transparent);
-  --xflow-status-disabled-subtle: color-mix(in srgb, var(--xflow-status-disabled) 12%, transparent);
-  --xflow-toolbar-height: 48px;
-  --xflow-panel-rail-width: 52px;
-  --xflow-panel-left-width: 300px;
-  --xflow-panel-right-width: 324px;
-  --xflow-panel-collapsed-width: 44px;
-  --xflow-ruler-x-height: 24px;
-  --xflow-ruler-y-width: 24px;
-  --xflow-ruler-major-step: 100px;
-  --xflow-ruler-mid-step: 50px;
-  --xflow-ruler-minor-step: 10px;
-  --xflow-ruler-tick-major: color-mix(in srgb, var(--xflow-text) 46%, transparent);
-  --xflow-ruler-tick-mid: color-mix(in srgb, var(--xflow-text) 27%, transparent);
-  --xflow-ruler-tick-minor: color-mix(in srgb, var(--xflow-text) 15%, transparent);
-  --xflow-ruler-origin: var(--xflow-status-warning);
-  --xflow-control-height: 28px;
-  --xflow-field-height: 24px;
-  --xflow-control-radius: 6px;
-  --xflow-control-radius-sm: 4px;
-  /* Badges and pills (node type, template, section-card tag). */
-  --xflow-control-radius-pill: 999px;
-  --xflow-popup-shadow: 0 12px 30px var(--xflow-node-shadow);
+  --xflow-editor-toolbar-height: 52px;
+  /* §6.0.1: the rail is a column of its own; the left panel's content area sits
+   * beside it, so the docked left column is rail + content. */
+  --xflow-editor-panel-rail-width: 60px;
+  --xflow-editor-panel-left-content-width: 280px;
+  --xflow-editor-panel-left-width: calc(var(--xflow-editor-panel-rail-width) + var(--xflow-editor-panel-left-content-width));
+  --xflow-editor-panel-right-width: 360px;
+  /* §6.0: every panel title bar, docked or inside a compact drawer. */
+  --xflow-editor-panel-title-height: 40px;
+  /* §6.5: status bar 28 + this drawer; b/c tiers clamp it below. */
+  --xflow-editor-drawer-height: 256px;
+  /* The summary folded under the issue list (below 1280). */
+  --xflow-editor-drawer-side-folded-height: 112px;
+  /* The open drawer sits above the panels (2), the canvas (1) and the preview's
+     floats inside it, and below the compact drawers (12), the Modals and the
+     context menu (1000+). Everything is inside this root's stacking context. */
+  --xflow-editor-dock-z: 10;
+  --xflow-editor-dock-shadow: 0 -12px 30px var(--xflow-shadow);
+  --xflow-editor-popup-shadow: 0 12px 30px var(--xflow-shadow);
   /* Section cards inside a panel body (variables, workflow settings); derived
-     from the theme surfaces so all four themes get them without overrides. */
-  --xflow-section-card-bg: color-mix(in srgb, var(--xflow-surface-panel-raised) 70%, var(--xflow-surface-panel));
-  --xflow-section-card-border: var(--xflow-border);
-  --xflow-section-card-header-bg: var(--xflow-surface-overlay-subtle);
-  --xflow-section-card-radius: var(--xflow-control-radius);
-  --xflow-variable-row-bg: var(--xflow-surface-panel);
-  --xflow-variable-row-hover-border: var(--xflow-border-strong);
+     from the theme surfaces so both appearances get them without overrides. */
+  --xflow-editor-section-card-bg: color-mix(in srgb, var(--xflow-panel-raised) 70%, var(--xflow-panel));
+  --xflow-editor-section-card-border: var(--xflow-border);
+  --xflow-editor-section-card-header-bg: var(--xflow-overlay-subtle);
+  --xflow-editor-section-card-radius: var(--xflow-radius-sm);
+  --xflow-editor-variable-row-bg: var(--xflow-panel);
+  --xflow-editor-variable-row-hover-border: var(--xflow-border-strong);
   /* Node-library source badge ("Runner"); follows the active theme's cyan tone.
-     The light themes override --xflow-node-source-text above for contrast. */
-  --xflow-node-source-text: var(--xflow-node-tone-cyan-text);
-  --xflow-node-source-bg: var(--xflow-node-tone-cyan-bg);
-  --xflow-node-source-border: var(--xflow-node-tone-cyan-border);
-  background: var(--xflow-editor-app);
-  color: var(--xflow-editor-text);
+     The -fg mix is held above 6:1 on the panel in both appearances by
+     tokens.test.ts, which clears the 4.5:1 a 9px label needs. */
+  --xflow-editor-node-source-text: var(--xflow-cyan-fg);
+  --xflow-editor-node-source-bg: var(--xflow-cyan-bg-subtle);
+  --xflow-editor-node-source-border: var(--xflow-cyan-border);
+  background: var(--xflow-app);
+  /* This root is the responsive container: the JS layout tier (xflow-core
+     breakpoints) and every @container rule below read this same box, so an
+     embedded editor collapses with the box it was given, not the window.
+     `container-type` applies layout containment only; the ancestor that makes
+     the root the containing block for the absolutely-positioned canvas context
+     menu is its own `position: relative` below. */
+  container-name: xflow-editor;
+  container-type: inline-size;
+  color: var(--xflow-text);
   display: flex;
   flex-direction: column;
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  /* Same base type as the baseline's .xflow-pv (13/20), set here so the editor
+   * does not depend on whatever the host's body declares. */
+  font-family: var(--xflow-font-sans);
+  font-size: var(--xflow-font-md);
   height: 100vh;
+  line-height: 20px;
   min-height: 720px;
   min-width: 0;
   overflow: hidden;
@@ -472,146 +85,110 @@
 
 .xflow-editor-toolbar {
   align-items: center;
-  background: var(--xflow-editor-top);
-  border-bottom: 1px solid var(--xflow-editor-line);
+  background: var(--xflow-panel);
+  border-bottom: 1px solid var(--xflow-border);
   display: flex;
-  flex: 0 0 var(--xflow-toolbar-height);
-  gap: 12px;
-  justify-content: space-between;
+  flex: 0 0 var(--xflow-editor-toolbar-height);
+  gap: 8px;
   min-width: 0;
   padding: 0 12px;
   position: relative;
 }
 
-.xflow-editor-tool-strip {
-  align-items: center;
-  background: transparent;
-  border: 0;
-  display: flex;
-  gap: 7px;
-  left: 50%;
-  padding: 0;
-  position: absolute;
-  transform: translateX(-50%);
-}
-
-.xflow-editor-tool-group {
-  align-items: center;
-  background: var(--xflow-surface-control);
-  border: 1px solid var(--xflow-editor-line);
-  border-radius: 6px;
-  display: flex;
-  gap: 3px;
-  padding: 3px;
-}
-
-.xflow-editor-tool-strip button {
-  align-items: center;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: 5px;
-  color: var(--xflow-text-secondary);
-  cursor: pointer;
-  display: inline-flex;
-  font-size: 13px;
-  height: 28px;
-  justify-content: center;
-  min-width: 28px;
-  padding: 0 7px;
-}
-
-.xflow-editor-tool-strip button .anticon {
-  font-size: 14px;
-}
-
-.xflow-editor-tool-strip button:hover,
-.xflow-editor-tool-strip button.active,
-.xflow-editor-tool-strip button[aria-pressed="true"] {
-  background: var(--xflow-focus-subtle);
-  border-color: var(--xflow-focus-border);
-  color: var(--xflow-focus-text);
-}
-
-.xflow-editor-tool-strip button:disabled {
-  cursor: not-allowed;
-  opacity: .38;
-}
-
-.xflow-editor-tool-strip button:disabled:hover {
-  background: transparent;
-  border-color: transparent;
-  color: var(--xflow-text-secondary);
-}
-
-.xflow-editor-tool-divider {
-  background: var(--xflow-border-strong);
-  display: block;
-  height: 18px;
-  opacity: .8;
-  width: 1px;
-}
-
 .xflow-editor-toolbar-actions {
   align-items: center;
   display: flex;
-  gap: 10px;
-  margin-left: auto;
+  /* The title owns all of the bar's negative space (it is the only item with
+   * min-width: 0 + ellipsis), so a long name can never push 运行 / 发布 out of
+   * the clipped editor root at 1280. */
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  gap: 8px;
+  margin-left: 0;
   min-width: 0;
   position: relative;
   z-index: 2;
 }
 
-.xflow-editor-toolbar-actions .ant-space {
-  gap: 6px;
-}
-
-.xflow-editor-operation-status {
-  border: 1px solid var(--xflow-border);
-  border-radius: 4px;
-  color: var(--xflow-text-tertiary);
-  font-size: 10.5px;
-  line-height: 20px;
-  padding: 0 7px;
-  white-space: nowrap;
-}
-
-.xflow-editor-toolbar-actions .ant-btn {
+.xflow-editor-history-group {
   align-items: center;
   display: inline-flex;
-  font-size: 12px;
-  gap: 4px;
-  height: 28px;
-  padding-inline: 9px;
+  gap: 8px;
 }
 
-/* Theme controls are editor-specific; Segmented visuals remain ConfigProvider-owned. */
-.xflow-editor-theme-trigger {
+/* The 32px top-bar icon button from the baseline: bare glyph, square hit area. */
+.xflow-editor-icon-button {
   align-items: center;
-  border-color: var(--xflow-border);
+  border-radius: var(--xflow-radius-sm);
   color: var(--xflow-text-secondary);
   display: inline-flex;
-  gap: 4px;
+  font-size: var(--xflow-font-xl);
+  height: var(--xflow-control-height);
+  justify-content: center;
+  min-width: var(--xflow-control-height);
+  padding-inline: 0;
 }
 
-.xflow-editor-theme-trigger:hover,
-.xflow-editor-theme-trigger:focus-visible {
-  border-color: var(--xflow-focus-border-strong);
-  color: var(--xflow-focus);
+.xflow-editor-validate-button {
+  color: var(--xflow-text);
+  font-weight: 500;
 }
 
-.xflow-editor-theme-trigger:focus-visible {
-  outline: 2px solid var(--xflow-focus-ring);
-  outline-offset: 1px;
+.xflow-editor-save-button,
+.xflow-editor-publish-button {
+  font-weight: 500;
 }
 
-.xflow-editor-theme-popover .ant-popover-inner {
-  background: var(--xflow-surface-panel);
-  border: 1px solid var(--xflow-border);
-  box-shadow: 0 12px 30px var(--xflow-node-shadow);
+/* The baseline `.xflow-pv-top-text` pins the label to the body colour, so hover
+ * only moves the border; AntD would turn the text primary. */
+.xflow-editor-save-button:hover,
+.xflow-editor-publish-button:hover {
   color: var(--xflow-text);
 }
 
-.xflow-editor-theme-popover .ant-popover-title {
+.xflow-editor-save-button {
+  gap: 8px;
+}
+
+.xflow-editor-save-button__icon {
+  color: var(--xflow-danger);
+}
+
+/* 运行 split button: joined corners and a 1px on-primary seam, as the baseline
+ * `.xflow-pv-split-btn` pair draws it (§6.3). */
+.xflow-editor-run-split {
+  display: inline-flex;
+}
+
+.xflow-editor-run-split__main {
+  border-end-end-radius: 0;
+  border-start-end-radius: 0;
+}
+
+.xflow-editor-run-split__options {
+  border-end-start-radius: 0;
+  border-inline-start: 1px solid color-mix(in srgb, var(--xflow-on-primary) 30%, transparent);
+  border-start-start-radius: 0;
+  padding-inline: 8px;
+}
+
+.xflow-editor-sep {
+  border-color: var(--xflow-border);
+  height: 20px;
+  margin: 0;
+}
+
+/* Theme controls are editor-specific; Segmented visuals remain ConfigProvider-owned.
+ * The trigger takes the AntD focus ring (theme.ts controlOutline) like the other
+ * top-bar buttons, so it has no focus-visible rule of its own. */
+.xflow-editor-theme-popover__container {
+  background: var(--xflow-panel);
+  border: 1px solid var(--xflow-border);
+  box-shadow: 0 12px 30px var(--xflow-shadow);
+  color: var(--xflow-text);
+}
+
+.xflow-editor-theme-popover__title {
   border-bottom-color: var(--xflow-border);
   color: var(--xflow-text);
 }
@@ -639,213 +216,229 @@
 
 .xflow-editor-theme-settings__label {
   color: var(--xflow-text-secondary);
-  font-size: 12px;
+  font-size: var(--xflow-font-sm);
   font-weight: 600;
 }
 
 .xflow-editor-theme-settings__hint {
   color: var(--xflow-text-tertiary);
-  font-size: 11px;
+  font-size: var(--xflow-font-xs);
   line-height: 1.45;
 }
 
 .xflow-editor-title {
   align-items: center;
   display: flex;
-  gap: 10px;
-  min-width: 0;
+  gap: 8px;
+  /* §6.3: the name may ellipsize, but never below 160px, and the version chip
+   * is flex:none so the clamp never swallows it. */
+  min-width: 160px;
 }
 
-.xflow-editor-title > span {
-  align-items: center;
-  background: var(--xflow-editor-panel-2);
-  border: 1px solid var(--xflow-editor-line-2);
-  border-radius: 6px;
-  color: var(--xflow-editor-blue);
-  display: inline-flex;
-  font-weight: 700;
-  height: 28px;
-  justify-content: center;
-  width: 28px;
-}
-
-.xflow-editor-title strong,
-.xflow-editor-title p {
+.xflow-editor-title strong {
   display: block;
+  flex: 0 1 auto;
+  font-size: var(--xflow-font-xl);
+  font-weight: 600;
   margin: 0;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.xflow-editor-title strong {
-  font-size: 14px;
-}
-
-.xflow-editor-title__heading {
+/* Status / version chip (§6.3, §6.4, §6.10): one 20px pill. Tone colours derive
+ * like the baseline .xflow-pv-chip: 12% fill, 55% border, core -fg foreground. */
+.xflow-editor-chip {
+  --xflow-editor-chip-tone: var(--xflow-neutral);
+  --xflow-editor-chip-fg: var(--xflow-neutral-fg);
   align-items: center;
-  display: flex;
-  gap: 6px;
-  min-width: 0;
+  background: color-mix(in srgb, var(--xflow-editor-chip-tone) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--xflow-editor-chip-tone) 55%, transparent);
+  border-radius: var(--xflow-radius-pill);
+  color: var(--xflow-editor-chip-fg);
+  display: inline-flex;
+  flex: none;
+  font-size: var(--xflow-font-xs);
+  font-weight: 500;
+  gap: 4px;
+  height: 20px;
+  padding: 0 8px;
+  white-space: nowrap;
 }
 
-.xflow-editor-title__heading em {
-  background: var(--xflow-surface-control);
-  border: 1px solid var(--xflow-editor-line);
-  border-radius: 4px;
-  color: var(--xflow-editor-muted);
-  flex: 0 0 auto;
-  font-size: 10px;
-  font-style: normal;
-  line-height: 18px;
-  padding: 0 6px;
+.xflow-editor-chip[data-tone="warning"] {
+  --xflow-editor-chip-fg: var(--xflow-warning-fg);
+  --xflow-editor-chip-tone: var(--xflow-warning);
 }
 
-.xflow-editor-title__heading em.blue {
-  background: var(--xflow-focus-subtle);
-  border-color: var(--xflow-focus-border);
-  color: var(--xflow-focus-text);
+.xflow-editor-chip[data-tone="success"] {
+  --xflow-editor-chip-fg: var(--xflow-success-fg);
+  --xflow-editor-chip-tone: var(--xflow-success);
 }
 
-.xflow-editor-title__heading em.amber {
-  background: var(--xflow-status-warning-subtle);
-  border-color: var(--xflow-status-warning-border);
-  color: var(--xflow-status-warning);
+.xflow-editor-chip[data-tone="info"] {
+  --xflow-editor-chip-fg: var(--xflow-info-fg);
+  --xflow-editor-chip-tone: var(--xflow-info);
 }
 
-.xflow-editor-title p {
-  color: var(--xflow-editor-muted);
-  font-size: 11px;
+.xflow-editor-chip[data-tone="danger"] {
+  --xflow-editor-chip-fg: var(--xflow-danger-fg);
+  --xflow-editor-chip-tone: var(--xflow-danger);
+}
+
+.xflow-editor-chip[data-tone="suspend"] {
+  --xflow-editor-chip-fg: var(--xflow-suspend-fg);
+  --xflow-editor-chip-tone: var(--xflow-suspend);
+}
+
+.xflow-editor-chip__icon {
+  display: inline-flex;
+  font-size: var(--xflow-font-sm);
+}
+
+.xflow-editor-kbd {
+  border: 1px solid var(--xflow-border);
+  border-bottom-width: 2px;
+  border-radius: var(--xflow-radius-xs);
+  color: var(--xflow-text-tertiary);
+  font-family: var(--xflow-font-sans);
+  font-size: var(--xflow-font-xs);
+  font-weight: 500;
+  /* The baseline sets `font: 500 11px ...`, whose shorthand resets the line
+   * height to normal (a 21px key); inheriting the root's 20px would make 22.8. */
+  line-height: normal;
+  padding: 1px 5px;
+}
+
+/* Visually hidden live region: screen readers still announce tool results, and
+ * text assertions keep a target now that the top bar has no visible status em. */
+.xflow-editor-sr-only {
+  border: 0;
+  clip: rect(0, 0, 0, 0);
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  padding: 0;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
 }
 
 .xflow-editor-main {
   display: grid;
   flex: 1 1 auto;
-  grid-template-columns: var(--xflow-panel-left-width) minmax(480px, 1fr) var(--xflow-panel-right-width);
+  grid-template-columns: var(--xflow-editor-panel-left-width) minmax(480px, 1fr) var(--xflow-editor-panel-right-width);
   min-height: 0;
   min-width: 0;
   overflow: hidden;
+  /* The compact left drawer is positioned inside the body, under the top bar. */
+  position: relative;
+  /* §6.0: column widths animate on collapse/expand; the canvas keeps its
+   * viewport (neither the preview nor the editor refits on resize). */
+  transition: grid-template-columns 160ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .xflow-editor-main {
+    transition: none;
+  }
 }
 
 .xflow-editor-main[data-left-collapsed="true"] {
-  grid-template-columns: var(--xflow-panel-rail-width) minmax(480px, 1fr) var(--xflow-panel-right-width);
+  grid-template-columns: var(--xflow-editor-panel-rail-width) minmax(480px, 1fr) var(--xflow-editor-panel-right-width);
 }
 
 .xflow-editor-main[data-right-collapsed="true"] {
-  grid-template-columns: var(--xflow-panel-left-width) minmax(480px, 1fr) var(--xflow-panel-collapsed-width);
+  grid-template-columns: var(--xflow-editor-panel-left-width) minmax(480px, 1fr) 0px;
 }
 
 .xflow-editor-main[data-left-collapsed="true"][data-right-collapsed="true"] {
-  grid-template-columns: var(--xflow-panel-rail-width) minmax(480px, 1fr) var(--xflow-panel-collapsed-width);
+  grid-template-columns: var(--xflow-editor-panel-rail-width) minmax(480px, 1fr) 0px;
+}
+
+/* §6.0: the collapsed inspector leaves the grid entirely; its reopen chip
+ * lives on the canvas, so even the divider must not survive at width 0. */
+.xflow-editor-main[data-right-collapsed="true"] .xflow-editor-right {
+  border-left: 0;
 }
 
 .xflow-editor-left,
 .xflow-editor-right {
-  background: var(--xflow-editor-panel);
+  background: var(--xflow-panel);
   min-height: 0;
   position: relative;
   z-index: 2;
 }
 
 .xflow-editor-left {
-  border-right: 1px solid var(--xflow-editor-line);
+  border-right: 1px solid var(--xflow-border);
   display: flex;
 }
 
 .xflow-editor-right {
-  border-left: 1px solid var(--xflow-editor-line);
+  border-left: 1px solid var(--xflow-border);
   overflow: visible;
-}
-
-.xflow-editor-panel-handle {
-  align-items: center;
-  background: var(--xflow-surface-control);
-  border-color: var(--xflow-border-strong);
-  color: var(--xflow-text-tertiary);
-  display: inline-flex;
-  height: var(--xflow-field-height);
-  justify-content: center;
-  min-width: 20px;
-  padding: 0;
-  position: absolute;
-  top: 50%;
-  z-index: 4;
-}
-
-.xflow-editor-panel-handle:hover {
-  background: var(--xflow-surface-hover);
-  border-color: var(--xflow-border-strong);
-  color: var(--xflow-text);
-}
-
-.xflow-editor-panel-handle .anticon {
-  font-size: 10px;
-}
-
-.xflow-editor-panel-handle--left {
-  right: 0;
-  transform: translate(50%, -50%);
-}
-
-.xflow-editor-panel-handle--right {
-  left: 0;
-  transform: translate(-50%, -50%);
 }
 
 .xflow-editor-rail {
   align-items: center;
-  background: var(--xflow-surface-toolbar);
-  border-right: 1px solid var(--xflow-editor-line);
+  background: var(--xflow-panel);
+  border-right: 1px solid var(--xflow-border);
   display: flex;
-  flex: 0 0 52px;
+  flex: 0 0 var(--xflow-editor-panel-rail-width);
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
   padding: 8px 0;
 }
 
+/* Baseline `.xflow-pv-rail-btn`: 52x48, icon 16 over an 11px caption. */
 .xflow-editor-rail button {
   align-items: center;
   background: transparent;
   border: 0;
-  border-left: 2px solid transparent;
-  color: var(--xflow-editor-muted);
+  border-radius: var(--xflow-radius-sm);
+  color: var(--xflow-text-secondary);
   cursor: pointer;
   display: flex;
+  flex: 0 0 auto;
   flex-direction: column;
-  font-size: 11px;
-  gap: 4px;
+  font-size: var(--xflow-font-xl);
+  gap: 3px;
   height: 48px;
   justify-content: center;
+  padding: 0;
   width: 52px;
 }
 
-.xflow-editor-rail button .anticon {
-  font-size: 15px;
+.xflow-editor-rail button:hover {
+  background: var(--xflow-hover);
+}
+
+.xflow-editor-rail button:focus-visible {
+  box-shadow: 0 0 0 2px var(--xflow-primary-ring);
+  outline: none;
+}
+
+/* The caption only: the AntD icon is also a direct-child span and keeps the
+ * button's 16px. */
+.xflow-editor-rail__text {
+  font-size: var(--xflow-font-xs);
+  line-height: 1;
 }
 
 .xflow-editor-rail button.active {
-  background: var(--xflow-editor-panel);
-  border-left-color: var(--xflow-editor-blue);
-  color: var(--xflow-editor-text);
+  background: color-mix(in srgb, var(--xflow-primary) 14%, transparent);
+  color: var(--xflow-primary);
 }
 
-/* A section that does not exist in the current mode (the node library while
- * previewing) is disabled rather than a key that quietly does nothing. */
-.xflow-editor-rail button:disabled {
-  color: var(--xflow-status-disabled-text);
-  cursor: not-allowed;
-}
-
-/* Pinned to the bottom of the rail so it reads as a workbench utility rather
- * than a third navigation section alongside 节点 / 大纲. */
-.xflow-editor-rail .xflow-editor-rail-help {
-  border-top: 1px solid var(--xflow-editor-line);
-  height: 44px;
-  margin-top: auto;
+/* Pushes 属性 / 帮助 to the bottom of the rail. */
+.xflow-editor-rail__spacer {
+  flex: 1 1 auto;
 }
 
 .xflow-editor-shortcuts__group + .xflow-editor-shortcuts__group {
-  border-top: 1px solid var(--xflow-editor-line);
+  border-top: 1px solid var(--xflow-border);
   margin-top: 12px;
   padding-top: 12px;
 }
@@ -855,7 +448,7 @@
  * without promoting them to full body weight. */
 .xflow-editor-shortcuts__group-title {
   color: var(--xflow-text-secondary);
-  font-size: 11px;
+  font-size: var(--xflow-font-xs);
   font-weight: 600;
   letter-spacing: .06em;
   margin: 0 0 6px;
@@ -875,8 +468,8 @@
 }
 
 .xflow-editor-shortcuts__label {
-  color: var(--xflow-editor-text);
-  font-size: 12px;
+  color: var(--xflow-text);
+  font-size: var(--xflow-font-sm);
 }
 
 .xflow-editor-shortcuts__keys {
@@ -885,20 +478,20 @@
 }
 
 .xflow-editor-shortcuts__keys kbd {
-  background: var(--xflow-surface-field);
-  border: 1px solid var(--xflow-editor-line);
-  border-radius: var(--xflow-control-radius-sm);
+  background: var(--xflow-field);
+  border: 1px solid var(--xflow-border);
+  border-radius: var(--xflow-radius-xs);
   color: var(--xflow-text-secondary);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
+  font-size: var(--xflow-font-xs);
   padding: 2px 6px;
   white-space: nowrap;
 }
 
 .xflow-editor-shortcuts__note {
-  border-top: 1px solid var(--xflow-editor-line);
+  border-top: 1px solid var(--xflow-border);
   color: var(--xflow-text-secondary);
-  font-size: 11px;
+  font-size: var(--xflow-font-xs);
   margin: 12px 0 0;
   padding-top: 12px;
 }
@@ -912,111 +505,91 @@
   overflow: hidden;
 }
 
-.xflow-editor .xflow-editor-panel-card.ant-card {
-  background: var(--xflow-surface-panel);
+.xflow-editor .xflow-editor-panel {
+  background: var(--xflow-panel);
   border: 0;
   border-radius: 0;
-  color: var(--xflow-editor-text);
+  color: var(--xflow-text);
   display: flex;
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
 }
 
-.xflow-editor .xflow-editor-panel-card.ant-card,
-.xflow-editor .xflow-editor-panel-card > .ant-card-head,
-.xflow-editor .xflow-editor-panel-card > .ant-card-body,
-.xflow-editor .xflow-editor-panel-card > .ant-card-head > .ant-card-head-wrapper {
-  border-radius: 0;
-}
-
-.xflow-editor-left__content > .xflow-editor-panel-card.ant-card {
+.xflow-editor-left__content > .xflow-editor-panel,
+.xflow-editor-left__content > .xflow-editor-lib {
   min-width: 0;
 }
 
-.xflow-editor .xflow-editor-panel-card > .ant-card-head {
-  background: var(--xflow-surface-panel-raised);
+/* §6.0.1 dual-zone shell (baseline `.xflow-pv-lib`): 节点 over 大纲, 3:2, a 1px
+ * rule between. Preview has the outline alone, which then fills the column. */
+.xflow-editor-lib {
+  background: var(--xflow-panel);
+  display: grid;
+  grid-template-rows: minmax(0, 3fr) minmax(0, 2fr);
+  min-height: 0;
+  min-width: 0;
+}
+
+.xflow-editor-lib[data-zones="single"] {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+/* The rule between the zones. It follows the `.xflow-editor .xflow-editor-panel`
+ * reset (border: 0) at the same specificity, so it is not reset away. */
+.xflow-editor .xflow-editor-lib[data-zones="dual"] > .xflow-editor-outline {
+  border-top: 1px solid var(--xflow-border);
+}
+
+.xflow-editor-panel-title {
+  align-items: center;
   border-bottom: 1px solid var(--xflow-border);
-  box-shadow: inset 0 1px 0 var(--xflow-surface-highlight);
+  display: flex;
   flex: 0 0 auto;
-  min-height: 42px;
-  padding: 0 10px;
-}
-
-.xflow-editor .xflow-editor-panel-card > .ant-card-head > .ant-card-head-wrapper {
-  min-height: 42px;
-}
-
-.xflow-editor .xflow-editor-panel-card > .ant-card-head .ant-card-head-title {
+  gap: 8px;
+  height: var(--xflow-editor-panel-title-height);
   min-width: 0;
-  padding: 0;
+  padding: 0 8px 0 12px;
 }
 
-.xflow-editor .xflow-editor-panel-card > .ant-card-head .ant-card-extra {
-  margin-inline-start: 8px;
-  padding: 0;
+.xflow-editor-panel-title__actions {
+  display: flex;
+  gap: 2px;
+  margin-left: auto;
 }
 
-.xflow-editor .xflow-editor-panel-card__body {
-  background: var(--xflow-surface-panel);
-  box-shadow: inset 0 1px 0 var(--xflow-surface-inset-shadow);
+.xflow-editor .xflow-editor-panel__body {
+  background: var(--xflow-panel);
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
   padding: 8px 10px 10px;
 }
 
-.xflow-editor-panel-title {
-  align-items: center;
-  display: flex;
-  gap: 8px;
-  min-width: 0;
-}
-
 .xflow-editor-panel-title__icon {
   align-items: center;
-  background: var(--xflow-surface-field);
-  border: 1px solid var(--xflow-port-border);
-  border-radius: 4px;
   color: var(--xflow-text-secondary);
   display: inline-flex;
-  flex: 0 0 22px;
-  height: 22px;
-  justify-content: center;
-  width: 22px;
+  flex: 0 0 auto;
+  font-size: var(--xflow-font-xl);
 }
 
-.xflow-editor-panel-title__icon .anticon {
-  font-size: 13px;
-}
-
-.xflow-editor-panel-title__text {
-  display: grid;
-  gap: 1px;
-  min-width: 0;
-}
-
-.xflow-editor-panel-title__text strong,
-.xflow-editor-panel-title__text span {
-  display: block;
+.xflow-editor-panel-title__heading {
+  color: var(--xflow-text);
+  font-size: var(--xflow-font-lg);
+  font-weight: 600;
+  margin: 0;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.xflow-editor-panel-title__text > strong {
-  color: var(--xflow-text);
-  font-size: 12px;
-  font-weight: 650;
-  line-height: 16px;
-}
-
-.xflow-editor-panel-title__text > span {
+.xflow-editor-panel-title__count {
   color: var(--xflow-text-tertiary);
-  font-size: 10px;
-  font-weight: 500;
-  line-height: 13px;
+  font-size: var(--xflow-font-sm);
+  font-weight: 400;
+  white-space: nowrap;
 }
 
 .xflow-editor-pane {
@@ -1025,8 +598,178 @@
   padding: 10px 12px;
 }
 
-.xflow-editor-library {
-  border-bottom: 1px solid var(--xflow-editor-line);
+/* The library zone: a fixed search row over a scrolling list (baseline
+ * `.xflow-pv-lib-list`), so the panel body does not scroll as a whole. */
+.xflow-editor .xflow-editor-library__body,
+.xflow-editor .xflow-editor-outline__body {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+
+.xflow-editor-library__search {
+  flex: 0 0 auto;
+  padding: 0 12px 10px;
+}
+
+.xflow-editor-library__list,
+.xflow-editor-outline__list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+}
+
+/* The category block (baseline `.xflow-pv-cat`): 28px for the library rows. The
+ * glyph is 16px (`--xflow-font-xl`), the nearest step of the type scale to the
+ * baseline's 15px. */
+.xflow-editor-category-icon {
+  --xflow-editor-category: var(--xflow-neutral);
+  background: color-mix(in srgb, var(--xflow-editor-category) 14%, transparent);
+  border-radius: var(--xflow-radius-sm);
+  color: var(--xflow-editor-category);
+  display: grid;
+  flex: 0 0 28px;
+  font-size: var(--xflow-font-xl);
+  height: 28px;
+  place-items: center;
+  width: 28px;
+}
+
+/* The dense 20px size (baseline `.xflow-pv-cat--sm`) for the outline rows. */
+.xflow-editor-category-icon--sm {
+  border-radius: var(--xflow-radius-xs);
+  flex-basis: 20px;
+  font-size: var(--xflow-font-sm);
+  height: 20px;
+  width: 20px;
+}
+
+/* The outline tree (baseline `.xflow-pv-ol-*`). The list keeps the zone's 8px
+ * gutter; the baseline's extra 20px of head room was for a 需新字段 badge the
+ * editor does not draw. */
+.xflow-editor-outline__empty {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-sm);
+  line-height: 20px;
+  margin: 0;
+  padding: 4px 8px;
+}
+
+.xflow-editor-outline__heading {
+  align-items: center;
+  color: var(--xflow-text-tertiary);
+  display: flex;
+  font-size: var(--xflow-font-xs);
+  font-weight: 600;
+  gap: 6px;
+  line-height: 20px;
+  margin: 8px 4px 2px;
+}
+
+.xflow-editor-outline__bar {
+  background: var(--xflow-editor-category, var(--xflow-neutral));
+  border-radius: var(--xflow-radius-pill);
+  flex: 0 0 auto;
+  height: 10px;
+  width: 3px;
+}
+
+.xflow-editor-outline__count {
+  font-weight: 400;
+  margin-left: auto;
+}
+
+.xflow-editor-outline__port {
+  color: var(--xflow-text-tertiary);
+  font-family: var(--xflow-font-mono);
+  font-size: var(--xflow-font-sm);
+  line-height: 20px;
+  padding: 2px 8px 0;
+}
+
+.xflow-editor-outline__port[data-indent],
+.xflow-editor-outline__item[data-indent] {
+  padding-inline-start: 26px;
+}
+
+.xflow-editor-outline__item {
+  /* The dot reads this; the [data-tone] rules below override it per row. */
+  --xflow-editor-outline-tone: var(--xflow-neutral);
+  align-items: center;
+  border-radius: var(--xflow-radius-sm);
+  color: var(--xflow-text);
+  cursor: pointer;
+  display: flex;
+  font-size: var(--xflow-font-md);
+  font-weight: 400;
+  /* The baseline row is an AntD text Button, which keeps a 1px transparent border. */
+  border: 1px solid transparent;
+  gap: 8px;
+  height: 30px;
+  padding: 0 8px;
+}
+
+.xflow-editor-outline__item:hover {
+  background: var(--xflow-hover);
+}
+
+.xflow-editor-outline__item:focus-visible {
+  box-shadow: 0 0 0 2px var(--xflow-primary-ring);
+  outline: none;
+}
+
+.xflow-editor-outline__item[aria-current="true"] {
+  background: color-mix(in srgb, var(--xflow-primary) 12%, transparent);
+}
+
+.xflow-editor-outline__name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-align: start;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xflow-editor-outline__item[aria-current="true"] .xflow-editor-outline__name {
+  color: var(--xflow-primary);
+  font-weight: 600;
+}
+
+.xflow-editor-outline__sub {
+  color: var(--xflow-text-tertiary);
+  font-family: var(--xflow-font-mono);
+  font-size: var(--xflow-font-xs);
+  margin-inline-start: 4px;
+}
+
+/* The status dot: the tone token of the node's status; pending is a dashed ring. */
+.xflow-editor-outline__dot {
+  background: var(--xflow-editor-outline-tone);
+  border-radius: 50%;
+  flex: 0 0 auto;
+  height: 8px;
+  width: 8px;
+}
+
+.xflow-editor-outline__item[data-tone="info"] { --xflow-editor-outline-tone: var(--xflow-info); }
+.xflow-editor-outline__item[data-tone="success"] { --xflow-editor-outline-tone: var(--xflow-success); }
+.xflow-editor-outline__item[data-tone="warning"] { --xflow-editor-outline-tone: var(--xflow-warning); }
+.xflow-editor-outline__item[data-tone="danger"] { --xflow-editor-outline-tone: var(--xflow-danger); }
+.xflow-editor-outline__item[data-tone="suspend"] { --xflow-editor-outline-tone: var(--xflow-suspend); }
+.xflow-editor-outline__item[data-tone] .xflow-editor-outline__dot {
+  background: var(--xflow-editor-outline-tone);
+}
+
+.xflow-editor-outline__item[data-status="pending"] .xflow-editor-outline__dot {
+  background: transparent;
+  border: 1.5px dashed var(--xflow-editor-outline-tone);
+}
+
+.xflow-editor-outline__item[data-status="skipped"] .xflow-editor-outline__name {
+  color: var(--xflow-text-tertiary);
 }
 
 .xflow-editor-pane__header {
@@ -1042,12 +785,12 @@
 }
 
 .xflow-editor-pane__header strong {
-  font-size: 12px;
+  font-size: var(--xflow-font-sm);
 }
 
 .xflow-editor-pane__header span {
-  color: var(--xflow-editor-muted);
-  font-size: 11px;
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-xs);
   margin-top: 2px;
 }
 
@@ -1062,7 +805,7 @@
   color: var(--xflow-text-tertiary);
   display: inline-flex;
   flex: 0 0 auto;
-  font-size: 12px;
+  font-size: var(--xflow-font-sm);
   min-width: 12px;
   overflow: visible;
   text-overflow: clip;
@@ -1079,10 +822,10 @@
 .xflow-editor-library-title__icon,
 .xflow-editor-pane-title__icon {
   align-items: center;
-  background: var(--xflow-focus-subtle);
-  border: 1px solid var(--xflow-focus-border);
-  border-radius: 5px;
-  color: var(--xflow-focus-text);
+  background: var(--xflow-primary-bg-subtle);
+  border: 1px solid var(--xflow-primary-border);
+  border-radius: var(--xflow-radius-sm);
+  color: var(--xflow-primary-fg);
   display: inline-flex;
   flex: 0 0 24px;
   height: 24px;
@@ -1093,21 +836,11 @@
 
 .xflow-editor-library-title__icon .anticon,
 .xflow-editor-pane-title__icon .anticon {
-  font-size: 14px;
-}
-
-.xflow-editor-library-search-toggle[data-active="true"] {
-  background: var(--xflow-editor-panel-2);
-  border-color: var(--xflow-editor-line-2);
-  color: var(--xflow-editor-blue);
-}
-
-.xflow-editor-library-search {
-  margin-bottom: 1px;
+  font-size: var(--xflow-font-lg);
 }
 
 .xflow-editor-node-group {
-  margin-top: 11px;
+  margin-top: 8px;
 }
 
 .xflow-editor-node-group__title {
@@ -1118,13 +851,19 @@
   cursor: pointer;
   display: flex;
   font: inherit;
-  font-size: 11px;
+  font-size: var(--xflow-font-sm);
+  /* The baseline sets 600 on the whole group row, so the count beside the label
+   * is as heavy as the label itself. */
+  font-weight: 600;
+  gap: 6px;
   justify-content: space-between;
-  margin-bottom: 8px;
+  line-height: 20px;
+  /* The baseline row sits 4px in from the list gutter on both sides (head 255 wide). */
+  margin: 0 4px 4px;
   min-width: 0;
   padding: 0;
   text-align: left;
-  width: 100%;
+  width: calc(100% - 8px);
 }
 
 .xflow-editor-node-group__title:hover {
@@ -1136,25 +875,22 @@
 }
 
 .xflow-editor-node-group__title:focus-visible {
-  border-radius: 3px;
-  outline: 2px solid var(--xflow-focus-ring);
+  border-radius: var(--xflow-radius-xs);
+  outline: 2px solid var(--xflow-primary-ring);
   outline-offset: 2px;
 }
 
 .xflow-editor-node-group__heading {
   align-items: center;
   display: inline-flex;
+  flex: 1 1 auto;
   gap: 8px;
   min-width: 0;
 }
 
 .xflow-editor-node-group__heading .xflow-editor-block-title {
   color: var(--xflow-text-secondary);
-  font-weight: 650;
-}
-
-.xflow-editor-node-group__heading .xflow-editor-block-title .anticon {
-  color: var(--xflow-focus-text);
+  font-weight: 600;
 }
 
 .xflow-editor-node-group__title:hover .xflow-editor-block-title {
@@ -1163,15 +899,14 @@
 
 .xflow-editor-node-group__count {
   color: var(--xflow-text-tertiary);
-  font-family: SFMono-Regular, Consolas, monospace;
-  font-size: 9px;
-  font-weight: 500;
+  font-size: var(--xflow-font-sm);
+  margin-left: auto;
 }
 
 .xflow-editor-node-group__chevron {
   color: var(--xflow-text-tertiary);
   flex: 0 0 auto;
-  font-size: 10px;
+  font-size: var(--xflow-font-xs);
   transition: transform .16s ease;
 }
 
@@ -1186,84 +921,49 @@
   grid-template-columns: minmax(0, 1fr);
 }
 
+/* The baseline library rows are flush: the 58px row is the whole pitch. */
+.xflow-editor-node-list {
+  gap: 0;
+}
+
+/* Baseline `.xflow-pv-lib-item`: a flat row, icon block left, name over hint. */
 .xflow-editor-node-tile {
   align-items: center;
-  background: var(--xflow-surface-field);
-  border: 1px solid var(--xflow-border);
-  border-radius: 5px;
+  background: transparent;
+  /* The baseline row is an AntD text Button, which keeps a 1px transparent
+   * border: 58px tall, icon 17px in from the list's edge. */
+  border: 1px solid transparent;
+  border-radius: var(--xflow-radius-sm);
   color: var(--xflow-text);
-  cursor: pointer;
-  display: grid;
-  grid-template-columns: 25px minmax(0, 1fr) 18px;
-  min-height: 39px;
-  padding: 4px 6px;
-  text-align: left;
+  cursor: grab;
+  display: flex;
+  font-size: var(--xflow-font-md);
+  font-weight: 400;
+  gap: 10px;
+  padding: 8px;
+  text-align: start;
   width: 100%;
 }
 
 .xflow-editor-node-tile:hover {
-  background: var(--xflow-surface-hover);
-  border-color: var(--xflow-border-strong);
-  color: var(--xflow-text);
+  background: var(--xflow-hover);
 }
 
 .xflow-editor-node-tile:focus-visible {
-  border-color: var(--xflow-focus-border-strong);
-  box-shadow: 0 0 0 2px var(--xflow-focus-ring);
+  box-shadow: 0 0 0 2px var(--xflow-primary-ring);
   outline: none;
-}
-
-.xflow-editor-node-tile__icon {
-  align-items: center;
-  background: var(--xflow-node-tone-blue-bg);
-  border: 1px solid var(--xflow-node-tone-blue-border);
-  border-radius: 4px;
-  color: var(--xflow-node-tone-blue-text);
-  display: inline-flex;
-  height: 23px;
-  justify-content: center;
-  width: 23px;
-}
-
-.xflow-editor-node-tile[data-tone="green"] .xflow-editor-node-tile__icon {
-  background: var(--xflow-node-tone-green-bg);
-  border-color: var(--xflow-node-tone-green-border);
-  color: var(--xflow-node-tone-green-text);
-}
-
-.xflow-editor-node-tile[data-tone="cyan"] .xflow-editor-node-tile__icon {
-  background: var(--xflow-node-tone-cyan-bg);
-  border-color: var(--xflow-node-tone-cyan-border);
-  color: var(--xflow-node-tone-cyan-text);
-}
-
-.xflow-editor-node-tile[data-tone="amber"] .xflow-editor-node-tile__icon {
-  background: var(--xflow-node-tone-amber-bg);
-  border-color: var(--xflow-node-tone-amber-border);
-  color: var(--xflow-node-tone-amber-text);
-}
-
-.xflow-editor-node-tile[data-tone="violet"] .xflow-editor-node-tile__icon {
-  background: var(--xflow-node-tone-violet-bg);
-  border-color: var(--xflow-node-tone-violet-border);
-  color: var(--xflow-node-tone-violet-text);
-}
-
-.xflow-editor-node-tile__icon .anticon {
-  color: inherit;
-  font-size: 13px;
 }
 
 .xflow-editor-node-tile__content {
   display: grid;
-  gap: 1px;
+  flex: 1 1 auto;
   min-width: 0;
-  padding: 0 7px;
 }
 
 .xflow-editor-node-tile__content strong,
 .xflow-editor-node-tile__content small {
   display: block;
+  line-height: 20px;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1272,178 +972,43 @@
 
 .xflow-editor-node-tile__content strong {
   color: var(--xflow-text);
-  font-size: 10.5px;
-  font-weight: 650;
-  line-height: 13px;
+  font-weight: 500;
 }
 
 .xflow-editor-node-tile__content small {
   color: var(--xflow-text-tertiary);
-  font-family: SFMono-Regular, Consolas, monospace;
-  font-size: 8.5px;
-  line-height: 11px;
-}
-
-.xflow-editor-node-tile__add {
-  color: var(--xflow-text-tertiary);
-  font-size: 17px;
-  font-weight: 300;
-  line-height: 1;
-  text-align: right;
-}
-
-/* A runner-reported tile gains a column for its source badge. */
-.xflow-editor .xflow-editor-node-tile[data-source="runner"] {
-  grid-template-columns: 25px minmax(0, 1fr) auto 18px;
+  font-size: var(--xflow-font-xs);
 }
 
 .xflow-editor .xflow-editor__node-tile-source {
-  background: var(--xflow-node-source-bg);
-  border-color: var(--xflow-node-source-border);
-  border-radius: var(--xflow-control-radius-sm);
-  color: var(--xflow-node-source-text);
-  font-size: 9px;
+  background: var(--xflow-editor-node-source-bg);
+  border-color: var(--xflow-editor-node-source-border);
+  border-radius: var(--xflow-radius-xs);
+  color: var(--xflow-editor-node-source-text);
+  font-size: var(--xflow-font-xs);
   font-weight: 600;
   line-height: 14px;
+  flex: 0 0 auto;
   margin-inline-end: 0;
   padding-inline: 4px;
 }
 
 .xflow-editor-canvas {
-  background: var(--xflow-surface-canvas);
+  background: var(--xflow-canvas);
   display: flex;
   flex-direction: column;
   min-height: 0;
   min-width: 0;
   position: relative;
   z-index: 1;
+  --xflow-editor-banner-ruler: var(--xflow-ruler);
 }
 
-/* The canvas is a real four-cell ruler grid, not decorative overlays. Keeping
- * the ruler and React Flow surface in the same grid gives both a stable height
- * in the full-screen host and matching 96px major rhythm. */
-/* The canvas ruler follows the fused preview: 10 / 50 / 100 unit tick
- * hierarchy, a visible origin marker, and a shared 100-unit canvas rhythm. */
-.xflow-editor-canvas__frame {
-  display: grid;
-  flex: 1 1 auto;
-  grid-template-columns: var(--xflow-ruler-y-width) minmax(0, 1fr);
-  grid-template-rows: var(--xflow-ruler-x-height) minmax(0, 1fr);
-  height: 100%;
-  min-height: 0;
-  min-width: 0;
-}
-
-.xflow-editor-canvas__ruler-corner {
-  background: var(--xflow-surface-control);
-  border-bottom: 1px solid var(--xflow-border);
-  border-right: 1px solid var(--xflow-border);
-  grid-column: 1;
-  grid-row: 1;
-  position: relative;
-}
-
-.xflow-editor-canvas__ruler-corner::before {
-  border-bottom: 1px solid var(--xflow-ruler-origin);
-  border-right: 1px solid var(--xflow-ruler-origin);
-  bottom: -1px;
-  content: "";
-  height: 7px;
-  opacity: .86;
-  position: absolute;
-  right: -1px;
-  width: 7px;
-}
-
-.xflow-editor-canvas__ruler {
-  background-color: var(--xflow-surface-control);
-  color: var(--xflow-text-tertiary);
-  font-family: SFMono-Regular, Consolas, monospace;
-  font-size: 8px;
-  line-height: 1;
-  overflow: hidden;
-  position: relative;
-  text-rendering: geometricPrecision;
-  user-select: none;
-}
-
-.xflow-editor-canvas__ruler--x {
-  background-image:
-    linear-gradient(90deg, var(--xflow-ruler-tick-major) 0 1px, transparent 1px),
-    linear-gradient(90deg, var(--xflow-ruler-tick-mid) 0 1px, transparent 1px),
-    linear-gradient(90deg, var(--xflow-ruler-tick-minor) 0 1px, transparent 1px);
-  background-position: 0 bottom;
-  background-repeat: repeat-x;
-  background-size:
-    var(--xflow-ruler-major-step) 15px,
-    var(--xflow-ruler-mid-step) 10px,
-    var(--xflow-ruler-minor-step) 6px;
-  border-bottom: 1px solid var(--xflow-border);
-  grid-column: 2;
-  grid-row: 1;
-}
-
-.xflow-editor-canvas__ruler--x::after {
-  background: var(--xflow-ruler-origin);
-  bottom: 0;
-  content: "";
-  height: 18px;
-  left: 0;
-  opacity: .78;
-  position: absolute;
-  width: 1px;
-}
-
-.xflow-editor-canvas__ruler--x span {
-  left: 5px;
-  position: absolute;
-  top: 4px;
-}
-
-.xflow-editor-canvas__ruler--y {
-  background-image:
-    linear-gradient(var(--xflow-ruler-tick-major) 0 1px, transparent 1px),
-    linear-gradient(var(--xflow-ruler-tick-mid) 0 1px, transparent 1px),
-    linear-gradient(var(--xflow-ruler-tick-minor) 0 1px, transparent 1px);
-  background-position: right 0;
-  background-repeat: repeat-y;
-  background-size:
-    15px var(--xflow-ruler-major-step),
-    10px var(--xflow-ruler-mid-step),
-    6px var(--xflow-ruler-minor-step);
-  border-right: 1px solid var(--xflow-border);
-  grid-column: 1;
-  grid-row: 2;
-}
-
-.xflow-editor-canvas__ruler--y::after {
-  background: var(--xflow-ruler-origin);
-  content: "";
-  height: 1px;
-  opacity: .78;
-  position: absolute;
-  right: 0;
-  top: 0;
-  width: 18px;
-}
-
-.xflow-editor-canvas__ruler--y span {
-  left: 5px;
-  position: absolute;
-  top: 6px;
-  writing-mode: vertical-rl;
-}
-
+/* The preview owns the canvas surface: its dot grid, rulers, zoom bar and
+ * minimap (§6.2). The frame only gives it the canvas's full height. */
 .xflow-editor-preview-frame {
-  background-color: var(--xflow-editor-canvas);
-  background-image:
-    linear-gradient(var(--xflow-canvas-grid-minor) 1px, transparent 1px),
-    linear-gradient(90deg, var(--xflow-canvas-grid-minor) 1px, transparent 1px),
-    radial-gradient(circle at 1px 1px, var(--xflow-canvas-grid-dot) 1px, transparent 0);
-  background-size: var(--xflow-ruler-major-step) var(--xflow-ruler-major-step), var(--xflow-ruler-major-step) var(--xflow-ruler-major-step), var(--xflow-ruler-minor-step) var(--xflow-ruler-minor-step);
   display: flex;
-  grid-column: 2;
-  grid-row: 2;
+  flex: 1 1 auto;
   min-height: 0;
   min-width: 0;
   overflow: hidden;
@@ -1461,27 +1026,12 @@
   width: 100%;
 }
 
-.xflow-editor-canvas-status {
-  align-items: center;
-  background: var(--xflow-surface-overlay);
-  border: 1px solid var(--xflow-editor-line);
-  border-radius: 6px;
-  color: var(--xflow-editor-muted);
-  display: flex;
-  gap: 8px;
-  left: 18px;
-  padding: 7px 10px;
-  position: absolute;
-  top: 16px;
-  z-index: 5;
-}
-
 .xflow-editor-canvas-zone {
-  background: var(--xflow-surface-overlay-subtle);
-  border: 1px solid var(--xflow-editor-line);
-  border-radius: 5px;
-  color: var(--xflow-editor-muted);
-  font-size: 10px;
+  background: var(--xflow-overlay-subtle);
+  border: 1px solid var(--xflow-border);
+  border-radius: var(--xflow-radius-xs);
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-xs);
   left: 32px;
   padding: 4px 8px;
   pointer-events: none;
@@ -1498,8 +1048,8 @@
 .xflow-editor-canvas-zone.zone-l1,
 .xflow-editor-canvas-zone.zone-l2,
 .xflow-editor-canvas-zone.zone-l3 {
-  border-color: var(--xflow-focus-border);
-  color: var(--xflow-focus-text);
+  border-color: var(--xflow-primary-border);
+  color: var(--xflow-primary-fg);
   left: auto;
   right: 132px;
 }
@@ -1517,30 +1067,11 @@
 }
 
 .xflow-editor-canvas-zone.zone-error {
-  border-color: var(--xflow-status-error-border);
-  color: var(--xflow-status-error-text);
+  border-color: var(--xflow-danger-border);
+  color: var(--xflow-danger-fg);
   left: auto;
   right: 330px;
   top: 402px;
-}
-
-.xflow-editor-canvas-status span {
-  background: var(--xflow-editor-blue);
-  border-radius: 999px;
-  height: 8px;
-  width: 8px;
-}
-
-.xflow-editor-canvas-status strong {
-  color: var(--xflow-editor-text);
-  font-size: 11px;
-}
-
-.xflow-editor-canvas-status em {
-  border-left: 1px solid var(--xflow-editor-line);
-  font-size: 11px;
-  font-style: normal;
-  padding-left: 8px;
 }
 
 .xflow-editor-preview .xflow-preview-toolbar,
@@ -1560,190 +1091,304 @@
   min-height: 0;
 }
 
-.xflow-editor-preview .xflow-preview-empty {
-  display: none;
-}
-
-.xflow-editor-canvas-context {
-  color: var(--xflow-text-secondary);
-  font-size: 10px;
-}
-
-.xflow-editor-canvas-context i {
-  background: var(--xflow-status-warning);
-  border-radius: 999px;
-  box-shadow: 0 0 0 3px var(--xflow-status-warning-subtle);
-  height: 5px;
-  width: 5px;
-}
-
-.xflow-editor-canvas-context strong {
-  color: var(--xflow-text);
-  font-size: 10px;
-  font-weight: 650;
-}
-
-.xflow-editor-canvas-context span {
-  color: var(--xflow-text-tertiary);
-}
-
-.xflow-editor-empty-canvas {
-  color: var(--xflow-text-secondary);
-  max-width: 340px;
-}
-
-.xflow-editor-empty-canvas__icon {
-  align-items: center;
-  background: var(--xflow-focus-subtle);
-  border: 1px solid var(--xflow-focus-border);
-  border-radius: 999px;
-  box-shadow: 0 0 0 12px color-mix(in srgb, var(--xflow-focus) 3%, transparent), 0 18px 44px var(--xflow-node-shadow);
-  color: var(--xflow-focus-text);
-  display: inline-flex;
-  height: 72px;
-  justify-content: center;
-  margin-bottom: 15px;
-  width: 72px;
-}
-
-.xflow-editor-empty-canvas__icon .anticon {
-  font-size: 23px;
-}
-
-.xflow-editor-empty-canvas h1 {
-  color: var(--xflow-text);
-  font-size: 15px;
-  font-weight: 650;
-  margin: 0;
-}
-
-.xflow-editor-empty-canvas p {
-  color: var(--xflow-text-tertiary);
-  font-size: 11px;
-  line-height: 1.65;
-  margin: 8px 0 14px;
-}
-
-.xflow-editor-empty-canvas button {
-  background: var(--xflow-surface-panel-raised);
-  border: 1px solid var(--xflow-border-strong);
-  border-radius: 5px;
-  color: var(--xflow-text);
-  cursor: pointer;
-  font: inherit;
-  font-size: 11px;
-  font-weight: 600;
-  padding: 6px 10px;
-}
-
-.xflow-editor-empty-canvas button:hover {
-  background: var(--xflow-surface-hover);
-  border-color: var(--xflow-focus-border);
-  color: var(--xflow-focus-text);
-}
-
-.xflow-editor-empty-canvas button:focus-visible {
-  outline: 2px solid var(--xflow-focus-ring);
-  outline-offset: 2px;
-}
-
 .xflow-editor-preview .react-flow {
   background: transparent;
 }
 
-/* The node card itself is owned by @xflow/preview; the editor only maps its
-   palette onto the card's tokens and adds a run-status strip. */
-.xflow-editor-preview .xflow-preview-node {
-  --xflow-preview-node-bg: var(--xflow-node-bg);
-  --xflow-preview-node-border: var(--xflow-node-border);
-  --xflow-preview-node-shadow: 0 10px 24px var(--xflow-node-shadow);
+/* §6.2 top-left float, drawn inside the preview's float chrome. */
+.xflow-editor-canvas-add {
+  color: var(--xflow-text);
 }
 
-/* Status strip only once a run reported something: an idle canvas stays quiet. */
-.xflow-editor-preview .xflow-preview-node:is(
-    [data-status="success"],
-    [data-status="running"],
-    [data-status="waiting"],
-    [data-status="committing"],
-    [data-status="expired"],
-    [data-status="failed"]
-  )::before {
-  background: var(--xflow-status-disabled);
-  /* Inherits the card's own radius: the editor does not own that value. */
-  border-radius: inherit;
-  content: "";
-  height: 2px;
+.xflow-editor-canvas-locate {
+  color: var(--xflow-text-secondary);
+}
+
+/* §6.3 (E2b): the 24px magnifier sits in the same float as 添加节点. */
+.xflow-editor-canvas-locate {
+  font-size: var(--xflow-font-xl);
+  min-width: var(--xflow-control-height-sm);
+  padding-inline: 0;
+}
+
+/* §6.0 inspector reopen chip, in the preview's top-right float chrome. */
+.xflow-editor-canvas-reopen {
+  color: var(--xflow-text);
+}
+
+/* The read-only / preview notice that stands in for the Inspector. */
+.xflow-editor-preview-inspector {
+  font-size: var(--xflow-font-md);
+  padding: 16px;
+}
+
+/* §6.0: the preview notice keeps the inspector title bar, so the panel's
+ * collapse key stays reachable in preview mode. */
+.xflow-editor-preview-inspector__header {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.xflow-editor-preview-inspector__header strong {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.xflow-editor-canvas-mode {
+  align-items: center;
+  color: var(--xflow-text-tertiary);
+  display: flex;
+  font-size: var(--xflow-font-sm);
+  gap: 6px;
+  min-width: 0;
+  padding-inline: 4px;
+}
+
+.xflow-editor-canvas-mode .anticon {
+  color: var(--xflow-text-secondary);
+}
+
+.xflow-editor-canvas-mode strong {
+  color: var(--xflow-text);
+  font-weight: 600;
+}
+
+/* §6.5.1 / §6.10 banners: a stack floating over the canvas's top edge, so the
+ * canvas never changes height and the preview never refits. It starts 8px below
+ * the preview's top floats (ruler + 12px + float height), which would otherwise
+ * be covered; the ruler term is zero while the preview draws no rulers (toggled
+ * off, or an empty canvas), as the floats then sit at 12px. The stack lets
+ * clicks through; only the banners take them. */
+.xflow-editor-canvas:has([data-ruler="false"]) {
+  --xflow-editor-banner-ruler: 0px;
+}
+
+.xflow-editor-banners {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  left: 50%;
+  max-width: min(720px, calc(100% - 24px));
+  pointer-events: none;
+  position: absolute;
+  top: calc(var(--xflow-editor-banner-ruler) + 12px + var(--xflow-float-height) + 8px);
+  transform: translateX(-50%);
+  width: 100%;
+  z-index: 6;
+}
+
+.xflow-editor-banner {
+  --xflow-editor-banner-tone: var(--xflow-border);
+  align-items: center;
+  background: var(--xflow-panel);
+  border: 1px solid var(--xflow-editor-banner-tone);
+  border-radius: var(--xflow-radius-sm);
+  color: var(--xflow-text-secondary);
+  display: flex;
+  font-size: var(--xflow-font-sm);
+  gap: 8px;
+  line-height: 20px;
+  padding: 8px 12px;
+  pointer-events: auto;
+}
+
+.xflow-editor-banner[data-tone="warning"] {
+  --xflow-editor-banner-tone: var(--xflow-warning);
+  border-color: color-mix(in srgb, var(--xflow-warning) 40%, transparent);
+}
+
+.xflow-editor-banner[data-tone="danger"] {
+  --xflow-editor-banner-tone: var(--xflow-danger);
+  border-color: color-mix(in srgb, var(--xflow-danger) 40%, transparent);
+}
+
+.xflow-editor-banner[data-tone="neutral"] {
+  --xflow-editor-banner-tone: var(--xflow-neutral);
+}
+
+.xflow-editor-banner__icon {
+  color: var(--xflow-editor-banner-tone);
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: var(--xflow-font-xl);
+}
+
+.xflow-editor-banner__strong {
+  color: var(--xflow-text);
+  flex: 0 0 auto;
+  font-weight: 600;
+}
+
+.xflow-editor-banner__text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.xflow-editor-banner__actions {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+/* §6.3 run bar: one 34px float on the canvas's top edge, centred on the canvas.
+ * The preview's 添加节点 / 定位 floats sit in their own layer; a bar wider than
+ * the gap between them drops one float row (measured in the editor, the natural
+ * width is not a container threshold), and the banner stack follows it down.
+ * The banner stack starts 8px below this row's float height, so the two never
+ * overlap. */
+.xflow-editor-runbar-row {
+  display: flex;
+  justify-content: center;
   left: 0;
+  pointer-events: none;
   position: absolute;
   right: 0;
-  top: 0;
+  top: calc(var(--xflow-editor-banner-ruler) + 12px);
+  z-index: 5;
 }
 
-.xflow-editor-preview .xflow-preview-node[data-status="success"]::before {
-  background: var(--xflow-status-success);
+.xflow-editor-runbar-row[data-stacked="true"] {
+  top: calc(var(--xflow-editor-banner-ruler) + 12px + var(--xflow-float-height) + 8px);
 }
 
-.xflow-editor-preview .xflow-preview-node[data-status="running"]::before,
-.xflow-editor-preview .xflow-preview-node[data-status="waiting"]::before,
-.xflow-editor-preview .xflow-preview-node[data-status="committing"]::before {
-  background: var(--xflow-status-running);
+.xflow-editor-canvas:has(.xflow-editor-runbar-row[data-stacked="true"]) .xflow-editor-banners {
+  top: calc(
+    var(--xflow-editor-banner-ruler) + 12px + 2 * var(--xflow-float-height) + 16px
+  );
 }
 
-.xflow-editor-preview .xflow-preview-node[data-status="failed"]::before {
-  background: var(--xflow-status-error);
+.xflow-editor-runbar {
+  align-items: center;
+  background: var(--xflow-panel);
+  border: 1px solid var(--xflow-border);
+  border-radius: var(--xflow-radius-md);
+  box-shadow: var(--xflow-elev-2);
+  display: flex;
+  gap: 4px;
+  height: var(--xflow-float-height);
+  max-width: 100%;
+  min-width: 0;
+  padding: 4px;
+  pointer-events: auto;
+  white-space: nowrap;
 }
 
-.xflow-editor-preview .xflow-preview-node__port-chips span {
-  background: var(--xflow-port-chip-bg);
-  border-color: var(--xflow-port-chip-border);
+.xflow-editor-runbar__id {
+  align-items: center;
+  color: var(--xflow-text-tertiary);
+  display: inline-flex;
+  flex: 0 1 auto;
+  font-family: var(--xflow-font-mono);
+  font-size: var(--xflow-font-xs);
+  min-width: 0;
+  white-space: nowrap;
+}
+
+/* Only the id text truncates. A max-width/overflow on the Typography root
+ * would also clip the copy control AntD appends after it, which is how a real
+ * `exec-` + UUID id lost its copy button entirely. */
+.xflow-editor-runbar__id-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xflow-editor-runbar__counts,
+.xflow-editor-runbar__ops {
+  align-items: center;
+  display: flex;
+  gap: 4px;
+}
+
+.xflow-editor-runbar__count {
+  color: var(--xflow-text-secondary);
+  font-weight: 500;
+}
+
+.xflow-editor-runbar__count[data-tone="suspend"] {
+  color: var(--xflow-suspend-fg);
+}
+
+.xflow-editor-runbar__count[data-tone="danger"] {
+  color: var(--xflow-danger-fg);
+}
+
+.xflow-editor-runbar__link {
+  padding-inline: 4px;
+}
+
+.xflow-editor-runbar__tool {
+  color: var(--xflow-text-secondary);
+  font-size: var(--xflow-font-xl);
+  height: 24px;
+  padding: 0;
+  width: 24px;
+}
+
+.xflow-editor-runbar__hint {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-xs);
+  padding-inline: 4px;
+}
+
+/* §6.2 empty canvas card (0 nodes only), matching the reference's empty state. */
+.xflow-editor-empty-canvas {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: center;
+}
+
+.xflow-editor-empty-canvas__icon {
+  background: color-mix(in srgb, var(--xflow-orange) 14%, transparent);
+  border-radius: var(--xflow-radius-sm);
+  color: var(--xflow-orange);
+  display: grid;
+  font-size: var(--xflow-font-xl);
+  height: 28px;
+  place-items: center;
+  width: 28px;
+}
+
+.xflow-editor-empty-canvas__title {
+  color: var(--xflow-text);
+  font-size: var(--xflow-font-md);
+  font-weight: 600;
+  margin: 4px 0 0;
+}
+
+.xflow-editor-empty-canvas__text {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-sm);
+  margin: 0;
+  max-width: 320px;
+}
+
+.xflow-editor-empty-canvas__actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+/* The node card itself is owned by @xflow/preview; the editor only maps its
+   palette onto the card's tokens. */
+.xflow-editor-preview .xflow-preview-node {
+  --xflow-preview-node-bg: var(--xflow-panel);
+  --xflow-preview-node-border: var(--xflow-border);
 }
 
 .xflow-editor-preview .react-flow__edge-text {
-  font-size: 10px;
-  font-weight: 700;
+  font-size: var(--xflow-font-xs);
+  font-weight: 600;
 }
 
-/* .xflow-editor scope out-weighs xyflow's .react-flow__panel.bottom/.right and
- * the preview's .xflow-preview-canvas rules (both 0,2,0). */
-.xflow-editor .xflow-editor-preview .react-flow__minimap {
-  background: var(--xflow-canvas-minimap-mask);
-  border: 1px solid var(--xflow-border-strong);
-  border-radius: var(--xflow-control-radius);
-  bottom: 16px;
-  height: 104px;
-  right: 16px;
-  width: 160px;
-}
 
-/* The svg's width/height are presentation attributes, which any rule overrides. */
-.xflow-editor .xflow-editor-preview .react-flow__minimap-svg {
-  height: 100%;
-  width: 100%;
-}
-
-.xflow-editor-preview .react-flow__controls {
-  background: var(--xflow-surface-overlay);
-  border: 1px solid var(--xflow-editor-line);
-  border-radius: 6px;
-  box-shadow: none;
-}
-
-/* :hover is listed so the preview's .xflow-preview-canvas .react-flow__controls
- * button:hover (0,3,1) cannot repaint the button either. */
-.xflow-editor .xflow-editor-preview .react-flow__controls-button,
-.xflow-editor .xflow-editor-preview .react-flow__controls-button:hover {
-  background: transparent;
-  border-bottom-color: var(--xflow-editor-line);
-  color: var(--xflow-editor-text);
-}
-
-.xflow-editor-preview .react-flow__attribution {
-  display: none;
-}
-
-/* The inspector has its own header contract: one compact identity row,
- * then three equal-width views. It must not inherit the generic two-line panel
- * title because selected-node metadata belongs in the header's trailing slot. */
+/* The inspector is a panel like the others (§6.0 title bar) but its body is a
+ * flex column: the identity row and tabs own the top, the active view scrolls. */
 .xflow-editor-inspector {
   height: 100%;
   min-height: 0;
@@ -1751,8 +1396,8 @@
   padding: 0;
 }
 
-.xflow-editor .xflow-editor-inspector.xflow-editor-panel-card {
-  background: var(--xflow-surface-panel);
+.xflow-editor .xflow-editor-inspector.xflow-editor-panel {
+  background: var(--xflow-panel);
   border-radius: 0;
   height: 100%;
   min-height: 0;
@@ -1760,21 +1405,9 @@
   padding: 0;
 }
 
-.xflow-editor .xflow-editor-inspector > .xflow-editor-panel-card__header {
-  background: var(--xflow-surface-panel-raised);
-  border-radius: 0;
-  flex: 0 0 49px;
-  min-height: 49px;
-  padding: 0 12px;
-}
-
-.xflow-editor .xflow-editor-inspector > .xflow-editor-panel-card__header .ant-card-head-wrapper {
-  min-height: 49px;
-}
-
-.xflow-editor .xflow-editor-inspector > .xflow-editor-panel-card__body,
+.xflow-editor .xflow-editor-inspector > .xflow-editor-panel__body,
 .xflow-editor .xflow-editor-inspector__body {
-  background: var(--xflow-surface-panel);
+  background: var(--xflow-panel);
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
@@ -1783,120 +1416,67 @@
   padding: 0;
 }
 
-.xflow-editor .xflow-editor-inspector .xflow-editor-panel-card__extra {
-  margin-inline-start: 10px;
-}
-
 .xflow-editor-inspector-header-actions {
   align-items: center;
   display: flex;
-  gap: 4px;
+  gap: 2px;
   min-width: 0;
 }
 
-/* Node identity: icon tile, display name, type/template badges, run status. */
-.xflow-editor .xflow-editor-inspector-node {
-  align-items: flex-start;
-  border-bottom: 1px solid var(--xflow-border);
-  display: flex;
-  gap: 10px;
-  padding: 11px 11px 10px;
-}
-
-.xflow-editor .xflow-editor-inspector-node__icon {
+/* Node identity (§6.4): 28px category tile (`.xflow-editor-category-icon`, the
+   same block as the canvas card and the library row), name, status chip, header
+   actions, then the type line across the full width. */
+.xflow-editor .xflow-editor-inspector-head {
   align-items: center;
-  background: var(--xflow-node-tone-blue-bg);
-  border: 1px solid var(--xflow-node-tone-blue-border);
-  border-radius: var(--xflow-control-radius);
-  color: var(--xflow-node-tone-blue-text);
-  display: inline-flex;
-  flex: 0 0 auto;
-  font-size: 15px;
-  height: 30px;
-  justify-content: center;
-  width: 30px;
-}
-
-.xflow-editor .xflow-editor-inspector-node__icon[data-tone="green"] {
-  background: var(--xflow-node-tone-green-bg);
-  border-color: var(--xflow-node-tone-green-border);
-  color: var(--xflow-node-tone-green-text);
-}
-
-.xflow-editor .xflow-editor-inspector-node__icon[data-tone="cyan"] {
-  background: var(--xflow-node-tone-cyan-bg);
-  border-color: var(--xflow-node-tone-cyan-border);
-  color: var(--xflow-node-tone-cyan-text);
-}
-
-.xflow-editor .xflow-editor-inspector-node__icon[data-tone="amber"] {
-  background: var(--xflow-node-tone-amber-bg);
-  border-color: var(--xflow-node-tone-amber-border);
-  color: var(--xflow-node-tone-amber-text);
-}
-
-.xflow-editor .xflow-editor-inspector-node__icon[data-tone="violet"] {
-  background: var(--xflow-node-tone-violet-bg);
-  border-color: var(--xflow-node-tone-violet-border);
-  color: var(--xflow-node-tone-violet-text);
-}
-
-.xflow-editor .xflow-editor-inspector-node__text {
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
-  gap: 4px;
+  display: grid;
+  gap: 4px 10px;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
   min-width: 0;
+  padding: 12px;
 }
 
-.xflow-editor .xflow-editor-inspector-node__text strong {
+.xflow-editor .xflow-editor-inspector-head__name {
   color: var(--xflow-text);
-  font-size: 13px;
-  font-weight: 650;
-  line-height: 18px;
+  font-size: var(--xflow-font-lg);
+  font-weight: 600;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.xflow-editor .xflow-editor-inspector-node__badges {
-  align-items: center;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
+/* size="small" is 24px; the inline editor keeps the icon row's 28px height and
+ * the name's 14/600, so entering rename does not move the row. */
+.xflow-editor .xflow-editor-inspector-head__rename {
+  font-size: var(--xflow-font-lg);
+  font-weight: 600;
+  height: 28px;
   min-width: 0;
 }
 
-.xflow-editor .xflow-editor-inspector-node__type {
-  background: var(--xflow-surface-field);
-  border: 1px solid var(--xflow-border);
-  border-radius: var(--xflow-control-radius-pill);
+.xflow-editor .xflow-editor-inspector-head__type {
   color: var(--xflow-text-tertiary);
   font-family: var(--xflow-font-mono);
-  font-size: 10px;
-  line-height: 15px;
-  max-width: 100%;
+  font-size: var(--xflow-font-xs);
+  grid-column: 1 / -1;
+  line-height: 16px;
+  min-width: 0;
   overflow: hidden;
-  padding: 0 6px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.xflow-editor .xflow-editor-inspector-node__template {
-  background: var(--xflow-node-tone-violet-bg);
-  border: 1px solid var(--xflow-node-tone-violet-border);
-  border-radius: var(--xflow-control-radius-pill);
-  color: var(--xflow-node-tone-violet-text);
-  font-size: 10px;
-  font-style: normal;
-  line-height: 15px;
-  padding: 0 6px;
-  white-space: nowrap;
-}
-
-.xflow-editor .xflow-editor-inspector-node__status {
-  flex: 0 0 auto;
-  margin-inline-start: auto;
+/* Copy / ⋯: square 24px ghost buttons, like the title bar's (§6.0). */
+.xflow-editor .xflow-editor-inspector-head__action {
+  align-items: center;
+  border-radius: var(--xflow-radius-xs);
+  color: var(--xflow-text-secondary);
+  display: inline-flex;
+  font-size: var(--xflow-font-xl);
+  height: var(--xflow-control-height-sm);
+  justify-content: center;
+  min-width: var(--xflow-control-height-sm);
+  padding: 0;
 }
 
 /* The parameters / settings cards: a little more air than the left panel. */
@@ -1913,14 +1493,14 @@
 
 .xflow-editor .xflow-editor-param-source__hint {
   color: var(--xflow-text-tertiary);
-  font-size: 11px;
+  font-size: var(--xflow-font-xs);
   line-height: 16px;
   margin: 0;
 }
 
 .xflow-editor .xflow-editor-param-source .xflow-editor-textarea--code {
   font-family: var(--xflow-font-mono);
-  font-size: 11px;
+  font-size: var(--xflow-font-xs);
   line-height: 17px;
 }
 
@@ -1938,14 +1518,14 @@
   gap: 4px;
 }
 
-.xflow-editor .xflow-editor-param-source__action.ant-btn {
+.xflow-editor .xflow-editor-param-source__action {
   color: var(--xflow-text-secondary);
-  font-size: 11px;
+  font-size: var(--xflow-font-xs);
 }
 
 .xflow-editor .xflow-editor-param-source__error {
-  color: var(--xflow-status-error-text);
-  font-size: 11px;
+  color: var(--xflow-danger-fg);
+  font-size: var(--xflow-font-xs);
   line-height: 16px;
   overflow: hidden;
   text-align: end;
@@ -1953,74 +1533,71 @@
   white-space: nowrap;
 }
 
-.xflow-editor-inspector-tabs {
-  background: var(--xflow-surface-panel-raised);
-  border-bottom: 1px solid var(--xflow-border);
-  display: grid;
-  flex: 0 0 36px;
-  gap: 2px;
-  /* One column per tab, whatever the host or a future tab set adds: the
-     panel is narrow, so a fourth tab must not spill onto a second row. */
-  grid-auto-columns: minmax(0, 1fr);
-  grid-auto-flow: column;
-  margin: 0;
-  padding: 5px 9px;
-}
-
-.xflow-editor-inspector-tabs button {
-  align-items: center;
-  background: transparent;
-  border: 0;
-  border-radius: var(--xflow-control-radius-sm);
-  color: var(--xflow-text-tertiary);
-  cursor: pointer;
-  display: inline-flex;
-  font-size: 11px;
-  justify-content: center;
-  min-width: 0;
-  padding: 0;
-  width: 100%;
-}
-
-.xflow-editor-inspector-tabs button.active {
-  background: var(--xflow-surface-hover);
-  color: var(--xflow-text);
-  font-weight: 650;
-}
-
-.xflow-editor-inspector-tab-label {
-  align-items: center;
-  display: inline-flex;
-  justify-content: center;
+/* Inspector tabs (§6.4): AntD Tabs under the node head. The root fills what the
+   head leaves; the body scrolls on its own so the head and tab row stay put. */
+.xflow-editor .xflow-editor-inspector-tabs {
+  flex: 1 1 auto;
+  min-height: 0;
   min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.xflow-editor-inspector-tabs button:hover {
-  background: var(--xflow-surface-hover-subtle);
-  color: var(--xflow-text);
+.xflow-editor .xflow-editor-inspector-tabs__header {
+  padding-inline: 12px;
 }
 
-.xflow-editor-inspector-tabs button:focus-visible {
-  box-shadow: inset 0 0 0 1px var(--xflow-focus-border-strong), 0 0 0 2px var(--xflow-focus-ring);
-  color: var(--xflow-text);
-  outline: none;
+.xflow-editor .xflow-editor-inspector-tabs__body {
+  height: 100%;
+  overflow: auto;
 }
 
-.xflow-editor-inspector-panel {
+.xflow-editor .xflow-editor-inspector-tabs__content {
+  min-width: 0;
+  padding: 0 12px;
+}
+
+.xflow-editor .xflow-editor-inspector-tabs__content > * {
+  min-width: 0;
+}
+
+/* Nothing selected: the workflow settings fill the panel under its title bar and
+   scroll on their own, like a tab body (same 12px inset). */
+.xflow-editor .xflow-editor-inspector-settings {
   flex: 1 1 auto;
   min-height: 0;
   min-width: 0;
   overflow: auto;
-  padding: 14px 12px 16px;
+  padding: 0 12px;
 }
 
-.xflow-editor-inspector-panel:has(.xflow-editor-inspector-empty) {
-  align-items: center;
+/* The fixed footer (baseline `.xflow-pv-insp-foot`): the block 测试此节点 key under
+   the scrolling tabs. 22px on top leaves room for a badge hanging above it. */
+.xflow-editor .xflow-editor-inspector-foot {
+  border-top: 1px solid var(--xflow-border);
   display: flex;
-  justify-content: center;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 22px 12px 12px;
+}
+
+.xflow-editor .xflow-editor-inspector-tab-label {
+  align-items: center;
+  display: inline-flex;
+  gap: 4px;
+}
+
+.xflow-editor .xflow-editor-inspector-tab-count {
+  color: var(--xflow-text-tertiary);
+}
+
+/* 运行 tab: the latest run failed. */
+.xflow-editor .xflow-editor-inspector-tab-dot {
+  background: var(--xflow-danger);
+  border-radius: var(--xflow-radius-pill);
+  height: 6px;
+  width: 6px;
 }
 
 .xflow-editor-inspector-empty {
@@ -2044,22 +1621,22 @@
   align-items: center;
   color: var(--xflow-text-tertiary);
   display: flex;
-  font-size: 12px;
-  font-weight: 650;
+  font-size: var(--xflow-font-sm);
+  font-weight: 600;
   justify-content: space-between;
   margin: 2px 0 1px;
 }
 
 .xflow-editor-form-section__title .anticon {
   color: var(--xflow-text-tertiary);
-  font-size: 12px;
+  font-size: var(--xflow-font-sm);
 }
 
 .xflow-editor-section-action {
   align-items: center;
   background: transparent;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--xflow-radius-xs);
   color: var(--xflow-text-tertiary);
   cursor: pointer;
   display: inline-flex;
@@ -2070,14 +1647,14 @@
 }
 
 .xflow-editor-section-action:hover {
-  background: var(--xflow-surface-hover);
+  background: var(--xflow-hover);
   color: var(--xflow-text);
 }
 
 .xflow-editor-section-action:focus-visible {
-  background: var(--xflow-focus-subtle);
-  box-shadow: 0 0 0 2px var(--xflow-focus-ring);
-  color: var(--xflow-focus-text);
+  background: var(--xflow-primary-bg-subtle);
+  box-shadow: 0 0 0 2px var(--xflow-primary-ring);
+  color: var(--xflow-primary-fg);
   outline: none;
 }
 
@@ -2090,7 +1667,7 @@
 
 .xflow-editor-form label span {
   color: var(--xflow-text-tertiary);
-  font-size: 12px;
+  font-size: var(--xflow-font-sm);
 }
 
 .xflow-editor-json-field {
@@ -2099,15 +1676,15 @@
   min-width: 0;
 }
 
-.xflow-editor-json-field textarea.ant-input {
-  background: var(--xflow-surface-field);
+.xflow-editor-json-field .xflow-editor-textarea {
+  background: var(--xflow-field);
   line-height: 1.45;
   resize: vertical;
 }
 
 .xflow-editor-json-field > span {
-  color: var(--xflow-status-error-text);
-  font-size: 10px;
+  color: var(--xflow-danger-fg);
+  font-size: var(--xflow-font-xs);
   line-height: 14px;
 }
 
@@ -2119,9 +1696,9 @@
 
 .xflow-editor-rule-row {
   align-items: flex-start;
-  background: var(--xflow-surface-overlay-subtle);
-  border: 1px solid var(--xflow-editor-line);
-  border-radius: 6px;
+  background: var(--xflow-overlay-subtle);
+  border: 1px solid var(--xflow-border);
+  border-radius: var(--xflow-radius-sm);
   display: flex;
   gap: 10px;
   justify-content: space-between;
@@ -2130,13 +1707,13 @@
 }
 
 .xflow-editor-rule-row[data-active="true"] {
-  background: var(--xflow-surface-overlay);
-  border-color: var(--xflow-focus-border);
+  background: var(--xflow-overlay);
+  border-color: var(--xflow-primary-border);
 }
 
 .xflow-editor-rule-row[data-active="true"]::before {
-  background: var(--xflow-editor-blue);
-  border-radius: 999px;
+  background: var(--xflow-primary);
+  border-radius: var(--xflow-radius-pill);
   bottom: 7px;
   content: "";
   left: -1px;
@@ -2151,38 +1728,38 @@
 }
 
 .xflow-editor-rule-row strong {
-  color: var(--xflow-focus-text);
+  color: var(--xflow-primary-fg);
   font-family: SFMono-Regular, Consolas, monospace;
-  font-size: 11px;
+  font-size: var(--xflow-font-xs);
   margin-bottom: 4px;
 }
 
 .xflow-editor-rule-row span {
-  color: var(--xflow-editor-muted);
+  color: var(--xflow-text-tertiary);
   font-family: SFMono-Regular, Consolas, monospace;
-  font-size: 10px;
+  font-size: var(--xflow-font-xs);
   line-height: 1.35;
 }
 
 .xflow-editor-rule-row em {
-  color: var(--xflow-editor-muted);
+  color: var(--xflow-text-tertiary);
   flex: 0 0 auto;
-  font-size: 10px;
+  font-size: var(--xflow-font-xs);
   font-style: normal;
 }
 
 .xflow-editor-empty,
 .xflow-editor-error {
-  font-size: 12px;
+  font-size: var(--xflow-font-sm);
   margin: 0;
 }
 
 .xflow-editor-empty {
-  color: var(--xflow-editor-muted);
+  color: var(--xflow-text-tertiary);
 }
 
 .xflow-editor-error {
-  color: var(--xflow-status-error);
+  color: var(--xflow-danger);
 }
 
 .xflow-editor-connection-list,
@@ -2193,9 +1770,9 @@
 }
 
 .xflow-editor-connection-actions {
-  background: var(--xflow-surface-field);
+  background: var(--xflow-field);
   border: 1px solid var(--xflow-border);
-  border-radius: 4px;
+  border-radius: var(--xflow-radius-xs);
   display: grid;
   gap: 6px;
   padding: 7px;
@@ -2203,7 +1780,7 @@
 
 .xflow-editor-connection-actions > span {
   color: var(--xflow-text-tertiary);
-  font-size: 10.5px;
+  font-size: var(--xflow-font-xs);
 }
 
 .xflow-editor-connection-actions > div {
@@ -2213,30 +1790,30 @@
 }
 
 .xflow-editor-connection-actions button {
-  background: var(--xflow-surface-panel-raised);
+  background: var(--xflow-panel-raised);
   border: 1px solid var(--xflow-border);
-  border-radius: 4px;
+  border-radius: var(--xflow-radius-xs);
   color: var(--xflow-text-secondary);
   cursor: pointer;
   font-family: SFMono-Regular, Consolas, monospace;
-  font-size: 10px;
+  font-size: var(--xflow-font-xs);
   line-height: 19px;
   padding: 0 6px;
 }
 
 .xflow-editor-connection-actions button:hover {
-  background: var(--xflow-surface-hover);
+  background: var(--xflow-hover);
   border-color: var(--xflow-border-strong);
   color: var(--xflow-text);
 }
 
 .xflow-editor-connection-row {
   align-items: center;
-  background: var(--xflow-surface-field);
+  background: var(--xflow-field);
   border: 1px solid var(--xflow-border);
-  border-radius: 4px;
+  border-radius: var(--xflow-radius-xs);
   display: grid;
-  font-size: 10.5px;
+  font-size: var(--xflow-font-xs);
   gap: 6px;
   grid-template-columns: minmax(0, 1fr) auto auto minmax(0, 1fr) auto 20px;
   padding: 6px;
@@ -2254,7 +1831,7 @@
   align-items: center;
   background: transparent;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--xflow-radius-xs);
   color: var(--xflow-text-tertiary);
   cursor: pointer;
   display: inline-flex;
@@ -2265,24 +1842,8 @@
 }
 
 .xflow-editor-connection-delete:hover {
-  background: var(--xflow-status-error-subtle);
-  color: var(--xflow-status-error-text);
-}
-
-.xflow-editor-inspector-delete.ant-btn {
-  align-items: center;
-  color: var(--xflow-text-secondary);
-  display: inline-flex;
-  height: 22px;
-  justify-content: center;
-  min-width: 22px;
-  padding: 0;
-}
-
-/* Out-weighs antd's .ant-btn:not(:disabled):not(.ant-btn-disabled):hover (0,4,0). */
-.xflow-editor .xflow-editor-inspector-delete.ant-btn:not(:disabled):hover {
-  background: var(--xflow-status-error-subtle);
-  color: var(--xflow-status-error-text);
+  background: var(--xflow-danger-bg-subtle);
+  color: var(--xflow-danger-fg);
 }
 
 .xflow-editor-run-list > div {
@@ -2293,484 +1854,423 @@
   padding: 5px 0;
 }
 
-.xflow-editor-run-list span {
-  color: var(--xflow-editor-muted);
-  font-size: 11px;
+/* Row labels only: the status chip is a span too, and its tone foreground must
+ * win over this rule (a bare `.xflow-editor-run-list span` out-specified it). */
+.xflow-editor-run-list > div > span:first-child {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-xs);
 }
 
 .xflow-editor-run-list strong {
   color: var(--xflow-text);
   font-family: SFMono-Regular, Consolas, monospace;
-  font-size: 11px;
+  font-size: var(--xflow-font-xs);
   font-weight: 600;
 }
 
-.xflow-editor-right__strip {
-  align-items: center;
-  color: var(--xflow-editor-muted);
-  display: flex;
-  font-size: 11px;
-  height: 100%;
-  justify-content: center;
-  writing-mode: vertical-rl;
-}
-
-.xflow-editor-diagnostics {
-  background: var(--xflow-surface-panel);
-  border-top: 1px solid var(--xflow-border);
-  flex: 0 0 168px;
-  min-height: 0;
-}
-
-.xflow-editor-diagnostics[data-collapsed="true"] {
-  flex-basis: 36px;
-}
-
-.xflow-editor-diagnostics__bar {
-  align-items: center;
-  background: var(--xflow-surface-panel-raised);
-  border-bottom: 1px solid var(--xflow-border);
-  box-shadow: inset 0 1px 0 var(--xflow-surface-highlight);
-  display: flex;
-  height: 36px;
-  justify-content: space-between;
-  padding: 0 12px;
-}
-
-.xflow-editor-diagnostics__tabs,
-.xflow-editor-diagnostics__status {
-  align-items: center;
-  display: flex;
-  min-width: 0;
-}
-
-.xflow-editor-diagnostics__tabs {
-  gap: 6px;
-}
-
-/* Out-weighs .xflow-editor .xflow-editor-block-title (gap) and the narrow-viewport margin. */
-.xflow-editor .xflow-editor-diagnostics__tabs strong {
-  color: var(--xflow-text);
-  font-size: 11px;
-  font-weight: 600;
-  gap: 6px;
-  margin-right: 8px;
-}
-
-.xflow-editor .xflow-editor-diagnostics__tab {
-  align-items: center;
-  border-radius: var(--xflow-control-radius-sm);
-  display: inline-flex;
-  font-size: 11px;
-  gap: 4px;
-  height: 20px;
-  padding: 0 8px;
-}
-
-.xflow-editor-diagnostics__tabs button {
-  align-items: center;
-  background: transparent;
-  border: 0;
-  border-radius: 4px;
-  color: var(--xflow-text-tertiary);
-  cursor: pointer;
-  display: inline-flex;
-  font-size: 11px;
-  gap: 5px;
-  height: 20px;
-  padding: 0 8px;
-}
-
-.xflow-editor-diagnostics__tabs .active,
-.xflow-editor-diagnostics__tabs button:hover:not(:disabled) {
-  background: var(--xflow-surface-hover);
-  color: var(--xflow-text);
-}
-
-.xflow-editor-diagnostics__tabs button:disabled {
-  background: transparent;
-  color: var(--xflow-text-tertiary);
-  cursor: not-allowed;
-}
-
-.xflow-editor-diagnostics__tabs button:focus-visible {
-  box-shadow: inset 0 0 0 1px var(--xflow-focus-border-strong), 0 0 0 2px var(--xflow-focus-ring);
-  color: var(--xflow-text);
-  outline: none;
-}
-
-/* Scoped so the narrow-viewport gap override does not shrink the status row. */
-.xflow-editor .xflow-editor-diagnostics__status {
-  color: var(--xflow-text-tertiary);
-  font-size: 10.5px;
-  gap: 12px;
-}
-
-.xflow-editor-diagnostics__status > span {
-  align-items: center;
-  display: inline-flex;
-  gap: 4px;
-  white-space: nowrap;
-}
-
-.xflow-editor-diagnostics__status .ok,
-.xflow-editor-diagnostics-log .ok {
-  color: var(--xflow-status-success-text);
-}
-
-.xflow-editor-diagnostics__status .warn,
-.xflow-editor-diagnostics-log .warn {
-  color: var(--xflow-status-warning-text);
-}
-
-.xflow-editor-diagnostics__status .error,
-.xflow-editor-diagnostics-log .error {
-  color: var(--xflow-status-error-text);
-}
-
-.xflow-editor-diagnostics-toggle {
-  align-items: center;
-  background: var(--xflow-surface-control);
-  border: 1px solid var(--xflow-border);
-  border-radius: 4px;
-  color: var(--xflow-text-tertiary);
-  cursor: pointer;
-  display: inline-flex;
-  flex: 0 0 24px;
-  height: 24px;
-  justify-content: center;
-  line-height: 1;
-  padding: 0;
-  width: 24px;
-}
-
-.xflow-editor-diagnostics-toggle:hover {
-  background: var(--xflow-surface-hover);
-  border-color: var(--xflow-border-strong);
-  color: var(--xflow-text);
-}
-
-.xflow-editor-diagnostics-toggle:focus-visible {
-  border-color: var(--xflow-focus-border-strong);
-  box-shadow: 0 0 0 2px var(--xflow-focus-ring);
-  color: var(--xflow-text);
-  outline: none;
-}
-
-.xflow-editor-diagnostics-toggle .anticon {
-  font-size: 11px;
-}
-
-.xflow-editor-diagnostics__body {
-  background: var(--xflow-surface-app);
-  display: grid;
-  gap: 0;
-  grid-template-columns: minmax(0, 1fr) 310px 300px;
-  height: calc(100% - 36px);
-  overflow: hidden;
-  font-size: 11px;
-}
-
-.xflow-editor-diagnostics__body section {
-  background: var(--xflow-surface-panel);
-  border-left: 1px solid var(--xflow-border);
-  overflow: auto;
-  padding: 12px;
-}
-
-.xflow-editor-diagnostics__body section:first-child {
-  border-left: 0;
-}
-
-.xflow-editor-diagnostics-log {
-  display: flex;
+/* Run-tab blocks that need the full width (错误详情 / 输出): the row stops being
+ * a label–value split and stacks its content under the label. */
+.xflow-editor-run-list > .xflow-editor-run-list__stack {
+  align-items: stretch;
   flex-direction: column;
-  gap: 7px;
+  gap: 4px;
 }
 
-.xflow-editor-diagnostics-log p,
-.xflow-editor-diagnostics-run p {
-  color: var(--xflow-text-secondary);
-  font-family: SFMono-Regular, Consolas, monospace;
-  font-size: 11px;
-  line-height: 1.45;
+.xflow-editor-run-kv {
+  display: grid;
+  font-size: var(--xflow-font-sm);
+  gap: 6px 10px;
+  grid-template-columns: 84px minmax(0, 1fr);
   margin: 0;
 }
 
-.xflow-editor-diagnostics-log p {
-  border-bottom: 1px solid var(--xflow-border);
-}
-
-.xflow-editor-diagnostics-log p > span {
-  display: inline-block;
-  min-width: 78px;
-}
-
-.xflow-editor-diagnostics-log p > span:nth-child(2) {
+.xflow-editor-run-kv dt {
   color: var(--xflow-text-tertiary);
+  font-family: var(--xflow-font-mono);
 }
 
-/* The issue pane sits flush: its title spans the pane and the list carries the
- * padding, so it opts out of the generic section padding and gap. */
-.xflow-editor .xflow-editor-diagnostics-log {
-  gap: 0;
-  padding: 0;
-}
-
-.xflow-editor .xflow-editor-diagnostics-summary,
-.xflow-editor .xflow-editor-diagnostics-run {
-  padding: 8px 12px;
-}
-
-.xflow-editor-diagnostics-log__list {
-  padding: 8px 12px;
-}
-
-.xflow-editor .xflow-editor-diagnostics-waiting {
-  border-bottom-width: 0;
-  padding-block: 4px;
-}
-
-.xflow-editor .xflow-editor-diagnostics-log__row {
-  display: grid;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-  font-size: 10.5px;
-  gap: 8px;
-  grid-template-columns: 74px 74px minmax(0, 1fr);
-  line-height: 16px;
-  padding-block: 4px;
-}
-
-.xflow-editor .xflow-editor-diagnostics-log__row:last-child {
-  border-bottom-width: 0;
-}
-
-/* Status and area cells fit their grid tracks instead of the 78px inline cells. */
-.xflow-editor .xflow-editor-diagnostics-log__row > span:not(:last-child) {
-  min-width: 0;
-}
-
-.xflow-editor-diagnostics-section-title {
-  align-items: center;
-  color: var(--xflow-text-tertiary);
-  display: flex;
-  font-size: 10.5px;
-  justify-content: space-between;
-  margin-bottom: 8px;
-}
-
-.xflow-editor-diagnostics__body .xflow-editor-diagnostics-section-title {
-  background: var(--xflow-surface-panel-raised);
-  border-bottom-color: var(--xflow-border);
+.xflow-editor-run-kv dd {
   color: var(--xflow-text-secondary);
+  font-family: var(--xflow-font-mono);
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
-.xflow-editor .xflow-editor-diagnostics-log > .xflow-editor-diagnostics-section-title {
-  border-bottom: 1px solid var(--xflow-border);
-  height: 28px;
-  margin-bottom: 0;
-  padding: 0 12px;
-}
-
-.xflow-editor .xflow-editor-diagnostics-run > .xflow-editor-diagnostics-section-title {
-  margin-bottom: 4px;
-}
-
-.xflow-editor-diagnostics-meter {
-  margin-bottom: 8px;
-}
-
-.xflow-editor-diagnostics-meter div {
-  align-items: center;
-  display: flex;
-  font-size: 11px;
-  justify-content: space-between;
-  margin-bottom: 5px;
-}
-
-.xflow-editor-diagnostics-meter i {
-  background: var(--xflow-editor-blue);
-  border-radius: 999px;
-  display: block;
-  height: 100%;
-}
-
-.xflow-editor-diagnostics-meter::after {
-  background: var(--xflow-surface-control);
-  border-radius: 999px;
-  content: "";
-  display: block;
-  height: 6px;
-  margin-top: -6px;
-  position: relative;
-  z-index: 0;
-}
-
-.xflow-editor-diagnostics-meter i {
-  height: 6px;
-  position: relative;
-  z-index: 1;
-}
-
-.xflow-editor-diagnostics-meter i.green {
-  background: var(--xflow-status-success);
-}
-
-.xflow-editor-diagnostics-kv {
-  align-items: center;
-  border-top: 1px solid var(--xflow-border);
-  color: var(--xflow-text-tertiary);
-  display: flex;
-  font-size: 10.5px;
-  justify-content: space-between;
-  margin-top: 8px;
-  padding-top: 8px;
-}
-
-.xflow-editor-diagnostics-kv strong {
-  color: var(--xflow-editor-text);
-  font-weight: 600;
-}
-
-.xflow-editor-diagnostics-dsl {
-  background: var(--xflow-surface-field);
+.xflow-editor-run-code {
+  background: var(--xflow-field);
   border: 1px solid var(--xflow-border);
-  border-radius: 4px;
+  border-radius: var(--xflow-radius-sm);
   color: var(--xflow-text-secondary);
-  font-family: SFMono-Regular, Consolas, monospace;
-  font-size: 10px;
-  line-height: 1.45;
-  margin: 10px 0 0;
-  max-height: 48px;
+  font-family: var(--xflow-font-mono);
+  font-size: var(--xflow-font-sm);
+  line-height: 18px;
+  margin: 0;
   overflow: auto;
-  padding: 7px;
+  padding: 10px 12px;
   white-space: pre;
 }
 
-.xflow-editor-diagnostics-issue {
-  align-items: center;
-  background: var(--xflow-status-warning-subtle);
-  border: 1px solid var(--xflow-status-warning-border);
-  border-radius: 5px;
-  color: var(--xflow-status-warning-text);
+/* §6.5 bottom dock: the 28px status bar (one button) over the 256px drawer, both
+ * spanning the three workbench columns like the baseline's .xflow-pv-bottom.
+ * The drawer is positioned against the editor root, not this footer, so that
+ * `expanded` can stretch it up to the toolbar's lower edge as an overlay. The
+ * footer keeps the same footprint in docked and expanded (border + strip +
+ * drawer), which is why the canvas row never changes height and nothing refits. */
+.xflow-editor-bottom {
+  background: var(--xflow-panel);
+  border-top: 1px solid var(--xflow-border);
   display: flex;
-  font-size: 11px;
-  gap: 7px;
-  margin-top: 4px;
-  padding: 7px 8px;
+  flex: 0 0 auto;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
 }
 
-.xflow-editor-diagnostics-run {
+.xflow-editor-bottom[data-dock="docked"],
+.xflow-editor-bottom[data-dock="expanded"] {
+  height: calc(1px + 28px + var(--xflow-editor-drawer-height));
+  /* A host shorter than bar + dock (tier a has no viewport clamp) must not push
+   * the strip out from under the toolbar: the footer never outgrows the room
+   * below the bar. */
+  max-height: calc(100% - var(--xflow-editor-toolbar-height));
+}
+
+.xflow-editor-statusbar {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--xflow-text-secondary);
+  cursor: pointer;
+  display: flex;
+  flex: 0 0 28px;
+  font: inherit;
+  font-size: var(--xflow-font-sm);
+  gap: 12px;
+  height: 28px;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0 12px;
+  text-align: start;
+  width: 100%;
+}
+
+.xflow-editor-statusbar:hover {
+  background: var(--xflow-hover);
+}
+
+.xflow-editor-statusbar:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--xflow-primary-border-strong), inset 0 0 0 3px var(--xflow-primary-ring);
+  outline: none;
+}
+
+.xflow-editor-statusbar__item {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.xflow-editor-statusbar__item .anticon {
+  font-size: var(--xflow-font-lg);
+}
+
+.xflow-editor-statusbar__item[data-tone="success"] {
+  color: var(--xflow-success);
+}
+
+.xflow-editor-statusbar__item[data-tone="warning"] {
+  color: var(--xflow-warning);
+}
+
+.xflow-editor-statusbar__item[data-tone="danger"] {
+  color: var(--xflow-danger);
+}
+
+.xflow-editor-statusbar__sep {
+  align-self: center;
+  background: var(--xflow-border);
+  flex: 0 0 1px;
+  height: 14px;
+}
+
+/* The baseline `.xflow-pv-mono` value: mono, in the strip's own secondary colour. */
+.xflow-editor-statusbar__run {
+  color: inherit;
+  font-family: var(--xflow-font-mono);
+}
+
+.xflow-editor-statusbar__spacer {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.xflow-editor-statusbar__stats {
+  color: var(--xflow-text-tertiary);
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* The drawer is 256px: a 40px title bar over the issue list and a 360px summary
+ * column. Compact tiers clamp the height below so a short viewport keeps its canvas. */
+.xflow-editor-drawer {
+  background: var(--xflow-panel);
+  border-top: 1px solid var(--xflow-border);
+  bottom: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  grid-template-rows: var(--xflow-editor-panel-title-height) minmax(0, 1fr);
+  /* Short host: the drawer gives way before it covers the toolbar or the strip
+   * (the root is the containing block, so 100% is the editor's own height). */
+  height: min(var(--xflow-editor-drawer-height), calc(100% - var(--xflow-editor-toolbar-height) - 29px));
+  left: 0;
+  min-height: 0;
+  min-width: 0;
+  position: absolute;
+  right: 0;
+  transition: height 160ms ease, box-shadow 160ms ease;
+  z-index: var(--xflow-editor-dock-z);
+}
+
+/* Expanded: the drawer's upper edge is the toolbar's lower edge, full width. The
+ * workbench underneath keeps its size and is only covered. */
+.xflow-editor-drawer[data-dock="expanded"] {
+  box-shadow: var(--xflow-editor-dock-shadow);
+  height: calc(100% - var(--xflow-editor-toolbar-height));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .xflow-editor-drawer {
+    transition: none;
+  }
+}
+
+.xflow-editor .xflow-editor-drawer__head {
+  gap: 16px;
+  grid-column: 1 / -1;
+}
+
+.xflow-editor-drawer__title {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+  min-width: 0;
+}
+
+.xflow-editor .xflow-editor-diagnostics-tabs {
+  flex: 0 1 auto;
+  height: var(--xflow-editor-panel-title-height);
+  min-width: 0;
+}
+
+.xflow-editor .xflow-editor-diagnostics-tabs__body,
+.xflow-editor .xflow-editor-diagnostics-tabs__content {
+  display: none;
+}
+
+.xflow-editor-issues {
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+}
+
+.xflow-editor-issues__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.xflow-editor-issues__empty {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-sm);
+  margin: 0;
+  padding: 8px 12px;
+}
+
+.xflow-editor-issue {
+  align-items: center;
+  border-bottom: 1px solid var(--xflow-border);
+  display: grid;
+  font-size: var(--xflow-font-md);
+  gap: 10px;
+  grid-template-columns: 20px 160px minmax(0, 1fr) auto;
+  padding: 8px 12px;
+}
+
+.xflow-editor-issue:hover {
+  background: var(--xflow-hover);
+}
+
+/* Tone sits on the wrapper: an unlayered `.anticon { color: inherit }` from the
+ * icon package beats every @layer, so a colour on the icon itself would be lost. */
+.xflow-editor-issue__sev {
+  color: var(--xflow-text-secondary);
+  display: inline-flex;
+  font-size: var(--xflow-font-xl);
+}
+
+.xflow-editor-issue[data-tone="danger"] .xflow-editor-issue__sev {
+  color: var(--xflow-danger);
+}
+
+.xflow-editor-issue[data-tone="warning"] .xflow-editor-issue__sev {
+  color: var(--xflow-warning);
+}
+
+.xflow-editor-issue[data-tone="success"] .xflow-editor-issue__sev {
+  color: var(--xflow-success);
+}
+
+.xflow-editor-issue__target,
+.xflow-editor-issue__text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.xflow-editor-issue__target {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xflow-editor-issue__actions {
+  align-items: center;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  justify-content: flex-end;
+}
+
+.xflow-editor .xflow-editor-issue__action {
+  font-size: var(--xflow-font-sm);
+  padding-inline: 4px;
+}
+
+.xflow-editor-issues__pass {
+  align-items: center;
+  color: var(--xflow-text-tertiary);
+  display: flex;
+  font-size: var(--xflow-font-sm);
+  gap: 8px;
+  padding: 8px 12px;
+}
+
+.xflow-editor-issues__ok {
+  color: var(--xflow-success);
+  display: inline-flex;
+  font-size: var(--xflow-font-xl);
+}
+
+.xflow-editor-issues__pass-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.xflow-editor-drawer__side {
+  border-left: 1px solid var(--xflow-border);
   display: flex;
   flex-direction: column;
   gap: 6px;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+  padding: 10px 12px;
 }
 
-.xflow-editor-diagnostics-run > div:not(.xflow-editor-diagnostics-section-title) {
-  align-items: center;
-  display: flex;
-  font-size: 10.5px;
-  justify-content: space-between;
+.xflow-editor-drawer__side-title {
+  color: var(--xflow-text-secondary);
+  font-size: var(--xflow-font-sm);
+  font-weight: 600;
+  line-height: 16px;
+  margin: 0 0 4px;
 }
 
-.xflow-editor-diagnostics-run span {
-  color: var(--xflow-editor-muted);
+/* Keys hold at most four characters (节点 / 命中分支), so the key column stays
+ * narrow and hands the rest to the values; 16px rows keep both lists inside 256. */
+.xflow-editor-kvlist {
+  display: grid;
+  font-size: var(--xflow-font-sm);
+  gap: 4px 10px;
+  grid-template-columns: 62px minmax(0, 1fr);
+  line-height: 16px;
+  margin: 0;
 }
 
-.xflow-editor-diagnostics-run strong,
-.xflow-editor-diagnostics-run code {
-  color: var(--xflow-editor-text);
-  font-family: SFMono-Regular, Consolas, monospace;
-  font-size: 11px;
+.xflow-editor-kvlist dt {
+  color: var(--xflow-text-tertiary);
 }
 
-.xflow-editor-diagnostics-run strong[data-status="running"] {
-  color: var(--xflow-focus-text);
+.xflow-editor-kvlist dd {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.xflow-editor-diagnostics-run strong[data-status="success"] {
-  color: var(--xflow-status-success);
+/* The node mix wraps rather than ellipsizing, and only on a `·`: each category
+ * is its own nowrap span and the separator's trailing space is the one break. */
+.xflow-editor-kvlist dd.xflow-editor-kvlist__wrap {
+  white-space: normal;
 }
 
-.xflow-editor-diagnostics-run strong[data-status="failed"] {
-  color: var(--xflow-status-error);
+.xflow-editor-kvlist__mix {
+  white-space: nowrap;
 }
 
-.xflow-editor-diagnostics-run p {
-  align-items: center;
-  border-top: 1px solid var(--xflow-border);
-  display: flex;
-  font-size: 10px;
-  gap: 6px;
-  margin-top: 4px;
-  padding-top: 8px;
+.xflow-editor-kvlist dd.xflow-editor-kvlist__mono {
+  font-family: var(--xflow-font-mono);
 }
 
-/* Keep the desktop workspace dense, but let the editor become a vertical document
- * before the three fixed desktop columns can force the viewport wider. */
-@media (max-width: 1120px) {
-  .xflow-editor {
-    height: auto;
-    max-width: 100%;
-    min-height: 100dvh;
-    overflow-x: clip;
-    overflow-y: visible;
-  }
-
+/* Compact workspace (xflow-core breakpoints.compact): the toolbar wraps and the
+ * desktop columns give way before they can force the editor wider. The query
+ * reads the editor's own container width, the same box the JS layout tier
+ * measures. The root's own box is owned by the [data-layout="c"] rules below;
+ * a container query cannot style its own container. */
+@container xflow-editor (width < 1280px) {
   .xflow-editor-toolbar {
-    align-items: flex-start;
-    flex: 0 0 auto;
-    flex-wrap: wrap;
+    align-items: center;
+    flex: 0 0 var(--xflow-editor-toolbar-height);
+    flex-wrap: nowrap;
     gap: 8px;
-    min-height: 48px;
-    padding: 8px 10px;
+    padding: 0 12px;
   }
 
   .xflow-editor-title {
-    flex: 1 1 280px;
+    flex: 0 1 auto;
   }
 
-  .xflow-editor-title > div,
-  .xflow-editor-toolbar > *,
+  /* The back button and the mode switch are fixed controls: their content is
+   * never squeezed, so the title pays for a long name down to its 160px floor
+   * instead and the 预览 label cannot paint under the actions cluster. */
+  .xflow-editor-toolbar > .xflow-editor-icon-button,
+  .xflow-editor-toolbar > .xflow-editor-mode-segmented {
+    flex: none;
+  }
+
+  .xflow-editor-toolbar > *:not(.xflow-editor-title),
   .xflow-editor-main > * {
     min-width: 0;
   }
 
-  .xflow-editor-tool-strip {
-    flex: 1 1 100%;
-    flex-wrap: wrap;
-    justify-content: center;
-    left: auto;
-    max-width: 100%;
-    order: 3;
-    position: static;
-    transform: none;
-  }
-
+  /* The actions cluster never wraps and never yields either: with the fixed
+   * controls above, the title is the only item that pays for a long name, so
+   * 运行 / 发布 stay inside the bar at every width >= 720 (E0 left 运行 clipped
+   * at 802-925). */
   .xflow-editor-toolbar-actions {
-    flex: 1 1 100%;
-    flex-wrap: wrap;
-    justify-content: flex-start;
+    flex: 0 0 auto;
+    flex-wrap: nowrap;
+    justify-content: flex-end;
     margin-left: 0;
-    max-width: 100%;
+    max-width: none;
   }
 
-  .xflow-editor-toolbar-actions .ant-space {
-    display: flex;
-    flex: 1 1 auto;
-    flex-wrap: wrap;
-    min-width: 0;
-  }
-
-  .xflow-editor-integration-notice {
-    min-width: 0;
-    overflow-wrap: anywhere;
-  }
-
-  .xflow-editor-main,
-  .xflow-editor-main[data-left-collapsed="true"],
-  .xflow-editor-main[data-right-collapsed="true"],
-  .xflow-editor-main[data-left-collapsed="true"][data-right-collapsed="true"] {
+  .xflow-editor[data-layout="c"] .xflow-editor-main,
+  .xflow-editor[data-layout="c"] .xflow-editor-main[data-left-collapsed="true"],
+  .xflow-editor[data-layout="c"] .xflow-editor-main[data-right-collapsed="true"],
+  .xflow-editor[data-layout="c"] .xflow-editor-main[data-left-collapsed="true"][data-right-collapsed="true"] {
     flex: 0 0 auto;
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto minmax(360px, 60vh) auto;
@@ -2778,49 +2278,33 @@
     min-width: 0;
   }
 
-  .xflow-editor-left,
-  .xflow-editor-right {
+  .xflow-editor[data-layout="c"] .xflow-editor-left,
+  .xflow-editor[data-layout="c"] .xflow-editor-right {
     min-width: 0;
     width: 100%;
   }
 
-  .xflow-editor-left {
-    border-bottom: 1px solid var(--xflow-editor-line);
+  .xflow-editor[data-layout="c"] .xflow-editor-left {
+    border-bottom: 1px solid var(--xflow-border);
     border-right: 0;
   }
 
-  .xflow-editor-right {
+  .xflow-editor[data-layout="c"] .xflow-editor-right {
     border-left: 0;
-    border-top: 1px solid var(--xflow-editor-line);
+    border-top: 1px solid var(--xflow-border);
   }
 
-  .xflow-editor-left__content {
+  .xflow-editor[data-layout="c"] .xflow-editor-left__content {
     grid-template-rows: auto;
     min-width: 0;
   }
 
-  .xflow-editor-main[data-left-collapsed="true"] .xflow-editor-left,
-  .xflow-editor-main[data-right-collapsed="true"] .xflow-editor-right {
+  .xflow-editor[data-layout="c"] .xflow-editor-main[data-left-collapsed="true"] .xflow-editor-left,
+  .xflow-editor[data-layout="c"] .xflow-editor-main[data-right-collapsed="true"] .xflow-editor-right {
     min-height: 44px;
   }
 
-  .xflow-editor-panel-handle {
-    top: 10px;
-    transform: none;
-  }
-
-  .xflow-editor-panel-handle--left,
-  .xflow-editor-panel-handle--right {
-    left: auto;
-    right: 8px;
-  }
-
-  .xflow-editor-right__strip {
-    height: 44px;
-    writing-mode: horizontal-tb;
-  }
-
-  .xflow-editor-canvas {
+  .xflow-editor[data-layout="c"] .xflow-editor-canvas {
     height: clamp(360px, 60vh, 520px);
     min-height: 360px;
     width: 100%;
@@ -2833,133 +2317,29 @@
     width: 100%;
   }
 
-  .xflow-editor-canvas-mode {
-    background: var(--xflow-surface-overlay);
-    border: 1px solid var(--xflow-editor-line);
-    border-radius: 5px;
-    display: flex;
-    flex-direction: column;
-    font-size: 10px;
-    gap: 2px;
-    left: 10px;
-    max-width: calc(100% - 20px);
-    min-width: 0;
-    padding: 5px 7px;
-    position: absolute;
-    top: 10px;
-    z-index: 3;
-  }
-
+  /* A narrow canvas keeps the read-only notice to its label. */
   .xflow-editor-canvas-mode span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    display: none;
   }
 
   .xflow-editor-preview-inspector {
     max-width: 100%;
     min-width: 0;
     overflow-wrap: anywhere;
-    padding: 16px;
   }
 
-  /* The legacy document layout may grow its diagnostics area. Compact mode is
-   * a viewport workbench instead, so its dedicated rules below retain a fixed,
-   * internally scrollable diagnostics surface. */
-  .xflow-editor:not([data-layout="c"]) .xflow-editor-diagnostics {
-    flex-basis: auto;
-    max-width: 100%;
-    min-width: 0;
-  }
-
-  .xflow-editor:not([data-layout="c"]) .xflow-editor-diagnostics[data-collapsed="true"] {
-    flex-basis: auto;
-  }
-
-  .xflow-editor:not([data-layout="c"]) .xflow-editor-diagnostics__bar {
-    flex-wrap: wrap;
-    gap: 6px;
-    height: auto;
-    min-height: 32px;
-    padding: 4px 10px;
-  }
-
-  .xflow-editor:not([data-layout="c"]) .xflow-editor-diagnostics__tabs,
-  .xflow-editor:not([data-layout="c"]) .xflow-editor-diagnostics__status {
-    flex-wrap: wrap;
-  }
-
-  .xflow-editor:not([data-layout="c"]) .xflow-editor-diagnostics__body {
-    grid-template-columns: minmax(0, 1fr);
-    height: auto;
-    max-width: 100%;
-    overflow: visible;
-  }
-
-  .xflow-editor:not([data-layout="c"]) .xflow-editor-diagnostics__body section {
-    border-left: 0;
-    border-top: 1px solid var(--xflow-border);
-    min-width: 0;
-  }
-
-  .xflow-editor:not([data-layout="c"]) .xflow-editor-diagnostics__body section:first-child {
-    border-top: 0;
-  }
 }
 
-@media (max-width: 560px) {
+/* 560/801 are editor-only density tiers with no ui-preview counterpart; kept at
+ * their existing values, now measured on the editor container. `<=` preserves
+ * the inclusive `max-width` semantics of the viewport rules they replaced. */
+@container xflow-editor (width <= 560px) {
   .xflow-editor-title {
     flex-basis: 100%;
   }
 
-  .xflow-editor-title__heading {
-    flex-wrap: wrap;
-  }
-
-  .xflow-editor-title__heading strong {
-    flex: 1 1 100%;
-  }
-
-  .xflow-editor-title p {
-    max-height: 2.8em;
-    white-space: normal;
-  }
-
-  .xflow-editor-tool-strip {
-    justify-content: flex-start;
-    gap: 4px;
-  }
-
-  .xflow-editor-tool-group {
-    gap: 2px;
-    padding: 2px;
-  }
-
-  .xflow-editor-tool-divider {
-    display: none;
-  }
-
-  .xflow-editor-tool-strip button {
-    min-width: 26px;
-    padding: 0 6px;
-  }
-
   .xflow-editor-toolbar-actions {
     gap: 6px;
-  }
-
-  .xflow-editor-toolbar-actions .ant-space {
-    flex-basis: 100%;
-  }
-
-  .xflow-editor-toolbar-actions .ant-btn {
-    font-size: 11px;
-    padding-inline: 7px;
-  }
-
-  .xflow-editor-integration-notice {
-    flex: 1 1 100%;
-    max-width: 100%;
   }
 
   .xflow-editor-main,
@@ -2972,13 +2352,6 @@
   .xflow-editor-canvas {
     height: clamp(320px, 56vh, 440px);
     min-height: 320px;
-  }
-
-  .xflow-editor .xflow-editor-preview .react-flow__minimap {
-    bottom: 8px;
-    height: 72px;
-    right: 8px;
-    width: 112px;
   }
 
   .xflow-editor-connection-selectors {
@@ -3002,26 +2375,6 @@
     grid-template-columns: 48px minmax(0, 1fr);
   }
 
-  .xflow-editor-diagnostics__tabs,
-  .xflow-editor-diagnostics__status {
-    flex-basis: 100%;
-  }
-
-  .xflow-editor-diagnostics__tabs strong {
-    margin-right: 2px;
-  }
-
-  .xflow-editor-diagnostics__status {
-    gap: 6px;
-  }
-
-  .xflow-editor-diagnostics__status > span {
-    white-space: normal;
-  }
-
-  .xflow-editor-diagnostics-dsl {
-    max-width: 100%;
-  }
 }
 
 /* Responsive compact workbench. These overrides deliberately follow the legacy
@@ -3029,6 +2382,19 @@
  * middle rail rather than stacking the editor into a vertical document. */
 .xflow-editor {
   position: relative;
+}
+
+/* Narrow workbench (§7.1): between `narrow` and `compact` the left panel is a
+ * rail while the inspector keeps its docked column -- the ui-preview baseline's
+ * COMPACT_LEFT band. Below `narrow`, layout "c" collapses both. */
+.xflow-editor[data-layout="b"] .xflow-editor-main,
+.xflow-editor[data-layout="b"] .xflow-editor-main[data-left-collapsed="true"] {
+  grid-template-columns: var(--xflow-editor-panel-rail-width) minmax(0, 1fr) var(--xflow-editor-panel-right-width);
+}
+
+.xflow-editor[data-layout="b"] .xflow-editor-compact-rail {
+  min-height: 0;
+  overflow: hidden;
 }
 
 .xflow-editor[data-layout="c"] {
@@ -3046,39 +2412,22 @@
 
 .xflow-editor[data-layout="c"] .xflow-editor-toolbar {
   align-items: center;
-  flex: 0 0 var(--xflow-toolbar-height);
+  flex: 0 0 var(--xflow-editor-toolbar-height);
   flex-wrap: nowrap;
-  gap: 12px;
-  min-height: 48px;
+  gap: 8px;
+  min-height: 52px;
   padding: 0 12px;
 }
 
 .xflow-editor[data-layout="c"] .xflow-editor-title {
-  flex: 0 1 280px;
-  max-width: calc(50% - 84px);
+  flex: 0 1 auto;
 }
 
 .xflow-editor[data-layout="c"] .xflow-editor-toolbar-actions {
-  flex: 0 1 auto;
+  flex: 0 0 auto;
   flex-wrap: nowrap;
   justify-content: flex-end;
-  margin-left: auto;
-  max-width: calc(50% - 84px);
-}
-
-.xflow-editor[data-layout="c"] .xflow-editor-toolbar-actions .ant-space {
-  flex: 0 1 auto;
-  flex-wrap: nowrap;
-}
-
-/* Compact mode keeps canvas controls usable while the less frequent workflow
- * actions remain available on wider desktop workspaces. */
-.xflow-editor[data-layout="c"] .xflow-editor-toolbar-actions .xflow-editor-operation-status,
-.xflow-editor[data-layout="c"] .xflow-editor-toolbar-actions .xflow-editor-layout-toggle,
-.xflow-editor[data-layout="c"] .xflow-editor-toolbar-actions .xflow-editor-new-button,
-.xflow-editor[data-layout="c"] .xflow-editor-toolbar-actions .xflow-editor-validate-button,
-.xflow-editor[data-layout="c"] .xflow-editor-toolbar-actions .xflow-editor-publish-button {
-  display: none;
+  margin-left: 0;
 }
 
 .xflow-editor[data-layout="c"] .xflow-editor-main,
@@ -3087,7 +2436,7 @@
 .xflow-editor[data-layout="c"] .xflow-editor-main[data-left-collapsed="true"][data-right-collapsed="true"] {
   display: grid;
   flex: 1 1 auto;
-  grid-template-columns: 52px minmax(0, 1fr) 52px;
+  grid-template-columns: var(--xflow-editor-panel-rail-width) minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
   max-width: none;
   min-height: 0;
@@ -3095,31 +2444,15 @@
 }
 
 .xflow-editor[data-layout="c"] .xflow-editor-compact-rail {
-  background: var(--xflow-surface-toolbar);
+  background: var(--xflow-panel);
   border: 0;
   min-height: 0;
   overflow: hidden;
   position: relative;
-  width: 52px;
 }
 
 .xflow-editor[data-layout="c"] .xflow-editor-compact-rail--left {
-  border-right: 1px solid var(--xflow-editor-line);
-}
-
-.xflow-editor[data-layout="c"] .xflow-editor-compact-rail--right {
-  border-left: 1px solid var(--xflow-editor-line);
-  border-right: 0;
-}
-
-.xflow-editor[data-layout="c"] .xflow-editor-compact-rail--right button {
-  border-left: 0;
-  border-right: 2px solid transparent;
-}
-
-.xflow-editor[data-layout="c"] .xflow-editor-compact-rail--right button.active {
-  border-left: 0;
-  border-right-color: var(--xflow-editor-blue);
+  border-right: 1px solid var(--xflow-border);
 }
 
 .xflow-editor[data-layout="c"] .xflow-editor-canvas {
@@ -3144,38 +2477,39 @@
   min-height: 0;
 }
 
-.xflow-editor[data-layout="c"] .xflow-editor-diagnostics {
-  /* Keep the bottom tool strip inside even a short viewport. The canvas owns the
-   * remaining space; expanded diagnostics scroll internally rather than growing
-   * the workbench beyond the host. */
-  flex: 0 0 min(160px, calc(100dvh - var(--xflow-toolbar-height) - 120px));
-  max-width: none;
-  min-height: 32px;
-  min-width: 0;
-  overflow: hidden;
+/* §6.5 compact tiers: the dock shares the viewport with the canvas, so the 256px
+ * drawer gives way first -- it never takes more than the height that leaves
+ * ~120px of canvas under the 52px bar and the 28px status strip. */
+.xflow-editor[data-layout="b"],
+.xflow-editor[data-layout="c"] {
+  --xflow-editor-drawer-height: min(256px, calc(100dvh - var(--xflow-editor-toolbar-height) - 28px - 120px));
 }
 
-.xflow-editor[data-layout="c"] .xflow-editor-diagnostics[data-collapsed="true"] {
-  flex: 0 0 32px;
+.xflow-editor[data-layout="b"] .xflow-editor-bottom,
+.xflow-editor[data-layout="c"] .xflow-editor-bottom {
+  max-width: 100%;
 }
 
-@media (max-width: 1120px) {
-  .xflow-editor[data-layout="c"] .xflow-editor-diagnostics__body {
+/* Below 1280 the 360px summary column would leave the issue list a sliver, so
+ * the drawer is one column: the list, then the summary folded under it as a row
+ * of its two blocks, scrolling on its own when the clamped height runs short. */
+@container xflow-editor (width < 1280px) {
+  .xflow-editor-drawer {
     grid-template-columns: minmax(0, 1fr);
-    height: calc(100% - 36px);
-    max-width: 100%;
-    overflow: hidden;
+    grid-template-rows: var(--xflow-editor-panel-title-height) minmax(0, 1fr) auto;
   }
 
-  .xflow-editor[data-layout="c"] .xflow-editor-diagnostics__body section {
+  .xflow-editor-drawer__side {
     border-left: 0;
     border-top: 1px solid var(--xflow-border);
-    min-width: 0;
-    overflow: auto;
+    flex-direction: row;
+    gap: 24px;
+    max-height: var(--xflow-editor-drawer-side-folded-height);
   }
 
-  .xflow-editor[data-layout="c"] .xflow-editor-diagnostics__body section:first-child {
-    border-top: 0;
+  .xflow-editor-drawer__side > * {
+    flex: 1 1 0;
+    min-width: 0;
   }
 }
 
@@ -3183,229 +2517,205 @@
   z-index: 12;
 }
 
-.xflow-editor-compact-drawer .xflow-editor-panel-card.ant-card,
+.xflow-editor-compact-drawer .xflow-editor-panel,
 .xflow-editor-compact-drawer .xflow-editor-variables,
 .xflow-editor-compact-drawer .xflow-editor-library,
+.xflow-editor-compact-drawer .xflow-editor-lib,
 .xflow-editor-compact-drawer .xflow-editor-inspector {
   height: 100%;
   min-height: 0;
   overflow: hidden;
 }
 
-.xflow-editor-compact-drawer .xflow-editor-inspector.ant-card {
+.xflow-editor-compact-drawer .xflow-editor-inspector {
   border: 0;
-}
-
-.xflow-editor-diagnostics-locate {
-  background: transparent;
-  border: 0;
-  color: var(--xflow-focus-text);
-  cursor: pointer;
-  display: inline;
-  font: inherit;
-  margin-inline-start: 8px;
-  padding: 0;
-  text-decoration: underline;
-}
-
-.xflow-editor-save-button:not(.ant-btn-primary) {
-  border-color: var(--xflow-border-strong);
-}
-
-.xflow-editor-tool-group .xflow-editor-disabled-control:has(button[aria-label="运行工作流"]:not(:disabled)) button {
-  background: var(--xflow-focus-subtle);
-  border-color: var(--xflow-focus-border);
-  color: var(--xflow-focus-text);
 }
 
 
 /* The compact shell retains the same centered icon-only toolbar. The host action
  * cluster degrades first, preserving the two immediate canvas tools on phones. */
-.xflow-editor[data-layout="c"] .xflow-editor-tool-strip {
-  flex: 0 0 auto;
-  left: 50%;
-  position: absolute;
-  transform: translateX(-50%);
-}
-
-
 /* --------------------------------------------------------------------------
  * Ant Design integration contract
  *
  * The nested ConfigProvider provides theme tokens; these stable semantic hooks
- * own only the design-reference deviations. Each value comes from the editor
- * CSS-variable palette so dark/light and graphite/blueprint never drift.
+ * own only the design-reference deviations. Each value comes from the shared
+ * --xflow-* tokens so dark and light never drift.
  * -------------------------------------------------------------------------- */
-.xflow-editor .xflow-editor-theme-segmented,
-.xflow-editor .xflow-editor-mode-segmented {
+.xflow-editor .xflow-editor-theme-segmented {
   border: 1px solid var(--xflow-border);
-  border-radius: var(--xflow-control-radius-sm);
-  box-shadow: inset 0 1px 0 var(--xflow-surface-highlight);
+  border-radius: var(--xflow-radius-xs);
+  box-shadow: inset 0 1px 0 var(--xflow-highlight);
+}
+
+/* The top-bar switch is a plain default-size Segmented, as in the baseline: a
+ * border here made it 34px instead of the 32px control height (§6.3). */
+.xflow-editor .xflow-editor-mode-segmented {
+  border: 0;
 }
 
 .xflow-editor .xflow-editor-theme-segmented__item,
 .xflow-editor .xflow-editor-mode-segmented__item {
-  border-radius: calc(var(--xflow-control-radius-sm) - 1px);
+  border-radius: var(--xflow-radius-xs);
 }
 
 .xflow-editor .xflow-editor-theme-segmented__label,
 .xflow-editor .xflow-editor-mode-segmented__label {
-  align-items: center;
   display: inline-flex;
-  font-size: 11px;
-  gap: 4px;
+  font-size: var(--xflow-font-md);
 }
 
 .xflow-editor .xflow-editor-mode-segmented {
+  margin-inline: auto;
   min-height: var(--xflow-control-height);
 }
 
-.xflow-editor .xflow-editor-theme-trigger.ant-btn,
-.xflow-editor .xflow-editor-toolbar-icon-action.ant-btn,
-.xflow-editor .xflow-editor-panel-handle.ant-btn,
-.xflow-editor .xflow-editor-library-search-toggle.ant-btn,
-.xflow-editor .xflow-editor-inspector-delete.ant-btn {
+.xflow-editor .xflow-editor-theme-trigger,
+.xflow-editor .xflow-editor-panel-collapse {
   align-items: center;
-  border-radius: var(--xflow-control-radius-sm);
+  border-radius: var(--xflow-radius-xs);
   display: inline-flex;
+  font-size: var(--xflow-font-xl);
   justify-content: center;
 }
 
-.xflow-editor .xflow-editor-theme-trigger.ant-btn,
-.xflow-editor .xflow-editor-toolbar-icon-action.ant-btn {
-  height: var(--xflow-control-height);
-  min-width: var(--xflow-control-height);
+/* The 32px top-bar theme trigger keeps the AntD button radius the baseline
+ * shows; only the 24px title-bar actions use the smaller step. */
+.xflow-editor .xflow-editor-theme-trigger {
+  border-radius: var(--xflow-radius-sm);
+}
+
+/* The title-bar actions are the baseline's ghost IconButton: secondary text. */
+.xflow-editor .xflow-editor-panel-collapse {
+  color: var(--xflow-text-secondary);
+}
+
+/* A pressed title-bar action (the diagnostics' 还原诊断台高度) reads as active, as
+ * the baseline's IconButton does. */
+.xflow-editor .xflow-editor-panel-collapse[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--xflow-primary) 14%, transparent);
+  color: var(--xflow-primary);
+}
+
+/* Title-bar actions are square 24px ghost buttons (§6.0); AntD small keeps 7px
+ * inline padding, which would make them 32×24. */
+.xflow-editor .xflow-editor-panel-collapse {
+  height: var(--xflow-control-height-sm);
+  min-width: var(--xflow-control-height-sm);
   padding-inline: 0;
 }
 
-.xflow-editor .xflow-editor-toolbar-actions .ant-btn {
-  height: var(--xflow-control-height);
-}
-
-.xflow-editor .xflow-editor-field.ant-input,
-.xflow-editor .xflow-editor-library-search.ant-input,
-.xflow-editor .xflow-editor-textarea.ant-input,
-.xflow-editor .xflow-editor-select__root .ant-select-selector {
-  background: var(--xflow-surface-field);
+.xflow-editor .xflow-editor-field,
+.xflow-editor .xflow-editor-textarea,
+.xflow-editor .xflow-editor-select__root {
+  background: var(--xflow-field);
   border-color: var(--xflow-border);
-  border-radius: var(--xflow-control-radius-sm);
+  border-radius: var(--xflow-radius-xs);
   color: var(--xflow-text);
 }
 
-.xflow-editor .xflow-editor-field.ant-input,
-.xflow-editor .xflow-editor-library-search.ant-input {
-  font-size: 11px;
-  height: var(--xflow-field-height);
-  line-height: calc(var(--xflow-field-height) - 2px);
+.xflow-editor .xflow-editor-field {
+  font-size: var(--xflow-font-md);
+  height: var(--xflow-control-height);
+  line-height: calc(var(--xflow-control-height) - 2px);
   padding-inline: 7px;
 }
 
-.xflow-editor .xflow-editor-library-search.ant-input {
-  margin-bottom: 6px;
-}
-
-.xflow-editor .xflow-editor-field.ant-input::placeholder,
-.xflow-editor .xflow-editor-library-search.ant-input::placeholder,
-.xflow-editor .xflow-editor-textarea.ant-input::placeholder {
+.xflow-editor .xflow-editor-field::placeholder,
+.xflow-editor .xflow-editor-textarea::placeholder {
   color: var(--xflow-text-tertiary);
 }
 
-.xflow-editor .xflow-editor-field.ant-input:hover,
-.xflow-editor .xflow-editor-library-search.ant-input:hover,
-.xflow-editor .xflow-editor-textarea.ant-input:hover,
-.xflow-editor .xflow-editor-select__root:hover .ant-select-selector {
-  border-color: var(--xflow-focus-border-strong);
+.xflow-editor .xflow-editor-field:hover,
+.xflow-editor .xflow-editor-textarea:hover,
+.xflow-editor .xflow-editor-select__root:hover {
+  border-color: var(--xflow-primary-border-strong);
 }
 
-.xflow-editor .xflow-editor-field.ant-input:focus,
-.xflow-editor .xflow-editor-library-search.ant-input:focus,
-.xflow-editor .xflow-editor-textarea.ant-input:focus,
-.xflow-editor .xflow-editor-select__root.ant-select-focused .ant-select-selector {
-  border-color: var(--xflow-focus);
-  box-shadow: 0 0 0 2px var(--xflow-focus-ring);
+.xflow-editor .xflow-editor-field:focus,
+.xflow-editor .xflow-editor-textarea:focus,
+.xflow-editor .xflow-editor-select__root.ant-select-focused {
+  border-color: var(--xflow-primary);
+  box-shadow: 0 0 0 2px var(--xflow-primary-ring);
 }
 
-.xflow-editor .xflow-editor-textarea.ant-input {
-  font-size: 11px;
+/* The library's always-visible search (baseline `.xflow-pv-search`): the AntD
+ * affix wrapper is the field, so focus is judged on the wrapper. */
+.xflow-editor .xflow-editor-library-search {
+  background: var(--xflow-field);
+  border-color: var(--xflow-border);
+  color: var(--xflow-text);
+  font-size: var(--xflow-font-md);
+}
+
+.xflow-editor .xflow-editor-library-search:hover {
+  border-color: var(--xflow-primary-border-strong);
+}
+
+.xflow-editor .xflow-editor-library-search:focus-within {
+  border-color: var(--xflow-primary);
+  box-shadow: 0 0 0 2px var(--xflow-primary-ring);
+}
+
+.xflow-editor .xflow-editor-library-search__prefix {
+  color: var(--xflow-text);
+}
+
+.xflow-editor .xflow-editor-textarea {
+  font-size: var(--xflow-font-md);
   line-height: 1.45;
   min-height: 48px;
   padding: 5px 7px;
   resize: vertical;
 }
 
-.xflow-editor .xflow-editor-textarea--code.ant-input {
+.xflow-editor .xflow-editor-textarea--code {
   font-family: SFMono-Regular, Consolas, monospace;
-  font-size: 10.5px;
+  font-size: var(--xflow-font-xs);
 }
 
-.xflow-editor .xflow-editor-connection-select.ant-select {
+.xflow-editor .xflow-editor-connection-select {
   min-width: 92px;
 }
 
-.xflow-editor .xflow-editor-select__root .ant-select-selector {
+.xflow-editor .xflow-editor-select__root {
   box-shadow: none;
 }
 
-.xflow-editor .xflow-editor-select__root.ant-select-focused .ant-select-selector {
-  box-shadow: 0 0 0 2px var(--xflow-focus-ring);
+.xflow-editor .xflow-editor-select__root.ant-select-focused {
+  box-shadow: 0 0 0 2px var(--xflow-primary-ring);
 }
 
 .xflow-editor .xflow-editor-select__content,
 .xflow-editor .xflow-editor-select__popup-item {
-  font-size: 11px;
+  font-size: var(--xflow-font-md);
 }
 
 .xflow-editor .xflow-editor-select__popup {
-  background: var(--xflow-surface-panel-raised);
+  background: var(--xflow-panel);
   border: 1px solid var(--xflow-border);
-  border-radius: var(--xflow-control-radius);
-  box-shadow: var(--xflow-popup-shadow);
+  border-radius: var(--xflow-radius-sm);
+  box-shadow: var(--xflow-editor-popup-shadow);
 }
 
 .xflow-editor .xflow-editor-select__popup-list {
   padding: 4px;
 }
 
-.xflow-editor .xflow-editor-switch.ant-switch {
+.xflow-editor .xflow-editor-switch {
   background: var(--xflow-border-strong);
 }
 
-.xflow-editor .xflow-editor-switch.ant-switch.ant-switch-checked {
-  background: var(--xflow-focus);
-}
-
-.xflow-editor .xflow-editor-runtime-tag.ant-tag {
-  border-radius: var(--xflow-control-radius-sm);
-  font-size: 10px;
-  line-height: 16px;
-  margin-inline-end: 0;
-  padding-inline: 5px;
-}
-
-/* `committing` and `expired` have no Ant Design preset that tells them apart:
- * the preset palette's nearest neighbours are the same blue `running` already
- * uses and the same gray an unrecognized status falls back to. Both are toned
- * from the shared status tokens instead, which is also what the embedded
- * preview draws, so the inspector and the canvas cannot disagree. */
-.xflow-editor .xflow-editor-runtime-tag.ant-tag[data-status="committing"] {
-  background: var(--xflow-status-running-subtle);
-  border-color: var(--xflow-status-running-border);
-  color: var(--xflow-status-running-text);
-}
-
-.xflow-editor .xflow-editor-runtime-tag.ant-tag[data-status="expired"] {
-  background: var(--xflow-status-disabled-subtle);
-  border-color: var(--xflow-status-disabled-border);
-  color: var(--xflow-status-disabled-text);
+.xflow-editor .xflow-editor-switch[aria-checked="true"] {
+  background: var(--xflow-primary);
 }
 
 .xflow-editor .xflow-editor-tooltip__container {
-  background: var(--xflow-surface-overlay);
+  background: var(--xflow-overlay);
   border: 1px solid var(--xflow-border-strong);
-  border-radius: var(--xflow-control-radius-sm);
-  box-shadow: var(--xflow-popup-shadow);
+  border-radius: var(--xflow-radius-xs);
+  box-shadow: var(--xflow-editor-popup-shadow);
   color: var(--xflow-text);
-  font-size: 11px;
+  font-size: var(--xflow-font-xs);
   padding: 5px 8px;
 }
 
@@ -3422,21 +2732,30 @@
 
 /* Same specificity as the rule above and later, so the source line keeps its tone. */
 .xflow-editor .xflow-editor-node-tile__tooltip > span.xflow-editor-node-tile__tooltip-source {
-  color: var(--xflow-node-source-text);
+  color: var(--xflow-editor-node-source-text);
 }
 
 .xflow-editor .xflow-editor-compact-drawer__wrapper {
-  box-shadow: 0 10px 36px var(--xflow-node-shadow);
+  /* The baseline floating pane lifts with elev-3 and a 1px divider on the canvas side. */
+  box-shadow: var(--xflow-elev-3);
+}
+
+.xflow-editor .xflow-editor-compact-drawer__wrapper--start {
+  border-right: 1px solid var(--xflow-border);
+}
+
+.xflow-editor .xflow-editor-compact-drawer__wrapper--end {
+  border-left: 1px solid var(--xflow-border);
 }
 
 .xflow-editor .xflow-editor-compact-drawer__section {
-  background: var(--xflow-surface-panel);
+  background: var(--xflow-panel);
   /* Popup container inside the drawer (see getPopupContainer). */
   position: relative;
 }
 
 .xflow-editor .xflow-editor-compact-drawer__header {
-  background: var(--xflow-surface-panel-raised);
+  background: var(--xflow-panel-raised);
   border-bottom-color: var(--xflow-border);
 }
 
@@ -3470,58 +2789,9 @@
   margin-top: 4px;
 }
 
-.xflow-editor-canvas-context {
-  align-items: center;
-  display: flex;
-  gap: 6px;
-  left: 14px;
-  pointer-events: none;
-  position: absolute;
-  top: 12px;
-  z-index: 3;
-}
-
-.xflow-editor-empty-canvas {
-  align-items: center;
-  display: flex;
-  flex-direction: column;
-  left: 50%;
-  /* The canvas below stays a drop target for the node library, so only the
-     button — which is the one interactive child — takes the pointer back. */
-  pointer-events: none;
-  position: absolute;
-  text-align: center;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  width: min(340px, calc(100% - 72px));
-  z-index: 2;
-}
-
-.xflow-editor-empty-canvas button {
-  pointer-events: auto;
-}
-
-@media (max-width: 801px) {
-  .xflow-editor .xflow-editor-title,
-  .xflow-editor .xflow-editor-toolbar-actions {
-    display: none;
-  }
-
-  .xflow-editor .xflow-editor-tool-divider--history,
-  .xflow-editor .xflow-editor-tool-button--history {
-    display: none;
-  }
-}
-
-/* The compact breakpoint must not turn a detail route back into a scrollable
- * document. Its rails/drawers provide the responsive alternative. */
-@media (max-width: 1120px) {
-  .xflow-editor.xflow-editor--fullscreen {
-    height: 100%;
-    min-height: 0;
-    overflow: hidden;
-  }
-}
+/* A full-screen detail host owns the available height. The non-compact minimum
+ * above is already lifted by the [data-layout="c"] rules, which every container
+ * below the compact breakpoint gets; no viewport-width rule is needed. */
 
 
 /* --------------------------------------------------------------------------
@@ -3532,23 +2802,16 @@
  * states stay with the nested ConfigProvider.
  * ------------------------------------------------------------------------ */
 .xflow-editor {
-  --xflow-font-mono: SFMono-Regular, Consolas, "Liberation Mono", monospace;
-  --xflow-composer-font-size: 12px;
-  --xflow-composer-field-gap: 10px;
-  --xflow-composer-section-gap: 14px;
-  --xflow-composer-title-size: 12px;
-  --xflow-nodeform-fx-size: var(--xflow-field-height);
+  --xflow-editor-nodeform-fx-size: var(--xflow-control-height);
 }
 
-/* Small AntD inputs render 20px high with the editor tokens while small
- * selects are 24px; align every node-form text control to the field height
- * (as the editor's own .xflow-editor-field inputs do). */
-.xflow-editor .xflow-composer-form .xflow-composer-control,
+/* Keep the editor's own node-form text controls on the shared control height;
+ * composer controls fall back to the same core token. */
 .xflow-editor .xflow-composer-form .xflow-editor-nodeform-node-name-control,
 .xflow-editor .xflow-composer-form .xflow-editor-nodeform-duration-text,
 .xflow-editor .xflow-composer-form .xflow-editor-nodeform-text-control,
 .xflow-editor .xflow-composer-form .xflow-editor-nodeform-expression-editor {
-  min-height: var(--xflow-field-height);
+  min-height: var(--xflow-control-height);
 }
 
 /* ExpressionInput: control + fx toggle on one row. */
@@ -3570,13 +2833,13 @@
 }
 
 .xflow-editor .xflow-editor-nodeform-expression.is-expression .xflow-editor-nodeform-expression-editor {
-  background: var(--xflow-surface-control);
+  background: var(--xflow-field);
 }
 
 .xflow-editor .xflow-editor-nodeform-fx {
   flex: 0 0 auto;
-  height: var(--xflow-nodeform-fx-size);
-  width: var(--xflow-nodeform-fx-size);
+  height: var(--xflow-editor-nodeform-fx-size);
+  width: var(--xflow-editor-nodeform-fx-size);
 }
 
 .xflow-editor .xflow-editor-nodeform-fx:not(.is-active) {
@@ -3612,9 +2875,9 @@
 
 /* Raw read-only view (shape guard): the value stays untouched. */
 .xflow-editor .xflow-editor-nodeform-raw {
-  background: var(--xflow-status-warning-subtle);
-  border: 1px solid var(--xflow-status-warning-border);
-  border-radius: var(--xflow-control-radius);
+  background: var(--xflow-warning-bg-subtle);
+  border: 1px solid var(--xflow-warning-border);
+  border-radius: var(--xflow-radius-sm);
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -3623,18 +2886,18 @@
 }
 
 .xflow-editor .xflow-editor-nodeform-raw-notice {
-  color: var(--xflow-status-warning-text);
-  font-size: 12px;
+  color: var(--xflow-warning-fg);
+  font-size: var(--xflow-font-sm);
   margin: 0;
 }
 
 .xflow-editor .xflow-editor-nodeform-raw-value {
-  background: var(--xflow-surface-control);
+  background: var(--xflow-field);
   border: 1px solid var(--xflow-border);
-  border-radius: var(--xflow-control-radius-sm);
+  border-radius: var(--xflow-radius-xs);
   color: var(--xflow-text-secondary);
   font-family: var(--xflow-font-mono);
-  font-size: 11px;
+  font-size: var(--xflow-font-xs);
   margin: 0;
   max-height: 160px;
   overflow: auto;
@@ -3644,7 +2907,7 @@
 }
 
 .xflow-editor .xflow-editor-nodeform-raw-value:focus-visible {
-  outline: 2px solid var(--xflow-focus-ring);
+  outline: 2px solid var(--xflow-primary-ring);
   outline-offset: 1px;
 }
 
@@ -3687,7 +2950,7 @@
 }
 
 .xflow-editor .xflow-editor-nodeform-note.is-warning {
-  color: var(--xflow-status-warning-text);
+  color: var(--xflow-warning-fg);
 }
 
 /* Base64Input: summary card + actions. */
@@ -3700,9 +2963,9 @@
 
 .xflow-editor .xflow-editor-nodeform-base64-summary {
   align-items: center;
-  background: var(--xflow-surface-control);
+  background: var(--xflow-field);
   border: 1px solid var(--xflow-border);
-  border-radius: var(--xflow-control-radius-sm);
+  border-radius: var(--xflow-radius-xs);
   display: flex;
   flex-wrap: wrap;
   gap: 4px 10px;
@@ -3723,7 +2986,7 @@
 .xflow-editor .xflow-editor-nodeform-base64-preview {
   color: var(--xflow-text-secondary);
   font-family: var(--xflow-font-mono);
-  font-size: 11px;
+  font-size: var(--xflow-font-xs);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3737,7 +3000,7 @@
 
 .xflow-editor .xflow-editor-nodeform-base64-help {
   color: var(--xflow-text-secondary);
-  font-size: 12px;
+  font-size: var(--xflow-font-sm);
   line-height: 18px;
   margin: 0;
 }
@@ -3754,8 +3017,8 @@
 
 /* FormNotice. */
 .xflow-editor .xflow-editor-nodeform-notice-alert {
-  border-radius: var(--xflow-control-radius);
-  font-size: 12px;
+  border-radius: var(--xflow-radius-sm);
+  font-size: var(--xflow-font-sm);
 }
 
 
@@ -3779,60 +3042,41 @@
 }
 
 .xflow-editor .xflow-editor-node-form {
-  --xflow-composer-field-gap: 12px;
   display: flex;
   flex-direction: column;
   gap: 10px;
   min-width: 0;
 }
 
-/* Each composer group is a card: raised surface, header row with the collapse
- * chevron, comfortable padding. The composer's own "sibling" separator is
- * neutralized so the cards (not a divider line) carry the structure. */
-.xflow-editor .xflow-editor-node-form .xflow-composer-field-group {
-  background: var(--xflow-section-card-bg);
-  border: 1px solid var(--xflow-section-card-border);
-  border-radius: var(--xflow-section-card-radius);
-  gap: 0;
-  min-width: 0;
-  overflow: hidden;
-}
-
-.xflow-editor .xflow-editor-node-form .xflow-composer-field-group + .xflow-composer-field-group {
-  border-top: 1px solid var(--xflow-section-card-border);
-  padding-top: 0;
-}
-
-.xflow-editor .xflow-editor-node-form .xflow-composer-section-header {
-  background: var(--xflow-section-card-header-bg);
-  border-bottom: 1px solid var(--xflow-section-card-border);
-  border-radius: var(--xflow-section-card-radius) var(--xflow-section-card-radius) 0 0;
+/* S2 deleted the node-form chrome that used to style every composer section.
+ * The FieldGroup card comes from the composer now; the ObjectGroup keeps that
+ * chrome (header band, 11px title, padded body). Scoped to the object group so
+ * field groups nested inside it still take the composer card. */
+.xflow-editor .xflow-editor-node-form .xflow-composer-object-group > .xflow-composer-section-header {
+  background: var(--xflow-editor-section-card-header-bg);
+  border-bottom: 1px solid var(--xflow-editor-section-card-border);
+  border-radius: var(--xflow-editor-section-card-radius) var(--xflow-editor-section-card-radius) 0 0;
   min-height: 30px;
   padding: 0 9px;
 }
 
-.xflow-editor .xflow-editor-node-form .xflow-composer-section-title {
+.xflow-editor .xflow-editor-node-form .xflow-composer-object-group > .xflow-composer-section-header .xflow-composer-section-title {
   color: var(--xflow-text);
-  font-size: 11px;
-  font-weight: 650;
+  font-size: var(--xflow-font-xs);
+  font-weight: 600;
   line-height: 16px;
 }
 
-.xflow-editor .xflow-editor-node-form .xflow-composer-section-description {
+.xflow-editor .xflow-editor-node-form .xflow-composer-object-group > .xflow-composer-section-description {
   color: var(--xflow-text-tertiary);
-  font-size: 11px;
+  font-size: var(--xflow-font-xs);
   line-height: 16px;
   margin: 0;
   padding: 8px 10px 0;
 }
 
-.xflow-editor .xflow-editor-node-form .xflow-composer-section-body {
+.xflow-editor .xflow-editor-node-form .xflow-composer-object-group > .xflow-composer-section-body {
   padding: 10px 10px 12px;
-}
-
-.xflow-editor .xflow-editor-node-form .xflow-composer-field-label {
-  font-size: 12px;
-  font-weight: 500;
 }
 
 /* The fx toggle rides on the control's trailing edge, like an input suffix. */
@@ -3845,7 +3089,7 @@
   border-start-end-radius: 0;
 }
 
-.xflow-editor .xflow-editor-nodeform-expression-row .xflow-editor-nodeform-fx.ant-btn {
+.xflow-editor .xflow-editor-nodeform-expression-row .xflow-editor-nodeform-fx {
   border-end-start-radius: 0;
   border-start-start-radius: 0;
   width: 26px;
@@ -3853,12 +3097,12 @@
 
 .xflow-editor .xflow-editor-node-form__notice {
   align-items: flex-start;
-  background: var(--xflow-status-running-subtle);
-  border: 1px solid var(--xflow-status-running-border);
-  border-radius: 6px;
-  color: var(--xflow-status-running-text);
+  background: var(--xflow-info-bg-subtle);
+  border: 1px solid var(--xflow-info-border);
+  border-radius: var(--xflow-radius-sm);
+  color: var(--xflow-info-fg);
   display: flex;
-  font-size: 11px;
+  font-size: var(--xflow-font-xs);
   gap: 6px;
   line-height: 16px;
   margin: 0;
@@ -3866,9 +3110,9 @@
 }
 
 .xflow-editor .xflow-editor-node-form__notice--error {
-  background: var(--xflow-status-error-subtle);
-  border-color: var(--xflow-status-error-border);
-  color: var(--xflow-status-error-text);
+  background: var(--xflow-danger-bg-subtle);
+  border-color: var(--xflow-danger-border);
+  color: var(--xflow-danger-fg);
 }
 
 .xflow-editor .xflow-editor-node-form__notice .anticon {
@@ -3876,19 +3120,19 @@
   margin-top: 2px;
 }
 
-.xflow-editor .xflow-editor-node-params .xflow-editor-json-field textarea.ant-input {
+.xflow-editor .xflow-editor-node-params .xflow-editor-json-field .xflow-editor-textarea {
   font-family: var(--xflow-font-mono);
-  font-size: 11px;
+  font-size: var(--xflow-font-xs);
 }
 
 .xflow-editor .xflow-editor-save-issues {
-  background: var(--xflow-status-warning-subtle);
-  border: 1px solid var(--xflow-status-warning-border);
-  border-radius: 8px;
-  color: var(--xflow-status-warning-text);
+  background: var(--xflow-warning-bg-subtle);
+  border: 1px solid var(--xflow-warning-border);
+  border-radius: var(--xflow-radius-md);
+  color: var(--xflow-warning-fg);
   display: inline-block;
-  font-size: 10px;
-  font-weight: 650;
+  font-size: var(--xflow-font-xs);
+  font-weight: 600;
   line-height: 14px;
   margin-inline-start: 4px;
   min-width: 16px;
@@ -3897,9 +3141,9 @@
 }
 
 .xflow-editor .xflow-editor-save-button[data-blocked] .xflow-editor-save-issues {
-  background: var(--xflow-status-error-subtle);
-  border-color: var(--xflow-status-error-border);
-  color: var(--xflow-status-error-text);
+  background: var(--xflow-danger-bg-subtle);
+  border-color: var(--xflow-danger-border);
+  color: var(--xflow-danger-fg);
 }
 
 /* ---- Left column: variables panel, section cards, node search ---------- */
@@ -3912,17 +3156,17 @@
 }
 
 .xflow-editor-section-card {
-  background: var(--xflow-section-card-bg);
-  border: 1px solid var(--xflow-section-card-border);
-  border-radius: var(--xflow-section-card-radius);
+  background: var(--xflow-editor-section-card-bg);
+  border: 1px solid var(--xflow-editor-section-card-border);
+  border-radius: var(--xflow-editor-section-card-radius);
   min-width: 0;
 }
 
 .xflow-editor-section-card__header {
   align-items: center;
-  background: var(--xflow-section-card-header-bg);
-  border-bottom: 1px solid var(--xflow-section-card-border);
-  border-radius: var(--xflow-section-card-radius) var(--xflow-section-card-radius) 0 0;
+  background: var(--xflow-editor-section-card-header-bg);
+  border-bottom: 1px solid var(--xflow-editor-section-card-border);
+  border-radius: var(--xflow-editor-section-card-radius) var(--xflow-editor-section-card-radius) 0 0;
   display: flex;
   gap: 6px;
   justify-content: space-between;
@@ -3934,27 +3178,27 @@
   align-items: center;
   color: var(--xflow-text-secondary);
   display: inline-flex;
-  font-size: 11px;
+  font-size: var(--xflow-font-xs);
   gap: 6px;
   min-width: 0;
 }
 
 .xflow-editor-section-card__title .anticon {
   color: var(--xflow-text-tertiary);
-  font-size: 12px;
+  font-size: var(--xflow-font-sm);
 }
 
 .xflow-editor-section-card__title strong {
   color: var(--xflow-text);
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .xflow-editor-section-card__title em {
-  background: var(--xflow-surface-field);
+  background: var(--xflow-field);
   border: 1px solid var(--xflow-border);
-  border-radius: var(--xflow-control-radius-pill);
+  border-radius: var(--xflow-radius-pill);
   color: var(--xflow-text-tertiary);
-  font-size: 9px;
+  font-size: var(--xflow-font-xs);
   font-style: normal;
   line-height: 14px;
   padding: 0 5px;
@@ -3971,6 +3215,31 @@
   gap: 8px;
   min-width: 0;
   padding: 8px 9px 9px;
+}
+
+/* 工作流设置 draws the baseline gallery's section stack (figure 6): 8px between
+ * sections, raised 8px-radius cards, a 13px/600 head with 6/12 padding, and a
+ * 2/12/8 body. The shared card keeps its own values for the other panels; only
+ * its variables and header/body padding change under this root. */
+.xflow-editor-workflow-settings {
+  --xflow-editor-section-card-bg: var(--xflow-panel-raised);
+  --xflow-editor-section-card-header-bg: var(--xflow-panel-raised);
+  --xflow-editor-section-card-radius: var(--xflow-radius-md);
+
+  gap: 8px;
+}
+
+.xflow-editor-workflow-settings .xflow-editor-section-card__header {
+  min-height: 35px;
+  padding: 0 12px;
+}
+
+.xflow-editor-workflow-settings .xflow-editor-section-card__title {
+  font-size: var(--xflow-font-md);
+}
+
+.xflow-editor-workflow-settings .xflow-editor-section-card__body {
+  padding: 2px 12px 8px;
 }
 
 .xflow-editor-variable-list {
@@ -3990,14 +3259,14 @@
 
 .xflow-editor-variable-block__title {
   color: var(--xflow-text-secondary);
-  font-size: 11px;
+  font-size: var(--xflow-font-xs);
   font-weight: 500;
 }
 
 .xflow-editor-variable-row {
-  background: var(--xflow-variable-row-bg);
+  background: var(--xflow-editor-variable-row-bg);
   border: 1px solid var(--xflow-border);
-  border-radius: var(--xflow-control-radius-sm);
+  border-radius: var(--xflow-radius-xs);
   display: grid;
   gap: 5px;
   min-width: 0;
@@ -4006,7 +3275,7 @@
 
 .xflow-editor-variable-row:hover,
 .xflow-editor-variable-row:focus-within {
-  border-color: var(--xflow-variable-row-hover-border);
+  border-color: var(--xflow-editor-variable-row-hover-border);
 }
 
 .xflow-editor-variable-row--pair {
@@ -4031,7 +3300,7 @@
   align-items: center;
   display: inline-flex;
   gap: 0;
-  height: var(--xflow-field-height);
+  height: var(--xflow-control-height);
 }
 
 .xflow-editor-variable-field {
@@ -4040,32 +3309,29 @@
   min-width: 0;
 }
 
-.xflow-editor .xflow-editor-variable-key.ant-input,
-.xflow-editor .xflow-editor-variable-value.ant-input {
+.xflow-editor .xflow-editor-variable-key,
+.xflow-editor .xflow-editor-variable-value {
   font-family: SFMono-Regular, Consolas, monospace;
 }
 
 .xflow-editor-variable-error {
-  color: var(--xflow-status-error-text);
-  font-size: 10px;
+  color: var(--xflow-danger-fg);
+  font-size: var(--xflow-font-xs);
   line-height: 13px;
 }
 
-.xflow-editor .xflow-editor-variable-type.ant-select {
+.xflow-editor .xflow-editor-variable-type {
+  font-size: var(--xflow-font-md);
+  height: var(--xflow-control-height);
   min-width: 0;
   width: 100%;
-}
-
-.xflow-editor .xflow-editor-variable-type .ant-select-selector {
-  font-size: 11px;
-  height: var(--xflow-field-height);
 }
 
 .xflow-editor-variable-required {
   align-items: center;
   color: var(--xflow-text-tertiary);
   display: inline-flex;
-  font-size: 10px;
+  font-size: var(--xflow-font-xs);
   gap: 4px;
   white-space: nowrap;
 }
@@ -4074,133 +3340,133 @@
   display: inline-flex;
 }
 
-.xflow-editor .xflow-editor-variable-action.ant-btn {
+.xflow-editor .xflow-editor-variable-action {
   align-items: center;
-  border-radius: var(--xflow-control-radius-sm);
+  border-radius: var(--xflow-radius-xs);
   color: var(--xflow-text-tertiary);
   display: inline-flex;
-  height: 22px;
+  height: var(--xflow-control-height-sm);
   justify-content: center;
-  min-width: 22px;
+  min-width: var(--xflow-control-height-sm);
   padding: 0;
-  width: 22px;
+  width: var(--xflow-control-height-sm);
 }
 
-/* Out-weighs antd's .ant-btn:not(:disabled):not(.ant-btn-disabled):hover (0,4,0). */
-.xflow-editor .xflow-editor-variable-action.ant-btn:not(:disabled):hover {
-  background: var(--xflow-surface-hover);
+.xflow-editor .xflow-editor-variable-action:not(:disabled):hover {
+  background: var(--xflow-hover);
   color: var(--xflow-text);
 }
 
-.xflow-editor .xflow-editor-variable-action--danger.ant-btn:not(:disabled):hover {
-  background: var(--xflow-status-error-subtle);
-  color: var(--xflow-status-error-text);
+.xflow-editor .xflow-editor-variable-action--danger:not(:disabled):hover {
+  background: var(--xflow-danger-bg-subtle);
+  color: var(--xflow-danger-fg);
 }
 
-.xflow-editor .xflow-editor-source-toggle.ant-btn.is-active,
-.xflow-editor .xflow-editor-source-toggle.ant-btn.is-active:not(:disabled):hover {
-  background: var(--xflow-focus-subtle);
-  color: var(--xflow-focus-text);
+.xflow-editor .xflow-editor-source-toggle.is-active,
+.xflow-editor .xflow-editor-source-toggle.is-active:not(:disabled):hover {
+  background: var(--xflow-primary-bg-subtle);
+  color: var(--xflow-primary-fg);
 }
 
-.xflow-editor .xflow-editor-variable-add.ant-btn {
+.xflow-editor .xflow-editor-variable-add {
   background: transparent;
   border-color: var(--xflow-border-strong);
-  border-radius: var(--xflow-control-radius-sm);
+  border-radius: var(--xflow-radius-xs);
   color: var(--xflow-text-secondary);
-  font-size: 11px;
-  height: var(--xflow-field-height);
+  font-size: var(--xflow-font-md);
+  height: var(--xflow-control-height);
   justify-self: start;
 }
 
-.xflow-editor .xflow-editor-variable-add.ant-btn:not(:disabled):hover {
-  border-color: var(--xflow-focus-border-strong);
-  color: var(--xflow-focus-text);
+.xflow-editor .xflow-editor-variable-add:not(:disabled):hover {
+  border-color: var(--xflow-primary-border-strong);
+  color: var(--xflow-primary-fg);
 }
 
 .xflow-editor-variable-empty,
 .xflow-editor-variable-hint {
   color: var(--xflow-text-tertiary);
-  font-size: 10.5px;
+  font-size: var(--xflow-font-xs);
   line-height: 15px;
   margin: 0;
 }
 
 .xflow-editor-variable-empty {
   border: 1px dashed var(--xflow-border);
-  border-radius: var(--xflow-control-radius-sm);
+  border-radius: var(--xflow-radius-xs);
   padding: 8px;
   text-align: center;
 }
 
 .xflow-editor-variable-notice {
-  background: var(--xflow-status-error-subtle);
-  border: 1px solid var(--xflow-status-error-border);
-  border-radius: var(--xflow-control-radius-sm);
-  color: var(--xflow-status-error-text);
-  font-size: 10.5px;
+  background: var(--xflow-danger-bg-subtle);
+  border: 1px solid var(--xflow-danger-border);
+  border-radius: var(--xflow-radius-xs);
+  color: var(--xflow-danger-fg);
+  font-size: var(--xflow-font-xs);
   line-height: 15px;
   margin: 0;
   padding: 5px 7px;
 }
 
-/* The label column sizes to the longest row name (错误策略, Pin 数据, ...)
-   instead of a fixed 40px, which wrapped the two-character rows onto a second
-   line and clipped them inside the row's height. */
+/* A row is the baseline's `.xflow-pv-field` (figure 6): the label sits on top of
+   its control, not in a side column that has to size to the longest row name. */
 .xflow-editor-workflow-settings .xflow-editor-form-row--workflow {
-  grid-template-columns: minmax(40px, max-content) minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  align-items: stretch;
 }
 
+/* The baseline `.xflow-pv-field-label`: 12px / 500 in the secondary text colour. */
 .xflow-editor-workflow-settings .xflow-editor-form-row > span {
-  color: var(--xflow-text-tertiary);
-  font-size: 11px;
+  align-items: center;
+  color: var(--xflow-text-secondary);
+  display: flex;
+  font-size: var(--xflow-font-sm);
+  font-weight: 500;
+  gap: 4px;
+  margin-bottom: 2px;
 }
 
 /* A switch is a control, not a field: it keeps its own size at the start of
    the value column instead of stretching to fill it. */
 .xflow-editor-workflow-settings .xflow-editor-setting-switch {
-  justify-self: start;
+  align-self: flex-start;
 }
 
-.xflow-editor .xflow-editor-inspector-workflow.ant-btn {
-  align-items: center;
-  border-radius: var(--xflow-control-radius-sm);
-  color: var(--xflow-text-secondary);
-  display: inline-flex;
-  height: 22px;
-  justify-content: center;
-  min-width: 22px;
+.xflow-editor .xflow-editor-node-search {
+  display: grid;
+  font-size: var(--xflow-font-md);
+  gap: 8px;
+  width: 100%;
+}
+
+/* The locate panel's listbox (§6.3 ⌘K): rows keep the option's name/type split. */
+.xflow-editor-node-search__list {
+  display: grid;
+  gap: 2px;
+  list-style: none;
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
   padding: 0;
 }
 
-.xflow-editor .xflow-editor-inspector-workflow.ant-btn:not(:disabled):hover {
-  background: var(--xflow-surface-hover);
-  color: var(--xflow-text);
-}
-
-.xflow-editor-tool-group--search {
-  padding: 0 2px;
-}
-
-.xflow-editor .xflow-editor-node-search.ant-select {
-  width: 168px;
-}
-
-.xflow-editor .xflow-editor-node-search .ant-select-selector {
-  font-size: 11px;
-  height: 22px;
-}
-
-.xflow-editor .xflow-editor-node-search .ant-select-prefix {
-  color: var(--xflow-text-tertiary);
-}
-
 .xflow-editor-node-search__option {
-  align-items: baseline;
+  align-items: center;
+  border-radius: var(--xflow-radius-sm);
+  cursor: pointer;
   display: flex;
   gap: 8px;
   justify-content: space-between;
+  min-height: var(--xflow-control-height);
   min-width: 0;
+  padding: 0 8px;
+}
+
+.xflow-editor-node-search__option[aria-selected="true"] {
+  background: var(--xflow-hover);
 }
 
 .xflow-editor-node-search__option strong {
@@ -4215,47 +3481,56 @@
   color: var(--xflow-text-tertiary);
   flex: 0 0 auto;
   font-family: SFMono-Regular, Consolas, monospace;
-  font-size: 10px;
+  font-size: var(--xflow-font-xs);
   font-style: normal;
 }
 
 .xflow-editor-node-search__empty {
   color: var(--xflow-text-tertiary);
-  font-size: 11px;
+  font-size: var(--xflow-font-xs);
+  margin: 0;
 }
 
-@media (max-width: 1120px) {
-  .xflow-editor .xflow-editor-node-search.ant-select {
-    width: 120px;
-  }
+/* The compact ⋯ menu's theme rows (§6.3) keep one icon slot whether or not the
+ * row is active, so 浅色 / 深色 / 跟随系统 share a single text column. */
+.xflow-editor .xflow-editor-menu-check-inactive {
+  visibility: hidden;
+}
+
+/* The locate dialog (§6.3 ⌘K): 480px, 64px from the top, no footer. */
+.xflow-editor-locate__body {
+  padding-top: 4px;
 }
 
 /* --------------------------------------------------------------------------
  * Canvas context menu: an antd Menu anchored to the pointer (node or empty
  * canvas), so it brings its own surface, density and shortcut hints. The
- * anchor is fixed-positioned, which also keeps the submenu popups clear of
- * the panels' overflow boundaries.
+ * anchor is absolutely positioned against the editor root, which keeps the
+ * menu and its submenu popups clear of the panels' overflow boundaries.
  * ------------------------------------------------------------------------ */
 .xflow-editor .xflow-editor-context-menu__anchor {
-  position: fixed;
+  /* The root's own `position: relative` makes it the containing block (a
+     container query context alone is not one). The pointer's viewport point is
+     rebased onto that box in contextMenu.tsx before this offset is written. */
+  position: absolute;
   z-index: 1200;
 }
 
-.xflow-editor .xflow-editor-context-menu.ant-menu,
-.xflow-editor .xflow-editor-context-menu__list.ant-menu {
-  background: var(--xflow-surface-panel-raised);
+.xflow-editor .xflow-editor-context-menu,
+.xflow-editor .xflow-editor-context-menu__list {
+  background: var(--xflow-panel-raised);
   border: 1px solid var(--xflow-border);
-  border-radius: var(--xflow-control-radius);
-  box-shadow: var(--xflow-popup-shadow);
+  border-radius: var(--xflow-radius-sm);
+  box-shadow: var(--xflow-editor-popup-shadow);
   min-width: 208px;
   padding: 4px;
 }
 
 .xflow-editor .xflow-editor-context-menu__popup .ant-menu {
-  background: var(--xflow-surface-panel-raised);
+  background: var(--xflow-panel-raised);
   border: 1px solid var(--xflow-border);
-  border-radius: var(--xflow-control-radius);
-  box-shadow: var(--xflow-popup-shadow);
+  border-radius: var(--xflow-radius-sm);
+  box-shadow: var(--xflow-editor-popup-shadow);
   /* The node library is long: cap the submenu so the popup can still be
      placed above or below its parent row instead of running off-screen. */
   max-height: min(420px, calc(100vh - 48px));
@@ -4268,21 +3543,21 @@
    block-level flex row) would be pushed onto a second line inside the item's
    fixed height and clipped away. Lay the row out as a flex box instead: icon,
    label, hint on one line. */
-.xflow-editor .xflow-editor-context-menu.ant-menu .ant-menu-item,
-.xflow-editor .xflow-editor-context-menu.ant-menu .ant-menu-submenu-title,
-.xflow-editor .xflow-editor-context-menu__popup .ant-menu .ant-menu-item,
+.xflow-editor .xflow-editor-context-menu__item,
+.xflow-editor .xflow-editor-context-menu__submenu-item,
+.xflow-editor .xflow-editor-context-menu .ant-menu-submenu-title,
 .xflow-editor .xflow-editor-context-menu__popup .ant-menu .ant-menu-submenu-title {
   align-items: center;
-  border-radius: var(--xflow-control-radius-sm);
+  border-radius: var(--xflow-radius-xs);
   display: flex;
-  font-size: 12px;
+  font-size: var(--xflow-font-sm);
   gap: 8px;
   min-height: 28px;
 }
 
-.xflow-editor .xflow-editor-context-menu.ant-menu .ant-menu-item .ant-menu-title-content,
-.xflow-editor .xflow-editor-context-menu.ant-menu .ant-menu-submenu-title .ant-menu-title-content,
-.xflow-editor .xflow-editor-context-menu__popup .ant-menu .ant-menu-item .ant-menu-title-content,
+.xflow-editor .xflow-editor-context-menu__item-content,
+.xflow-editor .xflow-editor-context-menu .ant-menu-submenu-title .ant-menu-title-content,
+.xflow-editor .xflow-editor-context-menu__submenu-item .ant-menu-title-content,
 .xflow-editor .xflow-editor-context-menu__popup .ant-menu .ant-menu-submenu-title .ant-menu-title-content {
   flex: 1 1 auto;
   min-width: 0;
@@ -4303,13 +3578,13 @@
 }
 
 .xflow-editor .xflow-editor-context-menu__hint {
-  background: var(--xflow-surface-field);
+  background: var(--xflow-field);
   border: 1px solid var(--xflow-border);
-  border-radius: var(--xflow-control-radius-sm);
+  border-radius: var(--xflow-radius-xs);
   color: var(--xflow-text-tertiary);
   flex: 0 0 auto;
   font-family: var(--xflow-font-mono);
-  font-size: 9px;
+  font-size: var(--xflow-font-xs);
   line-height: 15px;
   padding: 0 4px;
 }
@@ -4317,6 +3592,925 @@
 .xflow-editor .xflow-editor-context-menu__note {
   color: var(--xflow-text-tertiary);
   flex: 0 0 auto;
-  font-size: 10px;
+  font-size: var(--xflow-font-xs);
   font-style: normal;
+}
+
+/* --------------------------------------------------------------------------
+ * §6.10 publish & version history. The version chip is the history trigger;
+ * its button reset keeps the pill's metrics (a UA button would otherwise
+ * replace font, colour and padding). The popover reuses the theme popover's
+ * surface treatment and the panel inside owns the padding.
+ * ------------------------------------------------------------------------ */
+.xflow-editor .xflow-editor-version-chip {
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.xflow-editor .xflow-editor-version-chip:focus-visible {
+  outline: 2px solid var(--xflow-primary-ring);
+  outline-offset: 1px;
+}
+
+.xflow-editor-version-popover__container {
+  background: var(--xflow-panel);
+  border: 1px solid var(--xflow-border);
+  box-shadow: var(--xflow-editor-popup-shadow);
+  color: var(--xflow-text);
+  max-width: min(378px, calc(100vw - 24px));
+  padding: 0;
+}
+
+.xflow-editor-version-history {
+  display: grid;
+  gap: 10px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 12px;
+  width: 378px;
+}
+
+.xflow-editor-version-history__head {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+}
+
+.xflow-editor-version-history__icon {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-md);
+}
+
+.xflow-editor-version-history__title {
+  color: var(--xflow-text);
+  font-size: var(--xflow-font-md);
+  font-weight: 600;
+  margin: 0;
+}
+
+.xflow-editor-version-history__count {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-xs);
+  margin-inline-start: auto;
+}
+
+.xflow-editor-version-popover__content {
+  padding: 0;
+}
+
+.xflow-editor-version-history__state {
+  color: var(--xflow-text-secondary);
+  display: flex;
+  font-size: var(--xflow-font-sm);
+  gap: 8px;
+  margin: 0;
+}
+
+.xflow-editor-version-history__rows {
+  display: grid;
+  gap: 2px;
+  list-style: none;
+  margin: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 0;
+}
+
+.xflow-editor-version-history__row {
+  align-items: center;
+  border-radius: var(--xflow-radius-sm);
+  column-gap: 8px;
+  display: grid;
+  grid-template-columns: minmax(72px, auto) minmax(0, 1fr) auto;
+  padding: 4px 6px;
+}
+
+.xflow-editor-version-history__row:hover {
+  background: var(--xflow-panel-raised);
+}
+
+.xflow-editor-version-history__row[data-online] {
+  background: color-mix(in srgb, var(--xflow-success) 8%, transparent);
+}
+
+.xflow-editor-version-history__version {
+  color: var(--xflow-text);
+  font-family: var(--xflow-font-mono);
+  font-size: var(--xflow-font-sm);
+  font-weight: 500;
+}
+
+.xflow-editor-version-history__meta {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+}
+
+.xflow-editor-version-history__hash {
+  color: var(--xflow-text-tertiary);
+  font-family: var(--xflow-font-mono);
+  font-size: var(--xflow-font-xs);
+}
+
+.xflow-editor-version-history__ops {
+  align-items: center;
+  display: flex;
+  gap: 2px;
+}
+
+.xflow-editor-version-history__blocked {
+  color: var(--xflow-warning-fg);
+  font-size: var(--xflow-font-xs);
+  grid-column: 1 / -1;
+}
+
+.xflow-editor-version-history__note {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-xs);
+  line-height: 1.5;
+  margin: 0;
+}
+
+.xflow-editor-version-history__mono {
+  font-family: var(--xflow-font-mono);
+}
+
+/* The publish dialog (§6.10): title carries the workflow and its online
+ * version; the body groups online state, the new label, the diff and the
+ * gate in one column. */
+.xflow-editor-publish-dialog__header {
+  border-bottom: 1px solid var(--xflow-border);
+  margin-bottom: 0;
+  padding-bottom: 12px;
+}
+
+.xflow-editor-publish-dialog__title {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.xflow-editor-publish-dialog__icon {
+  align-items: center;
+  background: var(--xflow-suspend-bg-subtle);
+  border-radius: var(--xflow-radius-sm);
+  color: var(--xflow-suspend-fg);
+  display: inline-flex;
+  flex: 0 0 24px;
+  font-size: var(--xflow-font-md);
+  height: 24px;
+  justify-content: center;
+  width: 24px;
+}
+
+.xflow-editor-publish-dialog__heading-group {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.xflow-editor-publish-dialog__heading {
+  color: var(--xflow-text);
+  font-size: var(--xflow-font-lg);
+  font-weight: 600;
+}
+
+.xflow-editor-publish-dialog__sub {
+  color: var(--xflow-text-tertiary);
+  font-family: var(--xflow-font-mono);
+  font-size: var(--xflow-font-xs);
+  font-weight: 400;
+}
+
+.xflow-editor-publish-dialog__body {
+  display: grid;
+  gap: 14px;
+}
+
+.xflow-editor-publish-dialog__kv {
+  display: flex;
+  gap: 10px;
+  margin: 0;
+}
+
+.xflow-editor-publish-dialog__kv dt {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-sm);
+}
+
+.xflow-editor-publish-dialog__kv dd {
+  align-items: center;
+  color: var(--xflow-text);
+  display: flex;
+  font-size: var(--xflow-font-sm);
+  margin: 0;
+}
+
+.xflow-editor-publish-dialog__mono {
+  font-family: var(--xflow-font-mono);
+  font-size: var(--xflow-font-xs);
+}
+
+.xflow-editor-publish-dialog__field {
+  display: grid;
+  gap: 6px;
+}
+
+.xflow-editor-publish-dialog__field-head {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.xflow-editor-publish-dialog__label {
+  color: var(--xflow-text-secondary);
+  font-size: var(--xflow-font-sm);
+  font-weight: 500;
+}
+
+.xflow-editor-publish-dialog__hint {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-sm);
+  margin: 0;
+}
+
+.xflow-editor-publish-dialog__counts {
+  display: flex;
+  gap: 4px;
+  margin-inline-start: auto;
+}
+
+.xflow-editor-publish-dialog__diff {
+  border: 1px solid var(--xflow-border);
+  border-radius: var(--xflow-radius-sm);
+  display: grid;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.xflow-editor-publish-dialog__diff-row {
+  align-items: start;
+  border-top: 1px solid var(--xflow-border);
+  column-gap: 8px;
+  display: grid;
+  font-size: var(--xflow-font-sm);
+  grid-template-columns: 14px minmax(0, 1fr) minmax(0, 1.4fr);
+  padding: 6px 8px;
+}
+
+.xflow-editor-publish-dialog__diff-row:first-child {
+  border-top: 0;
+}
+
+.xflow-editor-publish-dialog__diff-sign {
+  color: var(--xflow-text-tertiary);
+  font-family: var(--xflow-font-mono);
+  text-align: center;
+}
+
+.xflow-editor-publish-dialog__diff-row[data-change-kind="add"] .xflow-editor-publish-dialog__diff-sign {
+  color: var(--xflow-success-fg);
+}
+
+.xflow-editor-publish-dialog__diff-row[data-change-kind="mod"] .xflow-editor-publish-dialog__diff-sign {
+  color: var(--xflow-warning-fg);
+}
+
+.xflow-editor-publish-dialog__diff-row[data-change-kind="del"] .xflow-editor-publish-dialog__diff-sign {
+  color: var(--xflow-danger-fg);
+}
+
+.xflow-editor-publish-dialog__diff-target {
+  color: var(--xflow-text);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.xflow-editor-publish-dialog__diff-fields {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.xflow-editor-publish-dialog__diff-field {
+  color: var(--xflow-text-secondary);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.xflow-editor-publish-dialog__diff-field-name {
+  color: var(--xflow-text-tertiary);
+}
+
+.xflow-editor-publish-dialog__diff-before,
+.xflow-editor-publish-dialog__diff-after {
+  font-family: var(--xflow-font-mono);
+  font-size: var(--xflow-font-sm);
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.xflow-editor-publish-dialog__diff-before {
+  color: var(--xflow-text-tertiary);
+  text-decoration: line-through;
+}
+
+.xflow-editor-publish-dialog__diff-after {
+  color: var(--xflow-text);
+}
+
+.xflow-editor-publish-dialog__diff-arrow {
+  color: var(--xflow-text-tertiary);
+}
+
+.xflow-editor-publish-dialog__empty {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-sm);
+  margin: 0;
+  padding: 10px 8px;
+}
+
+.xflow-editor-publish-dialog__retry {
+  margin-inline-start: 6px;
+  padding-inline: 4px;
+}
+
+.xflow-editor-publish-dialog__full-diff {
+  margin-inline-end: auto;
+}
+
+.xflow-editor-publish-dialog__diff--full {
+  max-height: min(60vh, 520px);
+}
+
+/* The approval dialog (§6.12): same chrome as the publish dialog, one column
+ * of ledger, decision, secondary actions and the timeout policy in the foot. */
+.xflow-editor-approval__header {
+  border-bottom: 1px solid var(--xflow-border);
+  margin-bottom: 0;
+  padding-bottom: 12px;
+}
+
+.xflow-editor-approval__title {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.xflow-editor-approval__heading-group {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.xflow-editor-approval__heading {
+  color: var(--xflow-text);
+  font-size: var(--xflow-font-lg);
+  font-weight: 600;
+}
+
+.xflow-editor-approval__sub {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-xs);
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xflow-editor-approval__close {
+  margin-inline-start: auto;
+}
+
+.xflow-editor-approval__body {
+  /* The ledger or the ignored trail can reach 32 / 20 rows; past this the
+     decision block must stay reachable instead of pushing the footer off the
+     viewport. One ceiling shared by both scroll areas. */
+  --xflow-editor-approval-scroll: min(40vh, 360px);
+  display: grid;
+  gap: 12px;
+}
+
+.xflow-editor-approval__mono {
+  font-family: var(--xflow-font-mono);
+  font-size: var(--xflow-font-xs);
+}
+
+.xflow-editor-approval__wait {
+  color: var(--xflow-suspend-fg);
+  font-size: var(--xflow-font-sm);
+  margin: 0;
+}
+
+.xflow-editor-approval__banner {
+  background: var(--xflow-neutral-bg-subtle);
+  border: 1px solid var(--xflow-border);
+  border-radius: var(--xflow-radius-sm);
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+}
+
+.xflow-editor-approval__banner[data-tone="warning"] {
+  background: var(--xflow-warning-bg-subtle);
+  border-color: var(--xflow-warning-border);
+}
+
+.xflow-editor-approval__banner strong {
+  color: var(--xflow-text);
+  font-size: var(--xflow-font-sm);
+}
+
+.xflow-editor-approval__banner span {
+  color: var(--xflow-text-secondary);
+  font-size: var(--xflow-font-xs);
+}
+
+.xflow-editor-approval__ledger {
+  align-content: start;
+  border: 1px solid var(--xflow-border);
+  border-radius: var(--xflow-radius-sm);
+  display: grid;
+  max-height: var(--xflow-editor-approval-scroll);
+  overflow-y: auto;
+}
+
+.xflow-editor-approval__row {
+  align-items: center;
+  border-top: 1px solid var(--xflow-border);
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 16px minmax(80px, auto) minmax(0, 1fr) auto;
+  padding: 7px 10px;
+}
+
+.xflow-editor-approval__row:first-child {
+  border-top: 0;
+}
+
+.xflow-editor-approval__row[data-state="current"] {
+  background: var(--xflow-info-bg-subtle);
+}
+
+.xflow-editor-approval__row-icon {
+  align-items: center;
+  display: inline-flex;
+  font-size: var(--xflow-font-xs);
+  justify-content: center;
+}
+
+.xflow-editor-approval__row-icon[data-tone="success"] {
+  color: var(--xflow-success);
+}
+
+.xflow-editor-approval__row-icon[data-tone="info"] {
+  color: var(--xflow-info);
+}
+
+.xflow-editor-approval__row-icon[data-tone="neutral"] {
+  color: var(--xflow-text-tertiary);
+}
+
+.xflow-editor-approval__actor {
+  color: var(--xflow-text);
+  font-size: var(--xflow-font-sm);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xflow-editor-approval__say {
+  color: var(--xflow-text-secondary);
+  font-size: var(--xflow-font-sm);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xflow-editor-approval__muted {
+  color: var(--xflow-text-tertiary);
+}
+
+.xflow-editor-approval__when {
+  color: var(--xflow-text-tertiary);
+  font-family: var(--xflow-font-mono);
+  font-size: var(--xflow-font-xs);
+}
+
+.xflow-editor-approval__empty {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-sm);
+  margin: 0;
+  padding: 10px;
+}
+
+.xflow-editor-approval__meta,
+.xflow-editor-approval__hint {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-xs);
+  margin: 0;
+}
+
+.xflow-editor-approval__choices {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.xflow-editor-approval__choice {
+  background: var(--xflow-panel);
+  border: 1px solid var(--xflow-border);
+  border-radius: var(--xflow-radius-sm);
+  color: var(--xflow-text-secondary);
+  cursor: pointer;
+  display: grid;
+  gap: 2px;
+  padding: 7px 10px;
+  text-align: start;
+}
+
+.xflow-editor-approval__choice span {
+  font-size: var(--xflow-font-sm);
+  font-weight: 500;
+}
+
+.xflow-editor-approval__choice small {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-xs);
+}
+
+.xflow-editor-approval__choice[data-tone="success"] {
+  --xflow-editor-approval-choice-tone: var(--xflow-success);
+}
+
+.xflow-editor-approval__choice[data-tone="danger"] {
+  --xflow-editor-approval-choice-tone: var(--xflow-danger);
+}
+
+.xflow-editor-approval__choice[data-tone="warning"] {
+  --xflow-editor-approval-choice-tone: var(--xflow-warning);
+}
+
+.xflow-editor-approval__choice[aria-pressed="true"] {
+  border-color: var(--xflow-editor-approval-choice-tone, var(--xflow-primary));
+  box-shadow: inset 0 0 0 1px var(--xflow-editor-approval-choice-tone, var(--xflow-primary));
+  color: var(--xflow-text);
+}
+
+.xflow-editor-approval__choice:focus-visible {
+  outline: 2px solid var(--xflow-primary);
+  outline-offset: 1px;
+}
+
+.xflow-editor-approval__field {
+  display: grid;
+  gap: 4px;
+}
+
+.xflow-editor-approval__label {
+  color: var(--xflow-text-secondary);
+  font-size: var(--xflow-font-sm);
+  font-weight: 500;
+}
+
+.xflow-editor-approval__actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.xflow-editor-approval__force {
+  margin-inline-start: auto;
+}
+
+.xflow-editor-approval__secondary {
+  background: var(--xflow-panel-raised);
+  border: 1px solid var(--xflow-border);
+  border-radius: var(--xflow-radius-sm);
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.xflow-editor-approval__secondary-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.xflow-editor-approval__status {
+  align-items: center;
+  background: var(--xflow-neutral-bg-subtle);
+  border: 1px solid var(--xflow-border);
+  border-radius: var(--xflow-radius-sm);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.xflow-editor-approval__status[data-tone="success"] {
+  background: var(--xflow-success-bg-subtle);
+  border-color: var(--xflow-success-border);
+}
+
+.xflow-editor-approval__status[data-tone="danger"] {
+  background: var(--xflow-danger-bg-subtle);
+  border-color: var(--xflow-danger-border);
+}
+
+.xflow-editor-approval__status[data-tone="warning"] {
+  background: var(--xflow-warning-bg-subtle);
+  border-color: var(--xflow-warning-border);
+}
+
+.xflow-editor-approval__status strong {
+  color: var(--xflow-text);
+  font-size: var(--xflow-font-sm);
+}
+
+.xflow-editor-approval__status span {
+  color: var(--xflow-text-secondary);
+  font-size: var(--xflow-font-xs);
+}
+
+.xflow-editor-approval__trail {
+  border-top: 1px dashed var(--xflow-border-strong);
+  display: grid;
+  gap: 4px;
+  max-height: var(--xflow-editor-approval-scroll);
+  overflow-y: auto;
+  padding-top: 8px;
+}
+
+.xflow-editor-approval__trail-title {
+  color: var(--xflow-warning-fg);
+  font-size: var(--xflow-font-sm);
+  font-weight: 500;
+}
+
+.xflow-editor-approval__trail-row {
+  color: var(--xflow-text-secondary);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: var(--xflow-font-xs);
+  gap: 8px;
+}
+
+.xflow-editor-approval__foot {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.xflow-editor-approval__policy {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-xs);
+}
+
+.xflow-editor-approval__foot-gap {
+  flex: 1;
+}
+
+/* §6.8 运行记录: the left execution list owns the column and scrolls its rows. */
+.xflow-editor-exec-list > .xflow-editor-panel__body {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+
+.xflow-editor-exec-filters {
+  align-items: center;
+  border-bottom: 1px solid var(--xflow-border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+}
+
+.xflow-editor-exec-rows {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.xflow-editor-exec-item {
+  border-bottom: 1px solid var(--xflow-border);
+}
+
+.xflow-editor-exec-item__button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  display: grid;
+  font: inherit;
+  gap: 2px 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 7px 12px;
+  text-align: start;
+  width: 100%;
+}
+
+.xflow-editor-exec-item__button:hover {
+  background: var(--xflow-hover);
+}
+
+.xflow-editor-exec-item__button[aria-current="true"] {
+  background: var(--xflow-hover);
+  box-shadow: inset 2px 0 0 var(--xflow-primary);
+}
+
+.xflow-editor-exec-item__button:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--xflow-primary-border-strong), inset 0 0 0 3px var(--xflow-primary-ring);
+  outline: none;
+}
+
+.xflow-editor-exec-item__id {
+  font-family: var(--xflow-font-mono);
+  font-size: var(--xflow-font-sm);
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xflow-editor-exec-item__sub {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-xs);
+  grid-column: 1 / -1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xflow-editor-exec-empty {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-xs);
+  margin: 0;
+  padding: 16px 12px;
+  text-align: center;
+}
+
+.xflow-editor-exec-more {
+  padding-block: 8px;
+}
+
+.xflow-editor-exec-error {
+  align-items: center;
+  color: var(--xflow-danger-fg);
+  display: flex;
+  font-size: var(--xflow-font-xs);
+  gap: 8px;
+  justify-content: space-between;
+  padding: 6px 12px;
+}
+
+/* §6.8 top bar: execution id, status, lineage and the status table's ops. */
+.xflow-editor-runmeta {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.xflow-editor-runmeta__id {
+  color: var(--xflow-text-tertiary);
+  font-family: var(--xflow-font-mono);
+  font-size: var(--xflow-font-sm);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xflow-editor-runmeta__lineage {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-sm);
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The rerun lineage is the one jump inside the top bar (§6.8): same type as the
+   label it replaces, with a hover underline and a keyboard focus ring. */
+.xflow-editor-runmeta__lineage-link {
+  background: none;
+  border: 0;
+  cursor: pointer;
+  font-family: inherit;
+  padding: 0;
+  text-align: start;
+}
+
+.xflow-editor-runmeta__lineage-link:hover {
+  text-decoration: underline;
+}
+
+.xflow-editor-runmeta__lineage-link:focus-visible {
+  outline: 2px solid var(--xflow-primary-ring);
+  outline-offset: 2px;
+}
+
+.xflow-editor-runmeta__empty {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-sm);
+}
+
+/* §6.8 status bar: the replay's own strip, the diagnostics dock's 28px twin. */
+.xflow-editor-runs-statusbar {
+  align-items: center;
+  display: flex;
+  flex: 0 0 28px;
+  font-size: var(--xflow-font-sm);
+  gap: 12px;
+  height: 28px;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0 12px;
+}
+
+.xflow-editor-runs-statusbar__item {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.xflow-editor-runs-statusbar__item[data-tone="faint"] {
+  color: var(--xflow-text-tertiary);
+}
+
+.xflow-editor-runs-statusbar__id {
+  font-family: var(--xflow-font-mono);
+}
+
+/* §6.8 empty replay: no execution selected yet. */
+.xflow-editor-replay-empty {
+  color: var(--xflow-text-secondary);
+  display: grid;
+  gap: 6px;
+  justify-items: center;
+  padding: 24px;
+  text-align: center;
+}
+
+/* §6.9 rerun dialog. */
+.xflow-editor-rerun__body {
+  display: grid;
+  gap: 12px;
+}
+
+.xflow-editor-rerun__sub {
+  margin: 0;
+}
+
+.xflow-editor-rerun__id {
+  color: var(--xflow-text-secondary);
+  font-family: var(--xflow-font-mono);
+  font-size: var(--xflow-font-sm);
+}
+
+.xflow-editor-rerun__field {
+  color: var(--xflow-text-secondary);
+  display: grid;
+  font-size: var(--xflow-font-sm);
+  gap: 6px;
+}
+
+.xflow-editor-rerun__select {
+  width: 100%;
+}
+
+.xflow-editor-rerun__hint {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-xs);
+  margin: 0;
+}
+
+.xflow-editor-rerun__error {
+  color: var(--xflow-danger-fg);
+  font-size: var(--xflow-font-xs);
+  margin: 0;
+}
+
+.xflow-editor-rerun__actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
 }

@@ -1,4 +1,4 @@
-import type { WorkflowDef } from "@xflow/core";
+import { foundationTokens, type WorkflowDef } from "@xflow/core";
 import { listConnectionReferences, nodeKey, nodeName } from "./workflowOps";
 
 /**
@@ -32,8 +32,12 @@ export interface LayoutOptions {
   originY?: number;
 }
 
-/** The canvas node card's own box, used when nothing measured it yet. */
-export const defaultNodeBox: NodeBox = { width: 232, height: 64 };
+/**
+ * The canvas node card's own box, used when nothing measured it yet. The width is
+ * the card's CSS width (`--xflow-node-width`, from core's foundation tokens): it
+ * must stay equal to it, or unmeasured cards are laid out narrower than they draw.
+ */
+export const defaultNodeBox: NodeBox = { width: parseInt(foundationTokens.nodeWidth, 10), height: 64 };
 const defaultGapX = 96;
 const defaultGapY = 32;
 const defaultOrigin = 48;

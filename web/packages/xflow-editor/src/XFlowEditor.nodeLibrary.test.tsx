@@ -13,7 +13,7 @@ import { zhCN } from "./node-form/locales/zh-CN";
 import type { NodeFormSchema } from "./node-form/schema";
 import generated from "./node-form/testdata/node-types.generated.json";
 
-/** The canvas node's own select button (the outline is gone; the canvas is the list). */
+/** The canvas node's own select button: the canvas cards stay a selectable list beside the outline tree. */
 const canvasNode = (name: string): HTMLElement => {
   const node = document.querySelector<HTMLElement>(`.xflow-preview-node__select[aria-label^="${name} node "]`);
   if (!node) throw new Error(`canvas node ${name} not found`);
@@ -54,7 +54,8 @@ const tile = (type: string) => {
 };
 const groupOf = (element: HTMLElement) =>
   element.closest(".xflow-editor-node-group")?.querySelector(".xflow-editor-block-title")?.textContent;
-const iconOf = (element: HTMLElement) => element.querySelector(".xflow-editor-node-tile__icon .anticon")?.getAttribute("aria-label");
+/** The category the tile's icon block was drawn in (`categoryOf(type)`), exposed as `data-cat`. */
+const iconOf = (element: HTMLElement) => element.querySelector(".xflow-editor-category-icon")?.getAttribute("data-cat");
 const lastNode = (spy: ReturnType<typeof vi.fn>) => (spy.mock.calls.at(-1)?.[0] as WorkflowDef).nodes?.at(-1) as WorkflowNode;
 
 function schema(overrides: Partial<NodeFormSchema> & Pick<NodeFormSchema, "node_type">): NodeFormSchema {
@@ -72,7 +73,7 @@ describe("node library from /v1/node-types (Doc C §6.3)", () => {
     expect(tile("xflow.approval").getAttribute("aria-label")).toBe("审批");
     // Existing presentation is kept for known types...
     expect(groupOf(tile("xflow.http"))).toBe("动作与人工");
-    expect(iconOf(tile("xflow.http"))).toBe("global");
+    expect(iconOf(tile("xflow.http"))).toBe("action");
     expect(groupOf(tile("xflow.trigger.cron"))).toBe("触发器");
     expect(groupOf(tile("xflow.transform.set"))).toBe("数据转换");
     expect(groupOf(tile("xflow.supply.static"))).toBe("供应");
@@ -98,9 +99,10 @@ describe("node library from /v1/node-types (Doc C §6.3)", () => {
     expect(tiles().filter((element) => element.dataset.nodeType === "xflow.acme.fax")).toHaveLength(1);
     expect(fax.getAttribute("aria-label")).toBe("Fax"); // latest version wins
     expect(groupOf(fax)).toBe("其他");
-    expect(iconOf(fax)).toBe("appstore");
+    expect(iconOf(fax)).toBe("unknown");
     expect(groupOf(tile("xflow.trigger.acme"))).toBe("触发器");
-    expect(iconOf(tile("xflow.trigger.acme"))).toBe("appstore");
+    // The category follows the type's own prefix, not the library group's fallback.
+    expect(iconOf(tile("xflow.trigger.acme"))).toBe("trigger");
     expect(tile("xflow.acme.unnamed").getAttribute("aria-label")).toBe("xflow.acme.unnamed");
     expect(within(library()).getByRole("button", { name: /其他 2/ })).toBeTruthy();
   });
@@ -166,14 +168,16 @@ describe("node library from /v1/node-types (Doc C §6.3)", () => {
     render(<XFlowEditor nodeTypes={nodeTypes} value={custom} />);
 
     fireEvent.click(canvasNode("fax"));
-    const inspector = screen.getByRole("region", { name: "属性" });
+    const inspector = screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
     expect(within(inspector).getByText("该节点类型未在 server 注册，参数按 JSON 编辑")).toBeTruthy();
     expect(within(inspector).getByRole("button", { name: "以 JSON 编辑参数" })).toBeTruthy();
     // Diagnosed as a warning, not an error: the type may be registered on a runner.
     const toggle = screen.queryByRole("button", { name: "展开诊断台" });
     if (toggle) fireEvent.click(toggle);
-    const line = screen.getByText("节点类型未在 server 注册，参数按 JSON 编辑: fax:custom.runner.fax").closest("p");
-    expect(line?.textContent).toMatch(/^warn/);
+    const line = screen.getByText("节点类型未在 server 注册，参数按 JSON 编辑: fax:custom.runner.fax").closest("li");
+    expect(line?.getAttribute("data-tone")).toBe("warning");
+    expect(line?.querySelector('[aria-label="警告"]')).toBeTruthy();
+    expect(line?.textContent).not.toMatch(/^warn/);
   });
 
   it("badges a runner-reported type with a Runner tag and names its pools in the tooltip", async () => {
@@ -200,7 +204,7 @@ describe("node library from /v1/node-types (Doc C §6.3)", () => {
     expect(analyse.getAttribute("aria-label")).toBe("Analyse (Runner)");
     // No presentation entry: the kind-based fallback group and generic icon.
     expect(groupOf(analyse)).toBe("其他");
-    expect(iconOf(analyse)).toBe("appstore");
+    expect(iconOf(analyse)).toBe("unknown");
     const badge = analyse.querySelector(".xflow-editor__node-tile-source");
     expect(badge?.textContent).toBe("Runner");
     expect(badge?.getAttribute("aria-hidden")).toBe("true");

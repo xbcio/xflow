@@ -59,27 +59,56 @@ export function CanvasContextMenu({
       setPosition(undefined);
       return;
     }
-    setPosition({ left: request.clientX, top: request.clientY });
+    // The anchor is absolute against the editor root, never the viewport. The
+    // real point is computed by the rebase effect below in this same pre-paint
+    // commit; starting at the root origin keeps the viewport coordinates from
+    // ever being written into an ancestor's scroll area (an embedded host would
+    // scroll the root before the menu had a chance to move).
+    setPosition({ left: 0, top: 0 });
   }, [request]);
 
-  // Keep the menu inside the viewport: a click near the right or bottom edge
-  // flips the panel back instead of letting it run off (or be clipped).
+  // Keep the menu inside the editor: a click near the right or bottom edge
+  // flips the panel back instead of letting it run off (or be clipped). The
+  // anchor is absolute against the editor root (its `position: relative` makes
+  // it the containing block), so the pointer's viewport coordinates are rebased
+  // onto that box before clamping. A submenu opens outside the menu's own box,
+  // so an embedded host also reserves its width on the right -- rc-trigger only
+  // flips against the window, not against the editor box.
   React.useLayoutEffect(() => {
     if (!request || !position) return;
     const element = rootRef.current;
     if (!element) return;
+    const parent = element.offsetParent ?? element.parentElement;
+    const box = parent instanceof HTMLElement ? parent : undefined;
+    const rawBounds = box?.getBoundingClientRect();
+    // jsdom reports a zero rect for everything; treat that as "no box" so the
+    // window fallback still applies there.
+    const bounds = rawBounds && (rawBounds.width > 0 || rawBounds.height > 0) ? rawBounds : undefined;
+    const originLeft = bounds?.left ?? 0;
+    const originTop = bounds?.top ?? 0;
+    const limitWidth = bounds?.width ?? window.innerWidth;
+    const limitHeight = bounds?.height ?? window.innerHeight;
+    const hasSubmenu = (items ?? []).some((item) => {
+      const children = item && "children" in item ? item.children : undefined;
+      return Array.isArray(children) ? children.length > 0 : Boolean(children);
+    });
+    // Only an embedded host (root narrower than the viewport) needs room kept
+    // for the submenu: with a full-viewport root the trigger's own viewport
+    // flip keeps the popup on screen.
+    const rootRight = bounds ? bounds.left + bounds.width : window.innerWidth;
+    const submenuWidth = hasSubmenu && rootRight < window.innerWidth - 1 ? 208 : 0;
     const rect = element.getBoundingClientRect();
     const margin = 8;
-    let left = request.clientX;
-    let top = request.clientY;
-    if (left + rect.width + margin > window.innerWidth) {
-      left = Math.max(margin, window.innerWidth - rect.width - margin);
+    let left = request.clientX - originLeft;
+    let top = request.clientY - originTop;
+    if (left + rect.width + submenuWidth + margin > limitWidth) {
+      left = Math.max(margin, limitWidth - rect.width - submenuWidth - margin);
     }
-    if (top + rect.height + margin > window.innerHeight) {
-      top = Math.max(margin, window.innerHeight - rect.height - margin);
+    if (top + rect.height + margin > limitHeight) {
+      top = Math.max(margin, limitHeight - rect.height - margin);
     }
     if (left !== position.left || top !== position.top) setPosition({ left, top });
-  }, [position, request]);
+  }, [items, position, request]);
 
   // Focus the first item once the menu actually exists: the Menu's own root
   // handles the arrow keys, so a keyboard-opened menu (Shift+F10) must own the
@@ -99,7 +128,9 @@ export function CanvasContextMenu({
     focusedRequestRef.current = request;
     const rows = rootRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]');
     const first = Array.from(rows ?? []).find((row) => row.getAttribute("aria-disabled") !== "true");
-    first?.focus();
+    // Never let focusing a row scroll its container: the rebased position lands
+    // in the same pre-paint commit, and a scroll here would close the menu.
+    first?.focus({ preventScroll: true });
   }, [position, request]);
 
   React.useEffect(() => {
@@ -176,11 +207,17 @@ export function CanvasContextMenu({
       style={{ left: position.left, top: position.top }}
     >
       {/* Submenu popups belong to the menu, not to the panel underneath it:
-          the anchor is fixed-positioned and unclipped by the canvas frame. */}
+          the anchor is absolutely positioned in the editor root and unclipped
+          by the canvas frame. */}
       <ConfigProvider getPopupContainer={() => rootRef.current ?? document.body}>
         <Menu
           className="xflow-editor-context-menu__list"
-          classNames={{ popup: { root: "xflow-editor-context-menu__popup" } }}
+          classNames={{
+            item: "xflow-editor-context-menu__item",
+            itemContent: "xflow-editor-context-menu__item-content",
+            popup: { root: "xflow-editor-context-menu__popup" },
+            subMenu: { item: "xflow-editor-context-menu__submenu-item" }
+          }}
           items={items}
           rootClassName="xflow-editor-context-menu"
           selectable={false}

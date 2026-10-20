@@ -1,105 +1,153 @@
-export type XFlowEditorAppearance = "light" | "dark" | "system";
-export type XFlowEditorThemeVariant = "graphite" | "blueprint";
-export type ResolvedXFlowEditorAppearance = Exclude<XFlowEditorAppearance, "system">;
+import { foundationTokens, paletteTokens, type Appearance } from "@xflow/core";
+import { theme, type ThemeConfig } from "antd";
 
 /**
- * The editor palette for each theme variant and appearance. It feeds the AntD
- * ConfigProvider tokens and mirrors the --xflow-* custom properties declared in
- * styles.css; theme.test.ts fails when the two disagree. Not part of the
- * package's public API.
+ * `system` follows `prefers-color-scheme`; the other two are explicit. The
+ * resolved value is what `data-theme` carries and what picks the palette.
+ * Palette values live in `@xflow/core` (`paletteTokens`); the editor keeps no
+ * colour table of its own.
  */
-export interface EditorThemePalette {
-  app: string;
-  border: string;
-  borderStrong: string;
-  field: string;
-  hover: string;
-  panel: string;
-  panelRaised: string;
-  primary: string;
-  text: string;
-  textSecondary: string;
-  textTertiary: string;
-  toolbar: string;
-  success: string;
-  warning: string;
-  error: string;
+export type XFlowEditorAppearance = Appearance | "system";
+export type ResolvedXFlowEditorAppearance = Appearance;
+
+/** The editor's AntD theme, generated from the same palette that renders tokens.css. */
+export function createEditorThemeConfig(appearance: ResolvedXFlowEditorAppearance): ThemeConfig {
+  // The palette is the same record @xflow/core renders into tokens.css, so the
+  // AntD tokens and the --xflow-* custom properties cannot disagree.
+  // ConfigProvider owns AntD's interaction states; the root CSS variables own
+  // editor-only surfaces such as rulers and the React Flow canvas.
+  const palette = paletteTokens[appearance];
+  const focusOutline = `${palette.primary}33`;
+
+  return {
+    algorithm: appearance === "dark" ? theme.darkAlgorithm : theme.defaultAlgorithm,
+    cssVar: {
+      prefix: "xflow-ant",
+      key: `xflow-editor-${appearance}`
+    },
+    token: {
+      borderRadius: 6,
+      borderRadiusSM: 4,
+      borderRadiusLG: 8,
+      colorBgBase: palette.app,
+      colorBgContainer: palette.field,
+      colorBgContainerDisabled: palette.panelRaised,
+      colorBgElevated: palette.panel,
+      colorBgLayout: palette.app,
+      colorBgTextActive: palette.hover,
+      colorBgTextHover: palette.hover,
+      colorBorder: palette.border,
+      colorBorderBg: palette.border,
+      colorBorderSecondary: palette.border,
+      colorError: palette.danger,
+      colorFillAlter: palette.field,
+      colorFillContent: palette.field,
+      colorFillContentHover: palette.hover,
+      colorFillSecondary: palette.field,
+      colorFillTertiary: palette.hover,
+      colorIcon: palette.textTertiary,
+      colorIconHover: palette.text,
+      colorInfo: palette.info,
+      colorPrimary: palette.primary,
+      colorSplit: palette.border,
+      colorSuccess: palette.success,
+      colorText: palette.text,
+      colorTextBase: palette.text,
+      colorTextDescription: palette.textTertiary,
+      colorTextLabel: palette.textSecondary,
+      colorTextPlaceholder: palette.textTertiary,
+      colorTextSecondary: palette.textSecondary,
+      colorTextTertiary: palette.textTertiary,
+      colorWarning: palette.warning,
+      boxShadowSecondary: palette.elev2,
+      controlHeight: 32,
+      controlHeightSM: 24,
+      controlItemBgActive: palette.hover,
+      controlItemBgActiveHover: palette.hover,
+      controlItemBgHover: palette.hover,
+      controlOutline: focusOutline,
+      controlOutlineWidth: 2,
+      fontFamily: foundationTokens.fontSans,
+      fontFamilyCode: foundationTokens.fontMono,
+      fontSize: 13,
+      fontSizeSM: 12
+    },
+    components: {
+      Button: {
+        dangerColor: palette.danger,
+        dangerShadow: "none",
+        defaultActiveBg: palette.hover,
+        defaultActiveBorderColor: palette.primary,
+        defaultActiveColor: palette.text,
+        defaultBg: palette.panel,
+        defaultBorderColor: palette.border,
+        defaultColor: palette.text,
+        // No defaultHover* tokens: the baseline keeps AntD's default hover (field
+        // fill, primary-hover border), so overriding them here made every default
+        // button hover grey with a solid primary border.
+        defaultShadow: "none",
+        // The 24px tool buttons (spec §6.0) carry a 16px icon, the size the
+        // baseline draws with `.xflow-pv-tool`; AntD would inherit fontSizeSM.
+        onlyIconSizeSM: 16,
+        primaryColor: palette.onPrimary,
+        primaryShadow: "none",
+        solidTextColor: palette.onPrimary
+      },
+      Card: {
+        bodyPaddingSM: 10,
+        headerBg: palette.panelRaised,
+        headerPaddingSM: 10
+      },
+      Input: {
+        activeBg: palette.field,
+        activeBorderColor: palette.primary,
+        activeShadow: `0 0 0 2px ${focusOutline}`,
+        hoverBg: palette.field,
+        hoverBorderColor: palette.primary
+      },
+      Modal: { borderRadiusLG: 12, contentBg: palette.panel, footerBg: palette.panel, headerBg: palette.panel },
+      Popover: { colorBgElevated: palette.panel },
+      Segmented: {
+        itemActiveBg: palette.hover,
+        itemColor: palette.textSecondary,
+        itemHoverBg: palette.hover,
+        itemHoverColor: palette.text,
+        itemSelectedBg: palette.panel,
+        itemSelectedColor: palette.text,
+        trackBg: palette.hover,
+        trackPadding: 2
+      },
+      Select: {
+        activeBorderColor: palette.primary,
+        activeOutlineColor: focusOutline,
+        hoverBorderColor: palette.primary,
+        optionActiveBg: palette.hover,
+        optionSelectedBg: palette.hover,
+        optionSelectedColor: palette.text,
+        optionSelectedFontWeight: 600,
+        selectorBg: palette.field
+      },
+      Switch: {
+        handleBg: palette.field,
+        handleShadow: "none",
+        handleSizeSM: 12,
+        trackHeightSM: 16,
+        trackMinWidthSM: 28,
+        trackPadding: 2
+      },
+      // Same values as the baseline's Tabs token (ui-preview/tokens.ts): 16px
+      // between items, no gap under the nav, inactive labels in secondary text.
+      Tabs: {
+        horizontalItemGutter: 16,
+        horizontalMargin: "0",
+        itemColor: palette.textSecondary
+      },
+      Tag: {
+        defaultBg: palette.panelRaised,
+        defaultColor: palette.textSecondary,
+        solidTextColor: palette.onPrimary
+      }
+    }
+  };
 }
 
-export const editorThemePalettes: Record<
-  XFlowEditorThemeVariant,
-  Record<ResolvedXFlowEditorAppearance, EditorThemePalette>
-> = {
-  graphite: {
-    light: {
-      app: "#f5f6f8",
-      border: "#d9dee7",
-      borderStrong: "#bcc5d0",
-      field: "#ffffff",
-      hover: "#edf3ff",
-      panel: "#ffffff",
-      panelRaised: "#f7f8fa",
-      primary: "#2f7cff",
-      text: "#1f2329",
-      textSecondary: "#4e5969",
-      textTertiary: "#86909c",
-      toolbar: "#ffffff",
-      success: "#1a9b67",
-      warning: "#c98600",
-      error: "#d9363e"
-    },
-    dark: {
-      app: "#151617",
-      border: "#3a3d43",
-      borderStrong: "#4b5058",
-      field: "#1e2023",
-      hover: "#30343a",
-      panel: "#24262a",
-      panelRaised: "#2b2e33",
-      primary: "#4c8dff",
-      text: "#f2f4f7",
-      textSecondary: "#c8cdd5",
-      textTertiary: "#a4abb6",
-      toolbar: "#1e1f21",
-      success: "#35c98b",
-      warning: "#f7b955",
-      error: "#ff5f57"
-    }
-  },
-  blueprint: {
-    light: {
-      app: "#f6f8fc",
-      border: "#d5dfeb",
-      borderStrong: "#b7c7d9",
-      field: "#ffffff",
-      hover: "#ecf3ff",
-      panel: "#ffffff",
-      panelRaised: "#f1f5fb",
-      primary: "#316dff",
-      text: "#1b2b3f",
-      textSecondary: "#50647d",
-      textTertiary: "#8191a5",
-      toolbar: "#ffffff",
-      success: "#168b63",
-      warning: "#b87700",
-      error: "#cf3c45"
-    },
-    dark: {
-      app: "#111827",
-      border: "#314158",
-      borderStrong: "#465b76",
-      field: "#121b28",
-      hover: "#24344a",
-      panel: "#17202d",
-      panelRaised: "#1e2a3a",
-      primary: "#5b8cff",
-      text: "#e6edf7",
-      textSecondary: "#c0cddc",
-      textTertiary: "#8fa0b5",
-      toolbar: "#141e2d",
-      success: "#48c78e",
-      warning: "#eab85b",
-      error: "#ff6b6b"
-    }
-  }
-};

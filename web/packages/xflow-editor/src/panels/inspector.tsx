@@ -1,26 +1,29 @@
 import * as React from "react";
 import {
   BranchesOutlined,
+  CaretRightOutlined,
   CodeOutlined,
+  CopyOutlined,
   DeleteOutlined,
-  FileSearchOutlined,
   FormatPainterOutlined,
   InfoCircleOutlined,
+  MoreOutlined,
   SettingOutlined,
+  SlidersOutlined,
   WarningOutlined
 } from "@ant-design/icons";
-import { Button, Input, Select, Tag, Tooltip } from "antd";
-import { isSupplyNode, runtimeForNode } from "@xflow/core";
+import { Button, Dropdown, Input, Select, Tabs, Tooltip } from "antd";
+import type { MenuProps, TabsProps } from "antd";
+import { APPROVAL_NODE_TYPE, isSupplyNode, nodeStatusMeta, runtimeForNode } from "@xflow/core";
 import type { NodeTypesResponse, RuntimeSnapshot, WorkflowDef, WorkflowNode } from "@xflow/core";
 import type { Issue, Patch } from "@xflow/composer/core";
-import { Composer, type Registry } from "@xflow/composer/react";
+import { Composer, type FocusRequest, type Registry } from "@xflow/composer/react";
 import { nodeHasTemplate, NodeFormCompiler, portsForNode } from "../node-form";
 import {
   EditorPanel,
   SectionCard,
   editorInputClassNames,
   editorSelectClassNames,
-  editorTagClassNames,
   editorTextAreaClassNames,
   editorTooltipClassNames,
   serializeJson,
@@ -28,8 +31,11 @@ import {
   type WorkflowJsonField,
   type WorkflowUpdater
 } from "./shared";
+import { statusGlyph } from "./statusGlyph";
 import {
   addConnection,
+  connectionsOfNode,
+  countNodeConnections,
   formSchemaForNode,
   listConnectionReferences,
   nodeKey,
@@ -41,11 +47,13 @@ import {
   selectedPorts,
   supportedInputPorts,
   supportedOutputPorts,
+  updateNodeByKey,
   type ConnectionReference,
   type ParameterDraft,
   type ParameterTab,
   type RenameResult
 } from "./workflowOps";
+import { NodeCategoryIcon } from "./categoryIcon";
 import { WorkflowSettings } from "./workflowSettings";
 
 /**
@@ -69,13 +77,15 @@ interface RenameFeedback {
   message: string;
 }
 
-/** Visual identity of the node's type, taken from the node library descriptor. */
-export interface NodePresentationHint {
-  icon: React.ReactNode;
-  tone: string;
-}
+export type InspectorTabKey = "parameters" | "settings" | "connections" | "run";
 
-type InspectorTabKey = "parameters" | "settings" | "connections" | "run";
+/** Semantic hooks for the Inspector's AntD Tabs; CSS scopes below `.xflow-editor`. */
+const editorInspectorTabsClassNames = {
+  body: "xflow-editor-inspector-tabs__body",
+  content: "xflow-editor-inspector-tabs__content",
+  header: "xflow-editor-inspector-tabs__header",
+  item: "xflow-editor-inspector-tabs__item"
+};
 
 function NodeParametersForm({
   workflow,
@@ -85,6 +95,8 @@ function NodeParametersForm({
   nodeTypes,
   host,
   externalIssues,
+  focusRequest,
+  onFocusRequestHandled,
   readOnly,
   invalidDraft,
   onApplyPatches
@@ -97,6 +109,10 @@ function NodeParametersForm({
   nodeTypes?: NodeTypesResponse;
   host: NodeFormHost;
   externalIssues?: Record<string, Issue[]>;
+  /** Reveals one bound parameter path (the diagnostics' 定位字段). */
+  focusRequest?: FocusRequest;
+  /** Reports the executed nonce back, so the editor can clear the request. */
+  onFocusRequestHandled?: (nonce: number) => void;
   readOnly: boolean;
   invalidDraft: boolean;
   onApplyPatches?: (key: string, patches: Patch[]) => void;
@@ -145,6 +161,8 @@ function NodeParametersForm({
         key={`${nodeKeyValue}:${section}`}
         context={context}
         externalIssues={externalIssues}
+        focusRequest={focusRequest}
+        onFocusRequestHandled={onFocusRequestHandled}
         readOnly={readOnly}
         registry={host.registry}
         spec={spec}
@@ -170,9 +188,7 @@ function ConnectionsPanel({
   const [targetInput, setTargetInput] = React.useState("main");
   const selectedName = selectedNode?.name ?? selectedNode?.id;
   const connections = React.useMemo(() => listConnectionReferences(workflow), [workflow]);
-  const visibleConnections = connections.filter(
-    (connection) => connection.sourceName === selectedName || connection.targetName === selectedName
-  );
+  const visibleConnections = connectionsOfNode(connections, selectedName);
   const sourcePorts = supportedOutputPorts(selectedNode, workflow);
   const targetCandidates = (workflow.nodes ?? []).filter((node, index) => {
     const name = nodeName(node, index);
@@ -260,39 +276,58 @@ function ConnectionsPanel({
 }
 
 /** Supply nodes are wired by the engine's supply subsystem, never by a data connection. */
-/**
- * Ant Design preset for a runtime status, or `default` for the ones the preset
- * palette cannot tell apart. `committing` and `expired` are two of those — the
- * nearest preset is the blue `running` already uses, and the gray an
- * unrecognized status falls back to — so the stylesheet tones them from the
- * shared `--xflow-status-*` tokens through the tag's `data-status` instead.
- */
-function statusColor(status: string | undefined): string {
-  if (status === "success") return "green";
-  if (status === "running" || status === "waiting") return "blue";
-  if (status === "failed" || status === "canceled") return "red";
-  if (status === "pinned" || status === "continued") return "gold";
-  if (status === "suspended") return "gold";
-  return "default";
+/** Core's status table carries icon keys; {@link statusGlyph} renders them. */
+
+/** One status pill, shared by the header and the 运行 tab (§6.4). */
+function StatusPill({
+  status,
+  className
+}: {
+  status: keyof typeof nodeStatusMeta;
+  className?: string;
+}): React.ReactElement {
+  const meta = nodeStatusMeta[status];
+  return (
+    <span className={`xflow-editor-chip ${className ?? ""}`} data-status={status} data-tone={meta.tone}>
+      <span aria-hidden="true" className="xflow-editor-chip__icon">
+        {statusGlyph[meta.icon]}
+      </span>
+      <span>{meta.label}</span>
+    </span>
+  );
+}
+
+/** One error-detail value: strings read as written, everything else as JSON. */
+function detailValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  const json = JSON.stringify(value);
+  return json === undefined ? String(value) : json;
 }
 
 function RunPanel({
   selectedNode,
-  runtime
+  runtime,
+  onOpenExecution,
+  onHandleApproval
 }: {
   selectedNode?: WorkflowNode;
   runtime?: RuntimeSnapshot;
+  onOpenExecution?: (executionId: string) => void;
+  /** Opens the §6.12 approval dialog for a suspended approval node. */
+  onHandleApproval?: () => void;
 }): React.ReactElement {
   if (!selectedNode) {
     return <p className="xflow-editor-empty">选择节点后查看运行状态。</p>;
   }
 
   const snapshot = runtimeForNode(runtime, selectedNode);
+  const errorDetails = snapshot.errorDetails ? Object.entries(snapshot.errorDetails) : [];
+  const childExecutionId = snapshot.childExecutionId;
   return (
     <div className="xflow-editor-run-list">
       <div>
         <span>状态</span>
-        <Tag className="xflow-editor-runtime-tag" classNames={editorTagClassNames} color={statusColor(snapshot.status)} data-status={snapshot.status}>{snapshot.status}</Tag>
+        <StatusPill status={snapshot.status} />
       </div>
       <div>
         <span>尝试次数</span>
@@ -300,60 +335,218 @@ function RunPanel({
       </div>
       <div>
         <span>耗时</span>
+        {/* B2b adds node timings; until then an honest dash, never createdAt. */}
         <strong>{snapshot.durationMs === undefined ? "-" : `${snapshot.durationMs} ms`}</strong>
       </div>
+      {snapshot.port ? (
+        <div>
+          <span>输出端口</span>
+          <strong>{snapshot.port}</strong>
+        </div>
+      ) : null}
+      {selectedNode.type === APPROVAL_NODE_TYPE && snapshot.status === "suspended" ? (
+        <div>
+          <span>审批</span>
+          <Button
+            disabled={!onHandleApproval}
+            size="small"
+            type="link"
+            onClick={onHandleApproval}
+          >
+            处理审批
+          </Button>
+        </div>
+      ) : null}
       {snapshot.error ? <p className="xflow-editor-error">{snapshot.error}</p> : null}
+      {errorDetails.length > 0 ? (
+        <div className="xflow-editor-run-list__stack">
+          <span>错误详情</span>
+          <dl className="xflow-editor-run-kv">
+            {errorDetails.map(([key, value]) => (
+              <React.Fragment key={key}>
+                <dt>{key}</dt>
+                <dd>{detailValue(value)}</dd>
+              </React.Fragment>
+            ))}
+          </dl>
+        </div>
+      ) : null}
+      {snapshot.output ? (
+        <div className="xflow-editor-run-list__stack">
+          <span>输出</span>
+          <pre className="xflow-editor-run-code">{serializeJson(snapshot.output)}</pre>
+        </div>
+      ) : null}
+      {childExecutionId ? (
+        <div>
+          <span>子执行</span>
+          <Button
+            disabled={!onOpenExecution}
+            size="small"
+            type="link"
+            onClick={() => onOpenExecution?.(childExecutionId)}
+          >
+            打开子执行
+          </Button>
+        </div>
+      ) : null}
     </div>
   );
 }
 
-/** The node's identity line: icon tile, display name, type and template badges. */
+/** Copy and the ⋯ menu at the end of the header row (§6.4). */
+function HeaderActions({
+  disabled,
+  editable,
+  onDuplicate,
+  onToggleDisabled,
+  onDelete
+}: {
+  disabled: boolean;
+  editable: boolean;
+  onDuplicate?: () => void;
+  onToggleDisabled?: () => void;
+  onDelete?: () => void;
+}): React.ReactElement {
+  const items: MenuProps["items"] = [
+    { key: "duplicate", icon: <CopyOutlined />, label: "复制" },
+    { key: "toggle-disabled", label: disabled ? "启用" : "禁用" },
+    { key: "divider", type: "divider" },
+    { key: "delete", danger: true, icon: <DeleteOutlined />, label: "删除" }
+  ];
+  const handleMenu: MenuProps["onClick"] = ({ key }) => {
+    if (key === "duplicate") onDuplicate?.();
+    else if (key === "toggle-disabled") onToggleDisabled?.();
+    else if (key === "delete") onDelete?.();
+  };
+  return (
+    <>
+      <Tooltip classNames={editorTooltipClassNames} title="复制节点">
+        <Button
+          aria-label="复制节点"
+          className="xflow-editor-inspector-head__action"
+          disabled={!editable}
+          icon={<CopyOutlined />}
+          size="small"
+          type="text"
+          onClick={onDuplicate}
+        />
+      </Tooltip>
+      <Tooltip classNames={editorTooltipClassNames} title="更多操作">
+        <Dropdown
+          classNames={{ root: "xflow-editor-inspector-menu" }}
+          disabled={!editable}
+          menu={{ items, onClick: handleMenu }}
+          placement="bottomRight"
+          trigger={["click"]}
+        >
+          <Button
+            aria-label="更多操作"
+            className="xflow-editor-inspector-head__action"
+            icon={<MoreOutlined />}
+            size="small"
+            type="text"
+          />
+        </Dropdown>
+      </Tooltip>
+    </>
+  );
+}
+
+/** The node's identity row: icon tile, name, status chip, actions and the type line. */
 function NodeHeader({
   node,
   index,
-  presentation,
   nodeTypes,
-  runtime
+  nodeCategories,
+  runtime,
+  editable,
+  canRename,
+  renaming,
+  renameDraft,
+  onRenameDraft,
+  onBeginRename,
+  onCancelRename,
+  onCommitRename,
+  onDuplicateNode,
+  onToggleNodeDisabled,
+  onDeleteNode
 }: {
   node: WorkflowNode;
   index: number;
-  presentation?: NodePresentationHint;
   nodeTypes?: NodeTypesResponse;
+  nodeCategories?: Readonly<Record<string, string>>;
   runtime?: RuntimeSnapshot;
+  editable: boolean;
+  /** False while the panel is read-only or the parameters draft is broken. */
+  canRename: boolean;
+  renaming: boolean;
+  renameDraft: string;
+  onRenameDraft: (value: string) => void;
+  onBeginRename: () => void;
+  onCancelRename: () => void;
+  onCommitRename: () => void;
+  onDuplicateNode?: () => void;
+  onToggleNodeDisabled?: () => void;
+  onDeleteNode?: () => void;
 }): React.ReactElement {
   const schema = formSchemaForNode(nodeTypes, node);
   const version = schema?.node_version;
-  const typeLabel = `${node.type ?? "unknown"}${version === undefined ? "" : ` · v${version}`}`;
+  // §6.13: the declared category comes from the same latest-wins map as the
+  // canvas, not from whichever schema version this node happens to pin.
+  const declaredCategory =
+    node.type && nodeCategories && Object.hasOwn(nodeCategories, node.type) ? nodeCategories[node.type] : undefined;
+  const typeParts = [nodeName(node, index), node.type ?? "unknown"];
+  if (version !== undefined) typeParts.push(`v${version}`);
+  if (node.template) typeParts.push(`模板 ${node.template}`);
+  const typeLine = typeParts.join(" · ");
   const snapshot = runtimeForNode(runtime, node);
-  const showStatus = Boolean(runtime) && snapshot.status !== "pending";
+  // Every node has a status while running, pending (排队) included (spec §6.1).
+  const showStatus = Boolean(runtime);
+  const label = nodeLabel(node, index);
   return (
-    <div className="xflow-editor-inspector-node">
-      <span
-        aria-hidden="true"
-        className="xflow-editor-inspector-node__icon"
-        data-tone={presentation?.tone ?? "blue"}
-      >
-        {presentation?.icon ?? <SettingOutlined />}
-      </span>
-      <div className="xflow-editor-inspector-node__text">
-        <strong title={nodeLabel(node, index)}>{nodeLabel(node, index)}</strong>
-        <span className="xflow-editor-inspector-node__badges">
-          <code className="xflow-editor-inspector-node__type">{typeLabel}</code>
-          {node.template ? (
-            <em className="xflow-editor-inspector-node__template">模板 {node.template}</em>
-          ) : null}
-        </span>
+    <div className="xflow-editor-inspector-head">
+      <NodeCategoryIcon category={declaredCategory} type={node.type} />
+      {renaming ? (
+        <Input
+          aria-label="节点显示名"
+          autoFocus
+          className="xflow-editor-inspector-head__rename"
+          size="small"
+          value={renameDraft}
+          onBlur={onCommitRename}
+          onChange={(event) => onRenameDraft(event.target.value)}
+          onFocus={(event) => event.currentTarget.select()}
+          onKeyDown={(event) => {
+            if (event.key !== "Escape") return;
+            event.preventDefault();
+            event.stopPropagation();
+            onCancelRename();
+          }}
+          onPressEnter={onCommitRename}
+        />
+      ) : (
+        <Tooltip classNames={editorTooltipClassNames} title={canRename ? "双击改名" : undefined}>
+          <span
+            className="xflow-editor-inspector-head__name"
+            title={label}
+            onDoubleClick={canRename ? onBeginRename : undefined}
+          >
+            {label}
+          </span>
+        </Tooltip>
+      )}
+      {showStatus ? <StatusPill className="xflow-editor-inspector-head__status" status={snapshot.status} /> : null}
+      <HeaderActions
+        disabled={Boolean(node.disabled)}
+        editable={editable}
+        onDelete={onDeleteNode}
+        onDuplicate={onDuplicateNode}
+        onToggleDisabled={onToggleNodeDisabled}
+      />
+      <div className="xflow-editor-inspector-head__type" title={typeLine}>
+        {typeLine}
       </div>
-      {showStatus ? (
-        <Tag
-          className="xflow-editor-runtime-tag xflow-editor-inspector-node__status"
-          classNames={editorTagClassNames}
-          color={statusColor(snapshot.status)}
-          data-status={snapshot.status}
-        >
-          {snapshot.status}
-        </Tag>
-      ) : null}
     </div>
   );
 }
@@ -456,15 +649,19 @@ export function Inspector({
   runtime,
   editable = true,
   nodeTypes,
+  nodeCategories,
   formHost,
   externalIssues,
-  presentation,
   parameterTab,
   revealNonce,
+  focusRequest,
+  onFocusRequestHandled,
   nameFocusNonce,
   onChangeWith,
   onApplyNodePatches,
   onDeleteNode,
+  onDuplicateNode,
+  onToggleNodeDisabled,
   onNodeRenamed,
   parameterDrafts,
   onParameterText,
@@ -472,7 +669,14 @@ export function Inspector({
   onParameterTabChange,
   workflowJsonDrafts,
   onWorkflowJsonText,
-  onClearSelection
+  onNameFocusHandled,
+  onRunNode,
+  onRerunFromNode,
+  onOpenExecution,
+  onHandleApproval,
+  defaultTab,
+  running = false,
+  headerAction
 }: {
   workflow: WorkflowDef;
   selectedNode?: WorkflowNode;
@@ -480,18 +684,32 @@ export function Inspector({
   runtime?: RuntimeSnapshot;
   editable?: boolean;
   nodeTypes?: NodeTypesResponse;
+  /**
+   * Declared categories by node type (§6.13): the same latest-wins map the
+   * canvas, outline and library use, so the head cannot disagree with them when
+   * the node pins an older schema version.
+   */
+  nodeCategories?: Readonly<Record<string, string>>;
   formHost: NodeFormHost;
   externalIssues?: Record<string, Issue[]>;
-  /** Look of the node's type (icon, tone) from the node library descriptor. */
-  presentation?: NodePresentationHint;
   parameterTab: ParameterTab;
   /** Bumped by the editor to bring the configuration view to the front. */
   revealNonce?: number;
+  /** Bumped by the editor to reveal one parameter field (定位字段, P1-c S5). */
+  focusRequest?: FocusRequest;
+  /** Reports an executed focusRequest nonce back, so the editor clears it. */
+  onFocusRequestHandled?: (nonce: number) => void;
   /** Bumped by the editor to move focus into the node-name field. */
   nameFocusNonce?: number;
+  /** Reports the consumed nonce back, so the editor can clear the request. */
+  onNameFocusHandled?: (nonce: number) => void;
   onChangeWith?: (update: WorkflowUpdater) => void;
   onApplyNodePatches?: (key: string, patches: Patch[]) => void;
   onDeleteNode?: () => void;
+  /** Copies the selected node (the header's copy button / ⋯ 复制). */
+  onDuplicateNode?: () => void;
+  /** Flips the selected node's `disabled` field (⋯ 禁用 / 启用). */
+  onToggleNodeDisabled?: () => void;
   onNodeRenamed?: (previousKey: string, nextKey: string) => void;
   parameterDrafts?: Record<string, ParameterDraft>;
   /** Every keystroke of the parameters JSON; the editor parses, drafts and debounces. */
@@ -502,10 +720,40 @@ export function Inspector({
   workflowJsonDrafts?: Partial<Record<WorkflowJsonField, WorkflowJsonDraft>>;
   /** Every keystroke of a workflow-level JSON field; the editor parses, drafts and commits. */
   onWorkflowJsonText?: (field: WorkflowJsonField, text: string) => void;
-  /** Deselects the node, which brings up the workflow settings. */
-  onClearSelection?: () => void;
+  /**
+   * Runs the workflow up to the selected node (the footer's 测试此节点). Without
+   * it the button is drawn disabled and says why, rather than pretending the
+   * host supports a partial run.
+   */
+  onRunNode?: () => void;
+  /**
+   * §6.9 从此节点重跑. The run-record mode passes it, so the footer's single
+   * action becomes the rerun entry (Q7=a). Omit and the footer keeps 测试此节点.
+   */
+  onRerunFromNode?: () => void;
+  /**
+   * The tab a freshly selected node opens on. The run-record mode defaults to
+   * 运行 (§6.8); ordinary editing keeps 参数. A new value moves the tab.
+   */
+  defaultTab?: InspectorTabKey;
+  /** Opens a sub-workflow node's child execution (运行 tab 的 打开子执行). */
+  onOpenExecution?: (executionId: string) => void;
+  /** Opens the §6.12 approval dialog (运行 tab, suspended approval node). */
+  onHandleApproval?: () => void;
+  /** A run is in flight; the footer button waits for it. */
+  running?: boolean;
+  /** Editor-owned title-bar action (the §6.0 收起属性面板 key). */
+  headerAction?: React.ReactNode;
 }): React.ReactElement {
-  const [activeTab, setActiveTab] = React.useState<InspectorTabKey>("parameters");
+  const [activeTab, setActiveTab] = React.useState<InspectorTabKey>(defaultTab ?? "parameters");
+  // A host-owned default (runs mode → 运行) moves the tab when it changes, but
+  // a user's later choice is left alone until the default changes again.
+  const lastDefaultTab = React.useRef(defaultTab);
+  React.useEffect(() => {
+    if (lastDefaultTab.current === defaultTab) return;
+    lastDefaultTab.current = defaultTab;
+    if (defaultTab !== undefined) setActiveTab(defaultTab);
+  }, [defaultTab]);
   const [renameFeedback, setRenameFeedback] = React.useState<RenameFeedback>();
   const [parametersText, setParametersText] = React.useState("{}");
   const selectedNodeIdentity = selectedNode ? nodeKey(selectedNode, selectedIndex) : undefined;
@@ -524,7 +772,7 @@ export function Inspector({
     if (revealNonce) setActiveTab("parameters");
   }, [revealNonce]);
 
-  const handledNameFocusRef = React.useRef(nameFocusNonce);
+  const handledNameFocusRef = React.useRef<number | undefined>(undefined);
 
   React.useEffect(() => {
     setRenameFeedback((current) =>
@@ -583,6 +831,47 @@ export function Inspector({
     // under its new name or the Inspector loses it.
     onNodeRenamed?.(previousKey, nextKey);
   }, [onChangeWith, onNodeRenamed, selectedNodeIdentity]);
+  // Header rename (2026-10-17): the header shows the node's *display* name
+  // (`editor_metadata.ui[name].label`, §6.4 / §6.7), while the type line carries
+  // the technical name. The draft is seeded from that same display label, the
+  // unchanged check compares against it, and the commit writes the `ui.label`
+  // through the editor's updater (one undo entry). Identity rename stays in the
+  // form's 节点名称 field and its commitNodeRename chain.
+  const [headerRenaming, setHeaderRenaming] = React.useState(false);
+  const [renameDraft, setRenameDraft] = React.useState("");
+  const renameFinishedRef = React.useRef(false);
+  const renameOriginalRef = React.useRef("");
+  const startHeaderRename = React.useCallback(() => {
+    // Same read-only rule as the form (§6.2): an unparseable parameters draft
+    // blocks every write, rename included.
+    if (!editable || !onChangeWith || !selectedNode || invalidDraft) return;
+    const original = nodeLabel(selectedNode, selectedIndex);
+    renameOriginalRef.current = original;
+    setRenameDraft(original);
+    renameFinishedRef.current = false;
+    setHeaderRenaming(true);
+  }, [editable, invalidDraft, onChangeWith, selectedIndex, selectedNode]);
+  const cancelHeaderRename = React.useCallback(() => {
+    renameFinishedRef.current = true;
+    setHeaderRenaming(false);
+  }, []);
+  const commitHeaderRename = React.useCallback(() => {
+    if (renameFinishedRef.current) return;
+    renameFinishedRef.current = true;
+    setHeaderRenaming(false);
+    const key = selectedNodeIdentity;
+    const next = renameDraft.trim();
+    if (!key || !next || next === renameOriginalRef.current) return;
+    onChangeWith?.((latest) =>
+      updateNodeByKey(latest, key, (node) => ({ ...node, ui: { ...node.ui, label: next } }))
+    );
+    setRenameFeedback((current) => (current?.nodeKey === key ? undefined : current));
+  }, [onChangeWith, renameDraft, selectedNodeIdentity]);
+  // Selecting another node ends any header rename in progress.
+  React.useEffect(() => {
+    setHeaderRenaming(false);
+    renameFinishedRef.current = true;
+  }, [selectedNodeIdentity]);
   // The registry is created once per editor; its NodeNameInput calls through
   // this ref, so it always reaches the mounted Inspector's current node.
   const renameRef = formHost.renameRef;
@@ -630,35 +919,29 @@ export function Inspector({
     [commitParameters, onParameterTabChange]
   );
 
-  // The context menu's 重命名 lands here: show the parameters tab (the node name
-  // lives there) and put the caret in the name field. The JSON source view
-  // replaces that field, so the rename leaves it the same way the card's toggle
-  // does (commit the draft, then switch to the form). The nonce is ignored on
-  // mount so merely opening the panel never steals focus.
+  // 定位字段 (P1-c S5): the Inspector owns no effect for a focusRequest. The
+  // editor's locateParameterField sets parameterTab("form") and bumps
+  // revealNonce in the same batch, so the parameters view — including the
+  // Composer that consumes the request — mounts from that one state change;
+  // tab switching has exactly one owner (the revealNonce effect above).
+  // Consumption is reported back through onFocusRequestHandled so the editor
+  // can clear the request.
+
+  // The context menu's 重命名 enters the header's inline rename (2026-10-17).
+  // The request outlives an unmount: the editor keeps the nonce until a mounted
+  // Inspector consumes it here and clears it, so reopening a collapsed panel or
+  // mounting the compact drawer from the same gesture still starts the rename.
   React.useEffect(() => {
-    if (nameFocusNonce === undefined || nameFocusNonce === handledNameFocusRef.current) return;
+    if (nameFocusNonce === undefined) {
+      // The editor cleared the request: the next bump may reuse the same number.
+      handledNameFocusRef.current = undefined;
+      return;
+    }
+    if (nameFocusNonce === handledNameFocusRef.current) return;
     handledNameFocusRef.current = nameFocusNonce;
-    setActiveTab("parameters");
-    changeParameterTab("form");
-    let frame = 0;
-    let attempts = 0;
-    const focusName = () => {
-      // The control's own class sits on the input itself (the AntD Input's
-      // rootClassName), and the form scope differs between the node form and
-      // the workflow-level one, so match the control and unwrap if needed.
-      const control = document.querySelector<HTMLElement>(".xflow-editor-nodeform-node-name-control");
-      const field = control instanceof HTMLInputElement ? control : control?.querySelector("input");
-      if (field) {
-        field.focus();
-        field.select();
-        return;
-      }
-      // The form mounts on the commit that follows the tab switch.
-      if (attempts++ < 5) frame = requestAnimationFrame(focusName);
-    };
-    frame = requestAnimationFrame(focusName);
-    return () => cancelAnimationFrame(frame);
-  }, [changeParameterTab, nameFocusNonce]);
+    onNameFocusHandled?.(nameFocusNonce);
+    startHeaderRename();
+  }, [nameFocusNonce, onNameFocusHandled, startHeaderRename]);
   const formReadOnly = !editable || invalidDraft;
   const parametersPanel = selectedNode ? (
     <div className="xflow-editor-config">
@@ -706,6 +989,7 @@ export function Inspector({
         ) : (
           <NodeParametersForm
             externalIssues={externalIssues}
+            focusRequest={focusRequest}
             host={formHost}
             invalidDraft={invalidDraft}
             node={selectedNode}
@@ -715,6 +999,7 @@ export function Inspector({
             section="parameters"
             workflow={workflow}
             onApplyPatches={onApplyNodePatches}
+            onFocusRequestHandled={onFocusRequestHandled}
           />
         )}
       </SectionCard>
@@ -748,13 +1033,31 @@ export function Inspector({
   ) : (
     <p className="xflow-editor-empty">选择节点后编辑执行策略。</p>
   );
-  const inspectorTabs: { key: InspectorTabKey; label: string; panel: React.ReactNode }[] = [
-    { key: "parameters", label: "参数", panel: parametersPanel },
-    { key: "settings", label: "设置", panel: settingsPanel },
+  // 连接 tab count: wired edges at this node, in + out (user ruling 2026-10-17);
+  // 0 shows nothing. 运行 tab dot: the node's latest run reads as a danger tone
+  // in nodeStatusMeta (only `failed`; `continued` is warning, so no dot).
+  const connectionCount = React.useMemo(() => countNodeConnections(workflow, selectedNode), [workflow, selectedNode]);
+  const runFailed = selectedNode ? nodeStatusMeta[runtimeForNode(runtime, selectedNode).status].tone === "danger" : false;
+  // The count is aria-hidden and the dot sits under an aria-label, so each tab's
+  // accessible name stays exactly 连接 / 运行; the dot is still a named image.
+  const inspectorTabs: NonNullable<TabsProps["items"]> = [
+    { key: "parameters", label: "参数", children: parametersPanel },
+    { key: "settings", label: "设置", children: settingsPanel },
     {
       key: "connections",
-      label: "连接",
-      panel: (
+      label: (
+        // Plain inline text, as the baseline draws it: the count is a faint
+        // run with its own leading space, not a flex item with a 4px gap.
+        <span>
+          连接
+          {connectionCount > 0 ? (
+            <span aria-hidden="true" className="xflow-editor-inspector-tab-count">
+              {` ${connectionCount}`}
+            </span>
+          ) : null}
+        </span>
+      ),
+      children: (
         <ConnectionsPanel
           workflow={workflow}
           selectedNode={selectedNode}
@@ -763,117 +1066,113 @@ export function Inspector({
         />
       )
     },
-    { key: "run", label: "运行", panel: <RunPanel selectedNode={selectedNode} runtime={runtime} /> }
-  ];
-  const activeTabIndex = inspectorTabs.findIndex((tab) => tab.key === activeTab);
-  const activePanel = inspectorTabs[activeTabIndex]?.panel ?? parametersPanel;
-  const handleTabKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>, currentIndex: number) => {
-    let nextIndex: number | undefined;
-    if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
-      nextIndex = (currentIndex - 1 + inspectorTabs.length) % inspectorTabs.length;
-    } else if (event.key === "ArrowRight" || event.key === "ArrowDown") {
-      nextIndex = (currentIndex + 1) % inspectorTabs.length;
-    } else if (event.key === "Home") {
-      nextIndex = 0;
-    } else if (event.key === "End") {
-      nextIndex = inspectorTabs.length - 1;
-    } else {
-      return;
+    {
+      key: "run",
+      label: (
+        <span aria-label="运行" className="xflow-editor-inspector-tab-label">
+          运行
+          {runFailed ? (
+            <span aria-label="最近一次运行失败" className="xflow-editor-inspector-tab-dot" role="img" />
+          ) : null}
+        </span>
+      ),
+      children: (
+        <RunPanel
+          onHandleApproval={onHandleApproval}
+          onOpenExecution={onOpenExecution}
+          selectedNode={selectedNode}
+          runtime={runtime}
+        />
+      )
     }
-
-    event.preventDefault();
-    const nextTab = inspectorTabs[nextIndex];
-    setActiveTab(nextTab.key);
-    document.getElementById(`xflow-editor-inspector-tab-${nextTab.key}`)?.focus();
+  ];
+  // AntD Tabs moves focus with the arrow keys / Home / End but leaves activation
+  // to Enter / Space. The Inspector's tabs have always followed focus, so any
+  // tab that takes focus becomes the active one (a click focuses it too).
+  const activateFocusedTab = (event: React.FocusEvent<HTMLElement>) => {
+    const key = (event.target as HTMLElement).closest<HTMLElement>("[data-node-key]")?.dataset.nodeKey;
+    if (key && event.target.getAttribute("role") === "tab") setActiveTab(key as InspectorTabKey);
   };
 
   return (
     <EditorPanel
-      ariaLabel="属性"
-      bodyClassName="xflow-editor-inspector__body"
-      className="xflow-editor-inspector"
-      icon={<SettingOutlined />}
-      title="属性"
-      extra={
+      actions={
         <div className="xflow-editor-inspector-header-actions">
-          {selectedNode && onClearSelection ? (
-            <Tooltip classNames={editorTooltipClassNames} title="取消选择节点，编辑工作流设置">
-              <Button
-                aria-label="工作流设置"
-                className="xflow-editor-inspector-workflow"
-                icon={<FileSearchOutlined />}
-                size="small"
-                variant="text"
-                color="default"
-                onClick={onClearSelection}
-              />
-            </Tooltip>
-          ) : null}
-          {selectedNode ? (
-            <Tooltip classNames={editorTooltipClassNames} title="删除节点（Delete）">
-              <Button
-                aria-label="删除节点"
-                className="xflow-editor-inspector-delete"
-                color="danger"
-                danger
-                icon={<DeleteOutlined />}
-                size="small"
-                variant="text"
-                onClick={onDeleteNode}
-              />
-            </Tooltip>
-          ) : null}
+          {headerAction}
         </div>
       }
+      bodyClassName="xflow-editor-inspector__body"
+      className="xflow-editor-inspector"
+      count={selectedNode ? undefined : "未选中节点"}
+      icon={<SlidersOutlined />}
+      title={selectedNode ? "属性" : "工作流设置"}
     >
       {selectedNode ? (
         <NodeHeader
+          canRename={editable && !invalidDraft && Boolean(onChangeWith)}
+          editable={editable}
           index={selectedIndex}
           node={selectedNode}
           nodeTypes={nodeTypes}
-          presentation={presentation}
+          nodeCategories={nodeCategories}
+          renameDraft={renameDraft}
+          renaming={headerRenaming}
           runtime={runtime}
+          onBeginRename={startHeaderRename}
+          onCancelRename={cancelHeaderRename}
+          onCommitRename={commitHeaderRename}
+          onDeleteNode={onDeleteNode}
+          onDuplicateNode={onDuplicateNode}
+          onRenameDraft={setRenameDraft}
+          onToggleNodeDisabled={onToggleNodeDisabled}
+        />
+      ) : null}
+      {selectedNode ? (
+        <Tabs
+          activeKey={activeTab}
+          animated={false}
+          className="xflow-editor-inspector-tabs"
+          classNames={editorInspectorTabsClassNames}
+          destroyOnHidden
+          id="xflow-editor-inspector"
+          items={inspectorTabs}
+          size="small"
+          onChange={(key) => setActiveTab(key as InspectorTabKey)}
+          onFocus={activateFocusedTab}
         />
       ) : (
-        <div className="xflow-editor-inspector-node xflow-editor-inspector-node--workflow">
-          <span aria-hidden="true" className="xflow-editor-inspector-node__icon" data-tone="blue">
-            <FileSearchOutlined />
-          </span>
-          <div className="xflow-editor-inspector-node__text">
-            <strong>{workflow.name ?? "未命名工作流"}</strong>
-            <span className="xflow-editor-inspector-node__badges">
-              <code className="xflow-editor-inspector-node__type">工作流设置</code>
-            </span>
-          </div>
-        </div>
+        // Nothing selected: the baseline panel is the workflow settings alone,
+        // titled as such, with no node head and no tab row.
+        <div className="xflow-editor-inspector-settings">{parametersPanel}</div>
       )}
-      <div className="xflow-editor-inspector-tabs" role="tablist" aria-label="属性面板视图">
-        {inspectorTabs.map((tab) => (
-          <button
-            aria-label={tab.label}
-            aria-controls={`xflow-editor-inspector-panel-${tab.key}`}
-            aria-selected={activeTab === tab.key}
-            className={activeTab === tab.key ? "active" : ""}
-            id={`xflow-editor-inspector-tab-${tab.key}`}
-            key={tab.key}
-            role="tab"
-            tabIndex={activeTab === tab.key ? 0 : -1}
-            type="button"
-            onClick={() => setActiveTab(tab.key)}
-            onKeyDown={(event) => handleTabKeyDown(event, inspectorTabs.findIndex((candidate) => candidate.key === tab.key))}
-          >
-            <span className="xflow-editor-inspector-tab-label">{tab.label}</span>
-          </button>
-        ))}
-      </div>
-      <div
-        aria-labelledby={`xflow-editor-inspector-tab-${inspectorTabs[activeTabIndex]?.key ?? "parameters"}`}
-        className="xflow-editor-inspector-panel"
-        id={`xflow-editor-inspector-panel-${inspectorTabs[activeTabIndex]?.key ?? "parameters"}`}
-        role="tabpanel"
-      >
-        {activePanel}
-      </div>
+      {selectedNode ? (
+        <div
+          className="xflow-editor-inspector-foot"
+          title={onRerunFromNode ? undefined : onRunNode ? undefined : "宿主未接 onRunNode"}
+        >
+          {onRerunFromNode ? (
+            <Button
+              aria-label="从此节点重跑"
+              block
+              icon={<CaretRightOutlined />}
+              onClick={onRerunFromNode}
+            >
+              从此节点重跑
+            </Button>
+          ) : (
+            <Button
+              aria-label="测试此节点"
+              block
+              disabled={!onRunNode || running}
+              icon={<CaretRightOutlined />}
+              loading={running}
+              onClick={onRunNode}
+            >
+              测试此节点
+            </Button>
+          )}
+        </div>
+      ) : null}
     </EditorPanel>
   );
 }
