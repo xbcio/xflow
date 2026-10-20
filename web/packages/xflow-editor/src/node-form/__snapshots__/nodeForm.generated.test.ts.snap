@@ -5015,6 +5015,240 @@ exports[`A6-generated node-types fixture > xflow.trigger.kafka@1 snapshot 1`] = 
         },
         "type": "Tags",
       },
+      "f.parameters.emit_retry": {
+        "props": {
+          "description": "Optional failure policy for the legacy per-message emit path (aggregation off and not entry-seed). A failed emit holds the partition and retries the SAME record with exponential backoff (100ms doubling, jittered, capped at 5s); nothing behind it is emitted, and no commit can pass its offset. With on_failure unset or "retry" the retry is UNBOUNDED and ends only when the trigger stops — the safe default, because a bounded retry with nowhere to put the record would have to lose it. "dead_letter" bounds the wait by max_attempts (default 10) and max_block (default 30s), whichever comes first, then republishes the record to dead_letter_topic (required) with the last emit error in xflow-dlq-reason and commits the offset only after the republish succeeds; a failing republish keeps the partition held and is retried. Retries are visible in xflow_trigger_consumption_blocked and the dead-letter outcome in xflow_trigger_messages_dead_lettered_total. Delivery stays at-least-once; consumers must be idempotent on (topic, partition, offset).",
+          "expect": {
+            "type": "object",
+          },
+          "fxToggle": true,
+          "label": "Emit Retry",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/emit_retry",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.emit_retry:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.emit_retry.dead_letter_topic": {
+        "checks": [
+          {
+            "message": "当前配置下必填",
+            "type": "required",
+            "when": {
+              "$state": "/parameters/emit_retry/on_failure",
+              "eq": "dead_letter",
+            },
+          },
+        ],
+        "props": {
+          "description": "Where an undeliverable record is parked; read only when on_failure is dead_letter",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Dead Letter Topic",
+          "mode": "template",
+          "required": {
+            "$cond": {
+              "$state": "/parameters/emit_retry/on_failure",
+              "eq": "dead_letter",
+            },
+            "else": false,
+            "then": true,
+          },
+          "value": {
+            "$bindState": "/parameters/emit_retry/dead_letter_topic",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.emit_retry.dead_letter_topic:control",
+          ],
+        },
+        "type": "ExpressionInput",
+        "visible": {
+          "$state": "/parameters/emit_retry/on_failure",
+          "eq": "dead_letter",
+        },
+      },
+      "f.parameters.emit_retry.dead_letter_topic:control": {
+        "props": {
+          "label": "Dead Letter Topic",
+          "required": {
+            "$cond": {
+              "$state": "/parameters/emit_retry/on_failure",
+              "eq": "dead_letter",
+            },
+            "else": false,
+            "then": true,
+          },
+          "value": {
+            "$bindState": "/parameters/emit_retry/dead_letter_topic",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.emit_retry.max_attempts": {
+        "checks": [
+          {
+            "args": {
+              "args": {
+                "value": 1,
+              },
+              "check": "min",
+            },
+            "message": "不能小于 1",
+            "type": "literalOnly",
+          },
+          {
+            "args": {
+              "args": {
+                "value": 1,
+              },
+              "check": "min",
+            },
+            "message": "不能小于 1",
+            "severity": "warning",
+            "type": "expressionOnly",
+          },
+        ],
+        "props": {
+          "description": "Failed emit attempts before the record is parked; default 10. Read only when on_failure is dead_letter",
+          "expect": {
+            "type": "number",
+          },
+          "fxToggle": true,
+          "label": "Max Attempts",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/emit_retry/max_attempts",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.emit_retry.max_attempts:control",
+          ],
+        },
+        "type": "ExpressionInput",
+        "visible": {
+          "$state": "/parameters/emit_retry/on_failure",
+          "eq": "dead_letter",
+        },
+      },
+      "f.parameters.emit_retry.max_attempts:control": {
+        "props": {
+          "label": "Max Attempts",
+          "value": {
+            "$bindState": "/parameters/emit_retry/max_attempts",
+          },
+        },
+        "type": "InputNumber",
+      },
+      "f.parameters.emit_retry.max_block": {
+        "checks": [
+          {
+            "args": {
+              "allowExpression": true,
+              "format": "duration",
+            },
+            "message": "需要 Go duration，例如 30s、5m",
+            "type": "format",
+          },
+        ],
+        "props": {
+          "description": "Wall time this partition may hold one record before it is parked; default 30s. Read only when on_failure is dead_letter",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Max Block",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/emit_retry/max_block",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.emit_retry.max_block:control",
+          ],
+        },
+        "type": "ExpressionInput",
+        "visible": {
+          "$state": "/parameters/emit_retry/on_failure",
+          "eq": "dead_letter",
+        },
+      },
+      "f.parameters.emit_retry.max_block:control": {
+        "props": {
+          "label": "Max Block",
+          "unit": "string",
+          "value": {
+            "$bindState": "/parameters/emit_retry/max_block",
+          },
+        },
+        "type": "DurationInput",
+      },
+      "f.parameters.emit_retry.on_failure": {
+        "props": {
+          "description": "Policy once emit keeps failing; unset means retry forever",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "On Failure",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/emit_retry/on_failure",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.emit_retry.on_failure:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.emit_retry.on_failure:control": {
+        "props": {
+          "label": "On Failure",
+          "options": [
+            {
+              "description": "Retry the same record forever; only stopping the trigger ends it (never skips, so nothing is lost)",
+              "label": "Retry",
+              "value": "retry",
+            },
+            {
+              "description": "Retry within the bounds, then republish to dead_letter_topic before committing the offset",
+              "label": "Dead Letter",
+              "value": "dead_letter",
+            },
+          ],
+          "value": {
+            "$bindState": "/parameters/emit_retry/on_failure",
+          },
+        },
+        "type": "Select",
+      },
+      "f.parameters.emit_retry:control": {
+        "children": [
+          "f.parameters.emit_retry.on_failure",
+          "f.parameters.emit_retry.max_attempts",
+          "f.parameters.emit_retry.max_block",
+          "f.parameters.emit_retry.dead_letter_topic",
+        ],
+        "props": {
+          "value": {
+            "$bindState": "/parameters/emit_retry",
+          },
+        },
+        "type": "ObjectGroup",
+      },
       "f.parameters.group": {
         "checks": [
           {
@@ -5740,6 +5974,7 @@ exports[`A6-generated node-types fixture > xflow.trigger.kafka@1 snapshot 1`] = 
           "f.parameters.max_inflight",
           "f.parameters.aggregate",
           "f.parameters.message_schema",
+          "f.parameters.emit_retry",
         ],
         "props": {
           "collapsible": true,

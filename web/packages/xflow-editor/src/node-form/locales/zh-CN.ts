@@ -378,6 +378,24 @@ const messages: Record<string, string> = {
   "Heartbeat Interval": "心跳间隔",
   "Default 3s; must stay below session_timeout": "默认 3s；必须小于 session_timeout",
   "Rebalance Timeout": "重平衡超时",
+  "Emit Retry": "投递重试",
+  "Optional failure policy for the legacy per-message emit path (aggregation off and not entry-seed). A failed emit holds the partition and retries the SAME record with exponential backoff (100ms doubling, jittered, capped at 5s); nothing behind it is emitted, and no commit can pass its offset. With on_failure unset or \"retry\" the retry is UNBOUNDED and ends only when the trigger stops — the safe default, because a bounded retry with nowhere to put the record would have to lose it. \"dead_letter\" bounds the wait by max_attempts (default 10) and max_block (default 30s), whichever comes first, then republishes the record to dead_letter_topic (required) with the last emit error in xflow-dlq-reason and commits the offset only after the republish succeeds; a failing republish keeps the partition held and is retried. Retries are visible in xflow_trigger_consumption_blocked and the dead-letter outcome in xflow_trigger_messages_dead_lettered_total. Delivery stays at-least-once; consumers must be idempotent on (topic, partition, offset).":
+    "旧版逐条投递路径（未开启聚合且非 entry-seed）的可选失败策略。投递失败会挂住该分区，并对同一条记录按指数退避重试（100ms 起逐次翻倍、带抖动、上限 5s）；它后面的记录都不会投递，任何位点提交也无法越过它。on_failure 未设置或为 \"retry\" 时重试没有上限，只有停止触发器才会结束——这是安全的默认值，因为有限重试一旦无处安放记录就只能把它丢掉。\"dead_letter\" 用 max_attempts（默认 10）和 max_block（默认 30s）限制等待，先到者为准，然后把记录重新发布到 dead_letter_topic（必填），最近一次投递错误写入 xflow-dlq-reason，重新发布成功后才提交位点；重新发布失败会继续挂住分区并重试。重试情况可从 xflow_trigger_consumption_blocked 观察，死信结果计入 xflow_trigger_messages_dead_lettered_total。投递仍为至少一次；消费方必须按 (topic, partition, offset) 幂等。",
+  "On Failure": "失败策略",
+  "Policy once emit keeps failing; unset means retry forever": "投递持续失败时的策略；不设置表示一直重试",
+  "Retry": "重试",
+  "Retry the same record forever; only stopping the trigger ends it (never skips, so nothing is lost)":
+    "对同一条记录无限重试；只有停止触发器才会结束（绝不跳过，因此不会丢失消息）",
+  "Retry within the bounds, then republish to dead_letter_topic before committing the offset":
+    "在限定范围内重试，然后重新发布到 dead_letter_topic 再提交位点",
+  "Max Attempts": "最大尝试次数",
+  "Failed emit attempts before the record is parked; default 10. Read only when on_failure is dead_letter":
+    "记录转入死信前的投递失败尝试次数；默认 10。仅在 on_failure 为 dead_letter 时读取",
+  "Max Block": "最长阻塞时长",
+  "Wall time this partition may hold one record before it is parked; default 30s. Read only when on_failure is dead_letter":
+    "记录转入死信前，该分区最多可为其阻塞的实际时长；默认 30s。仅在 on_failure 为 dead_letter 时读取",
+  "Where an undeliverable record is parked; read only when on_failure is dead_letter":
+    "无法投递的记录转入死信的位置；仅在 on_failure 为 dead_letter 时读取",
 
   // ---------------------------------------------------------- trigger.redis
   "Address": "地址",
