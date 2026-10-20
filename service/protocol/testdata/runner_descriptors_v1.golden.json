@@ -8,6 +8,8 @@
         "Type": "acme.analyse",
         "Kind": "action",
         "DisplayName": "",
+        "Category": "",
+        "CardSummary": null,
         "Credentials": null,
         "Params": null,
         "Inputs": null,
@@ -26,6 +28,11 @@
         "Type": "acme.analyse",
         "Kind": "action",
         "DisplayName": "Analyse",
+        "Category": "action",
+        "CardSummary": [
+          "query+script",
+          "limit"
+        ],
         "Credentials": [
           "acme-api"
         ],

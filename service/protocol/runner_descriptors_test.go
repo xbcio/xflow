@@ -32,6 +32,8 @@ func fullRunnerDescriptor() types.Descriptor {
 		Type:               "acme.analyse",
 		Kind:               types.NodeKindAction,
 		DisplayName:        "Analyse",
+		Category:           "action",
+		CardSummary:        []string{"query+script", "limit"},
 		Credentials:        []string{"acme-api"},
 		Capabilities:       []string{"acme.experimental"},
 		Docs:               "# Analyse\nRuns the analysis.",
@@ -202,6 +204,17 @@ func TestRunnerDescriptorEnvelopeRoundTrip(t *testing.T) {
 	t.Run("DescriptorTypePreserved", func(t *testing.T) {
 		if d.Type != "acme.analyse" || d.Kind != types.NodeKindAction {
 			t.Errorf("Type/Kind = %q/%q, want acme.analyse/action", d.Type, d.Kind)
+		}
+	})
+	t.Run("EditorCardFieldsSurvive", func(t *testing.T) {
+		// The editor node-card metadata crosses the runner wire with the rest
+		// of the descriptor; a field the envelope drops would make a runner's
+		// node types lose their category and card rows on the server.
+		if d.Category != "action" {
+			t.Errorf("Category = %q, want action", d.Category)
+		}
+		if got, want := strings.Join(d.CardSummary, "|"), "query+script|limit"; got != want {
+			t.Errorf("CardSummary = %q, want %q", got, want)
 		}
 	})
 }
