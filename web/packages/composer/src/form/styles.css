@@ -8,15 +8,22 @@
  *   defining the variables; AntD component colours follow the host's
  *   ConfigProvider.
  * - No !important, no generated `.ant-*` selectors.
+ *
+ * The whole sheet sits in `@layer xflow.composer`, which the host declares
+ * after `antd`, so a single semantic class already beats AntD's component
+ * styles and nothing needs a doubled class to raise specificity.
  */
+
+@layer xflow.composer {
 
 .xflow-composer-form {
   display: flex;
   flex-direction: column;
-  gap: var(--xflow-composer-section-gap, 16px);
+  /* The stack gap between the FieldGroup cards (§6.4). */
+  gap: var(--xflow-composer-section-gap, 8px);
   min-width: 0;
-  color: var(--xflow-text, #1f2329);
-  font-size: var(--xflow-composer-font-size, 13px);
+  color: var(--xflow-text, #16191d);
+  font-size: var(--xflow-composer-font-size, var(--xflow-font-md, 13px));
   line-height: 1.5;
 }
 
@@ -29,9 +36,40 @@
   min-width: 0;
 }
 
-.xflow-composer-field-group + .xflow-composer-field-group {
-  padding-top: var(--xflow-composer-section-gap, 16px);
-  border-top: 1px solid var(--xflow-border, #d9dee7);
+/*
+ * FieldGroup as a card (§6.4). The cards are direct flex children of the form,
+ * so card-to-card spacing is the form's own --xflow-composer-section-gap
+ * above (8px) — a sibling margin would add to that flex gap, and the host's
+ * --xflow-composer-field-gap must not space the cards at all. Inside the card
+ * header and body meet flush; only the hairline below divides them.
+ */
+.xflow-composer-field-group {
+  gap: 0;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--xflow-border, #e2e5ea);
+  border-radius: var(--xflow-composer-section-radius, var(--xflow-radius-md, 8px));
+  background: var(--xflow-panel-raised, #f8f9fb);
+}
+
+.xflow-composer-field-group > .xflow-composer-section-header {
+  padding: var(--xflow-composer-section-header-padding, 6px 12px);
+}
+
+/* Expanded: the hairline between header and body. Collapsed: the header is the
+ * whole card, and the card's radius + overflow round its corners. */
+.xflow-composer-field-group:not(.is-collapsed) > .xflow-composer-section-header {
+  border-bottom: 1px solid var(--xflow-border, #e2e5ea);
+}
+
+.xflow-composer-field-group > .xflow-composer-section-description,
+.xflow-composer-field-group > .xflow-composer-field-issues {
+  padding: 6px 12px 0;
+}
+
+.xflow-composer-field-group > .xflow-composer-section-body {
+  gap: var(--xflow-composer-section-body-gap, 8px);
+  padding: var(--xflow-composer-section-body-padding, 2px 12px 8px);
 }
 
 .xflow-composer-section-header {
@@ -44,8 +82,8 @@
 
 .xflow-composer-section-title {
   margin: 0;
-  color: var(--xflow-text, #1f2329);
-  font-size: var(--xflow-composer-title-size, 13px);
+  color: var(--xflow-text, #16191d);
+  font-size: var(--xflow-composer-title-size, var(--xflow-font-md, 13px));
   font-weight: 600;
   line-height: 20px;
 }
@@ -63,15 +101,15 @@
 }
 
 .xflow-composer-section-toggle:focus-visible {
-  outline: 2px solid var(--xflow-focus, #2f7cff);
+  outline: 2px solid var(--xflow-primary, #2f7cff);
   outline-offset: 2px;
-  border-radius: var(--xflow-control-radius-sm, 4px);
+  border-radius: var(--xflow-radius-xs, 4px);
 }
 
 .xflow-composer-section-description {
   margin: 0;
-  color: var(--xflow-text-secondary, #4e5969);
-  font-size: 12px;
+  color: var(--xflow-text-secondary, #4a5260);
+  font-size: var(--xflow-font-sm, 12px);
 }
 
 .xflow-composer-section-body {
@@ -85,27 +123,47 @@
   display: none;
 }
 
-/* Collapsed section hiding errors: count next to the title. */
+/* Collapsed section hiding errors: the count as a danger chip, on the header's
+ * right side ahead of any actions (§6.4 / baseline StatusChip, danger tone).
+ * A button (P1-c S5): clicking it expands the section and reveals its first
+ * error; the chip look above is unchanged. */
 .xflow-composer-section-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   flex: 0 0 auto;
-  margin-right: auto;
-  padding: 0 6px;
-  border-radius: 999px;
-  background: var(--xflow-status-error-bg, #fdecee);
-  color: var(--xflow-status-error-text, #b4232b);
-  font-size: 12px;
-  line-height: 18px;
+  height: 20px;
+  margin-left: auto;
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--xflow-danger, #d1333b) 55%, transparent);
+  border-radius: var(--xflow-radius-pill, 999px);
+  background: var(--xflow-danger-bg-subtle, color-mix(in srgb, #d1333b 12%, transparent));
+  color: var(--xflow-danger-fg, color-mix(in srgb, #d1333b 70%, #16191d));
+  font-family: inherit;
+  font-size: var(--xflow-font-xs, 11px);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.xflow-composer-section-badge:focus-visible {
+  outline: 2px solid var(--xflow-primary, #2f7cff);
+  outline-offset: 2px;
+}
+
+.xflow-composer-section-badge-icon {
+  font-size: var(--xflow-font-sm, 12px);
 }
 
 .xflow-composer-object-group {
   padding: 10px 12px;
-  border: 1px solid var(--xflow-border, #d9dee7);
-  border-radius: var(--xflow-control-radius, 6px);
-  background: var(--xflow-surface-panel-raised, #f7f8fa);
+  border: 1px solid var(--xflow-border, #e2e5ea);
+  border-radius: var(--xflow-radius-sm, 6px);
+  background: var(--xflow-panel-raised, #f8f9fb);
 }
 
 .xflow-composer-object-group.is-error {
-  border-color: var(--xflow-status-error-border, rgba(217, 54, 62, .42));
+  border-color: var(--xflow-danger-border, color-mix(in srgb, #d1333b 40%, transparent));
 }
 
 /* ------------------------------------------------------------------ fields */
@@ -132,15 +190,15 @@
   align-items: baseline;
   gap: 2px;
   min-width: 0;
-  color: var(--xflow-text-secondary, #4e5969);
-  font-size: 12px;
+  color: var(--xflow-text-secondary, #4a5260);
+  font-size: var(--xflow-font-sm, 12px);
   font-weight: 500;
   line-height: 20px;
   overflow-wrap: anywhere;
 }
 
 .xflow-composer-field-required {
-  color: var(--xflow-status-error-text, #b4232b);
+  color: var(--xflow-danger-fg, color-mix(in srgb, #d1333b 70%, #16191d));
 }
 
 /* descriptionPlacement="tooltip": label + help icon on one row. */
@@ -155,6 +213,12 @@
   padding-top: 5px;
 }
 
+/* An "inline-after" field keeps its label inside the row (Switch), so the body
+ * spans the label column instead of being laid into it. */
+.xflow-composer-field--label-after > .xflow-composer-field-body {
+  grid-column: 1 / -1;
+}
+
 .xflow-composer-field-help {
   display: inline-flex;
   flex: none;
@@ -164,21 +228,21 @@
   height: 16px;
   margin: 0;
   padding: 0;
-  color: var(--xflow-text-tertiary, #86909c);
-  font-size: 12px;
+  color: var(--xflow-text-tertiary, #667085);
+  font-size: var(--xflow-font-sm, 12px);
   line-height: 1;
   background: none;
   border: 0;
-  border-radius: var(--xflow-control-radius-sm, 4px);
+  border-radius: var(--xflow-radius-xs, 4px);
   cursor: help;
 }
 
 .xflow-composer-field-help:hover {
-  color: var(--xflow-text-secondary, #4e5969);
+  color: var(--xflow-text-secondary, #4a5260);
 }
 
 .xflow-composer-field-help:focus-visible {
-  outline: 2px solid var(--xflow-focus, #2f7cff);
+  outline: 2px solid var(--xflow-primary, #2f7cff);
   outline-offset: 1px;
 }
 
@@ -196,6 +260,8 @@
 .xflow-composer-control {
   width: 100%;
   min-width: 0;
+  /* The host sets the control height (§6.4); the editor passes its field height. */
+  min-height: var(--xflow-composer-control-height, var(--xflow-control-height, 32px));
 }
 
 /* Select popup row with a description (choice.tsx renderOption). */
@@ -211,23 +277,32 @@
 }
 
 .xflow-composer-option-description {
-  color: var(--xflow-text-secondary, #4e5969);
-  font-size: 12px;
+  color: var(--xflow-text-secondary, #4a5260);
+  font-size: var(--xflow-font-sm, 12px);
   line-height: 18px;
   white-space: normal;
 }
 
-.xflow-composer-field-hint,
+/* The default hint is a note under the control, quieter than the description.
+ * Its 4px lead is .xflow-composer-field-body's own gap; the baseline's
+ * margin-top would double it to 8px. */
+.xflow-composer-field-hint {
+  color: var(--xflow-text-tertiary, #667085);
+  font-size: var(--xflow-font-sm, 12px);
+  line-height: 18px;
+}
+
 .xflow-composer-field-description {
-  color: var(--xflow-text-secondary, #4e5969);
-  font-size: 12px;
+  color: var(--xflow-text-secondary, #4a5260);
+  font-size: var(--xflow-font-sm, 12px);
   line-height: 18px;
 }
 
 .xflow-composer-field-issues {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  /* Rows are spaced by the sibling rule below; a gap would add to it. */
+  gap: 0;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -238,21 +313,35 @@
 }
 
 .xflow-composer-issue {
-  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--xflow-font-sm, 12px);
   line-height: 18px;
 }
 
+/* The baseline stacks rows by margin-top alone; here the field-body gap already
+ * leads the first row, so only consecutive rows carry the 4px. */
+.xflow-composer-issue + .xflow-composer-issue {
+  margin-top: 4px;
+}
+
+.xflow-composer-issue-icon {
+  flex: none;
+  font-size: var(--xflow-font-lg, 14px);
+}
+
 .xflow-composer-issue--error {
-  color: var(--xflow-status-error-text, #b4232b);
+  color: var(--xflow-danger-fg, color-mix(in srgb, #d1333b 70%, #16191d));
 }
 
 .xflow-composer-issue--warning {
-  color: var(--xflow-status-warning-text, #946200);
+  color: var(--xflow-warning-fg, color-mix(in srgb, #b26b00 70%, #16191d));
 }
 
 .xflow-composer-issue-detail {
   margin-left: 6px;
-  color: var(--xflow-text-tertiary, #86909c);
+  color: var(--xflow-text-tertiary, #667085);
 }
 
 .xflow-composer-visually-hidden {
@@ -269,32 +358,53 @@
 
 /* ------------------------------------------------------------ switch/radio */
 
-.xflow-composer-switch-row,
+.xflow-composer-switch-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  /* The switch row is a small control (baseline §6.4), not a full-height one. */
+  min-height: var(--xflow-composer-switch-height, var(--xflow-control-height-sm, 24px));
+}
+
 .xflow-composer-radio-row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  min-height: var(--xflow-control-height, 28px);
+  min-height: var(--xflow-composer-control-height, var(--xflow-control-height, 32px));
+}
+
+/* The switch labels itself in the row: the label is the control's own text
+ * (baseline §6.4), not the small secondary label above other controls. */
+.xflow-composer-switch-row .xflow-composer-field-label {
+  color: var(--xflow-text, #16191d);
+  font-size: var(--xflow-font-md, 13px);
+  font-weight: 400;
+}
+
+/* Effectively off — including unset with no default: the baseline greys it. */
+.xflow-composer-switch-row.is-off .xflow-composer-field-label {
+  color: var(--xflow-text-tertiary, #667085);
 }
 
 .xflow-composer-switch-state {
-  color: var(--xflow-text-secondary, #4e5969);
-  font-size: 12px;
+  color: var(--xflow-text-tertiary, #667085);
+  font-size: var(--xflow-font-sm, 12px);
 }
 
 .xflow-composer-switch.is-unset .xflow-composer-switch-control {
   opacity: .72;
 }
 
-.xflow-composer-reset.xflow-composer-reset {
+.xflow-composer-reset {
   height: auto;
   padding: 0 2px;
-  font-size: 12px;
+  font-size: var(--xflow-font-sm, 12px);
 }
 
 .xflow-composer-clear-icon {
-  color: var(--xflow-text-tertiary, #86909c);
+  color: var(--xflow-text-tertiary, #667085);
 }
 
 /* -------------------------------------------------------------- code/json */
@@ -311,17 +421,17 @@
   align-self: flex-end;
   margin-bottom: 2px;
   padding: 0 6px;
-  border-radius: var(--xflow-control-radius-sm, 4px);
-  background: var(--xflow-surface-control, #f7f8fa);
-  color: var(--xflow-text-tertiary, #86909c);
-  font-size: 11px;
+  border-radius: var(--xflow-radius-xs, 4px);
+  background: var(--xflow-field, #ffffff);
+  color: var(--xflow-text-tertiary, #667085);
+  font-size: var(--xflow-font-xs, 11px);
   line-height: 18px;
   pointer-events: none;
 }
 
 .xflow-composer-code-textarea {
-  font-family: var(--xflow-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
-  font-size: 12px;
+  font-family: var(--xflow-font-mono, "JetBrains Mono", "SF Mono", Menlo, monospace);
+  font-size: var(--xflow-font-sm, 12px);
   line-height: 1.55;
   tab-size: 2;
 }
@@ -331,48 +441,63 @@
 .xflow-composer-key-value-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
   min-width: 0;
 }
 
+/* One row per entry: key | value | delete, vertically centred (§6.4 baseline). */
 .xflow-composer-key-value-row {
-  display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(0, 3fr) auto;
-  align-items: start;
+  display: flex;
+  align-items: center;
   gap: 6px;
   min-width: 0;
 }
 
+.xflow-composer-key-value-row + .xflow-composer-key-value-row {
+  margin-top: 6px;
+}
+
+.xflow-composer-key-value-key,
 .xflow-composer-key-value-value {
+  flex: 1 1 0;
   min-width: 0;
 }
 
+/* One error line per failing row, under the rows and above the add button; the
+ * icon, the copy and the 4px lead are the baseline's error row (§6.4). */
 .xflow-composer-row-error {
-  grid-column: 1 / -1;
-  color: var(--xflow-status-error-text, #b4232b);
-  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  color: var(--xflow-danger-fg, color-mix(in srgb, #d1333b 70%, #16191d));
+  font-size: var(--xflow-font-sm, 12px);
+}
+
+.xflow-composer-row-error-icon {
+  flex: none;
+  font-size: var(--xflow-font-lg, 14px);
 }
 
 .xflow-composer-inline-error {
-  color: var(--xflow-status-error-text, #b4232b);
-  font-size: 12px;
+  color: var(--xflow-danger-fg, color-mix(in srgb, #d1333b 70%, #16191d));
+  font-size: var(--xflow-font-sm, 12px);
 }
 
-.xflow-composer-add.xflow-composer-add {
+.xflow-composer-add {
   align-self: flex-start;
 }
 
 .xflow-composer-empty {
   padding: 8px 10px;
-  border: 1px dashed var(--xflow-border, #d9dee7);
-  border-radius: var(--xflow-control-radius-sm, 4px);
-  color: var(--xflow-text-tertiary, #86909c);
-  font-size: 12px;
+  border: 1px dashed var(--xflow-border, #e2e5ea);
+  border-radius: var(--xflow-radius-xs, 4px);
+  color: var(--xflow-text-tertiary, #667085);
+  font-size: var(--xflow-font-sm, 12px);
   text-align: center;
 }
 
-.xflow-composer-icon-button.xflow-composer-icon-button {
-  color: var(--xflow-text-tertiary, #86909c);
+.xflow-composer-icon-button {
+  color: var(--xflow-text-tertiary, #667085);
 }
 
 /* ---------------------------------------------------------------- array */
@@ -388,9 +513,9 @@
   display: flex;
   flex-direction: column;
   min-width: 0;
-  border: 1px solid var(--xflow-border, #d9dee7);
-  border-radius: var(--xflow-control-radius, 6px);
-  background: var(--xflow-surface-panel, #ffffff);
+  border: 1px solid var(--xflow-border, #e2e5ea);
+  border-radius: var(--xflow-radius-sm, 6px);
+  background: var(--xflow-panel, #ffffff);
   overflow: hidden;
 }
 
@@ -407,7 +532,7 @@
 }
 
 .xflow-composer-array-row + .xflow-composer-array-row {
-  border-top: 1px solid var(--xflow-border, #d9dee7);
+  border-top: 1px solid var(--xflow-border, #e2e5ea);
 }
 
 .xflow-composer-array-row > .xflow-composer-field,
@@ -420,12 +545,12 @@
 .xflow-composer-array-head {
   padding-top: 4px;
   padding-bottom: 4px;
-  background: var(--xflow-surface-panel-raised, #f7f8fa);
+  background: var(--xflow-panel-raised, #f8f9fb);
 }
 
 .xflow-composer-array-heading {
-  color: var(--xflow-text-secondary, #4e5969);
-  font-size: 12px;
+  color: var(--xflow-text-secondary, #4a5260);
+  font-size: var(--xflow-font-sm, 12px);
   font-weight: 500;
   line-height: 20px;
 }
@@ -438,7 +563,7 @@
   justify-content: flex-end;
   gap: 2px;
   width: 84px;
-  min-height: var(--xflow-control-height, 28px);
+  min-height: var(--xflow-composer-control-height, var(--xflow-control-height, 32px));
 }
 
 /* ---------------------------------------------------------- raw / errors */
@@ -450,15 +575,15 @@
   gap: 6px;
   min-width: 0;
   padding: 8px 10px;
-  border: 1px solid var(--xflow-status-warning-border, rgba(201, 134, 0, .38));
-  border-radius: var(--xflow-control-radius-sm, 4px);
-  background: var(--xflow-status-warning-subtle, rgba(201, 134, 0, .10));
+  border: 1px solid var(--xflow-warning-border, color-mix(in srgb, #b26b00 40%, transparent));
+  border-radius: var(--xflow-radius-xs, 4px);
+  background: var(--xflow-warning-bg-subtle, color-mix(in srgb, #b26b00 12%, transparent));
 }
 
 .xflow-composer-raw-notice {
   margin: 0;
-  color: var(--xflow-status-warning-text, #946200);
-  font-size: 12px;
+  color: var(--xflow-warning-fg, color-mix(in srgb, #b26b00 70%, #16191d));
+  font-size: var(--xflow-font-sm, 12px);
 }
 
 .xflow-composer-raw-value {
@@ -467,17 +592,17 @@
   margin: 0;
   padding: 6px 8px;
   overflow: auto;
-  border-radius: var(--xflow-control-radius-sm, 4px);
-  background: var(--xflow-surface-control, #f7f8fa);
-  color: var(--xflow-text, #1f2329);
-  font-family: var(--xflow-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
-  font-size: 12px;
+  border-radius: var(--xflow-radius-xs, 4px);
+  background: var(--xflow-field, #ffffff);
+  color: var(--xflow-text, #16191d);
+  font-family: var(--xflow-font-mono, "JetBrains Mono", "SF Mono", Menlo, monospace);
+  font-size: var(--xflow-font-sm, 12px);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 .xflow-composer-raw-value:focus-visible {
-  outline: 2px solid var(--xflow-focus, #2f7cff);
+  outline: 2px solid var(--xflow-primary, #2f7cff);
   outline-offset: 1px;
 }
 
@@ -488,33 +613,35 @@
   gap: 4px;
   min-width: 0;
   padding: 8px 10px;
-  border: 1px dashed var(--xflow-status-error-border, rgba(217, 54, 62, .42));
-  border-radius: var(--xflow-control-radius-sm, 4px);
-  background: var(--xflow-status-error-subtle, rgba(217, 54, 62, .10));
-  color: var(--xflow-text, #1f2329);
-  font-size: 12px;
+  border: 1px dashed var(--xflow-danger-border, color-mix(in srgb, #d1333b 40%, transparent));
+  border-radius: var(--xflow-radius-xs, 4px);
+  background: var(--xflow-danger-bg-subtle, color-mix(in srgb, #d1333b 12%, transparent));
+  color: var(--xflow-text, #16191d);
+  font-size: var(--xflow-font-sm, 12px);
 }
 
 .xflow-composer-unsupported {
-  border-color: var(--xflow-status-warning-border, rgba(201, 134, 0, .38));
-  background: var(--xflow-status-warning-subtle, rgba(201, 134, 0, .10));
+  border-color: var(--xflow-warning-border, color-mix(in srgb, #b26b00 40%, transparent));
+  background: var(--xflow-warning-bg-subtle, color-mix(in srgb, #b26b00 12%, transparent));
 }
 
 .xflow-composer-placeholder-title {
-  color: var(--xflow-status-error-text, #b4232b);
+  color: var(--xflow-danger-fg, color-mix(in srgb, #d1333b 70%, #16191d));
   font-weight: 600;
 }
 
 .xflow-composer-unsupported .xflow-composer-placeholder-title {
-  color: var(--xflow-status-warning-text, #946200);
+  color: var(--xflow-warning-fg, color-mix(in srgb, #b26b00 70%, #16191d));
 }
 
 .xflow-composer-placeholder-message {
-  color: var(--xflow-text-secondary, #4e5969);
+  color: var(--xflow-text-secondary, #4a5260);
 }
 
 .xflow-composer-placeholder-issues {
   margin: 0;
   padding-left: 16px;
-  color: var(--xflow-text-secondary, #4e5969);
+  color: var(--xflow-text-secondary, #4a5260);
+}
+
 }

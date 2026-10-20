@@ -2,9 +2,10 @@
 // form components are composer/form). They follow the component contract
 // strictly: they never write on mount.
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import { zodProps, type PropsSchema } from "../core";
+import { useRevealElement, useRevealExpansion, useValuePath } from "../react";
 import type { ComposerComponent, ComposerComponentProps } from "../react/contract";
 import { createRegistry } from "../react/registry";
 
@@ -122,7 +123,33 @@ export function createConformanceRegistry(probe: RenderProbe = createProbe()) {
     }
   };
 
-  return createRegistry([Box, Text, Input, LocalInput, List, Toggle, Boom]);
+  const Group: ComposerComponent<Record<string, unknown>> = {
+    type: "Group",
+    props: loose,
+    render: (p) => <CollapsibleGroup {...p} />
+  };
+
+  return createRegistry([Box, Text, Input, LocalInput, List, Toggle, Boom, Group]);
+}
+
+/** Collapsible container (the reveal tests' stand-in for form's FieldGroup). */
+function CollapsibleGroup({ node, props, children }: ComposerComponentProps<Record<string, unknown>>) {
+  const [collapsed, setCollapsed] = useState(props.collapsed === true);
+  const path = useValuePath();
+  const ref = useRevealElement<HTMLDivElement>(path);
+  const expand = useCallback(() => setCollapsed(false), []);
+  useRevealExpansion(ref, expand);
+  const open = !collapsed;
+  return (
+    <div className="group" data-node={node.id} data-composer-path={path} ref={ref}>
+      <button type="button" aria-expanded={open} onClick={() => setCollapsed((current) => !current)}>
+        {show(props.title)}
+      </button>
+      <div className="group-body" hidden={!open}>
+        {children}
+      </div>
+    </div>
+  );
 }
 
 type ProbeProps = ComposerComponentProps<Record<string, unknown>> & { probe: RenderProbe };
@@ -130,9 +157,13 @@ type ProbeProps = ComposerComponentProps<Record<string, unknown>> & { probe: Ren
 /** Controlled input: every change is written immediately. */
 function ControlledInput({ node, value, onChange, defaultHint, readOnly, probe }: ProbeProps) {
   probe.renders.push(node.id);
+  const path = useValuePath();
+  const ref = useRevealElement<HTMLInputElement>(path);
   return (
     <input
+      ref={ref}
       data-node={node.id}
+      data-composer-path={path}
       value={show(value)}
       placeholder={defaultHint === undefined ? undefined : `default: ${show(defaultHint)}`}
       readOnly={readOnly}

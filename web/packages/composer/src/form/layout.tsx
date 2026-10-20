@@ -1,11 +1,11 @@
 // Structural components: Form, FieldGroup, ObjectGroup.
 
-import { DownOutlined, RightOutlined } from "@ant-design/icons";
+import { DownOutlined, RightOutlined, WarningOutlined } from "@ant-design/icons";
 import { Button } from "antd";
 import { useCallback, useContext, useId, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { z } from "zod";
 import { zodProps, type Issue } from "../core";
-import type { ComposerComponent } from "../react";
+import { useReveal, useRevealElement, useRevealExpansion, useValuePath, type ComposerComponent } from "../react";
 import {
   cx,
   DescriptionPlacementContext,
@@ -85,41 +85,83 @@ interface SectionProps {
   children: ReactNode;
 }
 
+/** What one Frame reported: its errors, plus the pointer they belong to. */
+interface FrameReport {
+  issues: readonly Issue[];
+  path?: string;
+  /** The frame's root element, so the badge can order frames by DOM position. */
+  element?: HTMLElement;
+}
+
+/** True when `element` sits before `anchor` in the document. */
+function precedesInDom(element: HTMLElement | undefined, anchor: HTMLElement | undefined): boolean {
+  if (!element?.isConnected || !anchor?.isConnected) return false;
+  return (anchor.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_PRECEDING) !== 0;
+}
+
 /**
- * Collects the issues FieldFrames below a section report and returns the
- * number of distinct errors among them. Reports are forwarded to an
- * enclosing section, so an outer group also counts its nested groups.
+ * Collects the issues FieldFrames below a section report. Returns the count
+ * of distinct errors among them, and a lookup of the first error's field path
+ * (the frame's own value path, else the issue's), for the badge's reveal.
+ * Reports are forwarded to an enclosing section, so an outer group also
+ * counts, and can reveal, its nested groups.
  */
-function useHiddenErrors(): [IssueReporter, number] {
+function useHiddenErrors(): [IssueReporter, number, () => string | undefined] {
   const parent = useContext(SectionIssuesContext);
-  const byFrame = useRef(new Map<string, readonly Issue[]>());
+  const byFrame = useRef(new Map<string, FrameReport>());
   const [count, setCount] = useState(0);
   const report = useCallback<IssueReporter>(
-    (key, issues) => {
+    (key, issues, path, element) => {
       if (issues === null || issues.length === 0) byFrame.current.delete(key);
-      else byFrame.current.set(key, issues);
+      else byFrame.current.set(key, { issues, path, element });
       // An issue reaches every element bound to its path (e.g. ExpressionInput
       // and its literal control), so count each path/check/message once.
       const errors = new Set<string>();
-      for (const [frame, list] of byFrame.current) {
-        for (const issue of list) {
+      for (const [frame, entry] of byFrame.current) {
+        for (const issue of entry.issues) {
           if (issue.severity !== "error") continue;
           errors.add(`${issue.path ?? frame}\u0000${issue.check ?? ""}\u0000${issue.message}`);
         }
       }
       setCount(errors.size);
-      parent?.(key, issues);
+      parent?.(key, issues, path, element);
     },
     [parent]
   );
-  return [report, count];
+  // The first error the user would see after expanding: per frame its first
+  // error with a pointer, across frames the one earliest in the DOM (a host
+  // row reorder keeps elements mounted, so report order can go stale).
+  const firstErrorPath = useCallback(() => {
+    let best: FrameReport | undefined;
+    let bestPath: string | undefined;
+    for (const entry of byFrame.current.values()) {
+      for (const issue of entry.issues) {
+        if (issue.severity !== "error") continue;
+        const hit = issue.path ?? entry.path;
+        if (!hit) continue;
+        if (bestPath === undefined || precedesInDom(entry.element, best?.element)) {
+          best = entry;
+          bestPath = hit;
+        }
+        break;
+      }
+    }
+    return bestPath;
+  }, []);
+  return [report, count, firstErrorPath];
 }
 
 /** Titled, optionally collapsible section. Collapsed content stays mounted (drafts survive). */
 function Section(props: SectionProps) {
   const base = useId();
   const [collapsed, setCollapsed] = useState(props.defaultCollapsed === true);
-  const [report, hiddenErrors] = useHiddenErrors();
+  const [report, hiddenErrors, firstErrorPath] = useHiddenErrors();
+  const reveal = useReveal();
+  const path = useValuePath();
+  const sectionRef = useRevealElement<HTMLElement>(path);
+  const expand = useCallback(() => setCollapsed(false), []);
+  // A reveal request expands every collapsed section on the target's path.
+  useRevealExpansion(sectionRef, expand);
   const titleId = `${base}title`;
   const bodyId = `${base}body`;
   const issuesId = `${base}issues`;
@@ -129,8 +171,10 @@ function Section(props: SectionProps) {
   const badge = !open && hiddenErrors > 0;
   return (
     <section
+      ref={sectionRef}
       className={cx("xflow-composer-section", props.className, status && `is-${status}`, !open && "is-collapsed", badge && "has-hidden-errors")}
       data-composer-node={props.nodeId}
+      data-composer-path={path}
       aria-labelledby={props.title ? titleId : undefined}
       aria-describedby={props.issues.length > 0 ? issuesId : undefined}
     >
@@ -156,9 +200,20 @@ function Section(props: SectionProps) {
             </h3>
           )}
           {badge ? (
-            <span id={badgeId} className="xflow-composer-section-badge" role="status">
+            <button
+              type="button"
+              id={badgeId}
+              className="xflow-composer-section-badge"
+              aria-label="展开并定位第一个错误"
+              onClick={() => {
+                const target = firstErrorPath();
+                if (target) reveal?.reveal(target);
+                setCollapsed(false);
+              }}
+            >
+              <WarningOutlined aria-hidden className="xflow-composer-section-badge-icon" />
               {hiddenErrors} 个错误
-            </span>
+            </button>
           ) : null}
           {props.actions ? <div className="xflow-composer-section-actions">{props.actions}</div> : null}
         </header>

@@ -2,6 +2,7 @@
 // Components depend only on these types; they never import a kernel.
 
 import type { ReactNode } from "react";
+import type { FocusRequest } from "./reveal";
 import type {
   CheckRegistry,
   ComposerSpec,
@@ -131,4 +132,20 @@ export interface ComposerProps {
    * emit, ...). Defaults to `console.warn`.
    */
   onWarning?(warning: Warning): void;
+  /**
+   * Brings one bound value path into view whenever `nonce` changes: collapsed
+   * ancestor sections expand, the field scrolls into view and its first
+   * control gets focus. An unmatched path reports one `focus-target-not-found`
+   * warning instead of throwing. The same nonce never executes twice while
+   * this Composer stays mounted; the de-duplication is per instance, so a host
+   * that remounts the Composer should clear the request when
+   * `onFocusRequestHandled` reports it (otherwise the reveal replays).
+   */
+  focusRequest?: FocusRequest;
+  /**
+   * Fired once per executed `focusRequest` nonce — after the field was focused
+   * or after the unmatched-path warning. Lets the host clear the request so a
+   * later remount of this Composer cannot replay the reveal.
+   */
+  onFocusRequestHandled?(nonce: number): void;
 }

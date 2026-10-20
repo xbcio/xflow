@@ -177,6 +177,13 @@ export interface ResolvedNode {
   type: string;
   props: Record<string, unknown>;
   bindings: Record<string, ResolvedBinding>;
+  /**
+   * Concrete JSON Pointer of the primary binding (`value`, else the first
+   * binding), against the current value. Absent when the element has no
+   * binding, or its target (a row) no longer exists. Renderers stamp it as
+   * `data-composer-path`, the key externalIssues use (P1-c S5).
+   */
+  valuePath?: JsonPointer;
   defaultHint?: unknown;
   issues: Issue[];
   error?: ResolveError;

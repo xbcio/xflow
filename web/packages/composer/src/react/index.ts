@@ -19,3 +19,16 @@ export { OVERLAY_TIMEOUT_MS } from "./overlay";
 export { createRegistry, type CreateRegistryOptions } from "./registry";
 export { useComposerRegistry } from "./registryContext";
 export { createNodeRenderer, ROW_TYPE, type NodeRendererOptions, type PlaceholderProps } from "./renderNode";
+export {
+  firstFocusableControl,
+  pointerAncestors,
+  RevealProvider,
+  useReveal,
+  useRevealElement,
+  useRevealExpansion,
+  useValuePath,
+  ValuePathContext,
+  type FocusRequest,
+  type RevealApi,
+  type RevealRequest
+} from "./reveal";

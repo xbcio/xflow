@@ -12,6 +12,7 @@
 import { Component, Fragment, memo, useMemo, useRef, type ErrorInfo, type ReactElement, type ReactNode } from "react";
 import type { BindTarget, ResolvedNode, ResolvedTree, ValueKind, Warning } from "../core";
 import type { ComposerBinding, ComposerComponent, ComposerComponentProps, ComposerRow, KernelContent, KernelEnv, Registry } from "./contract";
+import { ValuePathContext } from "./reveal";
 
 export const ROW_TYPE = "$row";
 const EMPTY_SLOTS: Record<string, ReactNode> = Object.freeze({}) as Record<string, ReactNode>;
@@ -142,7 +143,9 @@ const NodeHost = memo(function NodeHost({ node, content, rows, options }: NodeHo
 
   return (
     <ElementBoundary node={node} fallback={(error) => placeholder("ElementError", error.message, { error: { code: "render", message: error.message } })}>
-      {body}
+      {/* The nearest bound element answers for the reveal machinery (P1-c S5);
+          an unbound node shadows its ancestors with `undefined`. */}
+      <ValuePathContext.Provider value={node.valuePath}>{body}</ValuePathContext.Provider>
     </ElementBoundary>
   );
 });

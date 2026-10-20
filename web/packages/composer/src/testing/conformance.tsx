@@ -10,7 +10,7 @@ import { Composer } from "../react/Composer";
 import type { Registry, RenderKernel } from "../react/contract";
 import { OVERLAY_TIMEOUT_MS } from "../react/overlay";
 import { createConformanceRegistry, createProbe } from "./components";
-import { errorSpec, fieldsSpec, rowsSpec, slotSpec, toggleSpec, treeSpec, wideSpec } from "./fixtures";
+import { errorSpec, fieldsSpec, revealSpec, rowsSpec, slotSpec, toggleSpec, treeSpec, wideSpec } from "./fixtures";
 import { allPatches, mountComposer, type MountOptions } from "./harness";
 
 type Row = { name: string };
@@ -169,6 +169,90 @@ export function kernelConformance(kernel: RenderKernel): void {
       expect((m.value as { rows: Row[] }).rows).toEqual([{ name: "a" }, { name: "c" }]);
       expect(rowInputs(m.container).map((el) => el.value)).toEqual(["a", "c"]);
       expect(m.warnings.map((w) => w.code)).toContain("row-gone");
+    });
+
+    describe("focusRequest (P1-c S5)", () => {
+      it("expands collapsed ancestors and focuses the named field", async () => {
+        const scrollIntoView = vi.fn();
+        const original = Element.prototype.scrollIntoView;
+        Element.prototype.scrollIntoView = scrollIntoView;
+        try {
+          const m = mount({ spec: revealSpec, value: { a: { b: "bee", c: "cee" } }, focusRequest: { path: "/a/b", nonce: 1 } });
+          await m.flush();
+          const target = inputOf(m.container, "f");
+          expect(target.getAttribute("data-composer-path")).toBe("/a/b");
+          expect(document.activeElement).toBe(target);
+          // The collapsed Group pair around the target is open again.
+          expect([...m.container.querySelectorAll("[aria-expanded]")].map((el) => el.getAttribute("aria-expanded"))).toEqual(["true", "true"]);
+          expect(m.container.querySelector("[hidden]")).toBeNull();
+          expect(scrollIntoView).toHaveBeenCalled();
+          expect(m.warnings).toEqual([]);
+        } finally {
+          Element.prototype.scrollIntoView = original;
+        }
+      });
+
+      it("falls back to the nearest ancestor path that has a field", async () => {
+        const m = mount({ spec: revealSpec, value: { a: { b: "bee", c: "cee" } }, focusRequest: { path: "/a/b/deeper", nonce: 1 } });
+        await m.flush();
+        expect(document.activeElement).toBe(inputOf(m.container, "f"));
+        expect(m.warnings).toEqual([]);
+      });
+
+      it("executes a nonce once, and a new nonce again", async () => {
+        const m = mount({ spec: revealSpec, value: { a: { b: "bee", c: "cee" } }, focusRequest: { path: "/a/b", nonce: 1 } });
+        await m.flush();
+        const target = inputOf(m.container, "f");
+        expect(document.activeElement).toBe(target);
+        target.blur();
+        await m.setFocusRequest({ path: "/a/b", nonce: 1 });
+        expect(document.activeElement).not.toBe(target);
+        await m.setFocusRequest({ path: "/a/b", nonce: 2 });
+        expect(document.activeElement).toBe(target);
+      });
+
+      it("reports each executed nonce to the host exactly once", async () => {
+        // The host clears its request on this signal; the provider's own
+        // de-duplication is instance-local and cannot survive a remount, so
+        // the report is what keeps a remount from replaying the reveal.
+        const handled = vi.fn();
+        const m = mount({
+          spec: revealSpec,
+          value: { a: { b: "bee", c: "cee" } },
+          focusRequest: { path: "/a/b", nonce: 1 },
+          onFocusRequestHandled: handled
+        });
+        await m.flush();
+        expect(handled.mock.calls).toEqual([[1]]);
+        inputOf(m.container, "f").blur();
+        await m.setFocusRequest({ path: "/a/b", nonce: 1 });
+        expect(handled.mock.calls).toEqual([[1]]);
+        await m.setFocusRequest({ path: "/a/b", nonce: 2 });
+        expect(handled.mock.calls).toEqual([[1], [2]]);
+      });
+
+      it("reports a nonce that only produced the not-found warning", async () => {
+        const handled = vi.fn();
+        const m = mount({
+          spec: revealSpec,
+          value: { a: { b: "bee", c: "cee" } },
+          focusRequest: { path: "/absent", nonce: 7 },
+          onFocusRequestHandled: handled
+        });
+        await m.flush();
+        expect(m.warnings.map((warning) => warning.code)).toEqual(["focus-target-not-found"]);
+        expect(handled.mock.calls).toEqual([[7]]);
+      });
+
+      it("warns once, without throwing, when no field answers the path", async () => {
+        const m = mount({ spec: revealSpec, value: { a: { b: "bee", c: "cee" } }, focusRequest: { path: "/absent", nonce: 1 } });
+        await m.flush();
+        expect(m.warnings.map((warning) => warning.code)).toEqual(["focus-target-not-found"]);
+        expect(m.warnings[0]?.path).toBe("/absent");
+        // Re-issuing the same nonce neither focuses nor warns again.
+        await m.setFocusRequest({ path: "/absent", nonce: 1 });
+        expect(m.warnings).toHaveLength(1);
+      });
     });
 
     it("renders a placeholder for unknown types and isolates/reset element errors", async () => {

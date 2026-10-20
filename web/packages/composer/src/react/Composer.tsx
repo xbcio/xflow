@@ -8,6 +8,7 @@ import { defaultKernel } from "./defaultKernel";
 import { OverlayController, type OverlayHost } from "./overlay";
 import { RegistryContext } from "./registryContext";
 import { createNodeRenderer } from "./renderNode";
+import { RevealProvider } from "./reveal";
 
 const defaultWarn = (warning: Warning) => console.warn(`[composer] ${warning.code}: ${warning.message}`);
 
@@ -75,7 +76,17 @@ export function Composer(props: ComposerProps) {
 
   useValidationReport(tree, onValidate);
 
-  return <RegistryContext.Provider value={registry}>{kernel.render(tree, env)}</RegistryContext.Provider>;
+  // Error location (P1-c S5): the provider sits above the kernel, so both
+  // kernels share one registry/expansion/focus implementation.
+  return (
+    <RevealProvider
+      focusRequest={props.focusRequest}
+      onFocusRequestHandled={props.onFocusRequestHandled}
+      onWarning={(warning) => overlayHost.onWarning(warning)}
+    >
+      <RegistryContext.Provider value={registry}>{kernel.render(tree, env)}</RegistryContext.Provider>
+    </RevealProvider>
+  );
 }
 
 function useValidationReport(tree: ResolvedTree, onValidate: ComposerProps["onValidate"]): void {

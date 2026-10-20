@@ -6,6 +6,7 @@ import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
 import { applyPatches, type ComposerSpec, type Patch, type Warning } from "../core";
 import { Composer } from "../react/Composer";
 import type { Registry, RenderKernel, ValidationResult } from "../react/contract";
+import type { FocusRequest } from "../react/reveal";
 
 export interface MountOptions {
   kernel: RenderKernel;
@@ -19,6 +20,10 @@ export interface MountOptions {
   /** When true the host ignores onChange entirely. */
   ignoreChanges?: boolean;
   onValidate?(result: ValidationResult): void;
+  /** Host error-location request, as the editor's diagnostics send it. */
+  focusRequest?: FocusRequest;
+  /** Host's handled-notification receiver (the reveal tests' clear hook). */
+  onFocusRequestHandled?: (nonce: number) => void;
 }
 
 export interface Mounted extends RenderResult {
@@ -29,6 +34,8 @@ export interface Mounted extends RenderResult {
   readonly value: object;
   /** Replaces the host value (an external edit). */
   setValue(update: (value: object) => object): Promise<void>;
+  /** Replaces the host focus request (a new nonce re-runs the reveal). */
+  setFocusRequest(request: FocusRequest | undefined): Promise<void>;
   /** Flushes microtasks (batched onChange) and resulting renders. */
   flush(): Promise<void>;
 }
@@ -38,11 +45,14 @@ export function mountComposer(options: MountOptions): Mounted {
   const warnings: Warning[] = [];
   let current = options.value;
   let setHost: ((update: (value: object) => object) => void) | undefined;
+  let setHostFocus: ((request: FocusRequest | undefined) => void) | undefined;
 
   function Host() {
     const [value, setValue] = useState<object>(options.value);
+    const [focusRequest, setFocusRequest] = useState<FocusRequest | undefined>(options.focusRequest);
     current = value;
     setHost = setValue;
+    setHostFocus = setFocusRequest;
     // Tracks every ackDelayMs timer this instance has scheduled so the
     // unmount cleanup below can cancel the ones still pending. Without this,
     // a timer that outlives the test (the test ends, or calls m.unmount(),
@@ -81,6 +91,8 @@ export function mountComposer(options: MountOptions): Mounted {
         value={value}
         context={options.context}
         readOnly={options.readOnly}
+        focusRequest={focusRequest}
+        onFocusRequestHandled={options.onFocusRequestHandled}
         onChange={onChange}
         onWarning={onWarning}
         onValidate={options.onValidate}
@@ -101,6 +113,9 @@ export function mountComposer(options: MountOptions): Mounted {
     },
     async setValue(update: (value: object) => object) {
       await act(async () => setHost!(update));
+    },
+    async setFocusRequest(request: FocusRequest | undefined) {
+      await act(async () => setHostFocus!(request));
     },
     async flush() {
       await act(async () => {});

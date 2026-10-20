@@ -11,7 +11,7 @@
 // contains complete rows, and nothing is written while a key is duplicated.
 // Removing the last row writes {} which core turns into unset.
 
-import { DeleteOutlined, PlusOutlined } from "@ant-design/icons";
+import { DeleteOutlined, PlusOutlined, WarningOutlined } from "@ant-design/icons";
 import { Button, Input as AntInput } from "antd";
 import { useId, useRef, useState, type ReactNode } from "react";
 import { z } from "zod";
@@ -70,6 +70,14 @@ function toMap(entries: readonly Entry[]): { map: Record<string, unknown>; dupli
 /** Whether the value is what the rows say ({} and unset are the same map). */
 const sameMap = (map: Record<string, unknown>, value: unknown) => deepEqual(map, isPlainObject(value) ? value : {});
 
+/** Why a row is a draft (nothing of it is written), or undefined when it is complete. */
+function rowErrorOf(entry: Entry, duplicates: ReadonlySet<string>): string | undefined {
+  if (RESERVED_KEYS.has(entry.key)) return "保留键名，未保存";
+  if (entry.key !== "" && duplicates.has(entry.key)) return "键重复，未保存";
+  if (entry.key === "" && entry.value !== undefined) return "键为空，未保存";
+  return undefined;
+}
+
 function KeyValueField({ node, props, value, onChange, defaultHint, issues, readOnly }: ComposerComponentProps<KeyValueProps>) {
   const registry = useComposerRegistry();
   const baseId = useId();
@@ -102,6 +110,12 @@ function KeyValueField({ node, props, value, onChange, defaultHint, issues, read
     commit(current.entries.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry)));
 
   const { duplicates } = toMap(current.entries);
+  // One error line per failing row, listed under the whole row list (baseline
+  // §6.4); each keeps its own id for the row input's aria-describedby.
+  const rowErrors = current.entries.flatMap((entry, index) => {
+    const message = rowErrorOf(entry, duplicates);
+    return message ? [{ id: `${baseId}row${entry.id}error`, index, message }] : [];
+  });
   const unset = value === undefined;
   const editable = !readOnly && !props.disabled;
   const valueEditor = (entry: Entry, index: number): ReactNode => {
@@ -177,23 +191,20 @@ function KeyValueField({ node, props, value, onChange, defaultHint, issues, read
         ) : (
           <div className="xflow-composer-key-value-list">
             {current.entries.map((entry, index) => {
-              const duplicate = entry.key !== "" && duplicates.has(entry.key);
-              const orphan = entry.key === "" && entry.value !== undefined;
-              const reserved = RESERVED_KEYS.has(entry.key);
-              const rowError = reserved ? "保留键名，未保存" : duplicate ? "键重复，未保存" : orphan ? "键为空，未保存" : undefined;
+              const message = rowErrorOf(entry, duplicates);
               const errorId = `${baseId}row${entry.id}error`;
               return (
-                <div key={entry.id} className={cx("xflow-composer-key-value-row", rowError && "is-error")}>
+                <div key={entry.id} className={cx("xflow-composer-key-value-row", message && "is-error")}>
                   <AntInput
                     rootClassName="xflow-composer-control xflow-composer-key-value-key"
                     aria-label={`第 ${index + 1} 行的键`}
-                    aria-describedby={rowError ? errorId : undefined}
+                    aria-describedby={message ? errorId : undefined}
                     value={entry.key}
                     placeholder={props.keyPlaceholder ?? "键"}
                     readOnly={readOnly}
                     disabled={props.disabled}
-                    status={rowError ? "error" : undefined}
-                    aria-invalid={rowError ? true : undefined}
+                    status={message ? "error" : undefined}
+                    aria-invalid={message ? true : undefined}
                     onChange={(event) => update(entry.id, { key: event.target.value })}
                   />
                   <div className="xflow-composer-key-value-value">{valueEditor(entry, index)}</div>
@@ -207,20 +218,20 @@ function KeyValueField({ node, props, value, onChange, defaultHint, issues, read
                       onClick={() => commit(current.entries.filter((item) => item.id !== entry.id))}
                     />
                   ) : null}
-                  {rowError ? (
-                    <span id={errorId} className="xflow-composer-row-error" role="alert">
-                      {rowError}
-                    </span>
-                  ) : null}
                 </div>
               );
             })}
+            {rowErrors.map((error) => (
+              <span key={error.id} id={error.id} className="xflow-composer-row-error" role="alert">
+                <WarningOutlined aria-hidden className="xflow-composer-row-error-icon" />
+                第 {error.index + 1} 行：{error.message}
+              </span>
+            ))}
             {current.entries.length === 0 ? <div className="xflow-composer-empty">暂无条目</div> : null}
             {editable ? (
               <Button
                 size="small"
-                type="dashed"
-                className="xflow-composer-add"
+                className="xflow-composer-add xflow-composer-key-value-add"
                 icon={<PlusOutlined />}
                 onClick={() => setRows({ source: current.source, entries: [...current.entries, { id: nextId(), key: "", value: undefined }] })}
               >

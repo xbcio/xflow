@@ -78,6 +78,8 @@ interface Draft {
   bindings: Record<string, ResolvedBinding>;
   /** Concrete pointers of all bindings (for issue placement). */
   paths: JsonPointer[];
+  /** Concrete pointer of the primary binding, carried onto the ResolvedNode. */
+  valuePath?: JsonPointer;
   defaultHint?: unknown;
   error?: ResolveError;
   issues: Issue[];
@@ -339,6 +341,7 @@ export function resolve(input: ResolveInput): ResolvedTree {
     // Checks
     const primary = draft.bindings.value ?? Object.values(draft.bindings)[0];
     const primaryPath = primary ? (concretePointer(primary.target, row) ?? undefined) : undefined;
+    draft.valuePath = primaryPath;
     for (const check of Array.isArray(element.checks) ? element.checks : []) {
       const def = checks.get(check?.type);
       if (!def) {
@@ -569,6 +572,9 @@ function build(draft: Draft, previous: Map<string, ResolvedNode>, schemas: Schem
   const bindings = prev && bindingsEqual(prev.bindings, draft.bindings) ? prev.bindings : draft.bindings;
   const issues = prev && issuesEqual(prev.issues, draft.issues) ? prev.issues : draft.issues;
   const defaultHint = prev && deepEqual(prev.defaultHint, draft.defaultHint) ? prev.defaultHint : draft.defaultHint;
+  // Compared by value: a row's concrete pointer moves with the array, and the
+  // element stamped with the old one must rebuild (its path is a DOM attribute).
+  const valuePath = prev && prev.valuePath === draft.valuePath ? prev.valuePath : draft.valuePath;
 
   if (
     prev &&
@@ -579,11 +585,13 @@ function build(draft: Draft, previous: Map<string, ResolvedNode>, schemas: Schem
     prev.error === error &&
     prev.children === children &&
     prev.slots === slots &&
+    prev.valuePath === valuePath &&
     prev.defaultHint === defaultHint
   ) {
     return prev;
   }
   const node: ResolvedNode = { id: draft.id, type: draft.type, props, bindings, issues, children, slots };
+  if (valuePath !== undefined) node.valuePath = valuePath;
   if (defaultHint !== undefined) node.defaultHint = defaultHint;
   if (error) node.error = error;
   rawPropsOf.set(node, rawProps);

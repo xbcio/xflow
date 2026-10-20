@@ -81,6 +81,16 @@ export const errorSpec = spec({
   after: { type: "Text", props: { text: "after" } }
 });
 
+// Error location (P1-c S5): two collapsed ancestors around bound leaves, so a
+// focusRequest must expand both before the target can take focus.
+export const revealSpec = spec({
+  root: { type: "Box", children: ["outer"] },
+  outer: { type: "Group", props: { title: "outer", collapsed: true }, children: ["inner"] },
+  inner: { type: "Group", props: { title: "inner", collapsed: true }, children: ["f", "g"] },
+  f: { type: "Input", props: { value: { $bindState: "/a/b" } } },
+  g: { type: "Input", props: { value: { $bindState: "/a/c" } } }
+});
+
 const rows = () => [{ name: "a" }, { name: "b" }, { name: "c" }];
 
 /** Specs rendered by both kernels for the DOM parity check. */
