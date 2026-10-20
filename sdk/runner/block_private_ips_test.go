@@ -56,12 +56,12 @@ func TestLoadRunnerConfigBlockPrivateIPsAllow(t *testing.T) {
 	cfg, err := loadRunnerConfigFromBytes([]byte(`
 http_host_policy:
   allow: [app.test.internal]
-  block_private_ips_allow: ["internal-db.corp.test", "10.1.2.3"]
+  block_private_ips_allow: ["internal-db.corp.test", "10.0.0.7"]
 `))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"internal-db.corp.test", "10.1.2.3"}; !reflect.DeepEqual(cfg.httpBlockPrivateIPsAllow, want) {
+	if want := []string{"internal-db.corp.test", "10.0.0.7"}; !reflect.DeepEqual(cfg.httpBlockPrivateIPsAllow, want) {
 		t.Fatalf("block_private_ips_allow = %v, want %v", cfg.httpBlockPrivateIPsAllow, want)
 	}
 	if want := []string{"app.test.internal"}; !reflect.DeepEqual(cfg.httpHostPolicyAllow, want) {
@@ -79,7 +79,7 @@ func TestApplyLookupEnvOverridesBlockPrivateIPs(t *testing.T) {
 	cfg := applyLookupEnvOverrides(defaultRunnerConfig(), func(key string) (string, bool) {
 		values := map[string]string{
 			"XFLOW_HTTP_HOST_POLICY_BLOCK_PRIVATE_IPS":       "false",
-			"XFLOW_HTTP_HOST_POLICY_BLOCK_PRIVATE_IPS_ALLOW": "internal-db.corp.test, 10.1.2.3",
+			"XFLOW_HTTP_HOST_POLICY_BLOCK_PRIVATE_IPS_ALLOW": "internal-db.corp.test, 10.0.0.7",
 		}
 		value, ok := values[key]
 		return value, ok
@@ -87,7 +87,7 @@ func TestApplyLookupEnvOverridesBlockPrivateIPs(t *testing.T) {
 	if cfg.httpBlockPrivateIPs {
 		t.Fatal("XFLOW_HTTP_HOST_POLICY_BLOCK_PRIVATE_IPS=false did not disable the guard")
 	}
-	if want := []string{"internal-db.corp.test", "10.1.2.3"}; !reflect.DeepEqual(cfg.httpBlockPrivateIPsAllow, want) {
+	if want := []string{"internal-db.corp.test", "10.0.0.7"}; !reflect.DeepEqual(cfg.httpBlockPrivateIPsAllow, want) {
 		t.Fatalf("block_private_ips_allow = %v, want %v", cfg.httpBlockPrivateIPsAllow, want)
 	}
 	if len(cfg.httpHostPolicyAllow) != 0 {
