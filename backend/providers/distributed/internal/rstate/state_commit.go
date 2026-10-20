@@ -311,10 +311,33 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 	default:
 		return engine.CommitNodeResult{}, fmt.Errorf("commit node %q/%q: unknown outcome %d", req.ExecutionID, req.NodeName, code)
 	}
-	if out.Applied {
-		// The commit is what appends the node's advance intent (and any cyclic
-		// intents), so it is the transition that makes the execution ready
-		// again. An unapplied commit writes no outbox entry and is not marked.
+	if out.Applied && len(out.OutboxIDs) > 0 {
+		// Register only a commit that carries delivery intent. OutboxIDs is the
+		// candidate hint for exactly the transitions that can append one — the
+		// advance intent, the cyclic intents, and the two candidates per folded
+		// arrival — and it is empty for the commits that cannot: one that
+		// finalizes the execution, a fatal one (both suppress the outbox branches
+		// inside commitNodeLua), and a leaf commit with no outgoing edge (no
+		// advance task and no arrivals). Those used to pay for a registration
+		// that could never name work.
+		//
+		// The hint is conservative rather than exact, and that is the harmless
+		// direction: a candidate the script did not write still marks. The
+		// canceling guard suppressing a folded arrival is the case — the commit
+		// reports both candidates anyway, so this writes one member whose next
+		// claim finds nothing and re-arms or prunes it. The direction that would
+		// lose work cannot happen, because every branch in commitNodeLua that
+		// writes an entry is guarded by done/fatal — the same two conditions
+		// that decide whether OutboxIDs is populated — so a written entry always
+		// has a candidate. See engine.CommitNodeResult.OutboxIDs: a non-empty
+		// slice is a conservative "a flush may have work" signal, the empty one
+		// says nothing about the durable outbox.
+		//
+		// Not marking does not hide the backlog a commit leaves behind: entries
+		// appended by an earlier transition were registered by that transition,
+		// and a registration lost for any other reason is rediscovered by the
+		// OutboxDispatcher's keyspace sweep, the documented fallback in
+		// state_outbox_index.go.
 		s.markOutboxReadyIndex(ctx, t, req.ExecutionID)
 	}
 	if out.ExecutionDone {
