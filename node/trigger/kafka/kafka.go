@@ -877,7 +877,10 @@ func (w *partitionWorker) deliver(msg Message) {
 	// first. On the legacy emit path a failure does not move on to the next
 	// record: deliverLegacy holds this partition and retries the same
 	// record, because a later record's commit would sweep past the failed
-	// offset and that record would never be redelivered.
+	// offset and that record would never be redelivered. deliverInvalid does
+	// the same for the schema axis: under on_invalid=fail, and while a
+	// dead-letter republish is failing, it holds this partition instead of
+	// stepping over the record.
 	//
 	// Schema validation runs BEFORE the mode split. An earlier revision
 	// chained it as `else if` after the entry-seed branch, so entry-seed
@@ -885,9 +888,10 @@ func (w *partitionWorker) deliver(msg Message) {
 	// invalid content is most expensive, because a seeded execution is
 	// durable.
 	if w.rt.messageSchema != nil && !validateMessageSchema(msg, w.rt.messageSchema) {
-		if handleInvalidMessage(w.rt.runCtx, w.rt, msg) {
-			_ = commitMessages(w.rt.baseCtx, w.rt.consumer, msg)
-		}
+		// Returns only once the record is commit-safe (discarded, or durably
+		// republished) or the activation is canceled; on fail it holds this
+		// partition so no later offset can commit past the record.
+		w.deliverInvalid(w.rt.runCtx, msg)
 	} else if w.rt.entrySeed {
 		// Entry-seed mode: admission drives the seed, which commits the
 		// offset internally on accept/duplicate/conflict. Do NOT

@@ -36,16 +36,18 @@ const (
 	// gone, but the drop is counted (xflow_trigger_messages_discarded_total)
 	// and logged at a throttled rate.
 	onInvalidDiscard = "discard"
-	// onInvalidFail declines the commit, so Kafka redelivers. Use only
-	// when invalid messages are expected to be transient (e.g. a producer being
-	// rolled back): a permanently malformed message blocks its partition
-	// forever, which is the correct choice only if silent data loss is worse
-	// than a stall.
+	// onInvalidFail withholds the record from commit and holds its partition:
+	// the worker stops on it (deliverInvalid) until the activation is canceled,
+	// so nothing behind it is emitted or committed and a later offset can never
+	// sweep past it. Use only when invalid messages are expected to be transient
+	// (e.g. a producer being rolled back): a permanently malformed message
+	// blocks its partition forever, which is the correct choice only if silent
+	// data loss is worse than a stall.
 	onInvalidFail = "fail"
 	// onInvalidDeadLetter republishes the message to DeadLetterTopic and
-	// commits only if the republish succeeded. A failed republish falls back to
-	// no-commit (redelivery) rather than dropping — the whole point of a DLQ is
-	// that nothing vanishes.
+	// commits only if the republish succeeded. A failed republish holds the
+	// partition and retries the same record with the emit-retry cadence rather
+	// than dropping it — the whole point of a DLQ is that nothing vanishes.
 	onInvalidDeadLetter = "dead_letter"
 )
 
@@ -85,8 +87,13 @@ func validateMessageSchema(msg Message, schema *MessageSchema) bool {
 // this function exists to make visible.
 //
 // Returning false means "do not commit", which leaves the message for
-// redelivery. That is the correct fallback for a failed dead-letter publish:
-// redelivering a message forever is recoverable, dropping it is not.
+// redelivery — but only if the caller HOLDS the partition on that answer. A
+// caller that instead moves on to the next record lets a later commit sweep
+// past this offset, and Kafka replays only from the committed offset, so the
+// record is never redelivered in this process. deliverInvalid (per-message) and
+// executeBatch's retry (aggregate) are the callers that hold; that is the
+// correct fallback for a failed dead-letter publish, because redelivering a
+// message forever is recoverable and dropping it is not.
 func handleInvalidMessage(ctx context.Context, rt invalidMessageHandler, msg Message) (commit bool) {
 	schema := rt.schema()
 	policy := schema.OnInvalid
@@ -128,6 +135,89 @@ func handleInvalidMessage(ctx context.Context, rt invalidMessageHandler, msg Mes
 type invalidMessageHandler interface {
 	schema() *MessageSchema
 	deadLetters() DeadLetterPublisher
+}
+
+// deliverInvalid is the per-message path's disposition for a record that failed
+// messageSchema validation, and the counterpart to deliverLegacy: it does not
+// return while the record must remain uncommitted.
+//
+// The dispatch this replaced applied the policy once and then moved on. Under
+// on_invalid=fail, and under on_invalid=dead_letter when the republish failed,
+// that left this offset uncommitted but returned to the worker loop, so the
+// next record's commit advanced the partition past it. Kafka replays only from
+// the committed offset, so "not committed" then meant "lost in this process"
+// rather than "redelivered" — the opposite of what the policy comments in this
+// file promised. Holding the partition is what makes the no-commit decision
+// mean redelivery, exactly as deliverLegacy does for the emit axis.
+//
+// The two policies hold differently, and the difference is the policy:
+//
+//   - fail: the record must never be committed. The policy is applied once —
+//     handleInvalidMessage counts and logs it, and the count must not grow
+//     while the worker waits — and then this worker blocks until cancellation.
+//     Nothing behind the record is delivered or committed for the life of the
+//     activation.
+//   - dead_letter: the record is only safe to commit once it is durably on the
+//     dead-letter topic. A failed republish (or an absent publisher, which
+//     handleInvalidMessage fails closed) is retried for the SAME record with
+//     the emit-retry cadence; only a successful publish commits, after which
+//     the worker continues with the following offsets.
+//
+// Both hold paths exit on cancellation without committing anything, and the
+// blocked gauge is cleared on every exit: records already queued are left for
+// the next generation, exactly as deliverLegacy leaves them.
+func (w *partitionWorker) deliverInvalid(ctx context.Context, msg Message) {
+	if ctx.Err() != nil {
+		return
+	}
+	rt := w.rt
+	policy := rt.messageSchema.OnInvalid
+	if policy == "" {
+		policy = onInvalidDiscard
+	}
+	// The first, and for the fail policy the only, application of the policy.
+	// A discard or a successful dead-letter publish returns true here, which is
+	// the pre-existing commit semantics.
+	if handleInvalidMessage(ctx, rt, msg) {
+		_ = commitMessages(rt.baseCtx, rt.consumer, msg)
+		return
+	}
+	blocked := false
+	reportBlocked := func() {
+		if !blocked {
+			blocked = true
+			obs().OnConsumptionBlocked(ctx, msg.Topic, msg.Partition, true)
+		}
+	}
+	defer func() {
+		if blocked {
+			// Cleared on EVERY exit path, cancellation included: a gauge left at
+			// 1 by a shutdown would report the partition as blocked forever.
+			obs().OnConsumptionBlocked(ctx, msg.Topic, msg.Partition, false)
+		}
+	}()
+	reportBlocked()
+	if policy != onInvalidDeadLetter {
+		// fail. Hold the partition: the offset is never committed, so the next
+		// generation redelivers the record, and committing anything behind it
+		// here would drop it permanently.
+		<-ctx.Done()
+		return
+	}
+	// The dead-letter publish did not succeed. Retry the SAME record;
+	// handleInvalidMessage re-applies the policy on each attempt, so a later
+	// success takes the ordinary publish-then-commit path.
+	for attempt := 1; ; attempt++ {
+		if !waitEmitRetry(ctx, attempt) {
+			return
+		}
+		if handleInvalidMessage(ctx, rt, msg) {
+			blocked = false
+			obs().OnConsumptionBlocked(ctx, msg.Topic, msg.Partition, false)
+			_ = commitMessages(rt.baseCtx, rt.consumer, msg)
+			return
+		}
+	}
 }
 
 // logInvalidMessage emits a throttled log line. It never logs the message

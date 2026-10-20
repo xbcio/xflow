@@ -169,8 +169,15 @@ func (t TriggerMetrics) OnConsumerLag(ctx context.Context, topic string, partiti
 }
 
 // OnConsumptionBlocked records whether a partition has stopped consuming to
-// avoid dropping records, under on_overflow=block or while an
-// on_overflow=dead_letter publish is failing.
+// avoid dropping records. Five trigger conditions set it: on_overflow=block
+// sitting at its retained bound; on_overflow=dead_letter while a record's
+// republish is failing; a per-record entry seed whose workflow's concurrency
+// policy refused it; a legacy emit that failed and is being retried
+// (emit_retry, including its bounded phase's dead-letter publish); and a
+// schema-invalid record under message_schema's on_invalid=fail, or while its
+// on_invalid=dead_letter republish keeps failing. The last three retry the
+// SAME record with backoff — deliverInvalid and deliverLegacy hold the
+// per-message worker — so no later offset can commit past it.
 //
 // A gauge rather than a counter because the question an operator asks is "is it
 // blocked right now", and because the transitions are already in the log. It is

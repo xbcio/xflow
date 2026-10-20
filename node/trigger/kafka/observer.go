@@ -20,21 +20,28 @@ import (
 // stalled one. It stays bounded by the assignment, which is tens of series per
 // topic, not by anything a producer controls.
 type Observer interface {
-	// OnMessageDiscarded reports a message that was consumed (its offset
-	// committed) but never emitted. reason is a fixed enum: "schema" and
-	// "schema_fail" come from validation (schema.go), "buffer_overflow" from the
-	// aggregator shedding a message it had already read (aggregate.go). This is
-	// the counter that makes an otherwise invisible drop visible.
+	// OnMessageDiscarded reports a message that was consumed but never emitted.
+	// reason is a fixed enum: "schema" and "schema_fail" come from validation
+	// (schema.go), "buffer_overflow" from the aggregator shedding a message it
+	// had already read (aggregate.go). This is the counter that makes an
+	// otherwise invisible drop visible.
 	//
-	// The three are not equally recoverable, and the metric's help text says so:
-	// a schema drop is a decision about a message that could not be used,
-	// whereas buffer_overflow discards a usable message AND lets the commit
-	// frontier advance past its offset, so nothing ever redelivers it. That
-	// reading of buffer_overflow holds under the default on_overflow=discard
-	// only: under on_overflow=dead_letter the record leaves through
-	// OnMessageDeadLettered instead, precisely so this series keeps meaning
-	// "gone" and an alert on it is not diluted by records that were in fact
-	// preserved.
+	// The three are not equally recoverable: "schema" is a drop — the offset is
+	// committed and the message is gone — whereas buffer_overflow discards a
+	// usable message AND lets the commit frontier advance past its offset, so
+	// nothing ever redelivers it. That reading of buffer_overflow holds under
+	// the default on_overflow=discard only: under on_overflow=dead_letter the
+	// record leaves through OnMessageDeadLettered instead, precisely so this
+	// series keeps meaning "gone" and an alert on it is not diluted by records
+	// that were in fact preserved.
+	//
+	// "schema_fail" is the exception to this method's name: on_invalid=fail
+	// reports that reason and then declines the commit, so the record is not
+	// discarded at all — its offset stays uncommitted and its partition is held
+	// (deliverInvalid; the aggregate path holds the batch the same way). The
+	// per-message hold applies the policy once, so it counts once per record;
+	// the aggregate path re-applies it on each batch retry, so it counts once
+	// per attempt.
 	OnMessageDiscarded(ctx context.Context, topic, reason string)
 	// OnMessageDeadLettered reports a dead-letter publish attempt. result is
 	// "ok" or "error".
@@ -46,9 +53,16 @@ type Observer interface {
 	// at its cap for, and emit_retry's on_failure=dead_letter republishes a
 	// record the legacy emit path could not deliver within its retry budget.
 	// Which axis it was is in the published record's xflow-dlq-reason header and
-	// in the log line; the operational reading of result is identical either way
-	// — "error" means the record is being redelivered rather than parked, and the
-	// source partition is stalled on it.
+	// in the log line; the operational reading of result is identical either way.
+	// "ok" means the record is durably parked and its source offset may now be
+	// committed past. "error" means it is NOT parked: the source partition holds
+	// on that record and the publish is retried, so no later offset can commit
+	// past it. All three axes hold rather than step over the record — schema's
+	// deliverInvalid for a failed on_invalid=dead_letter republish, emit_retry's
+	// deliverLegacy for a failed publish after the emit budget, and the
+	// aggregator's pendingOverflow under on_overflow=dead_letter — so "error"
+	// names an in-place retry, not a broker redelivery (which happens only
+	// across a restart or rebalance).
 	OnMessageDeadLettered(ctx context.Context, topic, result string)
 	// OnConsumerLag reports how far this partition's fetch position sits behind
 	// the broker's high-water mark, sampled from a message that has just been
@@ -70,21 +84,23 @@ type Observer interface {
 	// OnConsumptionBlocked reports a partition halting or resuming consumption.
 	// blocked is the new state, reported on transitions only.
 	//
-	// Four conditions set it, and all mean "this partition is not making
+	// Five conditions set it, and all mean "this partition is not making
 	// progress so that no record is lost": on_overflow=block sitting at its
 	// retained bound, on_overflow=dead_letter holding a record whose
 	// dead-letter publish has not succeeded, a per-record entry seed whose
-	// workflow's concurrency policy refused it — that last one holds the
-	// record and retries it with backoff instead of stepping over it — and a
-	// legacy emit that has failed and is being retried (deliverLegacy, the
-	// emit_retry policy), which holds the partition the same way because a later
-	// record's commit would otherwise sweep past the undelivered one. They
-	// share a series because an operator's question is the same one — has this
-	// partition stopped, and is that why my lag looks fine — and the log line at
-	// each transition names which of the four it is.
+	// workflow's concurrency policy refused it — that one holds the record and
+	// retries it with backoff instead of stepping over it — a legacy emit that
+	// has failed and is being retried (deliverLegacy, the emit_retry policy),
+	// and a schema-invalid record under on_invalid=fail or while its
+	// on_invalid=dead_letter republish keeps failing (deliverInvalid). The last
+	// two hold the partition the same way because a later record's commit would
+	// otherwise sweep past the undelivered one. They share a series because an
+	// operator's question is the same one — has this partition stopped, and is
+	// that why my lag looks fine — and the log line at each transition names
+	// which of the five it is.
 	//
-	// The seed case is the one that is not backpressure from this process: the
-	// partition is waiting on the CONTROL PLANE to have room. Its rate is also
+	// The seed case is not backpressure from this process: the partition is
+	// waiting on the CONTROL PLANE to have room. Its rate is also
 	// visible as state="refused" on xflow_trigger_batch_admissions_total, which
 	// says why; this gauge says that the partition stopped, which the refusal
 	// counter alone cannot.
