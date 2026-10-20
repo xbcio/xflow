@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/node/trigger/triggertest"
 	"github.com/xbcio/xflow/types"
 )
@@ -172,6 +173,12 @@ func TestWebhookSecretSupplyIsEmittedOnlyWhenSet(t *testing.T) {
 		}
 		if spec.Type != types.ParamString {
 			t.Fatalf("secret_supply type = %q, want %q", spec.Type, types.ParamString)
+		}
+		if spec.Widget != nodeinternal.WidgetCredentialSelect {
+			t.Fatalf("secret_supply widget = %q, want %q: the editor must render the supply reference with the reference picker, not a plain text box", spec.Widget, nodeinternal.WidgetCredentialSelect)
+		}
+		if spec.Secret {
+			t.Fatal("secret_supply is Secret; the param holds a supply resource reference name, not the secret itself")
 		}
 	}
 	if !found {

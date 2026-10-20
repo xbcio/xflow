@@ -67,6 +67,8 @@ func (n *Node) Descriptor() types.Descriptor {
 		Type:        "xflow.trigger.webhook",
 		Kind:        types.NodeKindTrigger,
 		DisplayName: "Webhook Trigger",
+		Category:    "trigger",
+		CardSummary: []string{"method+path", "secret_supply"},
 		Params: []types.ParamSpec{
 			{Name: "method", DisplayName: "Method", Type: types.ParamString, Required: true},
 			{Name: "path", DisplayName: "Path", Type: types.ParamString, Required: true},
@@ -82,8 +84,11 @@ func (n *Node) Descriptor() types.Descriptor {
 			// It is not Required: a local-mode definition has no route to protect,
 			// and cluster registration enforces the reference where it matters
 			// (service/apiserver refuses to register a server-hosted webhook
-			// without one).
-			{Name: "secret_supply", DisplayName: "Secret Supply", Type: types.ParamString},
+			// without one). The value is a supply resource reference name, not
+			// the secret itself, so the param carries the credential-select
+			// widget for rendering the reference and stays unmarked by Secret.
+			{Name: "secret_supply", DisplayName: "Secret Supply", Type: types.ParamString,
+				Widget: nodeinternal.WidgetCredentialSelect},
 		},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 	}
