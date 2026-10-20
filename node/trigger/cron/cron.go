@@ -80,6 +80,8 @@ func (n *Node) Descriptor() types.Descriptor {
 		Type:        "xflow.trigger.cron",
 		Kind:        types.NodeKindTrigger,
 		DisplayName: "Cron Trigger",
+		Category:    "trigger",
+		CardSummary: []string{"expression", "timezone"},
 		Params: []types.ParamSpec{
 			// Parsed by robfig/cron's standard parser: five fields plus the
 			// @every / @hourly descriptors.
