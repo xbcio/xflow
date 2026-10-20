@@ -17,6 +17,7 @@ package types
 // its field-count table is updated.
 func (d Descriptor) Clone() Descriptor {
 	out := d
+	out.CardSummary = cloneStrings(d.CardSummary)
 	out.Credentials = cloneStrings(d.Credentials)
 	out.Params = cloneParamSpecs(d.Params)
 	out.Inputs = clonePorts(d.Inputs)

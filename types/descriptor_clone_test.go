@@ -10,6 +10,8 @@ func sampleDescriptor() Descriptor {
 		Type:        "x.sample",
 		Kind:        NodeKindAction,
 		DisplayName: "Sample",
+		Category:    "action",
+		CardSummary: []string{"tags", "opts+mode"},
 		Credentials: []string{"db"},
 		Params: []ParamSpec{
 			{Name: "opts", Type: ParamObject, Default: map[string]any{
@@ -39,6 +41,7 @@ func TestDescriptorCloneIsolatesCallerWrites(t *testing.T) {
 	c := src.Clone()
 
 	c.Credentials[0] = "mutated"
+	c.CardSummary[0] = "mutated"
 	c.Inputs[0].Name = "mutated"
 	c.Outputs[1].Name = "mutated"
 	c.Capabilities[0] = "mutated"
@@ -61,12 +64,14 @@ func TestDescriptorCloneIsolatesLaterSourceAppends(t *testing.T) {
 	src := sampleDescriptor()
 	src.Params = append(make([]ParamSpec, 0, 8), src.Params...)
 	src.Credentials = append(make([]string, 0, 8), src.Credentials...)
+	src.CardSummary = append(make([]string, 0, 8), src.CardSummary...)
 
 	c := src.Clone()
 	want := c.Clone()
 
 	src.Params = append(src.Params, ParamSpec{Name: "late"})
 	src.Credentials = append(src.Credentials, "late")
+	src.CardSummary = append(src.CardSummary, "late")
 	src.Params[0].Name = "mutated"
 
 	if !reflect.DeepEqual(c, want) {
@@ -76,7 +81,7 @@ func TestDescriptorCloneIsolatesLaterSourceAppends(t *testing.T) {
 
 func TestDescriptorClonePreservesNilSlices(t *testing.T) {
 	c := (Descriptor{Type: "x.empty"}).Clone()
-	if c.Credentials != nil || c.Params != nil || c.Inputs != nil || c.Outputs != nil || c.Capabilities != nil {
+	if c.Credentials != nil || c.CardSummary != nil || c.Params != nil || c.Inputs != nil || c.Outputs != nil || c.Capabilities != nil {
 		t.Fatalf("Clone() turned nil slices into empty ones: %#v", c)
 	}
 }
@@ -86,7 +91,7 @@ func TestDescriptorClonePreservesNilSlices(t *testing.T) {
 // extending the matching clone (and routing any any-typed field through
 // cloneParamValue).
 var cloneFieldCounts = map[reflect.Type]int{
-	reflect.TypeOf(Descriptor{}):      12,
+	reflect.TypeOf(Descriptor{}):      14,
 	reflect.TypeOf(ParamSpec{}):       18,
 	reflect.TypeOf(PortSpec{}):        2,
 	reflect.TypeOf(EnumOption{}):      3,

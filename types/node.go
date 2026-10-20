@@ -231,6 +231,15 @@ type Descriptor struct {
 	Type        string
 	Kind        NodeKind
 	DisplayName string
+	// Category is the editor's node category (spec §5): "trigger", "control",
+	// "action", "code", "transform", "human", or "unknown". Empty means the
+	// editor maps the type by prefix.
+	Category string
+	// CardSummary lists the params a node card shows as its configuration
+	// summary, in display order, at most three rows. An entry is a top-level
+	// param name; "a+b" joins two params into one row (HTTP's "method+url").
+	// Empty means the editor falls back to the first three required params.
+	CardSummary []string
 	Credentials []string    // declared credential names required by this node
 	Params      []ParamSpec // parameter schema for this node
 	Inputs      []PortSpec
