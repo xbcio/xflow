@@ -22,8 +22,11 @@ import (
 // methods (Submit/Invoke/Inspect/DeliverSignal/RevokeSignal/Cancel) carry
 // behavior; the lease/routing surface from execution.Engine is stubbed.
 type fakeControlFacade struct {
-	submitID   types.ExecutionID
-	submitErr  error
+	submitID  types.ExecutionID
+	submitErr error
+	// submitDef is the definition the module attached to the submission context.
+	// It is what the durable projection reads the workflow identity from.
+	submitDef  *types.WorkflowDef
 	invokeID   types.ExecutionID
 	invokeErr  error
 	inspect    engine.ExecutionDetail
@@ -53,6 +56,9 @@ func (f *fakeControlFacade) Rerun(_ context.Context, req engine.RerunRequest) (e
 }
 
 func (f *fakeControlFacade) Submit(ctx context.Context, _ *graph.Graph, _ map[string]any, _ ...*types.Runtime) (types.ExecutionID, error) {
+	if def, ok := engine.WorkflowDefFromContext(ctx); ok {
+		f.submitDef = def
+	}
 	// R3.1: mirror the real engine — when the authz wrapper pre-allocated an
 	// execution id into the submission context, echo it back so the response
 	// execution_id matches the admission audit row. Falls back to the fixed
@@ -212,8 +218,10 @@ func TestWorkflowControlExecuteRejectsNilWorkflow(t *testing.T) {
 
 func TestWorkflowControlInspect(t *testing.T) {
 	f := &fakeControlFacade{inspect: engine.ExecutionDetail{
-		ExecutionID: "exec-1",
-		Status:      types.ExecutionStatusRunning,
+		ExecutionID:     "exec-1",
+		Status:          types.ExecutionStatusRunning,
+		WorkflowID:      "wf-1",
+		WorkflowVersion: "v2",
 	}}
 	mux := newControlMux(f)
 
@@ -222,13 +230,28 @@ func TestWorkflowControlInspect(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	var detail engine.ExecutionDetail
+	// Decoded into a wire-shaped struct rather than engine.ExecutionDetail: the
+	// point is the JSON names the handler emits, and decoding into the same Go
+	// type would silently follow a renamed tag on both sides.
+	var detail struct {
+		ExecutionID     string                `json:"execution_id"`
+		Status          types.ExecutionStatus `json:"status"`
+		WorkflowID      string                `json:"workflow_id"`
+		WorkflowVersion string                `json:"workflow_version"`
+	}
 	env := decodeEnvelope(t, resp, &detail)
 	if !env.Success || env.Code != "200" {
 		t.Fatalf("envelope = %+v, want success/code=200", env)
 	}
 	if detail.ExecutionID != "exec-1" || detail.Status != types.ExecutionStatusRunning {
 		t.Fatalf("detail = %+v, want exec-1 running", detail)
+	}
+	// The workflow identity the editor resolves the run's definition version
+	// from; dropping it from the response would leave every run unattributed in
+	// the UI even though the engine recorded it.
+	if detail.WorkflowID != "wf-1" || detail.WorkflowVersion != "v2" {
+		t.Fatalf("detail identity = (%q, %q), want (%q, %q)",
+			detail.WorkflowID, detail.WorkflowVersion, "wf-1", "v2")
 	}
 }
 

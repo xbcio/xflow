@@ -291,6 +291,42 @@ func TestPostWorkflowsExecuteRejectsNilWorkflow(t *testing.T) {
 	}
 }
 
+// TestPostWorkflowsExecuteRejectsWorkflowID pins the inline route's refusal of
+// a client-supplied workflow id: the id is a server-assigned resource and the
+// execution's attribution must not be chosen by the request body (nor may it
+// escape ExecutionDetail.workflow_id's 64-character bound). A short id is
+// refused just like an over-long one — the rule is "any non-empty id", not a
+// length check.
+func TestPostWorkflowsExecuteRejectsWorkflowID(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		id   string
+	}{
+		{"short client-chosen id", "wf-client-chosen"},
+		{"over-long id", strings.Repeat("x", 100)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeControlFacade{}
+			mux := newControlMux(f)
+
+			wf := validWorkflow()
+			wf.ID = tc.id
+			resp := doJSON(t, mux, http.MethodPost, "/v1/workflows/execute", executeWorkflowRequest{Workflow: wf})
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", resp.StatusCode)
+			}
+			env := decodeEnvelope(t, resp, nil)
+			if env.Code != "workflow_invalid" {
+				t.Fatalf("code = %q, want workflow_invalid", env.Code)
+			}
+			if f.submitDef != nil {
+				t.Fatal("the inline definition with an id reached Submit instead of being refused")
+			}
+		})
+	}
+}
+
 // TestPostWorkflowsExecuteCompileErrorReturnsStableCode pins that a compile
 // failure maps to workflow_compile_failed (400), and the message carries only
 // node names / referenced node names / parameter names — never node output.

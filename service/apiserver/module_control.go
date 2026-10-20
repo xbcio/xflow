@@ -273,28 +273,32 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	// GET /v1/workflows (the collection read) reuses OpWorkflowRead — the very
 	// operation GET /v1/workflows/{id} carries — so the two scopes cannot drift:
 	// a principal that may read one workflow may list them, and one that may not
-	// is refused by the same default-deny check before the handler runs. No
-	// resource resolver is passed: a collection is not one resource, and the
-	// scope of the read is the principal's own namespace, resolved inside the
-	// handler via namespace.FromContext (never from a query parameter).
+	// is refused by the same default-deny check before the handler runs. The
+	// required scope is the read-only workflow.read (a write-scope principal is
+	// allowed too; see principalAllowsOperation). No resource resolver is
+	// passed: a collection is not one resource, and the scope of the read is the
+	// principal's own namespace, resolved inside the handler via
+	// namespace.FromContext (never from a query parameter).
 	mux.HandleFunc("GET "+PathWorkflows, authz(OpWorkflowRead, false, m.handleListWorkflows, nil))
 	mux.HandleFunc("GET "+PathWorkflowByID, authz(OpWorkflowRead, false, m.handleGetWorkflow, workflowIDResolver()))
 	mux.HandleFunc("PUT "+PathWorkflowByID, m.authzWrapWithPreAdmission(OpWorkflowDefinitionUpdate, true, m.handleReplaceWorkflow, workflowIDResolver(), rejectFAFWorkflowRegistrationBeforeAdmission))
 	mux.HandleFunc("DELETE "+PathWorkflowByID, authz(OpWorkflowRegister, true, m.handleDeregisterWorkflow, workflowIDResolver()))
 	// GET /v1/node-types[/{type}] reuses OpWorkflowRead: a principal that may
 	// read workflow definitions may read the node schemas they are written
-	// against. The resolver carries an optional ?namespace= as the resource
-	// namespace, so a scoped request (the only one that merges runner-reported
-	// types, which belong to tenant pools) is authorized against that
-	// namespace; an unscoped one is decided on the operation alone.
+	// against, so it requires the same read-only workflow.read scope. The
+	// resolver carries an optional ?namespace= as the resource namespace, so a
+	// scoped request (the only one that merges runner-reported types, which
+	// belong to tenant pools) is authorized against that namespace; an unscoped
+	// one is decided on the operation alone.
 	mux.HandleFunc("GET "+PathNodeTypes, authz(OpWorkflowRead, false, m.handleListNodeTypes, nodeTypesNamespaceResolver()))
 	mux.HandleFunc("GET "+PathNodeTypeByType, authz(OpWorkflowRead, false, m.handleGetNodeType, nodeTypesNamespaceResolver()))
 	// GET /v1/current-user reports the verified principal itself. No resource
 	// resolver: the resource IS the caller, so there is no id to resolve and no
 	// namespace to compare — the wrapper already bound the response to the
-	// principal it verified. It is mounted ONLY on this branch (the legacy
-	// branch below serves no identity at all), which is why it has no
-	// counterpart registration there.
+	// principal it verified. It requires authentication only (no scope), because
+	// the console derives its capabilities from the scopes reported here. It is
+	// mounted ONLY on this branch (the legacy branch below serves no identity at
+	// all), which is why it has no counterpart registration there.
 	mux.HandleFunc("GET "+PathCurrentUser, authz(OpCurrentUserRead, false, m.handleCurrentUser, nil))
 	mux.HandleFunc("POST "+PathWorkflowExecute, authz(OpWorkflowCreate, true, m.handleExecuteWorkflow, inlineExecutionIDResolver()))
 	mux.HandleFunc("POST "+PathWorkflowExecuteByID, authz(OpWorkflowInvoke, true, m.handleExecuteWorkflowByID, invokeByIDResolver()))
@@ -302,8 +306,9 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	// design §2.2) reuses OpWorkflowRead — the operation GET /v1/workflows/{id}
 	// carries — so the two scopes cannot drift: a principal that may read one
 	// workflow may read its version history, and one that may not is refused by
-	// the same default-deny check. The resolver scopes the audit row to the
-	// workflow id the route addresses, like the by-id read above.
+	// the same default-deny check. It therefore requires the same read-only
+	// workflow.read scope. The resolver scopes the audit row to the workflow id
+	// the route addresses, like the by-id read above.
 	mux.HandleFunc("GET "+PathWorkflowVersions, authz(OpWorkflowRead, false, m.handleListWorkflowVersions, workflowIDResolver()))
 	mux.HandleFunc("GET "+PathWorkflowVersionByID, authz(OpWorkflowRead, false, m.handleGetWorkflowVersion, workflowIDResolver()))
 	// POST /v1/workflows/{id}/rollback (versioning design §2.4) reuses
@@ -816,6 +821,17 @@ func (m *workflowControlModule) handleExecuteWorkflow(w http.ResponseWriter, r *
 		writeFail(w, r, http.StatusBadRequest, "workflow_invalid", "workflow is required")
 		return
 	}
+	// An inline definition is not a server resource, so it has no server-assigned
+	// id. Accepting one would let the caller choose the execution's workflow_id
+	// attribution, contradict WorkflowDef.id's "server-assigned" contract, and
+	// return an id of any length where ExecutionDetail declares maxLength 64
+	// (and the SQL column is VARCHAR(64)). Attribution is available where it is
+	// truthful: POST /v1/workflows/{id}/execute stamps the path id.
+	if req.Workflow.ID != "" {
+		writeFail(w, r, http.StatusBadRequest, "workflow_invalid",
+			"workflow id is not accepted for an inline execute; use POST /v1/workflows/{id}/execute")
+		return
+	}
 	// Compiled in the caller's namespace (server-issued by the authz wrapper,
 	// never the body): an inline definition carrying an xflow.subworkflow node
 	// pins its reference against the same registry the register path uses.
@@ -930,6 +946,16 @@ func (m *workflowControlModule) handleRegisterWorkflow(w http.ResponseWriter, r 
 	}
 	def, metadata, ok := decodeWorkflowDefinitionWithMetadata(w, r)
 	if !ok {
+		return
+	}
+	// A registered workflow is a server-assigned resource: the id is minted by
+	// the registry, and accepting a body-supplied one would let the caller
+	// choose the identity every execution of this workflow is attributed to.
+	// Refuse it exactly as the inline execute route does; PUT already requires
+	// a supplied id to match the path.
+	if def.ID != "" {
+		writeFail(w, r, http.StatusBadRequest, "workflow_invalid",
+			"workflow id is not accepted on registration; it is server-assigned")
 		return
 	}
 	// Namespace is authoritative from the context, never the body.
@@ -1437,38 +1463,47 @@ func (m *workflowControlModule) workflowListItems(ctx context.Context, registry 
 // client that needs one execution's definition reads it through
 // GET /v1/executions/{id}. What a row actually needs is the identity
 // (execution_id), the tenant it belongs to (namespace), what it ran
-// (workflow_name), where it is (status), how it ended (error), and when it was
-// created / last touched.
+// (workflow_id + workflow_name), where it is (status), how it ended (error),
+// and when it was created / last touched.
 //
-// workflow_name and not a workflow id: the executions table stores no workflow
-// id / key / hash column, so a name is the only workflow identity a row can
-// honestly project. That is also why no workflow filter is offered — see
-// executionListFilterFrom.
+// workflow_id is the identity and workflow_name is the display string. The row
+// stores both; `?workflow_id=` narrows on the id, because a name is not an
+// identity (two namespaces can hold the same name, and it can change under the
+// same id). A row recorded without a definition id projects workflow_id "" —
+// unattributed, and matched by no workflow filter.
 type executionListItem struct {
 	ExecutionID  string                `json:"execution_id"`
 	Namespace    string                `json:"namespace"`
+	WorkflowID   string                `json:"workflow_id"`
 	WorkflowName string                `json:"workflow_name"`
 	Status       types.ExecutionStatus `json:"status"`
 	Error        string                `json:"error"`
 	CreatedAt    time.Time             `json:"created_at"`
 	UpdatedAt    time.Time             `json:"updated_at"`
+	// QueuePosition is the row's 1-based place in its workflow's concurrency
+	// queue, present only while status is queued. It is not a stored column —
+	// the queue owner holds it — so the handler reads it back for the queued
+	// rows of a page and leaves it 0 for every other row. The cost is bounded:
+	// at most one InspectStatus per queued row, and InspectStatus is the
+	// status-only projection that does not walk the graph. 0 / absent means
+	// UNKNOWN, never "head of the line": the head is 1.
+	QueuePosition int `json:"queue_position,omitempty"`
 }
 
 // executionListFilterFrom parses and validates everything about a list request
-// that is a business input rather than a page number: the status filter and the
-// created_after / created_before bounds.
+// that is a business input rather than a page number: the status filter, the
+// workflow_id identity filter, and the created_after / created_before bounds.
 //
-// Only these three filters exist, and that is a data-model fact, not a
-// conservative default. The store's doc on ListExecutions spells out the two
-// rejections at column level: the executions table has no workflow id / key /
-// hash column (only workflow_name, which is a display string, not an identity —
-// two namespaces can hold the same name and it is not immutable across a
-// re-registration), and runner_id is not a column of that table at all (it
-// lives in the enrollment/identity tables and in per-node lease columns, none of
-// which is a per-execution projection of "who ran this"). Advertising either
-// parameter would promise a narrowing the store cannot perform — an
-// unrecognized query parameter is silently ignored, so the caller would get the
-// whole namespace back and read it as a filtered page.
+// These are the filters the data model actually supports. The store's doc on
+// ListExecutions spells out the remaining rejection at column level: runner_id
+// is not a column of xflow_executions at all (it lives in the enrollment/identity
+// tables and in per-node lease columns, none of which is a per-execution
+// projection of "who ran this"). Advertising it would promise a narrowing the
+// store cannot perform — an unrecognized query parameter is silently ignored,
+// so the caller would get the whole namespace back and read it as a filtered
+// page. A workflow NAME filter is likewise not offered: workflow_name is a
+// display string, not an identity (two namespaces can hold the same name and it
+// is not immutable across a re-registration); workflow_id is the identity.
 //
 // Unlike page/page_size — whose malformed values degrade to defaults because
 // they come straight off a frontend table component and can only ever make the
@@ -1480,13 +1515,16 @@ type executionListItem struct {
 //     refuses to do (ExecutionFilter.Validate);
 //   - a created_after that failed to parse and silently became "unbounded"
 //     widens the result set, and widening a tenant-scoped enumeration is the
-//     direction that costs data, not convenience.
+//     direction that costs data, not convenience;
+//   - an over-long workflow_id can never equal a stored id (the column is
+//     VARCHAR(64)); ignoring it would answer with the whole namespace as if it
+//     were the filtered page.
 //
 // ok=false means the handler has already written the failure response.
 //
 // The returned filter is passed straight to the store, which re-validates the
-// status itself: this function is the HTTP-layer mapping, not a replacement for
-// the store's own refusal.
+// status and the workflow id itself: this function is the HTTP-layer mapping,
+// not a replacement for the store's own refusal.
 func executionListFilterFrom(w http.ResponseWriter, r *http.Request) (store.ExecutionFilter, bool) {
 	q := r.URL.Query()
 
@@ -1499,6 +1537,18 @@ func executionListFilterFrom(w http.ResponseWriter, r *http.Request) (store.Exec
 			return store.ExecutionFilter{}, false
 		}
 		filter.Status = status
+	}
+
+	// Empty means "no workflow narrowing", the same convention status uses. A
+	// value that cannot match a stored row is refused rather than ignored, so a
+	// typo cannot read back as an unfiltered page.
+	if raw := q.Get("workflow_id"); raw != "" {
+		if err := store.ValidateExecutionWorkflowIDFilter(raw); err != nil {
+			writeFail(w, r, http.StatusBadRequest, "execution_workflow_id_invalid",
+				"workflow_id must be at most 64 characters")
+			return store.ExecutionFilter{}, false
+		}
+		filter.WorkflowID = types.WorkflowID(raw)
 	}
 
 	createdAfter, ok := parseExecutionListTime(w, r, q.Get("created_after"), "created_after")
@@ -1586,6 +1636,14 @@ func parseExecutionListTime(w http.ResponseWriter, r *http.Request, raw, param s
 //     are unreachable from every scope × filter combination, deliberately, so a
 //     pre-migration row is never shown to a tenant that merely might own it.
 //
+// Queue position: a queued row carries its live place in line (1-based) in
+// `queue_position`, read back per row from the queue owner rather than stored.
+// The cost is bounded by the page: at most pageSize status reads, issued only
+// for rows the page says are queued, and each is InspectStatus — the
+// graph-free projection — not Inspect. A read that fails omits the field; it
+// never fails the page and never changes a row's status. Absent/0 means
+// UNKNOWN, not the head of the line.
+//
 // Pagination: offset, 1-based, through the shared pageParams helper (default
 // 20, hard cap 200). The cap is a SECURITY control per org policy §2 — a
 // sensitive-data enumeration endpoint may not permit full-table traversal — so
@@ -1659,6 +1717,12 @@ func (m *workflowControlModule) handleListExecutions(w http.ResponseWriter, r *h
 		return
 	}
 	items := make([]executionListItem, 0, len(recs))
+	// queueReadFailures counts the queued rows whose place in line could not
+	// be read. It is reported once for the page, below: a queue owner that is
+	// down would otherwise turn one page into pageSize identical log lines,
+	// which is noise that hides the other rows' diagnostics rather than more
+	// information about this one.
+	var queueReadFailures int
 	for _, rec := range recs {
 		// The store already scoped this page by exact namespace equality. The
 		// re-check is defense in depth against a store whose scope handling
@@ -1672,15 +1736,38 @@ func (m *workflowControlModule) handleListExecutions(w http.ResponseWriter, r *h
 			}
 			continue
 		}
-		items = append(items, executionListItem{
+		item := executionListItem{
 			ExecutionID:  string(rec.ExecutionID),
 			Namespace:    rec.Namespace,
+			WorkflowID:   string(rec.WorkflowID),
 			WorkflowName: rec.WorkflowName,
 			Status:       rec.Status,
 			Error:        rec.Error,
 			CreatedAt:    rec.CreatedAt,
 			UpdatedAt:    rec.UpdatedAt,
-		})
+		}
+		// The place in line is the one column of a row that is not stored: it
+		// belongs to the live queue, so it is read back per queued row. The
+		// read is best effort for the same reason submissionResponse's is —
+		// the row exists and its other columns are the answer; a position that
+		// could not be read is a missing detail, not a failed page. Re-reading
+		// the STATUS as well as the position is deliberate: the row said
+		// queued a moment ago, and an execution promoted or finished since
+		// then must not report the position it no longer has.
+		if rec.Status == types.ExecutionStatusQueued && m.eng != nil {
+			detail, err := m.eng.InspectStatus(r.Context(), rec.ExecutionID)
+			switch {
+			case err != nil:
+				queueReadFailures++
+			case detail.Status == types.ExecutionStatusQueued:
+				item.QueuePosition = detail.QueuePosition
+			}
+		}
+		items = append(items, item)
+	}
+	if queueReadFailures > 0 && m.log != nil {
+		m.log.Error("list_executions_queue_position_unavailable",
+			"failed_rows", queueReadFailures, "page_rows", len(recs))
 	}
 	writeList(w, r, items, executionListTotal(total))
 }
@@ -2174,8 +2261,18 @@ func (m *workflowControlModule) handleExecuteWorkflowByID(w http.ResponseWriter,
 		}
 	}
 	// Attach the stored definition so the durable SQL execution projection can
-	// persist workflow_def (NOT NULL) — mirroring the inline-execute path.
-	ctx := engine.WithWorkflowDef(r.Context(), rec.Definition)
+	// persist workflow_def (NOT NULL) — mirroring the inline-execute path. The
+	// path id is the authoritative identity of this execution: always stamp it
+	// onto a copy, overriding any id a legacy stored definition still carries,
+	// so a client-supplied definition id can never hijack attribution. The
+	// registry's record is never mutated.
+	var subDef *types.WorkflowDef
+	if rec.Definition != nil {
+		stamped := *rec.Definition
+		stamped.ID = string(id)
+		subDef = &stamped
+	}
+	ctx := engine.WithWorkflowDef(r.Context(), subDef)
 	ctx = engine.WithTraceCarrier(ctx, tracing.InjectCarrier(ctx))
 	ctx = engine.WithTestRun(ctx, req.Test)
 	// A keyed request is scoped to the registered workflow, so one key means one
@@ -2321,6 +2418,39 @@ func sameWorkflowRevision(a, b backend.WorkflowRecord) bool {
 		a.Version == b.Version &&
 		a.DefinitionHash == b.DefinitionHash &&
 		a.RegistryRevision == b.RegistryRevision
+}
+
+// deregisterWorkflowByKey resolves (ns, name, version) through the registry's
+// key index and removes the record by id.
+//
+// It exists for an embedded host that knows the identity it registered under —
+// the name and version it derives from its own configuration — but not the id,
+// which the server issues as a UUID. Resolution is scoped to ns and matched on
+// the exact key the registration path writes, so a host can never reach another
+// namespace's record by name. An unknown key is backend.ErrWorkflowNotFound.
+//
+// The removal itself is deregisterWorkflow, so the
+// clear-activations-before-remove ordering contract is identical to
+// DELETE /v1/workflows/{id}.
+func (m *workflowControlModule) deregisterWorkflowByKey(ctx context.Context, ns namespace.Namespace, name, version string) error {
+	if name == "" || version == "" {
+		return backend.ErrWorkflowNotFound
+	}
+	registry := m.registry()
+	if registry == nil {
+		if m.log != nil {
+			m.log.Error("deregister_workflow_no_registry")
+		}
+		return errors.New("apiserver: no workflow registry configured")
+	}
+	rec, err := registry.GetWorkflowByKey(ctx, workflowRegistryKey(string(ns), name, version))
+	if err != nil {
+		if !errors.Is(err, backend.ErrWorkflowNotFound) && m.log != nil {
+			m.log.Error("deregister_workflow_key_lookup_failed", "err", err)
+		}
+		return err
+	}
+	return m.deregisterWorkflow(ctx, ns, rec.ID)
 }
 
 // replaceWorkflow registers def, and if a DIFFERENT definition already occupies
@@ -2957,6 +3087,36 @@ func (m *workflowControlModule) executionRerun() (executionRerunner, error) {
 	return rerunner, nil
 }
 
+// withParentWorkflowDef attaches the workflow definition a rerun inherits from
+// the execution it derives from, so the durable projection of the NEW
+// execution records its workflow id. The parent's workflow_id column is the
+// sole authority: it is the identity the parent was recorded with server-side.
+// The stored definition payload is never read for an id — a legacy submission
+// could choose it, and inheriting it would reopen the attribution hijack this
+// path exists to close. A row whose column is empty stays unattributed
+// (fail-closed), matching B1's "never guess an old row's ownership"; a graph
+// name is never promoted to an identity.
+func (m *workflowControlModule) withParentWorkflowDef(ctx context.Context, id types.ExecutionID) context.Context {
+	if m.executions == nil {
+		return ctx
+	}
+	rec, err := m.executions.GetExecution(ctx, id)
+	if err != nil || rec == nil || rec.WorkflowID == "" {
+		return ctx
+	}
+	var def types.WorkflowDef
+	if len(rec.WorkflowDef) > 0 {
+		// The payload only enriches the definition (name, version); the id is
+		// never taken from it, so an unparsable payload costs nothing here.
+		_ = json.Unmarshal(rec.WorkflowDef, &def)
+	}
+	def.ID = string(rec.WorkflowID)
+	if def.Name == "" {
+		def.Name = rec.WorkflowName
+	}
+	return engine.WithWorkflowDef(ctx, &def)
+}
+
 // handleRerun serves POST /v1/executions/{id}/rerun (design §3 API).
 //
 // It creates a NEW execution derived from a terminal one, starting at
@@ -2991,9 +3151,11 @@ func (m *workflowControlModule) handleRerun(w http.ResponseWriter, r *http.Reque
 	}
 	// The trace carrier is propagated so the new execution's asynchronous
 	// dispatch spans stay under this request's trace, exactly as the execute
-	// path does. It is the one submission hook a rerun needs from the API
-	// layer: the definition is the parent's already, and the identity is the
-	// engine's to attach.
+	// path does. Beyond the carrier, a rerun needs the API layer to attach the
+	// parent's workflow definition: the seed carries only a compiled graph, so
+	// the durable SQL projection would record no workflow_id without it. The
+	// engine attaches the identity inherited by the new snapshot; this layer
+	// supplies the row-authoritative definition that projection reads.
 	//
 	// An Idempotency-Key makes the rerun safe to retry: the engine scopes the key
 	// to the parent execution, and the fingerprint covers the parent, the
@@ -3005,6 +3167,11 @@ func (m *workflowControlModule) handleRerun(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	ctx := engine.WithTraceCarrier(r.Context(), tracing.InjectCarrier(r.Context()))
+	// A rerun carries no definition of its own, so projectSeededRerun would
+	// leave the new SQL row unattributed. The parent row is the exact source of
+	// the workflow identity (a rerun runs the workflow it derives from); a row
+	// that cannot be read leaves the child unattributed rather than guessing.
+	ctx = m.withParentWorkflowDef(ctx, id)
 	res, err := rerunner.Rerun(ctx, engine.RerunRequest{
 		ExecutionID:    id,
 		FromNode:       req.FromNode,

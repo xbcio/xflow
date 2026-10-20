@@ -2,12 +2,15 @@ package apiserver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/store"
+	"github.com/xbcio/xflow/store/memstore"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -392,5 +395,57 @@ func TestExecutionRerunCrossNamespaceIsNotFound(t *testing.T) {
 	decodeEnvelope(t, resp, &detail)
 	if detail.Status != types.ExecutionStatusCanceled {
 		t.Fatalf("status after the refused cross-namespace rerun = %q, want canceled", detail.Status)
+	}
+}
+
+// TestRerunInheritsTheParentWorkflowIdentity pins the attribution the rerun
+// projection depends on. A rerun seed carries only a compiled graph, so the
+// workflow id can come only from the definition this handler attaches from the
+// parent row; without it every rerun execution is projected unattributed and
+// invisible to any workflow_id filter. The parent's workflow_id column is the
+// sole server-recorded identity: a stored definition payload is never read for
+// an id (a legacy inline submission chose those freely), so a row written
+// before the column existed stays unattributed instead of inheriting it.
+func TestRerunInheritsTheParentWorkflowIdentity(t *testing.T) {
+	mem := memstore.New()
+	m := &workflowControlModule{executions: mem}
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name, wantID, wantName string
+		rec                    store.ExecutionRecord
+	}{
+		{"payload id is never inherited", "", "", store.ExecutionRecord{
+			ExecutionID: "exec-def",
+			WorkflowDef: []byte(`{"id":"wf-client-chosen","name":"approval"}`),
+		}},
+		{"identity column only", "wf-column", "approval", store.ExecutionRecord{
+			ExecutionID: "exec-column", WorkflowID: "wf-column", WorkflowName: "approval",
+		}},
+		{"identity column beats a client-supplied payload id", "wf-column", "approval", store.ExecutionRecord{
+			ExecutionID:  "exec-both",
+			WorkflowID:   "wf-column",
+			WorkflowName: "approval",
+			WorkflowDef:  []byte(`{"id":"wf-client-chosen","name":"approval"}`),
+		}},
+		{"unattributed parent", "", "", store.ExecutionRecord{ExecutionID: "exec-none"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := tc.rec
+			if err := mem.CreateExecution(ctx, &rec); err != nil {
+				t.Fatal(err)
+			}
+			def, ok := engine.WorkflowDefFromContext(m.withParentWorkflowDef(ctx, rec.ExecutionID))
+			if tc.wantID == "" {
+				if ok {
+					t.Fatalf("context carries workflow %q for an unattributed parent; the rerun must stay unattributed, not borrow a name", def.ID)
+				}
+				return
+			}
+			if !ok || def.ID != tc.wantID || def.Name != tc.wantName {
+				t.Fatalf("attached definition = %+v (present=%v), want id %q name %q",
+					def, ok, tc.wantID, tc.wantName)
+			}
+		})
 	}
 }

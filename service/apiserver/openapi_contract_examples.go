@@ -196,17 +196,39 @@ func ExampleWaitTimeoutResponse(id types.ExecutionID, status types.ExecutionStat
 
 // ExampleExecutionListItem builds one row of a GET /v1/executions page (the
 // executionListItem the list handler serializes inside the {list,total}
-// envelope). Every field is non-zero so the contract test validates a populated
-// row rather than a row of omitted keys.
-func ExampleExecutionListItem(id types.ExecutionID, ns, workflowName string, status types.ExecutionStatus, errMsg string, createdAt, updatedAt time.Time) any {
+// envelope). Every field a settled row carries is non-zero so the contract test
+// validates a populated row rather than a row of omitted keys. queue_position
+// is the one deliberate exception: it exists only while status is queued, so
+// the populated position is covered by ExampleExecutionListItemQueued — a zero
+// position here would be omitted by omitempty and validate nothing.
+func ExampleExecutionListItem(id types.ExecutionID, ns, workflowID, workflowName string, status types.ExecutionStatus, errMsg string, createdAt, updatedAt time.Time) any {
 	return executionListItem{
 		ExecutionID:  string(id),
 		Namespace:    ns,
+		WorkflowID:   workflowID,
 		WorkflowName: workflowName,
 		Status:       status,
 		Error:        errMsg,
 		CreatedAt:    createdAt,
 		UpdatedAt:    updatedAt,
+	}
+}
+
+// ExampleExecutionListItemQueued builds a GET /v1/executions row a workflow's
+// concurrency limit parked: status queued with the 1-based place in line the
+// handler reads back from the live queue. The position is the only field the
+// list projection derives at request time, so this row is what binds
+// queue_position — its type and its JSON tag — to the published schema.
+func ExampleExecutionListItemQueued(id types.ExecutionID, ns, workflowID, workflowName string, position int, createdAt, updatedAt time.Time) any {
+	return executionListItem{
+		ExecutionID:   string(id),
+		Namespace:     ns,
+		WorkflowID:    workflowID,
+		WorkflowName:  workflowName,
+		Status:        types.ExecutionStatusQueued,
+		CreatedAt:     createdAt,
+		UpdatedAt:     updatedAt,
+		QueuePosition: position,
 	}
 }
 
@@ -313,6 +335,8 @@ func ExampleNodeFormSchema() any {
 		Type:         "example.node",
 		Kind:         types.NodeKindAction,
 		DisplayName:  "Example",
+		Category:     "action",
+		CardSummary:  []string{"mode+name", "cfg"},
 		Credentials:  []string{"api"},
 		Capabilities: []string{"experimental"},
 		Docs:         "Example node.",

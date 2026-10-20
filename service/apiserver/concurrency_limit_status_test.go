@@ -230,3 +230,34 @@ func TestExecuteRegisteredWorkflowMapsConcurrencyUnsupportedTo503(t *testing.T) 
 		t.Fatalf("code = %q, want workflow_concurrency_unavailable", env.Code)
 	}
 }
+
+// TestExecuteRegisteredWorkflowStampsItsIdentityOntoTheSubmission pins the
+// write side of the executions workflow_id column. A POST-registered record
+// stores a definition with no id (only PUT stamps the path id), so this route
+// must stamp the path id onto the copy it attaches; without it every execution
+// started here projects workflow_id "" and is invisible to the workflow filter.
+func TestExecuteRegisteredWorkflowStampsItsIdentityOntoTheSubmission(t *testing.T) {
+	backend := local.New()
+	registerSeedWorkflow(t, backend)
+	cp, err := control.NewControlPlane(control.Config{Backend: backend})
+	if err != nil {
+		t.Fatalf("NewControlPlane: %v", err)
+	}
+	fake := &fakeControlFacade{submitID: "exec-stamped"}
+	m := &workflowControlModule{cp: cp, eng: fake}
+	mux := http.NewServeMux()
+	m.RegisterHTTP(mux)
+
+	resp := doJSON(t, mux, http.MethodPost, "/v1/workflows/wf-1/execute", executeRegisteredRequest{})
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if fake.submitDef == nil {
+		t.Fatal("submission context carried no definition; the execution row would be unattributed")
+	}
+	if fake.submitDef.ID != "wf-1" || fake.submitDef.Name != "wf-1" {
+		t.Fatalf("attached definition id/name = %q/%q, want wf-1/wf-1: the path id is the authoritative identity",
+			fake.submitDef.ID, fake.submitDef.Name)
+	}
+}

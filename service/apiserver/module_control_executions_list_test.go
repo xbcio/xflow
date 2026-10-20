@@ -149,6 +149,30 @@ func seedExecution(t *testing.T, st store.Executions, ns, workflowName string, i
 	}
 }
 
+// seedExecutionWorkflow writes one row that carries a workflow id. It is kept
+// apart from seedExecution so the existing fixtures stay UNATTRIBUTED
+// (WorkflowID ""), which is itself a case the workflow_id filter must ignore:
+// a row with no recorded identity is never returned for any filter value.
+func seedExecutionWorkflow(t *testing.T, st store.Executions, ns string, workflowID types.WorkflowID, workflowName string, id types.ExecutionID, status types.ExecutionStatus, createdAt time.Time) {
+	t.Helper()
+	rec := &store.ExecutionRecord{
+		ExecutionID:  id,
+		Namespace:    ns,
+		WorkflowID:   workflowID,
+		WorkflowName: workflowName,
+		Status:       status,
+		CreatedAt:    createdAt,
+		UpdatedAt:    createdAt.Add(time.Second),
+		WorkflowDef:  []byte(`{"marker":"workflow-definition-payload"}`),
+	}
+	if status == types.ExecutionStatusFailed {
+		rec.Error = "node \"work\" failed"
+	}
+	if err := st.CreateExecution(context.Background(), rec); err != nil {
+		t.Fatalf("seed execution %s in workflow %s: %v", id, workflowID, err)
+	}
+}
+
 // newExecutionListServer builds the real APIServer with the given store wired
 // through Config.Store (the same field production sets) and returns an
 // httptest.Server over its handler.
@@ -355,7 +379,7 @@ func TestListExecutionsResponseShapeIsSummaryInCollectionEnvelope(t *testing.T) 
 	rec := newRecordingExecutionStore()
 	mux := newUnitExecutionListMux(rec)
 	base := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
-	seedExecution(t, rec, string(namespace.Default), "wf-shape", "exec-shape", types.ExecutionStatusFailed, base)
+	seedExecutionWorkflow(t, rec, string(namespace.Default), "wfid-shape", "wf-shape", "exec-shape", types.ExecutionStatusFailed, base)
 
 	status, body := doRaw(t, mux, http.MethodGet, PathExecutions)
 	if status != http.StatusOK {
@@ -371,6 +395,9 @@ func TestListExecutionsResponseShapeIsSummaryInCollectionEnvelope(t *testing.T) 
 	}
 	if row.WorkflowName != "wf-shape" {
 		t.Fatalf("row.WorkflowName = %q, want wf-shape", row.WorkflowName)
+	}
+	if row.WorkflowID != "wfid-shape" {
+		t.Fatalf("row.WorkflowID = %q, want wfid-shape; the workflow identity must be projected", row.WorkflowID)
 	}
 	if row.Status != types.ExecutionStatusFailed {
 		t.Fatalf("row.Status = %q, want failed", row.Status)
@@ -389,7 +416,7 @@ func TestListExecutionsResponseShapeIsSummaryInCollectionEnvelope(t *testing.T) 
 	// runtime blob to a list row would be a payload regression
 	// (O(page × workflow size) on the wire), and this makes that a test failure
 	// rather than a quiet widening.
-	wantKeys := []string{"created_at", "error", "execution_id", "namespace", "status", "updated_at", "workflow_name"}
+	wantKeys := []string{"created_at", "error", "execution_id", "namespace", "status", "updated_at", "workflow_id", "workflow_name"}
 	if got := execListRowKeys(t, body); strings.Join(got, ",") != strings.Join(wantKeys, ",") {
 		t.Fatalf("list row keys = %v, want %v", got, wantKeys)
 	}
@@ -655,6 +682,73 @@ func TestListExecutionsFiltersAreAppliedToPageAndTotalTogether(t *testing.T) {
 	}
 }
 
+// TestListExecutionsFiltersByWorkflowID pins ?workflow_id= end to end: exact
+// identity match, a total narrowed with the page, namespace isolation, and
+// fail-closed handling of rows that carry no identity. The same display name is
+// used on purpose — a name is not an identity, and no filter may match it.
+func TestListExecutionsFiltersByWorkflowID(t *testing.T) {
+	st := memstore.New()
+	base := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+	seedExecutionWorkflow(t, st, "namespaceA", "wfid-alpha", "shared-name", "exec-a1", types.ExecutionStatusSuccess, base)
+	seedExecutionWorkflow(t, st, "namespaceA", "wfid-alpha", "shared-name", "exec-a2", types.ExecutionStatusFailed, base.Add(time.Hour))
+	seedExecutionWorkflow(t, st, "namespaceA", "wfid-beta", "shared-name", "exec-a3", types.ExecutionStatusSuccess, base.Add(2*time.Hour))
+	seedExecutionWorkflow(t, st, "namespaceB", "wfid-alpha", "shared-name", "exec-b1", types.ExecutionStatusSuccess, base.Add(3*time.Hour))
+	// Unattributed: same display name, no identity. No filter value reaches it.
+	seedExecution(t, st, "namespaceA", "shared-name", "exec-unattributed", types.ExecutionStatusSuccess, base.Add(4*time.Hour))
+
+	srv := newExecutionListServer(t, st)
+	for _, tc := range []struct {
+		name, token, query string
+		wantTotal          int
+		wantIDs            []string
+	}{
+		{"exact identity match", "tok-exec-a", "?workflow_id=wfid-alpha&page_size=100", 2, []string{"exec-a2", "exec-a1"}},
+		{"another workflow id", "tok-exec-a", "?workflow_id=wfid-beta&page_size=100", 1, []string{"exec-a3"}},
+		{"unknown id is an empty page, not an error", "tok-exec-a", "?workflow_id=wfid-missing", 0, nil},
+		{"empty value is unfiltered", "tok-exec-a", "?workflow_id=&page_size=100", 4, []string{"exec-unattributed", "exec-a3", "exec-a2", "exec-a1"}},
+		{"filter never crosses the namespace", "tok-exec-b", "?workflow_id=wfid-alpha&page_size=100", 1, []string{"exec-b1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body := getExecutionList(t, srv.URL, tc.token, tc.query)
+			if status != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (body=%s)", status, body)
+			}
+			env := decodeExecListEnvelope(t, body)
+			if env.Data == nil || env.Data.Total != tc.wantTotal {
+				t.Fatalf("data = %+v, want total %d (body=%s)", env.Data, tc.wantTotal, body)
+			}
+			got := make([]string, 0, len(env.Data.List))
+			for _, row := range env.Data.List {
+				got = append(got, row.ExecutionID)
+				if strings.Contains(tc.query, "workflow_id=wfid-") && row.WorkflowID == "" {
+					t.Errorf("row %s has no workflow id under a workflow filter", row.ExecutionID)
+				}
+			}
+			if strings.Join(got, ",") != strings.Join(tc.wantIDs, ",") {
+				t.Fatalf("page = %v, want %v (query %q)", got, tc.wantIDs, tc.query)
+			}
+		})
+	}
+
+	// The query string -> filter translation is pinned independently of the
+	// store's matching: both the page read and the count read must carry it.
+	rec := newRecordingExecutionStore()
+	mux := newUnitExecutionListMux(rec)
+	if status, body := doRaw(t, mux, http.MethodGet, PathExecutions+"?workflow_id=wfid-alpha"); status != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", status, body)
+	}
+	for _, call := range rec.lists() {
+		if call.filter.WorkflowID != "wfid-alpha" {
+			t.Fatalf("ListExecutions filter.WorkflowID = %q, want wfid-alpha", call.filter.WorkflowID)
+		}
+	}
+	for _, call := range rec.counts() {
+		if call.filter.WorkflowID != "wfid-alpha" {
+			t.Fatalf("CountExecutions filter.WorkflowID = %q, want wfid-alpha", call.filter.WorkflowID)
+		}
+	}
+}
+
 // TestListExecutionsRejectsUnusableFilters pins the refusal half of the filter
 // contract: an unknown status and an unparsable time bound are 400s with stable
 // snake_case codes.
@@ -679,6 +773,14 @@ func TestListExecutionsRejectsUnusableFilters(t *testing.T) {
 		{name: "status case mismatch", query: "?status=SUCCESS", wantCode: "execution_status_invalid"},
 		{name: "unparsable created_after", query: "?created_after=yesterday", wantCode: "execution_list_time_invalid"},
 		{name: "unparsable created_before", query: "?created_before=2026-09-17", wantCode: "execution_list_time_invalid"},
+		{
+			// The workflow_id column is VARCHAR(64); a longer value can never
+			// match a stored id, and serving it as an unfiltered page is the
+			// dangerous answer.
+			name:     "overlong workflow_id",
+			query:    "?workflow_id=" + strings.Repeat("w", store.MaxExecutionWorkflowIDLen+1),
+			wantCode: "execution_workflow_id_invalid",
+		},
 	}
 
 	for _, tc := range cases {
@@ -967,11 +1069,20 @@ func TestExecutionListContractBindsToHandler(t *testing.T) {
 			t.Fatalf("query parameter %q is missing from the contract", name)
 		}
 	}
-	// ...and the two the store genuinely cannot support must NOT be advertised.
-	for _, forbidden := range []string{"workflow_id", "workflow_key", "workflow", "runner_id", "runner"} {
+	// ...and the ones the store genuinely cannot support must NOT be advertised.
+	// workflow_id is absent from this list BECAUSE it is supported now: the
+	// contract must advertise it, which the assertions below pin. A workflow
+	// NAME / key filter and a runner filter remain unsupported (the row stores
+	// no name identity and no runner projection).
+	for _, forbidden := range []string{"workflow_key", "workflow", "workflow_name", "runner_id", "runner"} {
 		if params[forbidden] != nil {
 			t.Errorf("query parameter %q is advertised but the store has no column to filter on", forbidden)
 		}
+	}
+	if wfID := params["workflow_id"]; wfID == nil {
+		t.Fatal("query parameter workflow_id is missing from the contract; the store filters on the workflow_id column")
+	} else if wfID.Schema == nil || wfID.Schema.Value == nil || wfID.Schema.Value.MaxLength == nil || *wfID.Schema.Value.MaxLength != store.MaxExecutionWorkflowIDLen {
+		t.Errorf("workflow_id parameter publishes no %d-character maximum; an over-long value is a documented 400", store.MaxExecutionWorkflowIDLen)
 	}
 	if def, ok := params["page"].Schema.Value.Default.(float64); !ok || def != 1 {
 		t.Errorf("page default = %#v, want 1", params["page"].Schema.Value.Default)
@@ -1006,26 +1117,54 @@ func TestExecutionListContractBindsToHandler(t *testing.T) {
 		t.Error("GET /v1/executions has no documented 400 for an unusable filter")
 	}
 
-	// The real serialized values against the published schemas. The item comes
-	// from the same Example* constructor the api/openapi contract fixture uses,
+	// queue_position is optional — only a queued row carries it — and OpenAPI
+	// allows undeclared properties, so a row that omits it would validate even
+	// if the property had been deleted from the spec. Pin the property itself
+	// here; the queued row below then pins its type and the handler's
+	// projection of it.
+	listItemSchema := spec.Components.Schemas["ExecutionListItem"]
+	if listItemSchema == nil || listItemSchema.Value == nil {
+		t.Fatal("schema ExecutionListItem not found in spec")
+	}
+	positionSchema := listItemSchema.Value.Properties["queue_position"]
+	if positionSchema == nil || positionSchema.Value == nil || positionSchema.Value.Type == nil || !positionSchema.Value.Type.Is("integer") {
+		t.Error("ExecutionListItem.queue_position is missing from the spec or is not an integer")
+	}
+
+	// The real serialized values against the published schemas. The items come
+	// from the same Example* constructors the api/openapi contract fixture uses,
 	// so this check and that one cannot drift into validating two different
 	// shapes.
 	now := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
 	realItem, ok := ExampleExecutionListItem(
-		"exec-01H8XG", "namespaceA", "health-check",
+		"exec-01H8XG", "namespaceA", "wfid-health-check", "health-check",
 		types.ExecutionStatusFailed, "node \"work\" failed",
 		now, now.Add(time.Minute),
 	).(executionListItem)
 	if !ok {
-		t.Fatalf("ExampleExecutionListItem returned %T, want executionListItem", ExampleExecutionListItem("a", "b", "c", types.ExecutionStatusFailed, "d", now, now))
+		t.Fatalf("ExampleExecutionListItem returned %T, want executionListItem", ExampleExecutionListItem("a", "b", "c", "d", types.ExecutionStatusFailed, "e", now, now))
 	}
-	realPage := listPage{List: []executionListItem{realItem}, Total: 3}
+	// The queued row is the one that serializes queue_position; without it the
+	// optional property would never reach VisitJSON.
+	queuedItem := ExampleExecutionListItemQueued(
+		"exec-01H8XH", "namespaceA", "wfid-health-check", "health-check",
+		2, now.Add(2*time.Minute), now.Add(3*time.Minute),
+	).(executionListItem)
+	queuedRaw, err := json.Marshal(queuedItem)
+	if err != nil {
+		t.Fatalf("marshal queued executionListItem: %v", err)
+	}
+	if !strings.Contains(string(queuedRaw), `"queue_position":2`) {
+		t.Errorf("queued row does not serialize queue_position: %s", queuedRaw)
+	}
+	realPage := listPage{List: []executionListItem{realItem, queuedItem}, Total: 3}
 	for _, tc := range []struct {
 		name   string
 		schema string
 		value  any
 	}{
 		{name: "ExecutionListItem", schema: "ExecutionListItem", value: realItem},
+		{name: "ExecutionListItem (queued)", schema: "ExecutionListItem", value: queuedItem},
 		{name: "ExecutionListResponse", schema: "ExecutionListResponse", value: realPage},
 	} {
 		ref := spec.Components.Schemas[tc.schema]
