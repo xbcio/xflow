@@ -1520,6 +1520,11 @@ func (d *RedisRunnerDirectory) replayLease(ctx context.Context, runnerID, sessio
 			active[id] = struct{}{}
 		}
 	}
+	// Index hygiene is decided per candidate but written once: every prune and
+	// every backfill goes out in a single pipeline when this call returns, so a
+	// poll pays one write round trip no matter how many entries it decided on.
+	index := newReplayLeaseIndex(ctx, d.rdb, d.keys.runnerLeasedAssignmentsKey(runnerID))
+	defer index.flush()
 	// Pass 0 reads the per-runner index; pass 1, reached only when the index is
 	// known to be short, reads the whole assignment-state hash. A pass that
 	// replays a lease returns, so a shortfall is noticed by the poll that finds
@@ -1531,104 +1536,25 @@ func (d *RedisRunnerDirectory) replayLease(ctx context.Context, runnerID, sessio
 			return Claim{}, false, err
 		}
 		sort.Strings(assignmentIDs)
-		live := 0
+		pending := make([]string, 0, len(assignmentIDs))
 		for _, assignmentID := range assignmentIDs {
 			if _, done := visited[assignmentID]; done {
 				continue
 			}
 			visited[assignmentID] = struct{}{}
-			// The candidates are a superset of this runner's leases — the index
-			// can hold an entry whose lease has since been released, and the
-			// fallback pass holds every leased assignment in the directory — so
-			// each one is re-checked here rather than trusted.
-			state, err := d.rdb.HGet(ctx, d.keys.assignmentState, assignmentID).Result()
-			if err != nil && !errors.Is(err, redis.Nil) {
-				return Claim{}, false, fmt.Errorf("read lease state %q: %w", assignmentID, err)
-			}
-			if state != redisAssignmentLeased {
-				d.pruneLeasedAssignmentIndex(ctx, runnerID, assignmentID)
-				continue
-			}
-			owner, err := d.rdb.HGet(ctx, d.keys.assignmentRunner, assignmentID).Result()
-			if err != nil && !errors.Is(err, redis.Nil) {
-				return Claim{}, false, fmt.Errorf("read lease owner %q: %w", assignmentID, err)
-			}
-			if owner != runnerID {
-				d.pruneLeasedAssignmentIndex(ctx, runnerID, assignmentID)
-				continue
-			}
-			live++
-			if pass > 0 {
-				// This candidate came from the full scan, so the index did not know
-				// about it. Recording a lease that was just confirmed live and owned
-				// is the safe direction for the index to be wrong in: a later poll
-				// re-checks it, and an extra entry costs one bounded read where a
-				// missing one would cost the lease its replay.
-				d.indexLeasedAssignment(ctx, runnerID, assignmentID)
-			}
-			session, err := d.rdb.HGet(ctx, d.keys.assignmentSession, assignmentID).Result()
-			if err != nil && !errors.Is(err, redis.Nil) {
-				return Claim{}, false, fmt.Errorf("read lease session %q: %w", assignmentID, err)
-			}
-			if session != sessionID {
-				// Still leased and still this runner's, just not this session's. The
-				// index entry is accurate, so it is left in place for the session
-				// that does own it.
-				continue
-			}
-			rawAssignment, err := d.rdb.HGet(ctx, d.keys.assignmentData, assignmentID).Result()
-			if errors.Is(err, redis.Nil) {
-				// Released between the reads above — by the sweeper reclaiming a
-				// dead runner's lease, or by a report committing. The assignment is
-				// simply not this runner's to replay. Reporting it as an error would
-				// be fatal out of proportion: Runner.pollLoop returns on a poll
-				// error, so the runner stops claiming work altogether and a queue
-				// with waiting tasks goes unserved.
-				d.pruneLeasedAssignmentIndex(ctx, runnerID, assignmentID)
-				continue
-			}
-			if err != nil {
-				return Claim{}, false, fmt.Errorf("read leased assignment %q: %w", assignmentID, err)
-			}
-			assignment, err := unmarshalRedisAssignment(rawAssignment)
-			if err != nil {
-				return Claim{}, false, err
-			}
-			rawLease, err := d.rdb.Get(ctx, d.keys.assignmentLeaseMetaKey(assignmentID)).Result()
-			if errors.Is(err, redis.Nil) {
-				// The metadata is armed for the lease window plus one recovery margin
-				// and is now extended on every renewal, so its absence here means the
-				// lease has expired out of the directory: LookupLease can no longer
-				// find it, no renew and no report will ever succeed, and the
-				// assignment would hold this runner's capacity for the life of the
-				// process. Neither reclaim path sees that shape — the claim reclaimer
-				// only scans 'claimed', and the lease sweeper enumerates the
-				// execution's own lease index, which shares the metadata's transient
-				// TTL. Release the record here, token-fenced on the identity it still
-				// carries, and keep scanning.
-				//
-				// This is safe against a lost execution rather than a lost lease: an
-				// engine that still holds the lease reclaims it and re-enqueues the
-				// task through its outbox, and an execution that is gone has nothing
-				// left to re-enqueue.
-				d.releaseStrandedLease(ctx, assignmentID)
-				d.pruneLeasedAssignmentIndex(ctx, runnerID, assignmentID)
-				continue
-			}
-			if err != nil {
-				return Claim{}, false, fmt.Errorf("read persisted lease %q: %w", assignmentID, err)
-			}
-			lease, err := unmarshalRedisLeaseMeta(rawLease, assignment.Task)
-			if err != nil {
-				return Claim{}, false, fmt.Errorf("decode persisted lease %q: %w", assignmentID, err)
-			}
-			if _, executing := active[string(lease.LeaseID)]; executing {
-				// The runner is running this one. Handing it back would start a
-				// second execution of a node the first worker has not finished.
-				continue
-			}
-			d.observeLeaseReplay(ctx)
-			return Claim{Assignment: assignment, Lease: lease}, true, nil
+			pending = append(pending, assignmentID)
+		}
+		var replay replayLeasePass
+		if pass > 0 {
+			replay, err = d.replayLeaseFromScan(ctx, runnerID, sessionID, pending, active, index)
+		} else {
+			replay, err = d.replayLeaseFromIndex(ctx, runnerID, sessionID, pending, active, index)
+		}
+		if err != nil {
+			return Claim{}, false, err
+		}
+		if replay.found {
+			return replay.claim, true, nil
 		}
 		if pass > 0 {
 			return Claim{}, false, nil
@@ -1640,14 +1566,326 @@ func (d *RedisRunnerDirectory) replayLease(ctx context.Context, runnerID, sessio
 		// every version maintains exposes the one way the index can be short —
 		// leases finalized by a control plane that predates it — and reading the
 		// whole hash once rebuilds it.
-		count, err := d.rdb.HGet(ctx, d.keys.runnerLeaseCount, runnerID).Int()
-		if err != nil && !errors.Is(err, redis.Nil) {
-			return Claim{}, false, fmt.Errorf("read runner lease count %q: %w", runnerID, err)
-		}
-		if live >= count {
+		if replay.live >= replay.count {
 			return Claim{}, false, nil
 		}
 	}
+}
+
+// replayLeasePass is what one replay pass found. live and count are only set by
+// the index pass: live is the number of candidates it confirmed leased to this
+// runner, count is the runner's lease count read in the same pipeline, and
+// live < count is what selects the full-scan pass.
+type replayLeasePass struct {
+	claim Claim
+	found bool
+	live  int
+	count int
+}
+
+// replayLeaseFromIndex is pass 0: every read the pass needs for its candidates —
+// state, owner, session, payload and lease metadata — plus the runner's lease
+// count goes out in one pipeline after the index listing, so the pass costs two
+// round trips whether the runner holds one lease or a hundred. The payload of a
+// candidate the pass then prunes is read for nothing; that is the price of not
+// letting the poll grow with the number of leases the runner holds.
+func (d *RedisRunnerDirectory) replayLeaseFromIndex(ctx context.Context, runnerID, sessionID string, candidates []string, active map[string]struct{}, index *replayLeaseIndex) (replayLeasePass, error) {
+	pipe := d.rdb.Pipeline()
+	states := make([]*redis.StringCmd, len(candidates))
+	owners := make([]*redis.StringCmd, len(candidates))
+	sessions := make([]*redis.StringCmd, len(candidates))
+	payloads := make([]*redis.StringCmd, len(candidates))
+	metas := make([]*redis.StringCmd, len(candidates))
+	for i, assignmentID := range candidates {
+		states[i] = pipe.HGet(ctx, d.keys.assignmentState, assignmentID)
+		owners[i] = pipe.HGet(ctx, d.keys.assignmentRunner, assignmentID)
+		sessions[i] = pipe.HGet(ctx, d.keys.assignmentSession, assignmentID)
+		payloads[i] = pipe.HGet(ctx, d.keys.assignmentData, assignmentID)
+		metas[i] = pipe.Get(ctx, d.keys.assignmentLeaseMetaKey(assignmentID))
+	}
+	countCmd := pipe.HGet(ctx, d.keys.runnerLeaseCount, runnerID)
+	cmds, execErr := pipe.Exec(ctx)
+	fallback := replayPipelineFailure(cmds, execErr)
+
+	out := replayLeasePass{}
+	for i, assignmentID := range candidates {
+		// The candidates are a superset of this runner's leases — the index can
+		// hold an entry whose lease has since been released — so each one is
+		// re-checked here rather than trusted. Every command's error is inspected
+		// even where the decision below stops before using its value: Exec reports
+		// only the first error and counts redis.Nil as one, so a missing field
+		// early in the batch must not hide a broken connection later in it.
+		state, stateErr := replayPipelineValue(states[i], fallback)
+		if stateErr != nil && !errors.Is(stateErr, redis.Nil) {
+			return replayLeasePass{}, fmt.Errorf("read lease state %q: %w", assignmentID, stateErr)
+		}
+		owner, ownerErr := replayPipelineValue(owners[i], fallback)
+		if ownerErr != nil && !errors.Is(ownerErr, redis.Nil) {
+			return replayLeasePass{}, fmt.Errorf("read lease owner %q: %w", assignmentID, ownerErr)
+		}
+		session, sessionErr := replayPipelineValue(sessions[i], fallback)
+		if sessionErr != nil && !errors.Is(sessionErr, redis.Nil) {
+			return replayLeasePass{}, fmt.Errorf("read lease session %q: %w", assignmentID, sessionErr)
+		}
+		rawAssignment, payloadErr := replayPipelineValue(payloads[i], fallback)
+		if payloadErr != nil && !errors.Is(payloadErr, redis.Nil) {
+			return replayLeasePass{}, fmt.Errorf("read leased assignment %q: %w", assignmentID, payloadErr)
+		}
+		rawLease, metaErr := replayPipelineValue(metas[i], fallback)
+		if metaErr != nil && !errors.Is(metaErr, redis.Nil) {
+			return replayLeasePass{}, fmt.Errorf("read persisted lease %q: %w", assignmentID, metaErr)
+		}
+		if state != redisAssignmentLeased {
+			index.prune(assignmentID)
+			continue
+		}
+		if owner != runnerID {
+			index.prune(assignmentID)
+			continue
+		}
+		out.live++
+		if session != sessionID {
+			// Still leased and still this runner's, just not this session's. The
+			// index entry is accurate, so it is left in place for the session
+			// that does own it.
+			continue
+		}
+		if errors.Is(payloadErr, redis.Nil) {
+			// Released between the reads above — by the sweeper reclaiming a
+			// dead runner's lease, or by a report committing. The assignment is
+			// simply not this runner's to replay. Reporting it as an error would
+			// be fatal out of proportion: Runner.pollLoop returns on a poll
+			// error, so the runner stops claiming work altogether and a queue
+			// with waiting tasks goes unserved.
+			index.prune(assignmentID)
+			continue
+		}
+		assignment, err := unmarshalRedisAssignment(rawAssignment)
+		if err != nil {
+			return replayLeasePass{}, err
+		}
+		if errors.Is(metaErr, redis.Nil) {
+			// The metadata is armed for the lease window plus one recovery margin
+			// and is now extended on every renewal, so its absence here means the
+			// lease has expired out of the directory: LookupLease can no longer
+			// find it, no renew and no report will ever succeed, and the
+			// assignment would hold this runner's capacity for the life of the
+			// process. Neither reclaim path sees that shape — the claim reclaimer
+			// only scans 'claimed', and the lease sweeper enumerates the
+			// execution's own lease index, which shares the metadata's transient
+			// TTL. Release the record here, token-fenced on the identity it still
+			// carries, and keep scanning.
+			//
+			// This is safe against a lost execution rather than a lost lease: an
+			// engine that still holds the lease reclaims it and re-enqueues the
+			// task through its outbox, and an execution that is gone has nothing
+			// left to re-enqueue.
+			d.releaseStrandedLease(ctx, assignmentID)
+			index.prune(assignmentID)
+			continue
+		}
+		lease, err := unmarshalRedisLeaseMeta(rawLease, assignment.Task)
+		if err != nil {
+			return replayLeasePass{}, fmt.Errorf("decode persisted lease %q: %w", assignmentID, err)
+		}
+		if _, executing := active[string(lease.LeaseID)]; executing {
+			// The runner is running this one. Handing it back would start a
+			// second execution of a node the first worker has not finished.
+			continue
+		}
+		d.observeLeaseReplay(ctx)
+		out.claim = Claim{Assignment: assignment, Lease: lease}
+		out.found = true
+		return out, nil
+	}
+	count, err := replayLeaseCount(countCmd, fallback, runnerID)
+	if err != nil {
+		return replayLeasePass{}, err
+	}
+	out.count = count
+	return out, nil
+}
+
+// replayLeaseFromScan is pass 1: the full assignment-state hash already said
+// every candidate is leased, so the pass first reads only ownership and session
+// for them, and then reads payload and lease metadata for the survivors — the
+// leases that are actually this runner's. Reading the payload of the whole
+// fleet's leased work would put every input on the control plane for a poll
+// that usually replays nothing.
+func (d *RedisRunnerDirectory) replayLeaseFromScan(ctx context.Context, runnerID, sessionID string, candidates []string, active map[string]struct{}, index *replayLeaseIndex) (replayLeasePass, error) {
+	pipe := d.rdb.Pipeline()
+	owners := make([]*redis.StringCmd, len(candidates))
+	sessions := make([]*redis.StringCmd, len(candidates))
+	for i, assignmentID := range candidates {
+		owners[i] = pipe.HGet(ctx, d.keys.assignmentRunner, assignmentID)
+		sessions[i] = pipe.HGet(ctx, d.keys.assignmentSession, assignmentID)
+	}
+	cmds, execErr := pipe.Exec(ctx)
+	fallback := replayPipelineFailure(cmds, execErr)
+
+	survivors := make([]int, 0, len(candidates))
+	for i, assignmentID := range candidates {
+		owner, err := replayPipelineValue(owners[i], fallback)
+		if err != nil && !errors.Is(err, redis.Nil) {
+			return replayLeasePass{}, fmt.Errorf("read lease owner %q: %w", assignmentID, err)
+		}
+		session, err := replayPipelineValue(sessions[i], fallback)
+		if err != nil && !errors.Is(err, redis.Nil) {
+			return replayLeasePass{}, fmt.Errorf("read lease session %q: %w", assignmentID, err)
+		}
+		if owner != runnerID {
+			index.prune(assignmentID)
+			continue
+		}
+		// This candidate came from the full scan, so the index did not know about
+		// it. Recording a lease that was just confirmed live and owned is the safe
+		// direction for the index to be wrong in: a later poll re-checks it, and
+		// an extra entry costs one bounded read where a missing one would cost the
+		// lease its replay.
+		index.record(assignmentID)
+		if session != sessionID {
+			continue
+		}
+		survivors = append(survivors, i)
+	}
+
+	pipe = d.rdb.Pipeline()
+	payloads := make([]*redis.StringCmd, len(survivors))
+	metas := make([]*redis.StringCmd, len(survivors))
+	for j, i := range survivors {
+		payloads[j] = pipe.HGet(ctx, d.keys.assignmentData, candidates[i])
+		metas[j] = pipe.Get(ctx, d.keys.assignmentLeaseMetaKey(candidates[i]))
+	}
+	countCmd := pipe.HGet(ctx, d.keys.runnerLeaseCount, runnerID)
+	cmds, execErr = pipe.Exec(ctx)
+	fallback = replayPipelineFailure(cmds, execErr)
+
+	out := replayLeasePass{}
+	for j, i := range survivors {
+		assignmentID := candidates[i]
+		rawAssignment, payloadErr := replayPipelineValue(payloads[j], fallback)
+		if payloadErr != nil && !errors.Is(payloadErr, redis.Nil) {
+			return replayLeasePass{}, fmt.Errorf("read leased assignment %q: %w", assignmentID, payloadErr)
+		}
+		rawLease, metaErr := replayPipelineValue(metas[j], fallback)
+		if metaErr != nil && !errors.Is(metaErr, redis.Nil) {
+			return replayLeasePass{}, fmt.Errorf("read persisted lease %q: %w", assignmentID, metaErr)
+		}
+		if errors.Is(payloadErr, redis.Nil) {
+			index.prune(assignmentID)
+			continue
+		}
+		assignment, err := unmarshalRedisAssignment(rawAssignment)
+		if err != nil {
+			return replayLeasePass{}, err
+		}
+		if errors.Is(metaErr, redis.Nil) {
+			d.releaseStrandedLease(ctx, assignmentID)
+			index.prune(assignmentID)
+			continue
+		}
+		lease, err := unmarshalRedisLeaseMeta(rawLease, assignment.Task)
+		if err != nil {
+			return replayLeasePass{}, fmt.Errorf("decode persisted lease %q: %w", assignmentID, err)
+		}
+		if _, executing := active[string(lease.LeaseID)]; executing {
+			continue
+		}
+		d.observeLeaseReplay(ctx)
+		out.claim = Claim{Assignment: assignment, Lease: lease}
+		out.found = true
+		return out, nil
+	}
+	// The count read is merged into this pipeline so the pass keeps its fixed
+	// shape. The pass ends the replay either way; the value is not compared.
+	count, err := replayLeaseCount(countCmd, fallback, runnerID)
+	if err != nil {
+		return replayLeasePass{}, err
+	}
+	out.count = count
+	return out, nil
+}
+
+// replayLeaseIndex batches the prunes and backfills one replay decides on into
+// a single pipeline. Both writes are idempotent set operations and best effort,
+// exactly like pruneLeasedAssignmentIndex and indexLeasedAssignment; batching
+// them only removes a round trip per entry.
+type replayLeaseIndex struct {
+	ctx     context.Context
+	pipe    redis.Pipeliner
+	key     string
+	pending bool
+}
+
+func newReplayLeaseIndex(ctx context.Context, rdb redis.Cmdable, key string) *replayLeaseIndex {
+	return &replayLeaseIndex{ctx: ctx, pipe: rdb.Pipeline(), key: key}
+}
+
+func (i *replayLeaseIndex) prune(assignmentID string) {
+	i.pipe.SRem(i.ctx, i.key, assignmentID)
+	i.pending = true
+}
+
+func (i *replayLeaseIndex) record(assignmentID string) {
+	i.pipe.SAdd(i.ctx, i.key, assignmentID)
+	i.pending = true
+}
+
+// flush writes the batch and drops its error: a poll that failed over index
+// hygiene would stop the runner from claiming work altogether, and a stale
+// entry only costs one bounded read on the next poll.
+func (i *replayLeaseIndex) flush() {
+	if !i.pending {
+		return
+	}
+	_, _ = i.pipe.Exec(i.ctx)
+}
+
+// replayPipelineFailure isolates a failure that aborted a whole pipeline — a
+// hook or a broken connection — from the per-command errors Exec folds into one
+// return value. It returns nil when a command carries an error of its own,
+// because then the reads can report it precisely, and it treats redis.Nil as
+// what it is: the first missing field, not a failed batch. Without this split,
+// Exec's first-error semantics would let one absent field hide a connection
+// error on a later command.
+func replayPipelineFailure(cmds []redis.Cmder, execErr error) error {
+	if execErr == nil || errors.Is(execErr, redis.Nil) {
+		return nil
+	}
+	for _, cmd := range cmds {
+		if err := cmd.Err(); err != nil && !errors.Is(err, redis.Nil) {
+			return nil
+		}
+	}
+	return execErr
+}
+
+// replayPipelineValue reports one pipelined read's value. The per-command error
+// is authoritative, redis.Nil included; fallback stands in only for a failure
+// that left the command without an error of its own.
+func replayPipelineValue(cmd *redis.StringCmd, fallback error) (string, error) {
+	if err := cmd.Err(); err != nil {
+		return "", err
+	}
+	return cmd.Val(), fallback
+}
+
+// replayLeaseCount decodes the runner's lease count read alongside a replay
+// pass. An absent count is zero; a malformed one is an error, as it was when the
+// read was its own HGET.
+func replayLeaseCount(cmd *redis.StringCmd, fallback error, runnerID string) (int, error) {
+	raw, err := replayPipelineValue(cmd, fallback)
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return 0, fmt.Errorf("read runner lease count %q: %w", runnerID, err)
+	}
+	if errors.Is(err, redis.Nil) {
+		return 0, nil
+	}
+	count, parseErr := strconv.Atoi(raw)
+	if parseErr != nil {
+		return 0, fmt.Errorf("read runner lease count %q: %w", runnerID, parseErr)
+	}
+	return count, nil
 }
 
 // leasedAssignmentCandidates returns the assignment IDs that may be leased by
