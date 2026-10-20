@@ -681,24 +681,30 @@ func (e *Engine) afterAtomicCommitWithFlush(ctx context.Context, req CommitNodeR
 		e.notifyExecutionComplete(ctx, req.ExecutionID, result.ExecutionStatus)
 		e.EvictExecution(req.ExecutionID)
 	}
-	// Flush only when the transition may have appended something: a duplicate
+	// Flush on every commit that can have pending delivery work: a duplicate
 	// terminal always replays (the original commit may have crashed before
-	// delivering), and an accepted commit names its outbox candidates.
+	// delivering), and an accepted commit drains the execution's outbox before
+	// returning.
 	//
-	// OutboxIDs is a candidate hint, not a write log (see CommitNodeResult). For
-	// a folded arrival both candidates are reported and only the backend knows
-	// which one it wrote, so a non-empty hint can still describe zero entries.
-	// That direction is accepted: one wasted empty claim costs one ListOutbox and
-	// changes no state.
+	// OutboxIDs cannot narrow this gate. It is a candidate hint, not a write log:
+	// an empty slice says nothing about the durable outbox (see
+	// CommitNodeResult.OutboxIDs), and the outbox is a SHARED per-execution
+	// queue. An earlier transition — Submit's root intent, a retry reset, a
+	// lease revocation, a suspend continuation — may have left an entry
+	// undelivered when its own handoff hit a queue outage. A commit that appends
+	// nothing itself must still attempt that delivery: it is the last
+	// synchronous point at which the caller can learn the queue refused the
+	// handoff, and deferring to the OutboxDispatcher is only safe in a process
+	// that bound one. An engine over a non-consumer backend never starts that
+	// dispatcher, so the pending entry would be stranded; the real-Redis
+	// integration contract (TestAtomicReliabilityRealRedisLeaseCommitAnd
+	// OutboxRecovery) exercises exactly that topology.
 	//
-	// The other direction is the adopted default (S4b), not an oversight: a
-	// commit that appended nothing no longer consumes the execution's pending
-	// backlog as a side effect. Every outbox is a shared, per-execution queue, so
-	// flushing it from an unrelated completion delivered entries this commit
-	// never wrote. Those entries stay durable and the OutboxDispatcher's next
-	// tick recovers them; the extra latency is bounded by that interval, while
-	// the removed cost was a claim on every leaf and execution-finalizing commit.
-	if flush && (result.Outcome == CommitOutcomeDuplicateTerminal || len(result.OutboxIDs) > 0) {
+	// The non-empty-hint direction stays conservative: for a folded arrival both
+	// candidates are reported and only the backend knows which one it wrote, so
+	// a non-empty hint can describe zero entries. One wasted empty claim costs
+	// one ListOutbox and changes no state.
+	if flush && (result.Outcome == CommitOutcomeAccepted || result.Outcome == CommitOutcomeDuplicateTerminal) {
 		if err := e.FlushOutbox(ctx, req.ExecutionID); err != nil {
 			return err
 		}

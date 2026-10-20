@@ -91,6 +91,89 @@ func TestEngineCommitKeepsAcceptedWhenOutboxFlushFails(t *testing.T) {
 	}
 }
 
+// TestEngineCommitFlushesPendingBacklogWithEmptyCandidates pins the conservative
+// side of the flush gate: a commit that appended nothing of its own must still
+// flush, because the outbox is a SHARED per-execution queue and an earlier
+// transition may have left an entry undelivered. The deterministic engine-level
+// counterpart is the real-Redis integration contract
+// TestAtomicReliabilityRealRedisLeaseCommitAndOutboxRecovery.
+//
+// The single-node graph finalizes the execution and folds no arrivals, so this
+// commit's candidate hint is empty — which the OutboxIDs contract explicitly
+// says proves nothing about the durable outbox. Submit's root intent is still
+// pending because the queue was down for that handoff. If the commit narrows its
+// flush on the empty hint, the outage disappears: the caller is told the commit
+// succeeded while delivery was silently deferred, and in a process with no
+// OutboxDispatcher bound (the integration contract's WithConsumer(false)
+// topology) nothing would ever retry the entry.
+func TestEngineCommitFlushesPendingBacklogWithEmptyCandidates(t *testing.T) {
+	ctx := context.Background()
+	state := newFakeState()
+	queue := &toggleOutboxQueue{err: errOutboxQueueUnavailable}
+	eng := New(state, queue)
+
+	g, err := graph.Compile(&types.WorkflowDef{
+		Name:  "flush-pending-backlog",
+		Nodes: []types.NodeDef{{Name: "start", Type: "test.echo"}},
+	})
+	if err != nil {
+		t.Fatalf("Compile() error = %v", err)
+	}
+	// Submit is durable even though the queue is down: the root intent stays in
+	// the outbox for the dispatcher (or the explicit flush below) to retry.
+	id, err := eng.Submit(ctx, g, nil)
+	if err != nil {
+		t.Fatalf("Submit() error = %v, want durable success during queue outage", err)
+	}
+	entries := listAtomicOutbox(t, state, id, time.Now().Add(time.Second))
+	if len(entries) != 1 || entries[0].Task.NodeName != "start" {
+		t.Fatalf("outbox after submit = %+v, want one start intent", entries)
+	}
+	// Lease the retained intent directly, as the recovery path would.
+	lease, err := eng.BuildTaskLease(ctx, &entries[0].Task)
+	if err != nil || lease == nil {
+		t.Fatalf("BuildTaskLease() = %v, %v", lease, err)
+	}
+
+	outcome, err := eng.CommitTaskResultWithOutcome(ctx, lease, TaskResult{
+		Output: &types.Output{Data: map[string]any{"ok": true}},
+	})
+	if !errors.Is(err, errOutboxQueueUnavailable) {
+		t.Fatalf("CommitTaskResultWithOutcome() error = %v, want the queue outage after the durable commit", err)
+	}
+	// The transition applied, so the classification must still be the one that
+	// releases the runner's leased capacity.
+	if outcome != CommitOutcomeAccepted || !outcome.ReleasesLeasedCapacity() {
+		t.Fatalf("outcome = %q, want the accepted transition that releases capacity", outcome)
+	}
+
+	// The failed delivery undoes nothing: the terminal node/execution state and
+	// the pending intent all survive.
+	node, err := state.GetNode(ctx, id, "start")
+	if err != nil || node == nil || node.Status != types.NodeStatusSuccess {
+		t.Fatalf("node after failed delivery = %+v, err = %v, want durable success", node, err)
+	}
+	execution, err := state.GetExecution(ctx, id)
+	if err != nil || execution == nil || execution.Status != types.ExecutionStatusSuccess {
+		t.Fatalf("execution after failed delivery = %+v, err = %v, want durable success", execution, err)
+	}
+	if entries := listAtomicOutbox(t, state, id, time.Now().Add(time.Second)); len(entries) != 1 || entries[0].ID == "" {
+		t.Fatalf("outbox after failed delivery = %+v, want the retained start intent", entries)
+	}
+
+	queue.err = nil
+	if err := eng.FlushOutbox(ctx, id); err != nil {
+		t.Fatalf("FlushOutbox() after queue recovery error = %v", err)
+	}
+	delivered := queue.Drain()
+	if len(delivered) != 1 || delivered[0].ExecutionID != id || delivered[0].NodeName != "start" {
+		t.Fatalf("recovered delivery = %+v, want the retained start intent", delivered)
+	}
+	if entries := listAtomicOutbox(t, state, id, time.Now().Add(time.Second)); len(entries) != 0 {
+		t.Fatalf("outbox after recovery = %+v, want empty", entries)
+	}
+}
+
 func TestEngineCommitKeepsDuplicateTerminalWhenOutboxFlushFails(t *testing.T) {
 	ctx := context.Background()
 	state := newFakeState()
