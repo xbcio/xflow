@@ -400,9 +400,11 @@ func TestReclaimParksResolverDebtAtItsRecoveryDeadline(t *testing.T) {
 
 	// The parked entry must sit outside the sweep's -inf..now window, so a
 	// second pass cannot select it and repeat the ledger work.
-	due, err := rdb.ZRangeByScore(ctx, directory.keys.claimsExpiry, &redis.ZRangeBy{
-		Min: "-inf",
-		Max: strconv.FormatInt(time.Now().UnixMilli(), 10),
+	due, err := rdb.ZRangeArgs(ctx, redis.ZRangeArgs{
+		Key:     directory.keys.claimsExpiry,
+		Start:   "-inf",
+		Stop:    strconv.FormatInt(time.Now().UnixMilli(), 10),
+		ByScore: true,
 	}).Result()
 	if err != nil {
 		t.Fatalf("read due claim expiries: %v", err)

@@ -229,7 +229,7 @@ func TestLeaseSweeperCancelingReapReportsUnsupportedCapabilities(t *testing.T) {
 
 	t.Run("engine without Cancel", func(t *testing.T) {
 		h := newDefaultCancelingHarness()
-		h.LeaseSweeper.engine = &fakeReclaimer{}
+		h.engine = &fakeReclaimer{}
 		h.state.candidates = []engine.CancelingExecution{{ExecutionID: "exec-stuck"}}
 
 		if got := h.ReapStuckCancelingExecutionsOnce(context.Background()); got != 0 {
