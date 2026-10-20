@@ -63,6 +63,12 @@ func TestSubWorkflowResolverServesAPinnedRevision(t *testing.T) {
 	if target.DefinitionHash != child.DefinitionHash || target.Version != "v1" {
 		t.Fatalf("target = %+v, want version v1 and hash %q", target, child.DefinitionHash)
 	}
+	// A registry-compiled graph does not carry its definition (the distributed
+	// registry round-trips it through JSON), so the resolver is the only place
+	// that can give the child execution its workflow identity.
+	if target.WorkflowID != child.ID {
+		t.Fatalf("target WorkflowID = %q, want the registry record's %q", target.WorkflowID, child.ID)
+	}
 }
 
 // TestSubWorkflowResolverServesTheLatestForAVersionlessReference is the

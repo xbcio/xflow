@@ -1423,8 +1423,19 @@ func (c *Core) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecut
 	// When no registry is wired (embedded / in-process seeds already carry a
 	// resolved Graph/Downstream/EntryUnitIdx), preserve today's behavior.
 	if c.workflowRegistry != nil {
-		if err := c.resolveEntrySeedTopology(ctx, &req); err != nil {
+		def, err := c.resolveEntrySeedTopology(ctx, &req)
+		if err != nil {
 			return engine.SeedExecutionFromEntryResponse{}, err
+		}
+		// Attach the resolved definition so the durable SQL projection can
+		// record the workflow id this seed creates an execution for. The id the
+		// registry resolved (req.WorkflowID) is authoritative: always stamp it,
+		// overriding any id a legacy stored definition still carries, so a
+		// client-supplied definition id cannot hijack attribution.
+		if def != nil {
+			stamped := *def
+			stamped.ID = string(req.WorkflowID)
+			ctx = engine.WithWorkflowDef(ctx, &stamped)
 		}
 	}
 
@@ -1442,19 +1453,21 @@ func (c *Core) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecut
 
 // resolveEntrySeedTopology looks up the registered workflow for req and stamps
 // the authoritative Graph, EntryUnitIdx and downstream arrivals onto it. It
-// fails CLOSED (ErrEntrySeedWorkflowUnknown) when the workflow is not
-// registered, the version/hash does not match, or the entry unit cannot be
-// resolved in the compiled graph — a remote seed without a resolvable graph
-// must never be admitted with no downstream fan-out (spec §11.5). Any other
-// registry error is normalized to a generic internal error so backend details
-// never reach the caller.
-func (c *Core) resolveEntrySeedTopology(ctx context.Context, req *engine.SeedExecutionFromEntryRequest) error {
+// returns the record's definition so the caller can attach the workflow
+// identity to the seeding context. It fails CLOSED
+// (ErrEntrySeedWorkflowUnknown) when the workflow is not registered, the
+// version/hash does not match, or the entry unit cannot be resolved in the
+// compiled graph — a remote seed without a resolvable graph must never be
+// admitted with no downstream fan-out (spec §11.5). Any other registry error is
+// normalized to a generic internal error so backend details never reach the
+// caller.
+func (c *Core) resolveEntrySeedTopology(ctx context.Context, req *engine.SeedExecutionFromEntryRequest) (*types.WorkflowDef, error) {
 	rec, err := c.workflowRegistry.GetWorkflow(ctx, req.WorkflowID)
 	if err != nil {
 		if errors.Is(err, backend.ErrWorkflowNotFound) {
-			return ErrEntrySeedWorkflowUnknown
+			return nil, ErrEntrySeedWorkflowUnknown
 		}
-		return normalizeRunnerError(err, c.logger, "entry_seed_resolve")
+		return nil, normalizeRunnerError(err, c.logger, "entry_seed_resolve")
 	}
 	// The seed's declared version must match the registered record. On the remote
 	// path (registry present), an empty version is treated as a mismatch and
@@ -1463,24 +1476,24 @@ func (c *Core) resolveEntrySeedTopology(ctx context.Context, req *engine.SeedExe
 	// topology. A non-empty version that disagrees with the record is likewise
 	// rejected.
 	if req.WorkflowVersion == "" || (rec.Version != "" && req.WorkflowVersion != rec.Version) {
-		return ErrEntrySeedWorkflowUnknown
+		return nil, ErrEntrySeedWorkflowUnknown
 	}
 	if rec.Graph == nil {
-		return ErrEntrySeedWorkflowUnknown
+		return nil, ErrEntrySeedWorkflowUnknown
 	}
 	idx, downstream, err := deriveEntrySeedTopology(rec.Graph, req.EntryUnitID, req.Exits)
 	if err != nil {
 		// deriveEntrySeedTopology only returns ErrEntrySeedWorkflowUnknown-wrapped
 		// errors; surface the sentinel so the transport maps it to 404/409.
 		if errors.Is(err, ErrEntrySeedWorkflowUnknown) {
-			return ErrEntrySeedWorkflowUnknown
+			return nil, ErrEntrySeedWorkflowUnknown
 		}
-		return normalizeRunnerError(err, c.logger, "entry_seed_resolve")
+		return nil, normalizeRunnerError(err, c.logger, "entry_seed_resolve")
 	}
 	req.Graph = rec.Graph
 	req.EntryUnitIdx = idx
 	req.Downstream = downstream
-	return nil
+	return rec.Definition, nil
 }
 
 // fenceEntrySeedGeneration enforces the generation fence for one seed request.

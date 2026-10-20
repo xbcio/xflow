@@ -110,6 +110,7 @@ func (r *SubWorkflowResolver) ResolveSubWorkflow(ctx context.Context, ref graph.
 		return graph.SubWorkflowTarget{}, fmt.Errorf("sub-workflow %q: registry record %q carries no compiled graph", name, rec.Key)
 	}
 	return graph.SubWorkflowTarget{
+		WorkflowID:     rec.ID,
 		Version:        effectiveSubWorkflowVersion(rec.Version),
 		DefinitionHash: rec.DefinitionHash,
 		Graph:          rec.Graph,
