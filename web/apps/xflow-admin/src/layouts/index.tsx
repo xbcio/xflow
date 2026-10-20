@@ -1,43 +1,96 @@
-import { App, ConfigProvider, Layout, theme } from 'antd';
-import { Outlet, useLocation } from '@umijs/max';
+import '@xflow/core/tokens.css';
+import './admin.css';
+import type { Appearance } from '@xflow/core';
+import { history, Outlet, useLocation, useModel } from '@umijs/max';
+import { App, ConfigProvider } from 'antd';
+import { useMemo } from 'react';
+
+import type { InitialState } from '../app';
+import { AdminShell, type AdminSection } from './AdminShell';
+import { adminThemeConfig, useSystemAppearance } from './theme';
+import { useAdminNamespace } from './useAdminNamespace';
+
+/** A workflow detail route is the immersive editor, never the console shell. */
+const WORKFLOW_EDITOR_PATH = /^\/workflows\/[^/]+\/?$/;
+
+function sectionFor(pathname: string): AdminSection | undefined {
+  if (pathname === '/workflows' || pathname.startsWith('/workflows/')) return 'workflows';
+  if (pathname === '/executions' || pathname.startsWith('/executions/')) return 'executions';
+  return undefined;
+}
 
 /**
- * 应用布局。
+ * Console chrome. It lives inside `<App>` because the namespace fallback uses
+ * the message API, which only exists below the AntD App context.
+ */
+function AdminChrome({ appearance }: { appearance: Appearance }) {
+  const { pathname, search } = useLocation();
+  const { message } = App.useApp();
+  const { initialState } = useModel('@@initialState') as { initialState?: InitialState };
+  const namespace = useAdminNamespace({
+    current: initialState?.currentUser?.namespace,
+    pathname,
+    search,
+    replace: (to) => history.replace(to),
+    warn: (text) => message.warning(text),
+  });
+
+  return (
+    <AdminShell
+      current={sectionFor(pathname)}
+      appearance={appearance}
+      namespace={namespace.namespace}
+      namespaceOptions={namespace.options}
+      onNamespaceChange={namespace.select}
+    >
+      {/*
+       * The key is the contract for ruling 25: a namespace change remounts the
+       * page, and every page fetches its list on mount. The pages never hold a
+       * second copy of the namespace.
+       */}
+      <Outlet key={namespace.reloadKey} />
+    </AdminShell>
+  );
+}
+
+/**
+ * Application layout.
  *
- * 这里承担三件插件无法代劳的事（不启用 layout 插件，原因见设计文档 §2.3）：
- *   1. ConfigProvider —— 主题 token。刻意不设 locale：locale 插件已在更外层注入了
- *      一层带 locale + direction 的 ConfigProvider，此处只管主题，避免覆盖语言切换。
- *   2. App —— antd 6 静态方法（message / Modal.confirm）的上下文宿主。
- *   3. Layout + Outlet —— 内容区骨架。
- *
- * 导航菜单为最小骨架，待业务页面成型后再细化。
- *
- * 注意 minHeight 用了 style 而非 tailwind 的 min-h-screen：antd 组件样式由 cssinjs
- * 在运行时注入，规则不在任何 CSS layer 内，因此会压过 @layer utilities 里的 tailwind
- * 工具类（.ant-layout 自带 min-height:0）。tailwind.css 的 layer 方案只解决静态
- * reset.css，管不到 cssinjs。规律：不要用 tailwind 工具类去覆盖 antd 组件已声明的属性，
- * 改用 style / antd token；tailwind 用于 antd 未声明的属性和自有元素则完全正常。
+ * It owns what the route components must not each repeat:
+ *   1. ConfigProvider — the admin theme generated from the same `@xflow/core`
+ *      palette that renders `tokens.css`; it follows `prefers-color-scheme`.
+ *      No locale here: the locale plugin already injected a ConfigProvider
+ *      with locale + direction, and overriding it would break language switch.
+ *   2. App — the context host for antd 6 static methods.
+ *   3. The console shell, or — for `/workflows/:id` — a bare full-viewport
+ *      host. The editor must not inherit the admin header, padding or scrolling
+ *      container (CLAUDE.md, XFlow Editor UI Constraints 1).
  */
 export default function BasicLayout() {
   const { pathname } = useLocation();
-  const isWorkflowEditorRoute = /^\/workflows\/[^/]+\/?$/.test(pathname);
+  const appearance = useSystemAppearance();
+  const themeConfig = useMemo(() => adminThemeConfig(appearance), [appearance]);
 
   return (
-    <ConfigProvider theme={{ algorithm: theme.defaultAlgorithm }}>
-      <App>
-        <Layout style={isWorkflowEditorRoute ? { height: '100dvh', minHeight: '100dvh' } : { minHeight: '100vh' }}>
-          {isWorkflowEditorRoute ? null : (
-            <Layout.Header className="flex items-center">
-              <span className="text-white text-base font-semibold">XFlow</span>
-            </Layout.Header>
-          )}
-          <Layout.Content
-            className={isWorkflowEditorRoute ? 'min-h-0' : 'p-6'}
-            style={isWorkflowEditorRoute ? { display: 'flex', minHeight: 0, overflow: 'hidden', padding: 0 } : undefined}
+    <ConfigProvider theme={themeConfig} button={{ autoInsertSpace: false }}>
+      {/* Toasts portal into the shell so `--xflow-*` (e.g. the mono execution
+          id in the rerun toast) resolve; the editor route falls back to body. */}
+      <App
+        message={{
+          getContainer: () =>
+            document.querySelector<HTMLElement>('.xflow-admin') ?? document.body,
+        }}
+      >
+        {WORKFLOW_EDITOR_PATH.test(pathname) ? (
+          <div
+            className="flex h-dvh min-h-0 min-w-0 flex-col overflow-hidden"
+            data-testid="workflow-editor-host"
           >
             <Outlet />
-          </Layout.Content>
-        </Layout>
+          </div>
+        ) : (
+          <AdminChrome appearance={appearance} />
+        )}
       </App>
     </ConfigProvider>
   );

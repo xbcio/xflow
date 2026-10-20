@@ -1,0 +1,486 @@
+/*
+ * Admin console shell (§6.6). `components` sits between the AntD layer and the
+ * Tailwind utilities in the host's declared layer order (tailwind.css), so
+ * these semantic classes win over `@layer antd` without specificity hacks
+ * while layout utilities still override them. Layout belongs to Tailwind utilities;
+ * only design-specific surfaces are styled here, and every visual value comes
+ * from `--xflow-*` (tokens.css) — no colour, radius or font-size literal.
+ */
+@layer components {
+  .xflow-admin {
+    display: grid;
+    grid-template-columns: 220px minmax(0, 1fr);
+    height: 100dvh;
+    min-width: 0;
+    overflow: hidden;
+    background: var(--xflow-app);
+    color: var(--xflow-text);
+    font-family: var(--xflow-font-sans);
+    font-size: var(--xflow-font-md);
+    line-height: var(--xflow-line-height);
+  }
+
+  .xflow-admin-nav {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    padding: 12px;
+    overflow: auto;
+    background: var(--xflow-panel);
+    border-right: 1px solid var(--xflow-border);
+  }
+
+  .xflow-admin-brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px 10px;
+    font-size: var(--xflow-font-lg);
+    font-weight: 600;
+  }
+
+  .xflow-admin-brand i {
+    width: 24px;
+    height: 24px;
+    border-radius: var(--xflow-radius-sm);
+    background: var(--xflow-primary);
+  }
+
+  .xflow-admin-group {
+    margin: 12px 8px 4px;
+    font-size: var(--xflow-font-xs);
+    font-weight: 600;
+    color: var(--xflow-text-tertiary);
+  }
+
+  .xflow-admin-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    height: 34px;
+    min-width: 0;
+    padding: 0 10px;
+    border: 0;
+    border-radius: var(--xflow-radius-sm);
+    background: transparent;
+    color: var(--xflow-text-secondary);
+    font-family: inherit;
+    font-size: var(--xflow-font-sm);
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .xflow-admin-item:hover {
+    background: var(--xflow-hover);
+    color: var(--xflow-text);
+  }
+
+  .xflow-admin-item[aria-current='page'] {
+    background: var(--xflow-primary-bg-subtle);
+    color: var(--xflow-primary);
+    font-weight: 600;
+  }
+
+  .xflow-admin-item-icon {
+    display: inline-flex;
+  }
+
+  .xflow-admin-cluster {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: auto;
+    padding: 10px;
+    border: 1px solid var(--xflow-border);
+    border-radius: var(--xflow-radius-md);
+    font-size: var(--xflow-font-sm);
+  }
+
+  .xflow-admin-cluster > div {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .xflow-admin-cluster [data-tone='ok'] {
+    color: var(--xflow-success);
+  }
+
+  .xflow-admin-main {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  .xflow-admin-top {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+    height: 52px;
+    padding: 0 20px;
+    background: var(--xflow-panel);
+    border-bottom: 1px solid var(--xflow-border);
+  }
+
+  .xflow-admin-grow {
+    flex: 1 1 auto;
+  }
+
+  .xflow-admin-search {
+    width: 360px;
+    max-width: 100%;
+  }
+
+  /* Mirrors the baseline Kbd (ui-preview .xflow-pv-kbd): 500 11px Inter. */
+  .xflow-admin-kbd {
+    padding: 1px 5px;
+    border: 1px solid var(--xflow-border);
+    border-bottom-width: 2px;
+    border-radius: var(--xflow-radius-xs);
+    color: var(--xflow-text-tertiary);
+    font: 500 11px var(--xflow-font-sans);
+  }
+
+  /* Wrapper that keeps a disabled button's tooltip reachable (rule 16). */
+  .xflow-admin-control {
+    display: inline-flex;
+  }
+
+  .xflow-admin-body {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-width: 0;
+    min-height: 0;
+    padding: 20px;
+    overflow: auto;
+  }
+
+  /* ---------- Workflow centre (§6.6, ruling 20): surfaces only ---------- */
+
+  .xflow-admin-card {
+    background: var(--xflow-panel);
+    border: 1px solid var(--xflow-border);
+    border-radius: var(--xflow-radius-md);
+  }
+
+  .xflow-admin-card-icon {
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    flex: none;
+    border-radius: var(--xflow-radius-sm);
+    background: var(--xflow-primary-bg-subtle);
+    color: var(--xflow-primary);
+    font-size: var(--xflow-font-xl);
+  }
+
+  /* 创建卡在活基准里用 CategoryIcon category="code"（accent），与状态卡区分。 */
+  .xflow-admin-card-icon--code {
+    background: var(--xflow-accent-bg-subtle);
+    color: var(--xflow-accent);
+  }
+
+  .xflow-admin-card-v {
+    display: block;
+    font-size: var(--xflow-font-xl);
+    font-weight: 600;
+  }
+
+  .xflow-admin-card-l {
+    display: block;
+    color: var(--xflow-text-secondary);
+    font-size: var(--xflow-font-sm);
+  }
+
+  .xflow-admin-card-src {
+    margin-left: auto;
+    color: var(--xflow-text-tertiary);
+    font-family: var(--xflow-font-mono);
+    font-size: var(--xflow-font-xs);
+    white-space: nowrap;
+  }
+
+  .xflow-admin-tablecard {
+    padding: 0;
+    overflow: hidden;
+  }
+
+  .xflow-admin-panel-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 40px;
+    padding: 0 8px 0 12px;
+    border-bottom: 1px solid var(--xflow-border);
+  }
+
+  .xflow-admin-panel-icon {
+    display: inline-flex;
+    color: var(--xflow-text-secondary);
+    font-size: var(--xflow-font-xl);
+  }
+
+  .xflow-admin-panel-heading {
+    margin: 0;
+    font-size: var(--xflow-font-lg);
+    font-weight: 600;
+  }
+
+  .xflow-admin-panel-count {
+    color: var(--xflow-text-tertiary);
+    font-size: var(--xflow-font-sm);
+  }
+
+  .xflow-admin-name {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .xflow-admin-name small {
+    color: var(--xflow-text-tertiary);
+    font-family: var(--xflow-font-mono);
+    font-size: var(--xflow-font-xs);
+    line-height: normal;
+  }
+
+  .xflow-admin-ops {
+    display: inline-flex;
+    gap: 4px;
+    justify-content: flex-end;
+  }
+
+  .xflow-admin-page {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 10px 12px;
+    color: var(--xflow-text-tertiary);
+    font-size: var(--xflow-font-xs);
+  }
+
+  .xflow-admin-note {
+    margin: 0;
+    color: var(--xflow-text-tertiary);
+    font-size: var(--xflow-font-sm);
+  }
+
+  .xflow-admin-banner {
+    padding: 8px 12px;
+  }
+
+  .xflow-admin-faint {
+    color: var(--xflow-text-tertiary);
+  }
+
+  .xflow-admin-mono {
+    font-family: var(--xflow-font-mono);
+  }
+
+  /* ---------- Recent runs (ruling 26: three rows, cross-workflow) ---------- */
+
+  .xflow-admin-run {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    padding: 8px 12px;
+    border-top: 1px solid var(--xflow-border);
+    font-size: var(--xflow-font-sm);
+  }
+
+  .xflow-admin-panel-title + .xflow-admin-run {
+    border-top: 0;
+  }
+
+  .xflow-admin-run-id {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--xflow-font-mono);
+  }
+
+  .xflow-admin-run-name {
+    min-width: 0;
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--xflow-text-tertiary);
+  }
+
+  .xflow-admin-run-empty {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin: 0;
+    padding: 10px 12px;
+    color: var(--xflow-text-tertiary);
+    font-size: var(--xflow-font-sm);
+  }
+
+  /* ---------- Create cards (§6.6) ---------- */
+
+  .xflow-admin-new h4 {
+    margin: 0 0 4px;
+    font-size: var(--xflow-font-md);
+  }
+
+  .xflow-admin-new p {
+    margin: 0 0 10px;
+    color: var(--xflow-text-secondary);
+    font-size: var(--xflow-font-sm);
+  }
+
+  /* ---------- Status pill (§4) and 需新字段 marker (§6.7) ---------- */
+
+  .xflow-admin-chip {
+    --xflow-admin-chip-bg: var(--xflow-neutral-bg-subtle);
+    --xflow-admin-chip-fg: var(--xflow-neutral-fg);
+    --xflow-admin-chip-border: color-mix(in srgb, var(--xflow-neutral) 55%, transparent);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 20px;
+    padding: 0 8px;
+    flex: none;
+    border: 1px solid var(--xflow-admin-chip-border);
+    border-radius: var(--xflow-radius-pill);
+    background: var(--xflow-admin-chip-bg);
+    color: var(--xflow-admin-chip-fg);
+    font-size: var(--xflow-font-xs);
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  .xflow-admin-chip[data-tone='info'] {
+    --xflow-admin-chip-bg: var(--xflow-info-bg-subtle);
+    --xflow-admin-chip-fg: var(--xflow-info-fg);
+    --xflow-admin-chip-border: color-mix(in srgb, var(--xflow-info) 55%, transparent);
+  }
+
+  .xflow-admin-chip[data-tone='success'] {
+    --xflow-admin-chip-bg: var(--xflow-success-bg-subtle);
+    --xflow-admin-chip-fg: var(--xflow-success-fg);
+    --xflow-admin-chip-border: color-mix(in srgb, var(--xflow-success) 55%, transparent);
+  }
+
+  .xflow-admin-chip[data-tone='warning'] {
+    --xflow-admin-chip-bg: var(--xflow-warning-bg-subtle);
+    --xflow-admin-chip-fg: var(--xflow-warning-fg);
+    --xflow-admin-chip-border: color-mix(in srgb, var(--xflow-warning) 55%, transparent);
+  }
+
+  .xflow-admin-chip[data-tone='danger'] {
+    --xflow-admin-chip-bg: var(--xflow-danger-bg-subtle);
+    --xflow-admin-chip-fg: var(--xflow-danger-fg);
+    --xflow-admin-chip-border: color-mix(in srgb, var(--xflow-danger) 55%, transparent);
+  }
+
+  .xflow-admin-chip[data-tone='suspend'] {
+    --xflow-admin-chip-bg: var(--xflow-suspend-bg-subtle);
+    --xflow-admin-chip-fg: var(--xflow-suspend-fg);
+    --xflow-admin-chip-border: color-mix(in srgb, var(--xflow-suspend) 55%, transparent);
+  }
+
+  .xflow-admin-chip-icon {
+    display: inline-flex;
+    font-size: var(--xflow-font-sm);
+  }
+
+  /* 活基准的 Todo 默认 placement="hover"：徽标绝对定位在标题右上方，不占行高。 */
+  .xflow-admin-todo-wrap {
+    position: relative;
+    display: inline-flex;
+  }
+
+  .xflow-admin-todo {
+    position: absolute;
+    bottom: calc(100% + 2px);
+    right: 0;
+    display: inline-flex;
+    align-items: center;
+    height: 16px;
+    padding: 0 5px;
+    border: 1px dashed color-mix(in srgb, var(--xflow-orange) 65%, transparent);
+    border-radius: var(--xflow-radius-xs);
+    background: color-mix(in srgb, var(--xflow-panel) 82%, transparent);
+    color: var(--xflow-orange);
+    font-size: var(--xflow-font-xs);
+    font-weight: 500;
+    line-height: 14px;
+    white-space: nowrap;
+    z-index: 5;
+  }
+
+  /* ---------- Execution list (§6.6 / §6.9) ---------- */
+
+  /* First line of a failure only; the full text stays in the tooltip. */
+  .xflow-admin-err {
+    display: inline-block;
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: bottom;
+    color: var(--xflow-text-secondary);
+  }
+
+  /* Ruling 23: the freshly created rerun's row, after the list refetch. */
+  .xflow-admin-row-highlight td {
+    background: var(--xflow-primary-bg-subtle);
+  }
+
+  .xflow-admin-field-label {
+    font-size: var(--xflow-font-sm);
+    font-weight: 500;
+    color: var(--xflow-text-secondary);
+  }
+
+  /* Dialog metadata mirrors the baseline .xflow-pv-dialog-sub (11px mono). */
+  .xflow-admin-dialog-sub {
+    margin: 0;
+    font-family: var(--xflow-font-mono);
+    font-size: var(--xflow-font-xs);
+    color: var(--xflow-text-tertiary);
+  }
+
+  /* Baseline .xflow-pv-hint: 12px secondary copy inside dialogs. */
+  .xflow-admin-hint {
+    margin: 0;
+    font-size: var(--xflow-font-sm);
+    color: var(--xflow-text-tertiary);
+  }
+
+  /* Real execution ids are longer than the baseline sample: one line, ellipsis. */
+  .xflow-admin-ellipsis {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Slot the executions page portals its filter row into (baseline top bar). */
+  .xflow-admin-top-slot {
+    display: flex;
+    flex: 1 1 auto;
+    align-items: center;
+    min-width: 0;
+  }
+
+  /* Modal portals into .xflow-admin for the tokens; fixed keeps it out of the
+     shell's grid flow while the native mask/wrap stay viewport-fixed. */
+  .xflow-admin-modal-root {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+  }
+}

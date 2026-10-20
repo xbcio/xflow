@@ -13,12 +13,53 @@
  * webpack loader 能容忍，但 vite 的 CSS 解析器会报错并丢弃整个 tailwind 引入。
  *
  * 若本文件被改动，需重新验证：font-bold 计算值为 700，且 DOM 中裸 reset 规则数为 0。
+ *
+ * 层的完整顺序按设计文档 §7.1 声明：antd 层留给宿主根部的 <StyleProvider layer>
+ * （cssinjs 把 AntD 全部样式注入 @layer antd），xflow.* 三层留给编辑器的语义样式，
+ * 这样语义类无需提权即可覆盖 AntD，而 Tailwind 工具类（utilities）永远最后生效。
+ * 未开启 StyleProvider layer 的路由不受影响：那层不存在，声明只是排序。
+ *
+ * xyflow 层放画布库自带的基础样式（.react-flow 等）：xflow-preview 不再自己引入
+ * @xyflow/react/dist/style.css，改由宿主在这里统一引入，并排在 xflow.* 之前，
+ * 这样 preview / editor 的语义样式无需提权即可覆盖它。
  */
-@layer antd-reset, theme, base, components, utilities;
+@layer antd-reset, theme, base, antd, xyflow, xflow.tokens, xflow.preview, xflow.composer, xflow.editor, components, utilities;
 
 @import 'antd/dist/reset.css' layer(antd-reset);
 
+@import '@xyflow/react/dist/style.css' layer(xyflow);
+
 @import 'tailwindcss';
+
+/* Tailwind 主题从同一份 token 派生（设计文档 §7.1）：工具类读的是运行时的
+ * --xflow-*（定义在编辑器/预览根节点上），所以必须用 inline —— 非 inline 会在
+ * :root 上把 --color-xflow-* 求值一次，而那里没有 --xflow-*，值会失效。 */
+@theme inline {
+  --color-xflow-app: var(--xflow-app);
+  --color-xflow-panel: var(--xflow-panel);
+  --color-xflow-panel-raised: var(--xflow-panel-raised);
+  --color-xflow-field: var(--xflow-field);
+  --color-xflow-canvas: var(--xflow-canvas);
+  --color-xflow-border: var(--xflow-border);
+  --color-xflow-border-strong: var(--xflow-border-strong);
+  --color-xflow-hover: var(--xflow-hover);
+  --color-xflow-text: var(--xflow-text);
+  --color-xflow-text-secondary: var(--xflow-text-secondary);
+  --color-xflow-text-tertiary: var(--xflow-text-tertiary);
+  --color-xflow-primary: var(--xflow-primary);
+  --color-xflow-info: var(--xflow-info);
+  --color-xflow-success: var(--xflow-success);
+  --color-xflow-warning: var(--xflow-warning);
+  --color-xflow-danger: var(--xflow-danger);
+  --color-xflow-suspend: var(--xflow-suspend);
+  --color-xflow-neutral: var(--xflow-neutral);
+  --color-xflow-accent: var(--xflow-accent);
+  --color-xflow-orange: var(--xflow-orange);
+  --color-xflow-cyan: var(--xflow-cyan);
+  --radius-xflow-sm: var(--xflow-radius-sm);
+  --radius-xflow-md: var(--xflow-radius-md);
+  --radius-xflow-lg: var(--xflow-radius-lg);
+}
 
 /* Tailwind v4 scans the Admin app by default. The editor and preview live in
  * workspace packages, so declare them explicitly to keep their utility classes

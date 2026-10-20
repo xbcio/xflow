@@ -9,11 +9,13 @@
     "typecheck": "max setup && tsc --noEmit"
   },
   "dependencies": {
+    "@ant-design/cssinjs": "2.1.2",
+    "@ant-design/icons": "6.3.2",
+    "@umijs/max": "4.6.82",
     "@xflow/api": "workspace:*",
     "@xflow/core": "workspace:*",
     "@xflow/editor": "workspace:*",
-    "@ant-design/icons": "6.3.2",
-    "@umijs/max": "4.6.82",
+    "@xyflow/react": "12.5.0",
     "antd": "6.5.2",
     "react": "19.2.8",
     "react-dom": "19.2.8"

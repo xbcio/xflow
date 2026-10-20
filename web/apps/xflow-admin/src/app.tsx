@@ -1,5 +1,7 @@
+import { StyleProvider } from '@ant-design/cssinjs';
 import type { RequestConfig, RequestOptions } from '@umijs/max';
 import { history } from '@umijs/max';
+import type { ReactNode } from 'react';
 
 import { clearToken, getToken } from '@/services/token';
 import type { CurrentIdentity } from '@/services/user';
@@ -63,3 +65,12 @@ export const request: RequestConfig = {
     },
   },
 };
+
+/**
+ * 应用根容器。AntD 的 CSS-in-JS 样式整体进入 `@layer antd`（层的顺序在 tailwind.css 里
+ * 声明，设计文档 §7.1）：xflow 语义类排在它后面，无需提权即可覆盖；Tailwind 工具类排在
+ * 最后，布局永远生效。只在这里包一次，各路由不得再自行包 StyleProvider（重复包会生成两份样式）。
+ */
+export function rootContainer(container: ReactNode) {
+  return <StyleProvider layer>{container}</StyleProvider>;
+}

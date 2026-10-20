@@ -10,12 +10,13 @@ export default function access(initialState: InitialState | undefined) {
   const scopes = initialState?.currentUser?.scopes ?? [];
   const can = (scope: string) => scopes.includes(scope);
 
+  // 读与写分开声明：B5 落地前服务端只有 `workflow`（读等同写），B5 之后只读
+  // 凭据持 `workflow.read`。查看位同时接受两者，这样拆分前后路由都可进入；
+  // 编辑位只认 `workflow`，拆分后只读凭据自然失去编辑入口。
+  const canReadWorkflow = can('workflow') || can('workflow.read');
+
   return {
-    // scope 的粒度是按操作划分的：一个 workflow 同时覆盖读与写，服务端没有
-    // workflow:read / workflow:write 这样的区分。两个位都保留，是为了路由仍能按
-    // 语义声明自己要什么；它们目前必然同真同假，要让只读令牌真的只读，得先在
-    // 服务端把 scope 拆细。
-    canViewWorkflows: can('workflow'),
+    canViewWorkflows: canReadWorkflow,
     canEditWorkflows: can('workflow'),
     canViewExecutions: can('execution'),
   };
