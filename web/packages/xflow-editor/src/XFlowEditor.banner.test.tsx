@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkflowDef } from "@xflow/core";
 import { XFlowEditor } from "./index";
@@ -237,7 +237,13 @@ describe("save conflict banner", () => {
     await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
 
     rerender(<XFlowEditor value={{ ...workflow, version: "2.0.0" }} onSave={onSave} />);
-    reject(apiError(409, "workflow_conflict"));
+    // The rejection resolves the in-flight save outside any React event
+    // handler, so its finally-block `setSaving(false)` is only queued for a
+    // concurrent render. Coverage instrumentation (see vitest.config.ts) can
+    // starve that render past waitFor's 1s budget, so flush it inside act.
+    await act(async () => {
+      reject(apiError(409, "workflow_conflict"));
+    });
     await waitFor(saveSettled);
     expect(banners()).toHaveLength(0);
   });
