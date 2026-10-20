@@ -450,6 +450,18 @@ func buildExecutionRecord(ctx context.Context, e *engine.ExecutionSnapshot, now 
 func (s *Store) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID, status types.ExecutionStatus, errMsg string) error {
 	ttl := s.getExecTTL(ctx, id)
 	t := namespace.FromContext(ctx)
+	// Register a canceling transition BEFORE writing the status. The index is
+	// namespace-scoped and cannot share the status key's slot, so the two can
+	// never be one atomic step; ordering them registration-first is what makes
+	// the index complete. A failed registration fails the transition here,
+	// while the execution is still in its previous status and Cancel can simply
+	// be retried; the reverse order would leave a canceling execution the
+	// reaper can never discover. See canceling_index.go.
+	if status == types.ExecutionStatusCanceling {
+		if err := s.markExecutionCanceling(ctx, t, id); err != nil {
+			return err
+		}
+	}
 	// Compare-and-set with cancel-aware fencing: a terminal or canceling status
 	// blocks non-canceled overwrites, so a concurrent cyclic completeExecution
 	// cannot stomp an in-flight Cancel.
@@ -494,7 +506,28 @@ func (s *Store) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID,
 		// would admit a replacement that overlaps it, which is exactly what the
 		// limit exists to prevent.
 		s.releaseWorkflowSlotAfterTerminal(ctx, id, status)
+		// The execution can no longer be stuck in canceling, so its registration
+		// is retired. Best-effort: a leftover member is repaired by the next
+		// ListCancelingExecutions that reads it (canceling_index.go).
+		s.clearExecutionCanceling(ctx, t, id)
 	} else if applied == 1 {
+		// Re-assert the registration now that the canceling status is durable.
+		// A retried Cancel reuses the member its failed first attempt left
+		// behind (the ZADD NX above is a no-op), and List can read the still
+		// running status and prune that member in the window between the two
+		// steps. ZADD NX keeps the score of an existing member, so the age is
+		// not reset; and since the status is already persisted, a failure here
+		// is logged rather than returned — the next List's re-check repairs the
+		// missing member no later than the following sweep. Placed before
+		// refreshTransientTTL so a retry after that fails still finds the
+		// member present. Rebuilding on applied == 0 would resurrect an entry
+		// for a transition the status fencing refused (e.g. a terminal status).
+		if status == types.ExecutionStatusCanceling {
+			if err := s.markExecutionCanceling(ctx, t, id); err != nil && s.logger != nil {
+				s.logger.Error("re-register canceling execution in the canceling index failed",
+					"namespace", string(t), "execution_id", string(id), "err", err)
+			}
+		}
 		if err := s.refreshTransientTTL(ctx, id, keys...); err != nil {
 			return err
 		}
