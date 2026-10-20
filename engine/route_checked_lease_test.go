@@ -43,7 +43,7 @@ func (s *checkedLeaseState) AcquireTaskLeaseChecked(ctx context.Context, lease *
 	}
 	res := LeaseAcquireResult{Acquired: acquired, Previous: prev}
 	if !s.executionMissing {
-		if snap, err := s.fakeState.GetExecution(ctx, lease.Task.ExecutionID); err != nil {
+		if snap, err := s.GetExecution(ctx, lease.Task.ExecutionID); err != nil {
 			return LeaseAcquireResult{}, err
 		} else if snap != nil {
 			res.ExecutionFound = true
@@ -55,7 +55,7 @@ func (s *checkedLeaseState) AcquireTaskLeaseChecked(ctx context.Context, lease *
 
 func (s *checkedLeaseState) GetExecutionStatus(ctx context.Context, id types.ExecutionID) (types.ExecutionStatus, bool, error) {
 	s.statusReads++
-	snap, err := s.fakeState.GetExecution(ctx, id)
+	snap, err := s.GetExecution(ctx, id)
 	if err != nil || snap == nil {
 		return "", false, err
 	}

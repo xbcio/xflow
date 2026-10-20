@@ -136,7 +136,7 @@ func TestFoldedCommitReportsSkipOnceBeforeNodeComplete(t *testing.T) {
 	// ITS advance receipt. A second advance event for split would mean the old
 	// AdvanceNode carrier is still running alongside the fold; a missing one
 	// would mean the folded transition stopped being observable as an advance.
-	var commitIdx, advanceIdx int = -1, -1
+	var commitIdx, advanceIdx = -1, -1
 	events := drainEvidence(buf)
 	for i, ev := range events {
 		if ev.NodeName != "split" {
