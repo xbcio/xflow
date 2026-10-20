@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
@@ -12,7 +13,22 @@ import (
 type ExecutionDetail struct {
 	ExecutionID types.ExecutionID     `json:"execution_id"`
 	Status      types.ExecutionStatus `json:"status"`
-	Error       string                `json:"error,omitempty"`
+	// WorkflowID and WorkflowVersion name the definition this execution ran,
+	// captured at submission (see ExecutionSnapshot.WorkflowID). Both are
+	// omitted when the submission carried no identity — an inline definition
+	// with no id, or an execution recorded before the fields existed — because
+	// an unattributed run must not be reported under a guessed workflow.
+	WorkflowID      types.WorkflowID `json:"workflow_id,omitempty"`
+	WorkflowVersion string           `json:"workflow_version,omitempty"`
+	// CreatedAt / UpdatedAt describe the execution's lifetime: creation and the
+	// latest status transition, both taken from the backend's clock. Pointers
+	// rather than time.Time because omitempty does not omit a zero struct, and
+	// an execution recorded before the backends stamped these must report
+	// absence — the same "unknown, never guess" rule the run bar relies on —
+	// instead of the year 1.
+	CreatedAt *time.Time `json:"created_at,omitempty"`
+	UpdatedAt *time.Time `json:"updated_at,omitempty"`
+	Error     string     `json:"error,omitempty"`
 	// QueuePosition is where a queued execution stands in line, 1-based, or 0
 	// when it is not queued — which includes every execution of a workflow that
 	// never queues and every store that cannot report a position. Reporting is
@@ -59,6 +75,12 @@ type NodeDetail struct {
 	// content: it is published under the same policy as Status and Error, not
 	// under Output's.
 	ChildExecutionID types.ExecutionID `json:"child_execution_id,omitempty"`
+	// StartedAt / FinishedAt are the node's timing facts (see
+	// NodeSnapshot.StartedAt): the first lease it was given and the moment it
+	// first reached a terminal status. Omitted while unknown, so a client can
+	// tell "never started" from a real timestamp without parsing a sentinel.
+	StartedAt  *time.Time `json:"started_at,omitempty"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
 }
 
 // InspectStatus returns the execution-level half of Inspect: status, error and,
@@ -80,12 +102,16 @@ func (e *Engine) InspectStatus(ctx context.Context, id types.ExecutionID) (Execu
 	}
 
 	detail := ExecutionDetail{
-		ExecutionID: id,
-		Status:      snap.Status,
-		Error:       snap.Error,
-		ParentID:    snap.ParentID,
-		RerunFrom:   snap.RerunFrom,
-		ParentNode:  snap.ParentNode,
+		ExecutionID:     id,
+		Status:          snap.Status,
+		WorkflowID:      snap.WorkflowID,
+		WorkflowVersion: snap.WorkflowVersion,
+		CreatedAt:       timePtr(snap.CreatedAt),
+		UpdatedAt:       timePtr(snap.UpdatedAt),
+		Error:           snap.Error,
+		ParentID:        snap.ParentID,
+		RerunFrom:       snap.RerunFrom,
+		ParentNode:      snap.ParentNode,
 	}
 	if snap.Status == types.ExecutionStatusQueued {
 		// Best effort, and deliberately not an error when it fails: the caller
@@ -98,6 +124,16 @@ func (e *Engine) InspectStatus(ctx context.Context, id types.ExecutionID) (Execu
 		}
 	}
 	return detail, nil
+}
+
+// timePtr projects a backend timestamp into the inspect payload, where a zero
+// value means "unknown" and must be omitted rather than serialized as the year
+// 1 (encoding/json's omitempty does not treat a zero time.Time as empty).
+func timePtr(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	return &t
 }
 
 // Inspect returns execution status and, when requested or discoverable from the
@@ -239,6 +275,12 @@ func (e *Engine) inspectNode(
 		// complete — withholding it would make a privacy-marked wait
 		// undrillable with nothing gained, since the id names no content.
 		detail.ChildExecutionID = snap.ChildExecutionID
+		// Timing is metadata, not node content: it is published before the
+		// private-output fence below for the same reason Status and Error are.
+		// Withholding it would make a privacy-marked node's run untimed while
+		// revealing nothing, since the values name no payload.
+		detail.StartedAt = timePtr(snap.StartedAt)
+		detail.FinishedAt = timePtr(snap.FinishedAt)
 	}
 
 	// A resolved graph is authoritative. If it is unavailable or does not know

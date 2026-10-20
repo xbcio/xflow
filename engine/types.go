@@ -277,11 +277,34 @@ type RunnerHeartbeat struct {
 
 // ExecutionSnapshot is the engine's view of a running execution stored in the backend.
 type ExecutionSnapshot struct {
-	ID      types.ExecutionID
-	Graph   *graph.Graph
-	Status  types.ExecutionStatus
-	Params  map[string]any
-	Runtime *types.Runtime
+	ID     types.ExecutionID
+	Graph  *graph.Graph
+	Status types.ExecutionStatus
+	Params map[string]any
+	// WorkflowID and WorkflowVersion identify the definition this execution
+	// runs: the values captured at submission from the definition attached to
+	// the submission context (WithWorkflowDef), so a reader of the snapshot can
+	// name the workflow and the exact version it ran without the definition
+	// still being registered. A sub-execution records its own resolved target's
+	// identity; a rerun inherits its parent's when the submission carries no
+	// definition of its own.
+	//
+	// Both stay empty when nothing attached an identity — an inline submission
+	// with no definition id, for instance. Empty means unattributed, never "the
+	// current workflow": guessing would report a run under a definition it may
+	// never have executed.
+	WorkflowID      types.WorkflowID `json:"workflow_id,omitempty"`
+	WorkflowVersion string           `json:"workflow_version,omitempty"`
+	// CreatedAt is when the backend created the execution, and UpdatedAt is the
+	// wall clock of its latest status transition (creation included). The
+	// inspect API exposes them so a client can time a run — the editor's run bar
+	// needs a server-side start, and §6.8 derives a terminal run's duration as
+	// UpdatedAt − CreatedAt. Both are zero for an execution recorded before the
+	// backends stamped them, which readers must report as unknown rather than
+	// substitute a client-observed instant.
+	CreatedAt time.Time `json:"created_at,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	Runtime   *types.Runtime
 	// Scope holds expression roots that belong to the EXECUTION rather than to
 	// any one node: every node of this execution sees them, whatever its
 	// position in the graph. Today its only producer is a map body, which puts
@@ -398,6 +421,16 @@ type NodeSnapshot struct {
 	// graph.
 	CommittedLeaseToken LeaseToken
 	CommittedAttempt    int
+	// StartedAt is the issue time of the FIRST lease this node ever received in
+	// the execution, and FinishedAt is when it first reached a terminal status.
+	// Both are write-once: a retry (a new attempt within the same activation)
+	// and a duplicate commit must not restamp them, which is why every
+	// acquire/commit rebuild below copies them forward instead of taking the
+	// incoming value. They are zero when the fact never happened — a node that
+	// was skipped or seeded from a parent never started, and one still running
+	// has not finished — and inspect omits them in that case.
+	StartedAt  time.Time
+	FinishedAt time.Time
 	// Output is the public node-snapshot projection. Private node output stays
 	// in the runtime output store for downstream execution but is never present
 	// here.

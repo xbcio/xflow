@@ -212,6 +212,20 @@ func (e *Engine) seedRerun(ctx context.Context, seeder ExecutionSeeder, req Reru
 	if len(snap.Scope) == 0 {
 		snap.Scope = cloneMap(parent.Scope)
 	}
+	// A rerun carries no definition of its own: the HTTP path attaches the
+	// parent's, but a direct engine rerun may not. The parent snapshot is the
+	// authoritative record of what is being rerun, so identity falls back to it
+	// rather than leaving the derived execution unattributed.
+	if snap.WorkflowID == "" {
+		snap.WorkflowID = parent.WorkflowID
+	}
+	// A version without an id is a half identity (see attachSubmissionMetadata):
+	// a parent recorded before that rule may still carry one, and copying it
+	// alone would make the derived execution report a version belonging to no
+	// workflow.
+	if snap.WorkflowID != "" && snap.WorkflowVersion == "" {
+		snap.WorkflowVersion = parent.WorkflowVersion
+	}
 	ctx = attachTransientHint(ctx, g)
 
 	entries := []OutboxEntry(nil)

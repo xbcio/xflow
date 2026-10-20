@@ -493,6 +493,15 @@ func attachSubmissionMetadata(ctx context.Context, snap *ExecutionSnapshot) {
 	if scope := ExecutionScopeFromContext(ctx); len(scope) > 0 {
 		snap.Scope = cloneMap(scope)
 	}
+	// The workflow identity travels as audit metadata, not as execution
+	// behavior: a submission that attached no definition leaves both fields
+	// empty and stays unattributed rather than borrowing a name. A definition
+	// with no id writes neither field: a version without an id is a half
+	// identity that no reader can resolve back to a workflow.
+	if def, ok := WorkflowDefFromContext(ctx); ok && def.ID != "" {
+		snap.WorkflowID = types.WorkflowID(def.ID)
+		snap.WorkflowVersion = def.Version
+	}
 	snap.TestRun = TestRunFromContext(ctx)
 }
 

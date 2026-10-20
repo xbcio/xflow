@@ -387,11 +387,37 @@ func (e *Engine) startSubWorkflowChild(ctx context.Context, task *Task, g *graph
 	if err != nil {
 		return subWorkflowChild{}, err
 	}
+	// The resolver's explicit answer is the identity: a registry-compiled graph
+	// cannot be asked for its definition (the distributed registry decodes the
+	// graph through JSON, and ExpandedDefinition does not survive that), so a
+	// graph-derived id would leave every production child unattributed. The
+	// graph is only a fallback for a resolver that returned a compiled
+	// definition-carrying graph of its own.
+	childWorkflowID := target.WorkflowID
+	if childWorkflowID == "" {
+		if def := target.Graph.ExpandedDefinition(); def != nil {
+			childWorkflowID = types.WorkflowID(def.ID)
+		}
+	}
+	// A version with no id is a half identity no reader can resolve back to a
+	// workflow, so it is recorded only alongside the id — the same rule
+	// attachSubmissionMetadata applies to a directly submitted execution.
+	childWorkflowVersion := ""
+	if childWorkflowID != "" {
+		childWorkflowVersion = target.Version
+	}
 	childSnap := &ExecutionSnapshot{
 		ID:     child.ID,
 		Graph:  target.Graph,
 		Status: types.ExecutionStatusRunning,
 		Params: params,
+		// The child's own workflow identity, not the parent's: this execution
+		// runs the resolved target, and a reader drilling down from the parent's
+		// node needs to name what the child actually ran. The version is the
+		// resolver's concrete answer, which may be the default for an
+		// unversioned record.
+		WorkflowID:      childWorkflowID,
+		WorkflowVersion: childWorkflowVersion,
 		// The link back to the parent. ParentID reuses the field the snapshot
 		// already reserved for a sub-execution; ParentNode is what names the
 		// node whose wait this child satisfies.

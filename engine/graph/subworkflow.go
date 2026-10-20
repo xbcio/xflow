@@ -40,6 +40,14 @@ type SubWorkflowRef struct {
 
 // SubWorkflowTarget is a resolver's answer for one SubWorkflowRef.
 type SubWorkflowTarget struct {
+	// WorkflowID is the registered workflow's id, copied from the registry
+	// record the resolver read. It is an explicit field rather than something
+	// read off Graph because a registry-compiled graph is not guaranteed to
+	// carry its definition: the distributed registry round-trips the graph
+	// through JSON, and graph.ExpandedDefinition does not survive that decode.
+	// A resolver that cannot name an id leaves it empty, which the engine
+	// reports as an unattributed child rather than guessing.
+	WorkflowID types.WorkflowID
 	// Version is the concrete version that served the request. For a ref that
 	// pinned one it must equal it; for an unversioned ref it is the latest at
 	// resolution time, and pinning it here is what keeps "latest" from
@@ -62,9 +70,12 @@ type SubWorkflowTarget struct {
 // about other workflows comes through this method.
 //
 // Implementations must honor a non-empty ref.DefinitionHash by returning
-// exactly that revision or an error — never a newer one. The engine verifies
-// the hash it gets back anyway, but a resolver that ignores the pin would turn
-// every verification failure from a loud refusal into a fleet-wide outage of
+// exactly that revision or an error — never a newer one. They should also fill
+// SubWorkflowTarget.WorkflowID from the registry record they read: it is the
+// only reliable source of the child execution's workflow identity, because the
+// returned graph may not carry its definition. The engine verifies the hash it
+// gets back anyway, but a resolver that ignores the pin would turn every
+// verification failure from a loud refusal into a fleet-wide outage of
 // long-running parents.
 type SubWorkflowResolver interface {
 	ResolveSubWorkflow(ctx context.Context, ref SubWorkflowRef) (SubWorkflowTarget, error)
