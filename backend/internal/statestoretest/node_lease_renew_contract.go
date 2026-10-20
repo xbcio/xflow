@@ -52,6 +52,17 @@ func RunNodeLeaseRenewContract(t *testing.T, newStore func(*testing.T) NodeLease
 		if _, acquired, err := s.AcquireTaskLease(ctx, lease); err != nil || !acquired {
 			t.Fatalf("acquire node lease: acquired=%v err=%v", acquired, err)
 		}
+		// The first lease fixes started_at at its own issue time — not the wall
+		// clock at read time and not the renewal time. Compared in UnixMilli
+		// because the Redis backend stores milliseconds while the memory
+		// backend keeps the exact instant.
+		node, err := s.GetNode(ctx, id, "start")
+		if err != nil || node == nil {
+			t.Fatalf("GetNode after acquire: node=%v err=%v", node, err)
+		}
+		if got := node.StartedAt.UnixMilli(); got != lease.IssuedAt.UnixMilli() {
+			t.Fatalf("StartedAt = %v after the first lease, want %v", node.StartedAt, lease.IssuedAt)
+		}
 		return s, id, lease
 	}
 

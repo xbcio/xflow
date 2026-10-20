@@ -245,6 +245,21 @@ func seedRecordsTheResolvedUnits(t *testing.T, state engine.StateStore) {
 	if got := executionStatus(t, state, ctx, snap.ID); got != types.ExecutionStatusRunning {
 		t.Fatalf("status after the seed = %q, want %q", got, types.ExecutionStatusRunning)
 	}
+	// A seeded execution must carry the same lifetime as one created through
+	// CreateExecution: inspect reads created_at/updated_at as the run's
+	// duration, and a seed path that skips them reports a rerun with no start
+	// line even though the engine just started it.
+	seeded, err := state.GetExecution(ctx, snap.ID)
+	if err != nil || seeded == nil {
+		t.Fatalf("GetExecution() after the seed = (%v, %v), want a snapshot", seeded, err)
+	}
+	if seeded.CreatedAt.IsZero() || seeded.UpdatedAt.IsZero() {
+		t.Fatalf("seeded execution timing = (%v, %v), want both non-zero: the seed "+
+			"creates the execution and must stamp its clock", seeded.CreatedAt, seeded.UpdatedAt)
+	}
+	if seeded.UpdatedAt.Before(seeded.CreatedAt) {
+		t.Fatalf("UpdatedAt = %v before CreatedAt = %v after the seed", seeded.UpdatedAt, seeded.CreatedAt)
+	}
 
 	node, err := state.GetNode(ctx, snap.ID, "start")
 	if err != nil {
@@ -432,6 +447,8 @@ func seedRecordsTheRerunOrigin(t *testing.T, state engine.StateStore) {
 	snap.RerunFrom = "mid"
 	snap.ParentNode = "collect"
 	snap.Depth = 2
+	snap.WorkflowID = "wf-seed"
+	snap.WorkflowVersion = "v5"
 
 	if _, err := seeder.SeedExecution(ctx, engine.SeedExecutionRequest{
 		Execution: snap,
@@ -458,6 +475,15 @@ func seedRecordsTheRerunOrigin(t *testing.T, state engine.StateStore) {
 	}
 	if persisted.Depth != snap.Depth {
 		t.Fatalf("Depth = %d, want %d", persisted.Depth, snap.Depth)
+	}
+	// The seeded snapshot's workflow identity must survive the seed, exactly as
+	// it does the create path: a rerun's inspect answer names the definition it
+	// runs without re-reading that definition.
+	if persisted.WorkflowID != snap.WorkflowID {
+		t.Fatalf("WorkflowID = %q, want %q", persisted.WorkflowID, snap.WorkflowID)
+	}
+	if persisted.WorkflowVersion != snap.WorkflowVersion {
+		t.Fatalf("WorkflowVersion = %q, want %q", persisted.WorkflowVersion, snap.WorkflowVersion)
 	}
 }
 

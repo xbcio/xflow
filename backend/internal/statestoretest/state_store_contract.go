@@ -41,6 +41,11 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 		ParentNode: "collect",
 		Depth:      3,
 		RerunFrom:  "start",
+		// The workflow identity an inspect consumer reads back. Both are
+		// immutable submission metadata, and a JSON backend that persists the
+		// snapshot field-by-field must round-trip them like every other field.
+		WorkflowID:      "wf-contract",
+		WorkflowVersion: "v7",
 	}); err != nil {
 		t.Fatalf("CreateExecution() error = %v", err)
 	}
@@ -105,6 +110,16 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 	}
 	if snap.Depth != 3 {
 		t.Fatalf("Depth = %d, want 3", snap.Depth)
+	}
+	// The workflow identity is what GET /v1/executions/{id} reports as
+	// workflow_id/workflow_version, and a backend that drops it leaves the
+	// inspect answer unattributed even though the submission carried the
+	// identity.
+	if snap.WorkflowID != "wf-contract" {
+		t.Fatalf("WorkflowID = %q, want %q", snap.WorkflowID, "wf-contract")
+	}
+	if snap.WorkflowVersion != "v7" {
+		t.Fatalf("WorkflowVersion = %q, want %q", snap.WorkflowVersion, "v7")
 	}
 
 	loaded, err := state.LoadGraph(ctx, id)
@@ -275,6 +290,10 @@ func RunStateStoreContract(t *testing.T, state engine.StateStore) {
 	runCommitNodeAgainstMissingExecution(t, state)
 	runPinnedNodeIsTerminal(t, state)
 	runDisabledNodeSkippedOnExecuteUnit(t, state)
+	runExecutionTiming(t, state)
+	runNodeTiming(t, state)
+	runNodeTimingThroughLeases(t, state)
+	runExecutionTimingThroughTerminalCommit(t, state)
 }
 
 // runExecutionStatusAgreesWithSnapshot pins that the narrow status read and the
@@ -453,6 +472,17 @@ func runCancelSuspendedNode(t *testing.T, state engine.StateStore) {
 	after, err := state.ListSuspendedNodes(ctx, id)
 	if err != nil {
 		t.Fatalf("ListSuspendedNodes(after) error = %v", err)
+	}
+	// A cancel is a terminal transition of the parked node: the node's end line
+	// is stamped once, where the pause that might have started it left the
+	// start line alone.
+	canceledNode, err := state.GetNode(ctx, id, waiter)
+	if err != nil || canceledNode == nil {
+		t.Fatalf("GetNode(after cancel) = (%v, %v), want a snapshot", canceledNode, err)
+	}
+	if canceledNode.FinishedAt.IsZero() {
+		t.Errorf("FinishedAt is zero after CancelSuspendedNode: the cancel is the " +
+			"node's terminal transition and must stamp its end line")
 	}
 	if slices.Contains(after, waiter) {
 		t.Errorf("ListSuspendedNodes(after cancel) = %v, still contains %q. "+

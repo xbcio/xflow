@@ -270,6 +270,14 @@ func RunGroupStateContract(t *testing.T, newStore func(*testing.T) GroupStore) {
 		if ok, _ := s.AcquireGroupLease(ctx, lease(id, gu, "T1")); !ok {
 			t.Fatal("acquire must succeed")
 		}
+		queued, err := s.GetExecution(ctx, id)
+		if err != nil || queued == nil {
+			t.Fatalf("GetExecution before commit: snap=%v err=%v", queued, err)
+		}
+		// The group commit finalizes the execution inside the backend's
+		// transition, so the clock move must come from there; a millisecond
+		// backend needs the wall clock to advance.
+		time.Sleep(5 * time.Millisecond)
 		res, err := s.CommitGroup(ctx, commit(id, gu, "T1"))
 		if err != nil {
 			t.Fatalf("commit: %v", err)
@@ -277,6 +285,15 @@ func RunGroupStateContract(t *testing.T, newStore func(*testing.T) GroupStore) {
 		if !res.ExecutionDone || res.ExecutionStatus != types.ExecutionStatusSuccess {
 			t.Fatalf("single-group execution must complete on group commit (P0-2): done=%v status=%v",
 				res.ExecutionDone, res.ExecutionStatus)
+		}
+		done, err := s.GetExecution(ctx, id)
+		if err != nil || done == nil {
+			t.Fatalf("GetExecution after commit: snap=%v err=%v", done, err)
+		}
+		if !done.UpdatedAt.After(queued.UpdatedAt) {
+			t.Fatalf("UpdatedAt = %v after the finalizing group commit, want after %v: "+
+				"the commit is the only place this transition can stamp the clock",
+				done.UpdatedAt, queued.UpdatedAt)
 		}
 	})
 

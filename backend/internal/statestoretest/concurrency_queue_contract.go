@@ -185,12 +185,29 @@ func queuePromotesTheHeadOnRelease(t *testing.T, state engine.StateStore) {
 
 	holder, _ := queueSubmit(t, state, ctx, g, admission)
 	waiting, _ := queueSubmit(t, state, ctx, g, admission)
+	queued, err := state.GetExecution(ctx, waiting)
+	if err != nil || queued == nil {
+		t.Fatalf("GetExecution(queued) = (%v, %v), want a snapshot", queued, err)
+	}
+	// Leaving the queue is an accepted status transition, so it must advance
+	// the execution clock that inspect reports as updated_at. The sleep gives
+	// a millisecond-resolution backend room to move.
+	time.Sleep(5 * time.Millisecond)
 	if err := state.UpdateExecutionStatus(ctx, holder, types.ExecutionStatusSuccess, ""); err != nil {
 		t.Fatalf("UpdateExecutionStatus(success) error = %v", err)
 	}
 
 	if got := executionStatus(t, state, ctx, waiting); got != types.ExecutionStatusRunning {
 		t.Fatalf("promoted execution status = %q, want %q", got, types.ExecutionStatusRunning)
+	}
+	promoted, err := state.GetExecution(ctx, waiting)
+	if err != nil || promoted == nil {
+		t.Fatalf("GetExecution(promoted) = (%v, %v), want a snapshot", promoted, err)
+	}
+	if !promoted.UpdatedAt.After(queued.UpdatedAt) {
+		t.Fatalf("UpdatedAt = %v after promotion, want after %v: the queued→running "+
+			"transition was accepted and must move the execution clock",
+			promoted.UpdatedAt, queued.UpdatedAt)
 	}
 	if entries := readyOutbox(t, state, ctx, waiting); len(entries) != 1 {
 		t.Fatalf("promoted execution ready intents = %d, want its root intent delivered", len(entries))

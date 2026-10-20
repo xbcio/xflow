@@ -140,6 +140,17 @@ func RunEntryAdmissionContract(t *testing.T, newStore func(*testing.T) EntryAdmi
 		if resp.ExecutionID != expected {
 			t.Fatalf("execution ID = %q, want deterministic %q", resp.ExecutionID, expected)
 		}
+		// The admission creates the execution inside its seed transition; it
+		// must stamp the clock there too, or a trigger-created execution reads
+		// back from Inspect with no start line at all.
+		seeded, err := s.GetExecution(ctx, resp.ExecutionID)
+		if err != nil || seeded == nil {
+			t.Fatalf("GetExecution() after admission = (%v, %v), want a snapshot", seeded, err)
+		}
+		if seeded.CreatedAt.IsZero() || seeded.UpdatedAt.IsZero() {
+			t.Fatalf("admission-created execution timing = (%v, %v), want both non-zero",
+				seeded.CreatedAt, seeded.UpdatedAt)
+		}
 	})
 
 	t.Run("DuplicateAccepted_SameKeyAndHash", func(t *testing.T) {
@@ -209,6 +220,14 @@ func RunEntryAdmissionContract(t *testing.T, newStore func(*testing.T) EntryAdmi
 		}
 		if snap == nil {
 			t.Fatal("execution must exist after admission")
+		}
+		// The admission request names the workflow the entry unit belongs to.
+		// The created execution must carry it: Inspect/GET /v1/executions/{id}
+		// reads the identity off the snapshot, so dropping it here leaves every
+		// trigger-created execution unattributed while its SQL row is not.
+		if snap.WorkflowID != req.WorkflowID || snap.WorkflowVersion != req.WorkflowVersion {
+			t.Fatalf("execution identity = (%q, %q), want the admitted request's (%q, %q)",
+				snap.WorkflowID, snap.WorkflowVersion, req.WorkflowID, req.WorkflowVersion)
 		}
 	})
 
