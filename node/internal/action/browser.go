@@ -99,6 +99,8 @@ func (n *CDPNode) Descriptor() types.Descriptor {
 		Type:         browserCDPNodeType,
 		Kind:         types.NodeKindAction,
 		DisplayName:  "Browser Harvest (CDP)",
+		Category:     "action",
+		CardSummary:  []string{"entry_url", "target_host"},
 		Capabilities: []string{"browser.cdp.v1"},
 		Params: []types.ParamSpec{
 			{Name: "debugging_url", DisplayName: "CDP Endpoint", Type: types.ParamString, Required: true, Description: "Remote Chrome DevTools endpoint",

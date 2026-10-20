@@ -156,6 +156,8 @@ func (n *HTTPNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.http",
 		DisplayName: "HTTP Request",
+		Category:    "action",
+		CardSummary: []string{"method+url", "authentication"},
 		Credentials: []string{"http_auth"},
 		Params: []types.ParamSpec{
 			// Not Required: Execute falls back to GET, and the SDK writes the

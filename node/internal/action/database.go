@@ -44,6 +44,8 @@ func (n *DatabaseNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.database",
 		DisplayName: "Database",
+		Category:    "action",
+		CardSummary: []string{"operation+table", "credential", "where"},
 		Credentials: []string{"db_conn"},
 		Params: []types.ParamSpec{
 			{Name: "operation", DisplayName: "Operation", Type: types.ParamString, Required: true, Description: "DB operation: \"select\"/\"insert\"/\"update\"/\"delete\"/\"insert_many\"",
