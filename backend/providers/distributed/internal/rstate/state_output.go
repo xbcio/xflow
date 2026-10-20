@@ -50,6 +50,68 @@ func (s *Store) GetOutput(ctx context.Context, id types.ExecutionID, name string
 	return out, nil
 }
 
+// GetOutputs is the batch form of GetOutput (engine.BatchOutputReader). One
+// MGET reads every requested output of the execution.
+//
+// The keys share the execution's {id} hash tag (see keys.go), so the whole
+// batch lands in one Redis Cluster slot: a cluster client can serve it as a
+// single MGET instead of splitting it per slot or refusing it. That tag is what
+// makes this method safe on the clustered deployment this backend targets, so
+// do not build these keys any other way.
+//
+// A name with no stored output is absent from the result (MGET reports it as
+// nil), which is the same absence GetOutput encodes as nil, nil. A present but
+// corrupt value fails the whole batch with the offending name in the error:
+// partial success would let a node run on a silently truncated fan-in.
+func (s *Store) GetOutputs(ctx context.Context, id types.ExecutionID, names []string) (map[string]map[string]any, error) {
+	if len(names) == 0 {
+		return map[string]map[string]any{}, nil
+	}
+	t := namespace.FromContext(ctx)
+	keys := make([]string, 0, len(names))
+	unique := make([]string, 0, len(names))
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		unique = append(unique, name)
+		keys = append(keys, outputKey(t, id, name))
+	}
+	raws, err := s.rdb.MGet(ctx, keys...).Result()
+	if err != nil {
+		return nil, fmt.Errorf("mget outputs %q: %w", id, err)
+	}
+	// MGet returns one element per key, in key order. Treating a length
+	// mismatch as a backend failure keeps the positional mapping honest rather
+	// than decoding a value under the wrong name.
+	if len(raws) != len(unique) {
+		return nil, fmt.Errorf("mget outputs %q: got %d values for %d keys", id, len(raws), len(unique))
+	}
+	outputs := make(map[string]map[string]any, len(unique))
+	for i, raw := range raws {
+		if raw == nil {
+			continue
+		}
+		var payload []byte
+		switch v := raw.(type) {
+		case string:
+			payload = []byte(v)
+		case []byte:
+			payload = v
+		default:
+			return nil, fmt.Errorf("unexpected output value type %T for %q/%q", raw, id, unique[i])
+		}
+		out, err := s.decodeOutputValue(payload)
+		if err != nil {
+			return nil, fmt.Errorf("unmarshal output %q/%q: %w", id, unique[i], err)
+		}
+		outputs[unique[i]] = out
+	}
+	return outputs, nil
+}
+
 // ---------------------------------------------------------------------------
 // TTL renewal
 // ---------------------------------------------------------------------------

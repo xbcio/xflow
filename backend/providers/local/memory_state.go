@@ -1515,6 +1515,27 @@ func (s *memoryState) GetOutput(_ context.Context, id types.ExecutionID, name st
 	return s.outputs[string(id)+"/"+name], nil
 }
 
+// GetOutputs is the batch form of GetOutput (engine.BatchOutputReader). The
+// in-memory store has no round trips to amortize, but implementing the
+// interface keeps the engine's fan-in and $nodes read paths identical on both
+// backends instead of exercising the per-name fallback only in tests.
+//
+// The lock is the store's ordinary mutex: this backend has no RWMutex, and
+// taking the shared lock it does not have would require changing every reader.
+func (s *memoryState) GetOutputs(_ context.Context, id types.ExecutionID, names []string) (map[string]map[string]any, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// A missing name is absent from the result, mirroring GetOutput's nil, nil.
+	outputs := make(map[string]map[string]any, len(names))
+	prefix := string(id) + "/"
+	for _, name := range names {
+		if data, ok := s.outputs[prefix+name]; ok {
+			outputs[name] = data
+		}
+	}
+	return outputs, nil
+}
+
 // ---------------------------------------------------------------------------
 // Wait support
 // ---------------------------------------------------------------------------

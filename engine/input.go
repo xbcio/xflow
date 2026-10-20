@@ -84,27 +84,36 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 	}
 
 	if t.Type == TaskTypeNodeResume {
-		data, err := e.state.GetOutput(ctx, t.ExecutionID, t.NodeName)
-		if err != nil {
-			return nil, fmt.Errorf("get resumed node output %q/%q: %w", t.ExecutionID, t.NodeName, err)
-		}
 		// This is the one read that recovers the node's own private state. It
 		// comes from the node's own stored output, which only this node's commits
 		// write, so it is the one input channel no upstream node and no caller can
 		// seed -- see types.Input.State.
-		input.State, input.Data = splitNodeState(data)
-		applyExecutionScope(input, snap.Scope)
+		//
 		// A resumed node's parameters may also contain $nodes references that
 		// need resolving — the resume re-enters handler Execute with the same
-		// parameters, so $nodes must be available for template evaluation.
-		if err := prefetchNodesRefs(ctx, e, t, g, input); err != nil {
-			return nil, err
+		// parameters, so $nodes must be available for template evaluation. Both
+		// reads come from the same store and the same execution, so they merge
+		// into one batch when the backend supports it.
+		refs := g.NodesRefsFor(t.NodeIdx)
+		names := make([]string, 0, 1+len(refs))
+		names = append(names, t.NodeName)
+		names = append(names, refs...)
+		outputs, err := e.readOutputs(ctx, t.ExecutionID, names)
+		if err != nil {
+			return nil, fmt.Errorf("get resumed node output %q/%q: %w", t.ExecutionID, t.NodeName, err)
 		}
+		input.State, input.Data = splitNodeState(outputs[t.NodeName])
+		applyExecutionScope(input, snap.Scope)
+		mergeNodesRefs(input, refs, outputs)
 		stripNodeStateFromInput(input)
 		return input, nil
 	}
 
 	inEdges := g.NodeInEdges(t.NodeIdx)
+	refs := g.NodesRefsFor(t.NodeIdx)
+	// refOutputs holds a read that already covers refs, so the post-switch
+	// prefetch does not read them a second time. Nil means "not read yet".
+	var refOutputs map[string]map[string]any
 	// A cyclic workflow's start node on its first activation takes the
 	// submission params directly rather than reading its in-edges: the only
 	// edges into it come from around the cycle, and none of them have fired yet.
@@ -132,11 +141,27 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 		input.Data = StripNodeState(cloneMap(snap.Params))
 	case 1:
 		name := g.NodeName(inEdges[0].SrcIdx)
-		data, err := e.state.GetOutput(ctx, t.ExecutionID, name)
-		if err != nil {
-			return nil, fmt.Errorf("get upstream output %q/%q: %w", t.ExecutionID, name, err)
+		// With no $nodes references this is one read either way, so it keeps
+		// the plain GetOutput every one-edge node has always made. When the
+		// node also references peers, the upstream payload and those references
+		// ride the same batch instead of paying a second round trip.
+		if len(refs) == 0 {
+			data, err := e.state.GetOutput(ctx, t.ExecutionID, name)
+			if err != nil {
+				return nil, fmt.Errorf("get upstream output %q/%q: %w", t.ExecutionID, name, err)
+			}
+			input.Data = StripNodeState(cloneMap(data))
+			break
 		}
-		input.Data = StripNodeState(cloneMap(data))
+		names := make([]string, 0, 1+len(refs))
+		names = append(names, name)
+		names = append(names, refs...)
+		outputs, err := e.readOutputs(ctx, t.ExecutionID, names)
+		if err != nil {
+			return nil, fmt.Errorf("get upstream output %q: %w", t.ExecutionID, err)
+		}
+		input.Data = StripNodeState(cloneMap(outputs[name]))
+		refOutputs = outputs
 	default:
 		// Fan-in: expose every upstream output under the input port its edge
 		// targets, which is what $inputs is defined as -- the connection's
@@ -144,24 +169,35 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 		// name no port therefore share one key; that is the case the compiler
 		// warns about, because only one of the two payloads can be read.
 		//
+		// All upstream outputs -- and the node's $nodes references, when it has
+		// any -- are read before any of them is placed, so the fan-in costs one
+		// batch read instead of one round trip per inbound edge. The merge below
+		// still walks the edges in graph order, which is what keeps the "first
+		// non-nil payload wins a shared port" rule independent of the order the
+		// backend returned the map in.
+		//
 		// A nil output never overwrites a value already collected under the same
 		// key. An upstream that did not run has no output (GetOutput returns nil
 		// for it), and letting that nil win would turn "one arm of the fan-in was
 		// skipped" into "this port carries nothing". The key stays present either
 		// way, so $inputs.x still resolves -- to nil -- for a port nothing
 		// produced.
+		names := make([]string, 0, len(inEdges)+len(refs))
+		for _, edge := range inEdges {
+			names = append(names, g.NodeName(edge.SrcIdx))
+		}
+		names = append(names, refs...)
+		outputs, err := e.readOutputs(ctx, t.ExecutionID, names)
+		if err != nil {
+			return nil, fmt.Errorf("get upstream output %q: %w", t.ExecutionID, err)
+		}
 		inputs := make(map[string]any, len(inEdges))
 		for _, edge := range inEdges {
 			port := edge.DstPort
 			if port == "" {
 				port = types.DefaultInputPort
 			}
-			name := g.NodeName(edge.SrcIdx)
-			data, err := e.state.GetOutput(ctx, t.ExecutionID, name)
-			if err != nil {
-				return nil, fmt.Errorf("get upstream output %q/%q: %w", t.ExecutionID, name, err)
-			}
-			value := StripNodeState(cloneMap(data))
+			value := StripNodeState(cloneMap(outputs[g.NodeName(edge.SrcIdx)]))
 			if prev, seen := inputs[port]; seen && prev != nil && value == nil {
 				continue
 			}
@@ -175,10 +211,20 @@ func (e *Engine) buildInput(ctx context.Context, t *Task, g *graph.Graph) (*type
 		if main, ok := inputs[types.DefaultInputPort].(map[string]any); ok {
 			input.Data = cloneMap(main)
 		}
+		if len(refs) > 0 {
+			refOutputs = outputs
+		}
 	}
 	applyExecutionScope(input, snap.Scope)
-	if err := prefetchNodesRefs(ctx, e, t, g, input); err != nil {
-		return nil, err
+	// The local $nodes merge runs after applyExecutionScope because a local name
+	// wins over a snapshotted outer one (see prefetchNodesRefs); a read the
+	// switch already performed is simply merged here instead of being repeated.
+	if len(refs) > 0 {
+		if refOutputs != nil {
+			mergeNodesRefs(input, refs, refOutputs)
+		} else if err := prefetchNodesRefs(ctx, e, t, g, input); err != nil {
+			return nil, err
+		}
 	}
 	stripNodeStateFromInput(input)
 	return input, nil
@@ -249,21 +295,63 @@ func prefetchNodesRefs(ctx context.Context, e *Engine, t *Task, g *graph.Graph, 
 	if len(refs) == 0 {
 		return nil
 	}
+	outputs, err := e.readOutputs(ctx, t.ExecutionID, refs)
+	if err != nil {
+		return fmt.Errorf("get $nodes output %q: %w", t.ExecutionID, err)
+	}
+	mergeNodesRefs(input, refs, outputs)
+	return nil
+}
+
+// mergeNodesRefs copies the referenced outputs into input.Nodes. A name with no
+// stored output maps to a typed nil map, which is the form the $nodes contract
+// requires -- see Input.Nodes and TestInputNodes_UnexecutedIsTypedNilMap.
+func mergeNodesRefs(input *types.Input, refs []string, outputs map[string]map[string]any) {
+	if len(refs) == 0 {
+		return
+	}
 	if input.Nodes == nil {
 		input.Nodes = make(map[string]any, len(refs))
 	}
 	for _, name := range refs {
-		data, err := e.state.GetOutput(ctx, t.ExecutionID, name)
-		if err != nil {
-			return fmt.Errorf("get $nodes output %q/%q: %w", t.ExecutionID, name, err)
-		}
-		// data is map[string]any. On miss (node not executed) both backends
-		// return nil, nil — the static type is map[string]any so this assignment
-		// produces a typed nil map, which is the required form (see Input.Nodes
-		// field comment for why).
-		input.Nodes[name] = StripNodeState(data)
+		// outputs[name] is a typed nil map when the backend reported the output
+		// as missing (or omitted the name), which is exactly what GetOutput's
+		// nil, nil used to produce here.
+		input.Nodes[name] = StripNodeState(outputs[name])
 	}
-	return nil
+}
+
+// readOutputs reads the named node outputs of one execution, in a single batch
+// when the backend implements BatchOutputReader and one GetOutput per name
+// otherwise. The returned map omits names with no stored output; callers look
+// values up by name and therefore see a missing entry as a nil payload, which
+// is what GetOutput's nil, nil means.
+//
+// Duplicate names are read once. The caller's ordering never depends on the
+// returned map's iteration order: every caller walks the fixed sequence it
+// built (in-edges, or the sorted compile-time reference set) and addresses the
+// map by name.
+func (e *Engine) readOutputs(ctx context.Context, id types.ExecutionID, names []string) (map[string]map[string]any, error) {
+	if len(names) == 0 {
+		return map[string]map[string]any{}, nil
+	}
+	if reader, ok := e.state.(BatchOutputReader); ok {
+		// A backend that declares the capability is responsible for naming the
+		// failing output in its error; the caller adds the operation context.
+		return reader.GetOutputs(ctx, id, names)
+	}
+	outputs := make(map[string]map[string]any, len(names))
+	for _, name := range names {
+		if _, seen := outputs[name]; seen {
+			continue
+		}
+		data, err := e.state.GetOutput(ctx, id, name)
+		if err != nil {
+			return nil, fmt.Errorf("get output %q/%q: %w", id, name, err)
+		}
+		outputs[name] = data
+	}
+	return outputs, nil
 }
 
 func cloneRuntime(runtime *types.Runtime) *types.Runtime {

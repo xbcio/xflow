@@ -93,6 +93,29 @@ type Outputs interface {
 	GetOutput(ctx context.Context, id types.ExecutionID, name string) (map[string]any, error)
 }
 
+// BatchOutputReader is the optional batch form of Outputs.GetOutput: it reads
+// many node outputs of one execution in a single round trip.
+//
+// buildInput is its only caller, and it reads outputs in exactly the places
+// where a node's shape makes the count large: a fan-in reads one output per
+// inbound edge, and a $nodes prefetch reads one per referenced node. Asked one
+// name at a time, a node with F inbound edges and R references paid F+R
+// sequential round trips before its handler could even start — the read side of
+// the same fan-in cost the batch commit's write side already amortizes.
+//
+// The result maps output name to payload. A name with no stored output is
+// ABSENT from the map, which is the same absence GetOutput reports as
+// (nil, nil); callers must therefore treat a missing key as a nil payload. The
+// returned map's iteration order carries no meaning — callers address it by
+// name — and duplicate names in names are one read, not two.
+//
+// A backend that does not implement this interface is read one name at a time
+// by the caller, so the two forms MUST agree per name for the same reason
+// ExecutionStatusBatchReader and ExecutionStatusReader must.
+type BatchOutputReader interface {
+	GetOutputs(ctx context.Context, id types.ExecutionID, names []string) (map[string]map[string]any, error)
+}
+
 // Events publishes and watches execution lifecycle events.
 type Events interface {
 	PublishExecutionEvent(ctx context.Context, event ExecutionEvent) error

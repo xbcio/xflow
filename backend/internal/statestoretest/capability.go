@@ -41,6 +41,7 @@ const (
 	CapabilityDurableSignalDeliverer   Capability = "DurableSignalDeliverer"
 	CapabilityNodeLeaseRenewer         Capability = "NodeLeaseRenewer"
 	CapabilityCancelingExecutionLister Capability = "CancelingExecutionLister"
+	CapabilityBatchOutputReader        Capability = "BatchOutputReader"
 
 	CapabilityGroupStateStore      Capability = "GroupStateStore"
 	CapabilityGroupLeaseExpirer    Capability = "GroupLeaseExpirer"
@@ -138,6 +139,14 @@ var capabilitySpecs = map[Capability]capabilitySpec{
 		summary: "listing executions stuck in the canceling status (ListCancelingExecutions)",
 		implements: func(v any) bool {
 			_, ok := v.(engine.CancelingExecutionLister)
+			return ok
+		},
+	},
+	CapabilityBatchOutputReader: {
+		iface:   "engine.BatchOutputReader",
+		summary: "reading many node outputs in one round trip (GetOutputs)",
+		implements: func(v any) bool {
+			_, ok := v.(engine.BatchOutputReader)
 			return ok
 		},
 	},

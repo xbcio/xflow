@@ -25,6 +25,7 @@ var rstateCapabilities = []statestoretest.Capability{
 	statestoretest.CapabilityDurableSignalDeliverer,
 	statestoretest.CapabilityNodeLeaseRenewer,
 	statestoretest.CapabilityCancelingExecutionLister,
+	statestoretest.CapabilityBatchOutputReader,
 	statestoretest.CapabilityGroupStateStore,
 	statestoretest.CapabilityGroupLeaseExpirer,
 	statestoretest.CapabilityGroupLeaseReader,
