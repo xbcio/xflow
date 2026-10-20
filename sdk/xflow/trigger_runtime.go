@@ -439,6 +439,17 @@ func (p pausedRuntime) Dedup(ctx context.Context, key string, ttl time.Duration)
 	return p.inner.Dedup(ctx, key, ttl)
 }
 
+// ReleaseDedup passes the optional capability through. A paused runtime never
+// fails an emit (it drops it), so nothing calls this on one today; forwarding
+// keeps the wrapper from hiding a capability of the runtime it wraps, for the
+// same reason GetExecutionStatus forwards.
+func (p pausedRuntime) ReleaseDedup(ctx context.Context, key string) error {
+	if releaser, ok := p.inner.(backend.DedupReleaser); ok {
+		return releaser.ReleaseDedup(ctx, key)
+	}
+	return fmt.Errorf("paused trigger runtime: wrapped runtime does not support dedup release")
+}
+
 func (p pausedRuntime) TryLock(ctx context.Context, key string, ttl time.Duration) (types.TriggerLock, bool, error) {
 	return p.inner.TryLock(ctx, key, ttl)
 }
@@ -606,6 +617,20 @@ func (r *triggerRuntime) Emit(ctx context.Context, workflowID types.WorkflowID, 
 
 func (r *triggerRuntime) Dedup(ctx context.Context, key string, ttl time.Duration) (bool, error) {
 	return r.primitives.Dedup(ctx, key, ttl)
+}
+
+// ReleaseDedup undoes a Dedup claim whose emission failed, so a redelivery of
+// the same event is not dropped as a duplicate for the rest of the TTL. It is
+// the optional backend.DedupReleaser capability: the primitives own the key's
+// storage and namespace scoping, so the runtime can only forward. Primitives
+// without the capability report an error, which the caller logs while still
+// returning the original emit failure.
+func (r *triggerRuntime) ReleaseDedup(ctx context.Context, key string) error {
+	releaser, ok := r.primitives.(backend.DedupReleaser)
+	if !ok {
+		return fmt.Errorf("trigger runtime: primitives %T do not support dedup release", r.primitives)
+	}
+	return releaser.ReleaseDedup(ctx, key)
 }
 
 func (r *triggerRuntime) TryLock(ctx context.Context, key string, ttl time.Duration) (types.TriggerLock, bool, error) {

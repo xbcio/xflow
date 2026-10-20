@@ -37,6 +37,30 @@ const defaultRunnerShutdownTimeout = 10 * time.Second
 // pin a worker forever. This cap releases the worker back to the pool.
 const defaultReportTimeout = 15 * time.Second
 
+// Deadlines for the runner's other unary outbound RPCs. A half-open connection
+// otherwise blocks the calling loop forever: a hung heartbeat means
+// heartbeatGrace is never evaluated, so the session is never ended; a hung poll
+// parks the claim loop; a hung registration never reaches the SDK reconnect
+// loop. Converting each hang into an ordinary transport error is what lets the
+// existing failure handling (grace, reconnect, renewal retries) run at all.
+const (
+	// defaultRegisterTimeout bounds the one-shot session registration. It is
+	// generous relative to a healthy server, which validates descriptors and
+	// snapshots session state, but short enough that a dead control plane hands
+	// control back to the reconnect loop promptly.
+	defaultRegisterTimeout = 15 * time.Second
+	// defaultPollTimeout bounds one long-poll. The server holds a poll for at
+	// most its pollWait (1s, or 100ms while a claim walk is pending), so this is
+	// dominated by transport health, not server hold time. A hung poll must fail
+	// so pollLoop can return instead of parking the claim loop forever.
+	defaultPollTimeout = 30 * time.Second
+	// defaultHeartbeatTimeout bounds one heartbeat. It must leave
+	// defaultHeartbeatGrace enough budget to distinguish a hung call from a
+	// stopping run: a timeout past the grace immediately ends the session, which
+	// re-registers and invalidates every lease the session's workers still run.
+	defaultHeartbeatTimeout = 10 * time.Second
+)
+
 type ProtocolClient interface {
 	Register(ctx context.Context, req protocol.RegisterRunnerRequest) (protocol.RegisterRunnerResponse, error)
 	Heartbeat(ctx context.Context, req protocol.HeartbeatRequest) (protocol.HeartbeatResponse, error)
@@ -207,6 +231,12 @@ type Runner struct {
 	// the last success (or from registration), before the session is ended.
 	// Always defaultHeartbeatGrace outside tests.
 	heartbeatGrace time.Duration
+	// registerTimeout, pollTimeout and heartbeatTimeout bound one outbound
+	// unary RPC each (see the defaults above). Always their default constants
+	// outside tests.
+	registerTimeout  time.Duration
+	pollTimeout      time.Duration
+	heartbeatTimeout time.Duration
 	// now is the clock heartbeatGrace is measured on. Always time.Now outside
 	// tests.
 	now func() time.Time
@@ -249,6 +279,9 @@ func New(client ProtocolClient, registry engine.HandlerRegistry, config Config) 
 		active:            newActiveLeases(),
 		shutdownTimeout:   defaultRunnerShutdownTimeout,
 		heartbeatGrace:    defaultHeartbeatGrace,
+		registerTimeout:   defaultRegisterTimeout,
+		pollTimeout:       defaultPollTimeout,
+		heartbeatTimeout:  defaultHeartbeatTimeout,
 		now:               time.Now,
 	}
 	if config.ActivationTracker != nil {
@@ -273,7 +306,8 @@ func (r *Runner) Run(ctx context.Context) error {
 	if r.activationTracker != nil {
 		inventory = r.activationTracker.Inventory()
 	}
-	registerResp, err := r.client.Register(ctx, protocol.RegisterRunnerRequest{
+	registerCtx, registerCancel := context.WithTimeout(ctx, r.registerTimeout)
+	registerResp, err := r.client.Register(registerCtx, protocol.RegisterRunnerRequest{
 		RunnerID:           r.config.RunnerID,
 		Concurrency:        r.config.Concurrency,
 		Capabilities:       r.config.Capabilities,
@@ -284,6 +318,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		InstanceUID:        r.config.InstanceUID,
 		DescriptorsJSON:    r.config.DescriptorsJSON,
 	})
+	registerCancel()
 	if err != nil {
 		return runContextError(ctx, err)
 	}
@@ -476,7 +511,8 @@ func (r *Runner) pollLoop(ctx context.Context, sessionID string, leaseCh chan<- 
 			}
 			continue
 		}
-		resp, err := r.client.Poll(ctx, protocol.PollTaskRequest{
+		pollCtx, pollCancel := context.WithTimeout(ctx, r.pollTimeout)
+		resp, err := r.client.Poll(pollCtx, protocol.PollTaskRequest{
 			RunnerID:     r.config.RunnerID,
 			SessionID:    sessionID,
 			Capacity:     r.config.Concurrency,
@@ -489,6 +525,7 @@ func (r *Runner) pollLoop(ctx context.Context, sessionID string, leaseCh chan<- 
 			// second time while the first worker is still on it.
 			ActiveLeaseIDs: active.snapshot(),
 		})
+		pollCancel()
 		if err != nil {
 			return runContextError(ctx, err)
 		}
@@ -923,7 +960,9 @@ func (r *Runner) heartbeat(ctx context.Context, sessionID string, inFlight int) 
 			ActiveActivations: r.activationTracker.ActiveCount(),
 		}
 	}
-	return r.client.Heartbeat(ctx, req)
+	beatCtx, cancel := context.WithTimeout(ctx, r.heartbeatTimeout)
+	defer cancel()
+	return r.client.Heartbeat(beatCtx, req)
 }
 
 // supplyKeyID reports which supply encryption key this runner currently holds,

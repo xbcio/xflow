@@ -46,7 +46,9 @@ type Store struct {
 
 	// per-execution transient overrides (set via per-workflow transient context).
 	// This is a read-through cache over the Redis marker, not the source of
-	// truth -- see lookupTransient. Negative entries are cached too.
+	// truth -- see lookupTransient. Only verdicts backed by durable evidence are
+	// cached: an explicit marker or a confirmed SQL row. A "no evidence" answer
+	// is deliberately re-derived.
 	transientMu   sync.RWMutex
 	execTransient map[types.ExecutionID]transientMark
 
@@ -214,9 +216,10 @@ type transientMark struct {
 	transient     bool
 	ttl           time.Duration
 	completionTTL time.Duration
-	// durableConfirmed records that SQL holds an execution row for this ID, so
-	// the "durable" verdict rests on a fact that cannot expire. See
-	// lookupTransient.
+	// durableConfirmed records that the "durable" verdict rests on evidence that
+	// cannot turn into its opposite: the explicit durable marker written in the
+	// execution's create transaction, or -- for an execution created before that
+	// marker existed -- an execution row in SQL. See lookupTransient.
 	durableConfirmed bool
 }
 
@@ -232,10 +235,27 @@ type transientMark struct {
 // durable workflows -- and projecting the node payload into SQL. Redis is the
 // only place all replicas can see.
 //
-// The cache holds negative entries too, so a durable execution pays the Redis
-// round-trip once per replica rather than once per state mutation. Entries are
-// dropped by evictExecutionCaches when the execution reaches a terminal state,
-// giving them the same lifetime as the graph and TTL caches beside them.
+// The authoritative evidence is the per-execution marker written while the
+// execution is created: field "transient" names an execution that opted out of
+// SQL projection, field "durable" an execution whose row is expected there. The
+// durable marker exists so transience is never inferred from a bare SQL miss.
+// The projection is a best-effort follow-up that lands after the Redis commit,
+// so during that lag the row's absence says nothing about the execution's mode;
+// inferring "transient" from it -- and caching that verdict -- made a
+// cross-replica execution skip its audit projection permanently once the row
+// did land.
+//
+// Marker absence is the only case that still asks SQL. Executions created
+// before the durable marker existed, and transient executions whose marker
+// lapsed, both look that way. A row confirms durable and is cached. No row
+// keeps the fail-closed transient answer for THIS call but is deliberately not
+// cached, because it becomes wrong as soon as the projection lands.
+//
+// The cache holds only verdicts backed by durable evidence, so a durable
+// execution pays the Redis round-trip once per replica rather than once per
+// state mutation. Entries are dropped by evictExecutionCaches when the
+// execution reaches a terminal state, giving them the same lifetime as the
+// graph and TTL caches beside them.
 //
 // A Redis read failure resolves to transient. Losing an audit row is a
 // best-effort miss the storage contract already permits; persisting the payload
@@ -245,10 +265,10 @@ func (s *Store) lookupTransient(ctx context.Context, id types.ExecutionID) trans
 	s.transientMu.RLock()
 	mark, ok := s.execTransient[id]
 	s.transientMu.RUnlock()
-	// A negative entry is only as trustworthy as the evidence behind it: the
-	// absence of a Redis marker is exactly what a lapsed transient marker looks
-	// like, so a bare "no marker" verdict is re-confirmed (below) rather than
-	// cached as final.
+	// Only a verdict backed by durable evidence is reusable: an explicit marker
+	// (either mode) or a confirmed SQL row. "Nothing says transient" is not
+	// evidence -- the marker can lapse and the SQL row can lag the create -- so
+	// that answer is re-derived instead of cached.
 	if ok && (mark.transient || mark.durableConfirmed) {
 		return mark
 	}
@@ -269,30 +289,42 @@ func (s *Store) lookupTransient(ctx context.Context, id types.ExecutionID) trans
 		return transientMark{transient: true, ttl: s.transientTTL, completionTTL: s.transientCompletionTTL}
 	}
 	resolved := transientMark{}
-	if len(fields) > 0 {
+	switch {
+	case fieldPresent(fields, "transient"):
+		// The explicit transient marker. Its presence is the signal; the TTL
+		// fields only carry per-workflow overrides.
 		resolved.transient = true
 		resolved.ttl = parseDurationMillis(fields["ttl_ms"])
 		resolved.completionTTL = parseDurationMillis(fields["completion_ttl_ms"])
+	case fieldPresent(fields, "durable"):
+		// The explicit durable marker. No SQL round-trip: it was written by the
+		// same creation that made the execution visible, so it is already on
+		// every replica -- and it cannot be contradicted by a slow projection.
+		resolved.durableConfirmed = true
+	case len(fields) > 0:
+		// A marker this code does not write. Fail closed rather than guess.
+		resolved.transient = true
+		resolved.ttl = s.transientTTL
+		resolved.completionTTL = s.transientCompletionTTL
 	}
-	// No marker is not proof of durability, and treating it as proof is how this
-	// went wrong. transientTTL bounds run time and nothing enforces it, so an
-	// execution that outlives its marker reads as durable and has its node
-	// output projected into SQL -- while the execution row it should have
-	// matched was never created, which is the observed shape (xflow_nodes > 0
-	// with xflow_executions = 0). The margin on the marker's TTL narrows that
-	// window; it cannot close it, because a long enough execution beats any TTL.
-	//
-	// The row's existence is the durable answer: admission writes the row for
-	// exactly the executions that are not transient. So when Redis has no
-	// marker, ask SQL once and cache a verdict that cannot expire.
-	if !resolved.transient && s.db != nil {
+
+	// No marker at all: the execution was created before the durable marker
+	// existed, or its transient marker lapsed. SQL is a fallback for exactly
+	// this markerless case, never the authority.
+	if len(fields) == 0 && s.db != nil {
 		switch _, err := s.db.GetExecution(ctx, id); {
 		case err == nil:
 			resolved.durableConfirmed = true
 		case errors.Is(err, store.ErrNotFound):
+			// The row's absence is NOT evidence of transience: the projection is
+			// a best-effort follow-up that may not have landed yet (or ever, for
+			// a genuinely transient execution). Keep the fail-closed answer for
+			// this call and do NOT cache it; the next call re-asks, so the
+			// verdict repairs itself as soon as the row appears.
 			resolved.transient = true
 			resolved.ttl = s.transientTTL
 			resolved.completionTTL = s.transientCompletionTTL
+			return resolved
 		default:
 			// The store is unreadable, which is not evidence either way. Keep the
 			// durable verdict and proceed: the projection this unlocks writes to
@@ -307,10 +339,20 @@ func (s *Store) lookupTransient(ctx context.Context, id types.ExecutionID) trans
 			return resolved
 		}
 	}
-	s.transientMu.Lock()
-	s.execTransient[id] = resolved
-	s.transientMu.Unlock()
+	if resolved.transient || resolved.durableConfirmed {
+		s.transientMu.Lock()
+		s.execTransient[id] = resolved
+		s.transientMu.Unlock()
+	}
 	return resolved
+}
+
+// fieldPresent reports whether an HGETALL reply carries name. An empty hash
+// arrives as an empty map, so presence -- not truthiness -- is the marker's
+// signal.
+func fieldPresent(fields map[string]string, name string) bool {
+	_, ok := fields[name]
+	return ok
 }
 
 // rememberTransient records a verdict this replica established itself, so later
@@ -391,6 +433,32 @@ func (s *Store) markExecutionTransient(ctx context.Context, pipe redis.Pipeliner
 	s.transientMu.Lock()
 	s.execTransient[id] = transientMark{transient: true, ttl: ttl, completionTTL: completionTTL}
 	s.transientMu.Unlock()
+}
+
+// markExecutionDurable records the explicit durable verdict in Redis so every
+// replica resolves the execution without consulting the SQL projection.
+//
+// The write belongs to creation, in the same transaction (or, on the seed
+// paths, before the script) that makes the execution visible: otherwise a
+// replica can observe the execution while SQL has no row for it and -- before
+// this marker existed -- cache the missing row as "transient" forever. The
+// projection is a best-effort follow-up by contract; it cannot be the witness
+// that decides whether projection may run.
+//
+// Invalidation: the marker uses the same key as the transient marker, so the
+// creation/rollback inventory (createdExecutionKeys) already covers it, and
+// commitNodeLua's exists-guarded EXPIRE keeps it alive alongside the node keys.
+// TTL follows markerTTL for the same reason the transient marker does: the
+// marker must outlive every execution-scoped key whose mode it qualifies, so its
+// absence never becomes evidence.
+//
+// The caller remains responsible for priming the local cache
+// (rememberTransient); this helper is the cross-replica half only.
+func (s *Store) markExecutionDurable(ctx context.Context, pipe redis.Pipeliner, id types.ExecutionID, keyTTL time.Duration) {
+	pipe.HSet(ctx, transientMarkKey(namespace.FromContext(ctx), id), "durable", 1)
+	if ttl := markerTTL(keyTTL); ttl > 0 {
+		pipe.Expire(ctx, transientMarkKey(namespace.FromContext(ctx), id), ttl)
+	}
 }
 
 func executionKeySetKey(t namespace.Namespace, id types.ExecutionID) string {

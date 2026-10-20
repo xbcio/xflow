@@ -148,6 +148,26 @@ func (e *Engine) executeSubWorkflow(ctx context.Context, task *Task, g *graph.Gr
 	}
 	generation := subWorkflowGeneration(task.Generation)
 	child, cause := e.startSubWorkflowChild(ctx, task, g, meta, generation)
+	if cause == nil {
+		// The status read inside startSubWorkflowChild happened before the child
+		// existed, and the inline cancel cascade walks recorded links — which this
+		// dispatch has not written yet. A cancel landing between the two is
+		// therefore visible to neither, so the dispatch re-reads the parent here,
+		// before it commits to the park. Without this read the node would park and
+		// the child would run until the wait's reclaim (up to subWorkflowWaitTTL)
+		// rediscovered the parent, even though the answer is already decided.
+		canceling, err := e.subWorkflowParentCanceling(ctx, task.ExecutionID)
+		if err != nil {
+			// Fail the dispatch instead of parking on an unreadable status: a park
+			// commits the wait for a parent that may already be canceled, and undoing
+			// that commit is exactly the reclaim delay this check exists to avoid.
+			// The failed delivery is retried by the sweeper, and the retry re-reads.
+			return fmt.Errorf("re-read parent execution %q after starting child %q: %w", task.ExecutionID, child.ID, err)
+		}
+		if canceling {
+			cause = errSubWorkflowParentCanceling
+		}
+	}
 	if errors.Is(cause, errSubWorkflowParentCanceling) {
 		// The parent is on its way down: this delivery raced the inline cancel
 		// cascade, or the cancel landed before the child existed. Either way the

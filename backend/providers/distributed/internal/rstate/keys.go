@@ -44,10 +44,19 @@ func execKey(t namespace.Namespace, id types.ExecutionID, suffix string) string 
 	return fmt.Sprintf("xflow:ns:%s:exec:{%s}:%s", t, id, suffix)
 }
 
-// transientMarkKey holds the per-execution transient marker. It shares the
-// {id} hash tag with the rest of the execution's keys so a replica can read it
-// in the same slot, and it is written inside CreateExecution's transaction so
-// no replica can observe the execution before its transient decision.
+// transientMarkKey holds the per-execution mode marker: field "transient" for
+// an execution that opted out of SQL projection, field "durable" for one whose
+// row is expected there. Creation writes it -- for every execution -- before or
+// in the transaction that makes the execution visible, so no replica can
+// observe the execution without its decision.
+//
+// The durable field is what keeps a lagging SQL projection from being read as
+// evidence of transience. Its absence remains meaningful in the opposite
+// direction: an execution that outlived its transient marker also has no marker,
+// which is why markerless lookups still fail closed.
+//
+// It shares the {id} hash tag with the rest of the execution's keys so a
+// replica can read it in the same slot.
 func transientMarkKey(t namespace.Namespace, id types.ExecutionID) string {
 	return execKey(t, id, "transient")
 }

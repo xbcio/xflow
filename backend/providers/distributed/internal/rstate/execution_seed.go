@@ -350,6 +350,21 @@ func (s *Store) SeedExecution(ctx context.Context, req engine.SeedExecutionReque
 		}
 	}
 
+	// The explicit durable marker, written before the Lua creates the execution
+	// for the same reason the transient marker above is: from the instant the
+	// execution exists another replica can lease a node. Without a marker that
+	// replica asks SQL, whose row this path projects only after the Lua and
+	// best-effort even then, and caches the projection lag as "transient" --
+	// permanently skipping this execution's audit writes. Store-wide transient
+	// mode writes no marker, matching createExecution.
+	if !s.transient && (req.Execution.Graph == nil || !req.Execution.Graph.Transient()) {
+		pipe := s.rdb.TxPipeline()
+		s.markExecutionDurable(ctx, pipe, execID, ttl)
+		if _, err := pipe.Exec(ctx); err != nil {
+			return engine.SeedExecutionResponse{}, fmt.Errorf("mark durable execution %q: %w", execID, err)
+		}
+	}
+
 	// The execution this one derives from, and — for a rerun — the node it starts
 	// at (see the ExecutionSeeder contract, step 2). Written before the Lua, with
 	// the retention record above and for the same reason: it is immutable
@@ -383,10 +398,9 @@ func (s *Store) SeedExecution(ctx context.Context, req engine.SeedExecutionReque
 	}
 
 	// Prime the verdict when the graph is NOT transient: this call is
-	// authoritative for the execution, and the SQL projection below would
-	// otherwise ask isTransient, find no marker -- none is written for a durable
-	// execution -- and fall through to the SQL confirmation against a row that
-	// does not exist yet, misreading every seeded execution as transient.
+	// authoritative for the execution, and the durable marker above is already in
+	// Redis, but priming keeps the SQL projection below from paying a Redis
+	// round-trip to re-learn what this call already knows.
 	if !s.transient && (req.Execution.Graph == nil || !req.Execution.Graph.Transient()) {
 		s.rememberTransient(execID, transientMark{durableConfirmed: true})
 	}

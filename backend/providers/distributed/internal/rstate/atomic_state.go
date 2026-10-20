@@ -121,18 +121,21 @@ redis.call('HSET', KEYS[6],
     'committed_lease_token', ARGV[3],
     'committed_attempt', ARGV[4])
 redis.call('EXPIRE', KEYS[6], ttl)
--- Keep the per-execution transient marker alive for as long as this commit
--- keeps the node keys alive.
+-- Keep the per-execution mode marker alive for as long as this commit keeps
+-- the node keys alive.
 --
--- The marker is written once at CreateExecution and was never refreshed, while
--- the node keys are re-EXPIREd here on every commit. An execution that runs
--- longer than transientTTL therefore outlived its own marker, and isTransient
--- read the absent marker as "durable" -- the one answer that must never be
--- wrong, because it decides whether commit_node's SQL projection runs. Measured
--- on a real deployment: 187 rows in xflow_nodes with zero matching rows in
--- xflow_executions, i.e. raw traffic from transient executions persisted.
+-- The marker is written once at creation and would otherwise never be
+-- refreshed, while the node keys are re-EXPIREd here on every commit. An
+-- execution that runs longer than transientTTL therefore outlived its own
+-- marker, and isTransient read the absent marker as "durable" -- the one answer
+-- that must never be wrong, because it decides whether commit_node's SQL
+-- projection runs. Measured on a real deployment: 187 rows in xflow_nodes with
+-- zero matching rows in xflow_executions, i.e. raw traffic from transient
+-- executions persisted.
 --
--- EXISTS-guarded so a durable execution, which has no marker, is untouched.
+-- Creation now writes a marker for durable executions too, so this refresh is
+-- uniform: for a transient execution it is what keeps the payload out of SQL,
+-- and for a durable one it only extends a verdict that cannot change.
 -- The factor 2 mirrors transientMarkerTTLFactor in state.go: the marker must
 -- outlive the node keys it qualifies, so a path that extends node keys without
 -- refreshing the marker still cannot make it lapse first.

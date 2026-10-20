@@ -26,6 +26,13 @@ import (
 type subWorkflowLinkState struct {
 	*fakeState
 	links map[string]SubWorkflowLink // key: execID+"/"+nodeName
+	// onExecutionCreated, when set, runs after an execution is durably created.
+	// It is how a test lands work in the create-then-park window, which has no
+	// link for any other actor to observe.
+	onExecutionCreated func(id types.ExecutionID)
+	// readError, when it answers an error for an id, makes GetExecution fail —
+	// the shape of a status read that cannot answer between start and park.
+	readError func(id types.ExecutionID) error
 }
 
 var _ SubWorkflowLinkStore = (*subWorkflowLinkState)(nil)
@@ -35,6 +42,29 @@ func newSubWorkflowLinkState() *subWorkflowLinkState {
 		fakeState: newFakeState(),
 		links:     make(map[string]SubWorkflowLink),
 	}
+}
+
+// CreateExecutionWithOutbox delegates to the embedded fake and then runs the
+// optional post-create hook. The atomic path is the one startExecution takes
+// with this store, so this is where a test can interleave a cancel after the
+// child record exists but before the dispatch parks the parent.
+func (s *subWorkflowLinkState) CreateExecutionWithOutbox(ctx context.Context, execution *ExecutionSnapshot, entries []OutboxEntry) error {
+	if err := s.fakeState.CreateExecutionWithOutbox(ctx, execution, entries); err != nil {
+		return err
+	}
+	if s.onExecutionCreated != nil {
+		s.onExecutionCreated(execution.ID)
+	}
+	return nil
+}
+
+func (s *subWorkflowLinkState) GetExecution(ctx context.Context, id types.ExecutionID) (*ExecutionSnapshot, error) {
+	if s.readError != nil {
+		if err := s.readError(id); err != nil {
+			return nil, err
+		}
+	}
+	return s.fakeState.GetExecution(ctx, id)
 }
 
 // BeginSubWorkflowWait fences on the documented lease identity and claimable

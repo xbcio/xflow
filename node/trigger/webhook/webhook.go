@@ -14,6 +14,7 @@ import (
 	"github.com/xbcio/xflow/node/registry"
 
 	"github.com/spf13/cast"
+	"github.com/xbcio/xflow/node/trigger/internal/emitonce"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -163,11 +164,10 @@ func (n *Node) Activate(ctx context.Context, in *types.TriggerActivateInput) (ty
 			},
 			Raw: body,
 		}
-		ok, err := in.Runtime.Dedup(reqCtx, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+event.ID, 24*time.Hour)
-		if err != nil || !ok {
-			return event, err
-		}
-		_, err = in.Emit(reqCtx, event)
+		// A failed emit releases the dedup claim, so the sender's retry is
+		// processed instead of being answered as a duplicate for 24h. A
+		// duplicate returns no error: an earlier delivery already handled it.
+		_, err = emitonce.Emit(reqCtx, in, "trigger:"+string(in.WorkflowID)+":"+in.NodeName+":"+event.ID, 24*time.Hour, event)
 		return event, err
 	})
 }
