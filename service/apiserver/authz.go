@@ -77,7 +77,12 @@ type Authorizer interface {
 const (
 	OpWorkflowCreate = "workflow.create"
 	OpWorkflowInvoke = "workflow.invoke"
-	OpWorkflowRead   = "workflow.read"
+	// OpWorkflowRead is the definition read: GET /v1/workflows,
+	// GET /v1/workflows/{id}, the node-type schemas they are written against, and
+	// the version history. It requires the read-only ScopeWorkflowRead; every
+	// workflow mutation still requires ScopeWorkflow, which implies the read
+	// half (policy in principalAllowsOperation).
+	OpWorkflowRead = "workflow.read"
 	// OpWorkflowRegister is the mutation that persists a compiled workflow graph
 	// into the server-side registry via POST /v1/workflows/register, and its
 	// deregister counterpart via DELETE /v1/workflows/register/{id}. It maps to
@@ -137,8 +142,11 @@ const (
 	// identity. It reports what the presented credential already carries — the
 	// subject the server authenticated, the namespace it is bound to, and the
 	// scopes it was issued — so it grants a caller nothing it could not learn by
-	// attempting the operations those scopes name. See scopeForOperation for why
-	// it deliberately rides an existing scope instead of getting one of its own.
+	// attempting the operations those scopes name. It therefore requires
+	// authentication only: any scope this route demanded would refuse a caller
+	// the ability to read what its credential already holds, and a console that
+	// cannot read its own scopes cannot derive its capabilities at all (B5). See
+	// ScopeAuthenticatedOnly.
 	//
 	// Like every operation here, it MUST also appear in scopeForOperation or the
 	// route is silently unreachable.
@@ -215,14 +223,37 @@ const (
 	ScopeManagementRunnerControlGlobal = "management.runner.control_global"
 )
 
+// Scope vocabulary for the workflow read/write split (B5). A definition read
+// requires ScopeWorkflowRead; every mutation (create, register, update,
+// rollback, invoke) still requires ScopeWorkflow. The write scope implies the
+// read scope in principalAllowsOperation, so carving the read half out never
+// takes a read away from a token issued before the split: a read-only
+// credential holds ScopeWorkflowRead alone and is refused every mutation.
+const (
+	ScopeWorkflow     = "workflow"
+	ScopeWorkflowRead = "workflow.read"
+)
+
+// ScopeAuthenticatedOnly is the pseudo-scope for an operation that requires a
+// verified principal but no grant. Authentication happens in the authz wrapper
+// before any Authorizer runs; returning this sentinel from scopeForOperation
+// keeps the route on the same deny-by-default path as every other operation
+// (the coverage guard requires every Op to name a non-empty scope) without
+// refusing a caller access to its own credential. No other operation maps to
+// it, so a credential that happened to carry it as a scope would gain nothing.
+const ScopeAuthenticatedOnly = "authenticated"
+
 // scopeForOperation maps an operation to the scope it requires. A principal
-// must hold the scope to be allowed. This is the G1 single-namespace reference
-// policy; G2/G3 may substitute a richer authorizer.
+// must hold the scope to be allowed (ScopeWorkflowRead is also satisfied by
+// ScopeWorkflow; see principalAllowsOperation). This is the G1 single-namespace
+// reference policy; G2/G3 may substitute a richer authorizer.
 func scopeForOperation(op string) string {
 	switch op {
-	case OpWorkflowCreate, OpWorkflowInvoke, OpWorkflowRead,
+	case OpWorkflowRead:
+		return ScopeWorkflowRead
+	case OpWorkflowCreate, OpWorkflowInvoke,
 		OpWorkflowRegister, OpWorkflowDefinitionUpdate:
-		return "workflow"
+		return ScopeWorkflow
 	case OpExecutionRead, OpExecutionSignal, OpExecutionRevoke, OpExecutionCancel, OpExecutionSeed:
 		return "execution"
 	case OpExecutionRerun:
@@ -243,15 +274,14 @@ func scopeForOperation(op string) string {
 		// than silently granted the control.
 		return "execution.control"
 	case OpCurrentUserRead:
-		// Deliberately the console's baseline read scope rather than a scope of
-		// its own. The response is the caller's own credential, so a scope here
-		// can never protect anything — it can only refuse a caller the ability to
-		// read what they are already holding. A dedicated scope would additionally
-		// take the endpoint away from every token already issued, which is a
-		// silent UI degradation for a route that guards nothing. Give it its own
-		// scope only if a future requirement makes a principal's own identity
-		// sensitive to that principal.
-		return "workflow"
+		// Authentication is the whole grant. The response is the caller's own
+		// credential, so a scope here could never protect anything — it could
+		// only refuse a caller the ability to read what it is already holding.
+		// That refusal is not hypothetical: the console derives its capabilities
+		// from these scopes, so a credential that cannot reach this route gets
+		// every capability bit cleared (fail-closed) and loses controls it is
+		// in fact allowed to use. See ScopeAuthenticatedOnly.
+		return ScopeAuthenticatedOnly
 	case OpDeadLetterList:
 		return "deadletter.list"
 	case OpDeadLetterReplay:
@@ -352,7 +382,22 @@ func (NamespaceAwareAuthorizer) Authorize(_ context.Context, req AuthorizationRe
 }
 
 func principalAllowsOperation(principal Principal, operation, requiredScope string) bool {
+	// An operation that discloses only the caller's own credential is granted by
+	// authentication itself; the wrapper already authenticated before reaching
+	// an Authorizer. See ScopeAuthenticatedOnly.
+	if requiredScope == ScopeAuthenticatedOnly {
+		return true
+	}
 	if !principal.HasScope(requiredScope) {
+		// Write implies read: a principal that may define, publish, roll back, or
+		// start a workflow may read it. This is what keeps tokens issued before
+		// the read/write split (which carry only ScopeWorkflow) reading, and it
+		// matches the console's view gate, which accepts either scope. The
+		// implication does not run the other way — no mutation maps to
+		// ScopeWorkflowRead — so a read-only credential cannot write.
+		if requiredScope == ScopeWorkflowRead && principal.HasScope(ScopeWorkflow) {
+			return true
+		}
 		if !principal.HasScope(ScopeRunnerResource) {
 			return false
 		}

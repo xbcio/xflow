@@ -410,8 +410,9 @@ func TestListWorkflowsRefusesUnauthenticatedAndUnderScoped(t *testing.T) {
 	}{
 		{name: "no credential", token: "", wantCode: http.StatusUnauthorized},
 		{name: "unrecognized credential", token: "not-a-token", wantCode: http.StatusUnauthorized},
-		// Holds the execution scope only — the operation's scope is `workflow`,
-		// which is exactly what GET /v1/workflows/{id} requires.
+		// Holds the execution scope only — the operation's scope is
+		// `workflow.read` (or its write half `workflow`), which is exactly what
+		// GET /v1/workflows/{id} requires.
 		{name: "insufficient scope", token: "tok-exec-only", wantCode: http.StatusForbidden},
 	}
 

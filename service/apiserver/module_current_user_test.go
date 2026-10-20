@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 )
 
@@ -72,34 +71,52 @@ func TestCurrentUserReportsTheVerifiedPrincipal(t *testing.T) {
 	}
 }
 
-// TestCurrentUserScopeBindingIsTheConsoleBaseline pins the deliberate choice in
-// scopeForOperation: the route rides the console's baseline read scope rather
-// than a scope of its own, so an already-issued token keeps working. If someone
-// gives it a dedicated scope later, this test is where they will be asked
-// whether they meant to re-provision every console token.
-func TestCurrentUserScopeBindingIsTheConsoleBaseline(t *testing.T) {
-	if got := scopeForOperation(OpCurrentUserRead); got != "workflow" {
-		t.Fatalf("scopeForOperation(%s) = %q, want \"workflow\": the endpoint is "+
-			"deliberately bound to the console's baseline read scope so no issued "+
-			"token has to be re-provisioned for a call that discloses nothing",
-			OpCurrentUserRead, got)
+// TestCurrentUserRequiresAuthenticationOnly pins the deliberate choice in
+// scopeForOperation (B5): the route needs no grant, because the response is the
+// caller's own credential and a scope here could only refuse a caller the
+// ability to read what it already holds. A console credential that cannot read
+// its own scopes has its capabilities cleared (fail-closed) and loses controls
+// it is allowed to use, so this must stay authentication-only rather than
+// moving to workflow.read.
+func TestCurrentUserRequiresAuthenticationOnly(t *testing.T) {
+	if got := scopeForOperation(OpCurrentUserRead); got != ScopeAuthenticatedOnly {
+		t.Fatalf("scopeForOperation(%s) = %q, want %q: the endpoint discloses "+
+			"only the caller's own credential, so requiring any grant would "+
+			"refuse a credential its own scopes",
+			OpCurrentUserRead, got, ScopeAuthenticatedOnly)
+	}
+	// Behavior, not just the mapping: a principal with no scopes at all is
+	// admitted by the shipped authorizers.
+	principal := Principal{Subject: "scopeless", Namespace: "namespaceA"}
+	if dec, err := (ScopeAuthorizer{}).Authorize(context.Background(), AuthorizationRequest{
+		Principal: principal, Operation: OpCurrentUserRead,
+	}); err != nil || dec != DecisionAllow {
+		t.Fatalf("ScopeAuthorizer(scopeless, %s) = (%q, %v), want allow", OpCurrentUserRead, dec, err)
+	}
+	if dec, err := (NamespaceAwareAuthorizer{}).Authorize(context.Background(), AuthorizationRequest{
+		Principal: principal, Operation: OpCurrentUserRead,
+	}); err != nil || dec != DecisionAllow {
+		t.Fatalf("NamespaceAwareAuthorizer(scopeless, %s) = (%q, %v), want allow", OpCurrentUserRead, dec, err)
 	}
 }
 
-// TestCurrentUserDeniesPrincipalWithoutTheScope is the other half of the binding
-// above: the route is authorized like any other, so a principal without the
-// scope is refused before the handler runs. This is what keeps the endpoint from
-// being the one route that answers an authenticated-but-unauthorized caller.
-func TestCurrentUserDeniesPrincipalWithoutTheScope(t *testing.T) {
+// TestCurrentUserAdmitsAuthenticatedPrincipalWithoutTheWriteScope is the other
+// half of the binding above: an authenticated caller whose credential carries
+// unrelated scopes (here only "execution") still reads its own identity. Before
+// B5 this route demanded the workflow scope, so exactly this population lost its
+// capabilities projection to a 403.
+func TestCurrentUserAdmitsAuthenticatedPrincipalWithoutTheWriteScope(t *testing.T) {
 	rec := getCurrentUser(t, staticPrincipalAuth{principal: Principal{
-		Subject: "mallory", Namespace: "namespaceA", Scopes: []string{"deadletter.list"},
+		Subject: "mallory", Namespace: "namespaceA", Scopes: []string{"execution"},
 	}})
 
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403; body = %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
 	}
-	if strings.Contains(rec.Body.String(), "mallory") {
-		t.Errorf("denial body = %q leaks the principal", rec.Body.String())
+	body := currentUserBody(t, rec)
+	scopes, ok := body["scopes"].([]any)
+	if !ok || len(scopes) != 1 || scopes[0] != "execution" {
+		t.Errorf("scopes = %#v, want [execution]: the endpoint reports the credential verbatim", body["scopes"])
 	}
 }
 
@@ -112,12 +129,11 @@ func TestCurrentUserRejectsUnauthenticated(t *testing.T) {
 }
 
 // TestCurrentUserEncodesNoScopesAsAnEmptyList drives the handler directly: a
-// scope-carrying principal cannot reach the nil-scopes case through the
-// authorizer (this route needs the "workflow" scope to be admitted at all), but
-// Principal is built by a PLUGGABLE authenticator, so a host can hand one over
-// with no scopes. The handler is the boundary that promises a wire shape, and
-// "no scopes" must reach the client as [] — a client that iterates the list
-// should not have to guard against null.
+// scope-less principal now reaches this route through the authorizer too (it is
+// authentication-only), but Principal is built by a PLUGGABLE authenticator, so
+// a host can hand one over with no scopes. The handler is the boundary that
+// promises a wire shape, and "no scopes" must reach the client as [] — a client
+// that iterates the list should not have to guard against null.
 func TestCurrentUserEncodesNoScopesAsAnEmptyList(t *testing.T) {
 	m := authzModule(t, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, PathCurrentUser, nil)

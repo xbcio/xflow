@@ -239,8 +239,9 @@ func TestNodeTypesAuthzBranch(t *testing.T) {
 		want int
 	}{
 		{"unauthenticated", staticPrincipalAuth{err: errors.New("no token")}, http.StatusUnauthorized},
-		{"missing workflow scope", staticPrincipalAuth{principal: Principal{Subject: "bob", Scopes: []string{"execution"}}}, http.StatusForbidden},
-		{"workflow scope (OpWorkflowRead)", staticPrincipalAuth{principal: Principal{Subject: "alice", Scopes: []string{"workflow"}}}, http.StatusOK},
+		{"missing workflow read scope", staticPrincipalAuth{principal: Principal{Subject: "bob", Scopes: []string{"execution"}}}, http.StatusForbidden},
+		{"workflow.read scope", staticPrincipalAuth{principal: Principal{Subject: "alice", Scopes: []string{ScopeWorkflowRead}}}, http.StatusOK},
+		{"workflow write scope implies read", staticPrincipalAuth{principal: Principal{Subject: "alice", Scopes: []string{ScopeWorkflow}}}, http.StatusOK},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
