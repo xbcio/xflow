@@ -11,5 +11,12 @@ export const routes = [
   { path: '/workflows', component: './workflows' },
   { path: '/workflows/:id', component: './workflows/detail' },
   { path: '/executions', component: './executions', access: 'canViewExecutions' },
+  // 开发专用 UI 预览页（复刻 .claude/mockups 的静态稿，非产品功能）。
+  // 只在显式开启时注册：默认构建不含此路由，scripts/check-production-fixtures.mjs
+  // 才能在产物里确认 __XFLOW_DEV_ONLY__ 标记不存在。layout: false —— 预览页自带外壳，
+  // 不继承 Admin 顶栏与内边距。
+  ...(process.env.XFLOW_UI_PREVIEW === '1'
+    ? [{ path: '/ui-preview', component: './ui-preview', layout: false }]
+    : []),
   { path: '*', component: './404' },
 ];
