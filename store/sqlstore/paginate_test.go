@@ -2,6 +2,7 @@ package sqlstore
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -137,6 +138,83 @@ func TestPaginatedListsTreatZeroLimitAsUnbounded(t *testing.T) {
 			}
 			if !strings.Contains(paged, "OFFSET 5") {
 				t.Errorf("an explicit offset must still reach the database.\nSQL: %s", paged)
+			}
+		})
+	}
+}
+
+// TestOffsetWithoutLimitGetsAnUnboundedLimit pins the offset-only arm of the
+// ListOptions contract: skipping rows without sizing a page must still return
+// every remaining match.
+//
+// SQL cannot express that directly. OFFSET is only grammatical as part of
+// `LIMIT <n> OFFSET <m>`, so GORM's clause/limit.go writing a bare `OFFSET ?`
+// produced a statement MySQL rejects with error 1064 (and SQLite with a syntax
+// error). The contract tests that pass store.ListOptions{Offset: 1 << 30} —
+// store/storetest/nodes.go and signals.go — failed on exactly that. The fix is
+// an unreachable LIMIT; this test pins that the substitution appears with an
+// offset, that the offset reaches the query at all, and that neither the
+// no-pagination nor the explicit-limit path changed.
+func TestOffsetWithoutLimitGetsAnUnboundedLimit(t *testing.T) {
+	ctx := context.Background()
+	c := newSQLCapture(t)
+	nodes := &nodeRepo{db: c.db}
+	signals := &signalRepo{db: c.db}
+	artifacts := &artifactIndexRepo{db: c.db}
+
+	for _, tc := range []struct {
+		name string
+		// innerLimits counts LIMIT clauses the query contains on its own,
+		// before pagination is applied (ListLatestVersions' per-filename
+		// `LIMIT 1` subquery).
+		innerLimits int
+		run         func(store.ListOptions)
+	}{
+		{"ListNodes", 0, func(o store.ListOptions) {
+			_, _ = nodes.ListNodes(ctx, "exec-1", o)
+		}},
+		{"ListExpiredSuspensions", 0, func(o store.ListOptions) {
+			_, _ = nodes.ListExpiredSuspensions(ctx, time.Now(), o)
+		}},
+		{"ListSignalsByNames", 0, func(o store.ListOptions) {
+			_, _ = signals.ListSignalsByNames(ctx, "exec-1", []string{"sig"}, o)
+		}},
+		{"ListLatestVersions", 1, func(o store.ListOptions) {
+			_, _ = artifacts.ListLatestVersions(ctx, "ns", o)
+		}},
+		{"ListVersions", 0, func(o store.ListOptions) {
+			_, _ = artifacts.ListVersions(ctx, "ns", "a.wasm", o)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Zero offset, zero limit: no pagination at all. The missing LIMIT
+			// is the correct half; the OFFSET must not exist on its own either.
+			unbounded := c.sql(t, func() { tc.run(store.ListOptions{}) })
+			if got := strings.Count(strings.ToUpper(unbounded), "LIMIT"); got != tc.innerLimits {
+				t.Errorf("zero offset and zero limit must not add a LIMIT clause: "+
+					"want %d (all from subqueries), got %d.\nSQL: %s",
+					tc.innerLimits, got, unbounded)
+			}
+			if strings.Contains(strings.ToUpper(unbounded), "OFFSET") {
+				t.Errorf("zero offset must not add an OFFSET clause.\nSQL: %s", unbounded)
+			}
+
+			// Offset only: the offset has to survive, preceded by the
+			// unreachable bound rather than by nothing.
+			offsetOnly := c.sql(t, func() { tc.run(store.ListOptions{Offset: 5}) })
+			want := fmt.Sprintf("LIMIT %d OFFSET 5", unboundedOffsetLimit)
+			if !strings.Contains(offsetOnly, want) {
+				t.Errorf("an offset without a limit must produce %q; a bare OFFSET "+
+					"is a syntax error on both MySQL and SQLite.\nSQL: %s", want, offsetOnly)
+			}
+
+			// An explicit limit keeps its own value and still implies no offset.
+			limitOnly := c.sql(t, func() { tc.run(store.ListOptions{Limit: 25}) })
+			if !strings.Contains(limitOnly, "LIMIT 25") {
+				t.Errorf("an explicit limit must still reach the database.\nSQL: %s", limitOnly)
+			}
+			if strings.Contains(strings.ToUpper(limitOnly), "OFFSET") {
+				t.Errorf("a zero offset must not add an OFFSET clause.\nSQL: %s", limitOnly)
 			}
 		})
 	}
