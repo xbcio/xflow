@@ -36,6 +36,8 @@ func (n *Node) Descriptor() types.Descriptor {
 		Type:        "xflow.trigger.timer",
 		Kind:        types.NodeKindTrigger,
 		DisplayName: "Timer Trigger",
+		Category:    "trigger",
+		CardSummary: []string{"interval"},
 		Params: []types.ParamSpec{
 			{Name: "interval", DisplayName: "Interval", Type: types.ParamString, Required: true, Description: "Positive tick interval (e.g. \"1m\")",
 				Widget: nodeinternal.WidgetDuration, Constraints: nodeinternal.Format(nodeinternal.FormatDuration)},
