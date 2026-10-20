@@ -81,11 +81,16 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 			name:   "execution detail",
 			schema: "ExecutionDetail",
 			value: engine.ExecutionDetail{
-				ExecutionID: execID,
-				Status:      types.ExecutionStatusRunning,
+				ExecutionID:     execID,
+				Status:          types.ExecutionStatusRunning,
+				WorkflowID:      "wf-01H8XG",
+				WorkflowVersion: "v7",
+				CreatedAt:       &now,
+				UpdatedAt:       &now,
 				Nodes: []engine.NodeDetail{
-					{Name: "Start", Status: types.NodeStatusSuccess, Attempt: 1, Port: "default", Output: map[string]any{"ok": true}},
-					{Name: "Fetch", Status: types.NodeStatusRunning, Attempt: 0},
+					{Name: "Start", Status: types.NodeStatusSuccess, Attempt: 1, Port: "default",
+						Output: map[string]any{"ok": true}, StartedAt: &now, FinishedAt: &now},
+					{Name: "Fetch", Status: types.NodeStatusRunning, Attempt: 0, StartedAt: &now},
 				},
 			},
 		},
@@ -181,6 +186,19 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 			name:   "rerun execution response (queued)",
 			schema: "RerunExecutionResponse",
 			value:  apiserver.ExampleRerunExecutionResponse(execID, 2),
+		},
+		{
+			name:   "execution list item",
+			schema: "ExecutionListItem",
+			value:  apiserver.ExampleExecutionListItem(execID, "namespaceA", "wf-01H8XG", "health-check", types.ExecutionStatusFailed, "node \"work\" failed", now, now.Add(time.Minute)),
+		},
+		{
+			// The queued shape, the only one that carries queue_position: the
+			// property is optional, so a row without it cannot bind the
+			// published integer (or its value) to the handler's projection.
+			name:   "execution list item (queued)",
+			schema: "ExecutionListItem",
+			value:  apiserver.ExampleExecutionListItemQueued(execID, "namespaceA", "wf-01H8XG", "health-check", 2, now, now.Add(time.Minute)),
 		},
 		{
 			// The definition-backed shape: every omitempty field populated and
@@ -468,6 +486,29 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 					tc.schema, tc.value, err, string(data))
 			}
 		})
+	}
+}
+
+// TestExecutionListQueuePositionStaysOptional pins the one ExecutionListItem
+// property a fixture cannot bind on its own: queue_position is optional (only a
+// queued row carries it), and OpenAPI allows undeclared properties, so deleting
+// it from the spec would leave every row fixture green. The queued fixture in
+// TestSchemasMatchHandlerTypes pins its type; this pins that the property is
+// still published and still optional — a row without a position is valid.
+func TestExecutionListQueuePositionStaysOptional(t *testing.T) {
+	spec := loadSpec(t)
+	schema := spec.Components.Schemas["ExecutionListItem"]
+	if schema == nil || schema.Value == nil {
+		t.Fatal("ExecutionListItem schema is missing")
+	}
+	prop := schema.Value.Properties["queue_position"]
+	if prop == nil || prop.Value == nil || prop.Value.Type == nil || !prop.Value.Type.Is("integer") {
+		t.Fatal("ExecutionListItem.queue_position is missing from the spec or is not an integer")
+	}
+	for _, name := range schema.Value.Required {
+		if name == "queue_position" {
+			t.Fatal("ExecutionListItem.queue_position must stay optional: a row that is not queued has no position")
+		}
 	}
 }
 

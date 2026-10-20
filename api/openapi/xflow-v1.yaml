@@ -125,7 +125,10 @@ paths:
                         $ref: "#/components/schemas/RegisterWorkflowResponse"
         "400":
           description: |
-            The definition is invalid. `workflow_compile_failed` (ErrorEnvelope)
+            The definition is invalid. A non-empty `workflow.id` is refused with
+            `workflow_invalid`: registration mints the id server-side, and a
+            client-supplied one would choose the identity every execution of the
+            workflow is attributed to. `workflow_compile_failed` (ErrorEnvelope)
             when the compiler rejects it; `workflow_param_invalid`
             (ParamInvalidErrorEnvelope, carrying `data.param_issues`) when the
             server runs ParamSpec validation in enforce mode and a node
@@ -498,6 +501,13 @@ paths:
         Merges the old submit/invoke shapes: when entry is empty the graph's
         default start node is used; when set, that entry node drives the
         explicit-entry path (spec §7, §9.1).
+
+        The body runs an inline definition, so it must not carry a workflow
+        `id`: ids are server-assigned (`WorkflowDef.id`), and a client-supplied
+        one would both choose the execution's `workflow_id` attribution and
+        escape the `ExecutionDetail.workflow_id` length bound. A non-empty id
+        is refused with 400 `workflow_invalid`; run a registered workflow
+        through `POST /v1/workflows/{id}/execute`, which stamps the path id.
       tags: [Workflows]
       parameters:
         - $ref: "#/components/parameters/XRequestId"
@@ -535,7 +545,9 @@ paths:
                         $ref: "#/components/schemas/ExecuteWorkflowResponse"
         "400":
           description: |
-            The definition is invalid. `workflow_compile_failed` (ErrorEnvelope)
+            The definition is invalid, or the body carried a `workflow.id` the
+            inline route refuses (`workflow_invalid`; see the operation
+            description). `workflow_compile_failed` (ErrorEnvelope)
             when the compiler rejects it; `workflow_param_invalid`
             (ParamInvalidErrorEnvelope, carrying `data.param_issues`) when the
             server runs ParamSpec validation in enforce mode and a node
@@ -2142,6 +2154,26 @@ paths:
             "no executions have that status".
           schema:
             $ref: "#/components/schemas/ExecutionStatus"
+        - name: workflow_id
+          in: query
+          required: false
+          description: |
+            Narrows the page to one workflow, by the server-assigned workflow id
+            and EXACT match — not a workflow name, and not a prefix. Both the
+            page and `total` are narrowed by it.
+
+            Rows recorded before the column existed, or submitted without a
+            workflow definition id, carry the unattributed sentinel `""` and
+            match NO `workflow_id` filter: an execution is never guessed into a
+            workflow. An absent or empty value means unfiltered.
+
+            A value longer than 64 characters can never equal a stored id and is a
+            400 `execution_workflow_id_invalid` rather than being ignored —
+            ignoring it would answer with the whole namespace as if it were the
+            filtered page.
+          schema:
+            type: string
+            maxLength: 64
         - name: created_after
           in: query
           required: false
@@ -2188,7 +2220,8 @@ paths:
                         $ref: "#/components/schemas/ExecutionListResponse"
         "400":
           description: |
-            A filter value is unusable: an unrecognized `status`, or a
+            A filter value is unusable: an unrecognized `status`, a
+            `workflow_id` longer than the 64-byte identity column, or a
             `created_after` / `created_before` that is not an RFC3339
             date-time.
           headers:
@@ -2212,6 +2245,13 @@ paths:
                     success: false
                     code: execution_list_time_invalid
                     message: created_after must be an RFC3339 date-time
+                    trace_id: 0123456789abcdef0123456789abcdef
+                overlongWorkflowId:
+                  summary: The workflow_id filter cannot equal any stored id.
+                  value:
+                    success: false
+                    code: execution_workflow_id_invalid
+                    message: workflow_id must be at most 64 characters
                     trace_id: 0123456789abcdef0123456789abcdef
         default:
           $ref: "#/components/responses/DefaultError"
@@ -2848,9 +2888,11 @@ paths:
         validator over the `data` payload bytes (not the envelope, whose
         `trace_id` differs per request), so it changes when runner types
         appear or disappear; a matching `If-None-Match` answers 304 with no
-        body. Authorization is `workflow.read`, the operation of
-        GET /v1/workflows; with `namespace` it is decided against that
-        namespace, and a namespace the caller may not read fails with 403.
+        body. Authorization requires the read-only `workflow.read` scope — the
+        operation name GET /v1/workflows carries, now also its required scope.
+        The write scope `workflow` implies it, so pre-split tokens keep reading.
+        With `namespace` the decision is made against that namespace, and a
+        namespace the caller may not read fails with 403.
       tags: [NodeTypes]
       parameters:
         - $ref: "#/components/parameters/NodeTypesNamespace"
@@ -2953,10 +2995,12 @@ paths:
         refuse, which guesses wrong on routes that 404 and spends an audited
         round trip per guess on the ones that do not.
 
-        Authorization is `workflow.read` — the console's baseline read scope,
-        deliberately NOT a scope of this endpoint's own. The response is the
-        caller's own credential, so a dedicated scope could only ever subtract
-        callers while taking the route away from every token already issued.
+        Authorization requires authentication only: the route is behind the
+        bearer authz wrapper but demands no scope. Any scope here could only
+        subtract callers while refusing them the ability to read the credential
+        they already hold — and a console that cannot read its own scopes has
+        every capability cleared (fail-closed), hiding controls the credential
+        actually grants.
 
         Served only when the server was configured with a principal
         authenticator (`--auth-tokens-file`, or an embedder's
@@ -4048,8 +4092,9 @@ components:
       description: |
         Namespace whose live runner-reported node types are merged in. Absent
         means the server registry only. The caller must be allowed
-        `workflow.read` in this namespace (403 otherwise); a malformed value
-        fails with 400 (`namespace_invalid`).
+        `workflow.read` in this namespace (403 otherwise; the write scope
+        `workflow` implies it); a malformed value fails with 400
+        (`namespace_invalid`).
       schema:
         type: string
     IfNoneMatch:
@@ -4698,11 +4743,45 @@ components:
       type: object
       description: Audit snapshot of an execution (engine.ExecutionDetail).
       required: [execution_id, status]
+      additionalProperties: false
       properties:
         execution_id:
           type: string
+        workflow_id:
+          type: string
+          maxLength: 64
+          description: |
+            The workflow definition identity this execution ran, captured
+            immutably at submission (the same identity the `workflow_id` list
+            filter matches). Absent when the submission carried no definition
+            id — an inline definition with no server id, or an execution
+            recorded before the field existed. Absence means unattributed; a
+            client must not infer the current workflow from the name.
+        workflow_version:
+          type: string
+          description: |
+            The version label of the definition this execution ran, captured
+            with `workflow_id`. The editor resolves the run's definition
+            snapshot with `GET /v1/workflows/{id}/versions/{version}`.
+            Absent when there is no recorded identity or the definition
+            declares no version.
         status:
           $ref: "#/components/schemas/ExecutionStatus"
+        created_at:
+          type: string
+          format: date-time
+          description: |
+            When the backend recorded the execution, from the backend's clock.
+            The left edge of a finished run's duration (`updated_at -
+            created_at`). Absent for an execution recorded before the backends
+            stamped this fact; absence means unknown, never "now".
+        updated_at:
+          type: string
+          format: date-time
+          description: |
+            The wall clock of the execution's latest accepted status
+            transition, creation included. The right edge of a finished run's
+            duration. Absent under the same rule as `created_at`.
         parent_execution_id:
           type: string
           description: |
@@ -4776,6 +4855,23 @@ components:
             finished node's child is still drillable. The parent-side half of
             the drill-down; the child-side half is the child execution's
             `parent_node`.
+        started_at:
+          type: string
+          format: date-time
+          description: |
+            When the node received its FIRST lease. Write-once: a retry (a new
+            attempt) and a cyclic reactivation do not restamp it. Absent when
+            the node never started — it was skipped, fanned in without
+            execution, or seeded from its parent — and on records written
+            before the backends stamped this fact.
+        finished_at:
+          type: string
+          format: date-time
+          description: |
+            When the node first reached a terminal status. Write-once: a
+            duplicate terminal write and a cyclic reactivation keep the first
+            value. Absent while the node has not finished, under the same
+            "unknown, never guess" rule as `started_at`.
 
     ExecutionStatus:
       type: string
@@ -4821,10 +4917,13 @@ components:
         O(page × workflow size) on the wire — and are read one execution at a
         time via `GET /v1/executions/{id}`.
 
-        `workflow_name` is a display string, not a workflow identity: the
-        executions table stores no workflow id, key, or definition hash, so a
-        name is the only workflow field a row can honestly project.
-      required: [execution_id, namespace, workflow_name, status, error, created_at, updated_at]
+        `workflow_id` is the identity of the workflow the execution ran, recorded
+        at submit time from the server-resolved definition; it is what the
+        `workflow_id` query parameter matches exactly. `workflow_name` beside it
+        is the display string and is NOT an identity — two namespaces can hold
+        the same name, and it is not immutable across a re-registration under
+        the same id.
+      required: [execution_id, namespace, workflow_id, workflow_name, status, error, created_at, updated_at]
       properties:
         execution_id:
           type: string
@@ -4835,6 +4934,14 @@ components:
             The server-issued isolation scope this execution belongs to. It is
             always the authenticated principal's namespace — a row is returned
             only when the two are exactly equal.
+        workflow_id:
+          type: string
+          description: |
+            Server-assigned id of the workflow the execution ran, recorded at
+            submit time. `""` means UNATTRIBUTED: the row predates the column,
+            or the submission carried no workflow definition id (an inline
+            definition with none). An unattributed row matches no `workflow_id`
+            filter on the collection endpoint.
         workflow_name:
           type: string
           description: Name of the workflow this execution ran, as recorded at submit time.
@@ -4851,6 +4958,18 @@ components:
           type: string
           format: date-time
           description: When the execution row was last updated.
+        queue_position:
+          type: integer
+          description: |
+            Where a `queued` row stands in its workflow's concurrency queue:
+            `1` is the head, the execution the next slot release promotes.
+            Present only while `status` is `queued`; absent for every other
+            status and when the server could not read the live position, in
+            which case the place in line is UNKNOWN — absence never means the
+            head. Same semantics as `ExecutionDetail.queue_position`: it is
+            read from live queue state at list time, not stored with the row,
+            and the read is best effort so a position that is unavailable
+            omits the field rather than failing the page.
 
     NodeStatus:
       type: string
@@ -5535,7 +5654,7 @@ components:
       properties:
         id:
           type: string
-          description: Server-assigned resource id. Optional on writes; for PUT it must match the path id when supplied.
+          description: Server-assigned resource id. Refused on registration (`POST /v1/workflows`, 400 `workflow_invalid`) and on inline execute; for PUT it must match the path id when supplied.
         namespace:
           type: string
           description: Server-authoritative isolation scope; optional on writes, injected by the handler, and never trusted from the client body.
@@ -6417,6 +6536,24 @@ components:
         display_name:
           type: string
           description: Descriptor display name.
+        category:
+          type: string
+          enum: [trigger, control, action, code, transform, human, unknown]
+          description: |
+            Editor node category (spec §5). The editor draws the node's icon and
+            palette colour from it. Absent means the editor maps the type by
+            prefix instead; `unknown` is the explicit catch-all, declared for
+            builtin kinds the table does not name (the supply nodes).
+        card_summary:
+          type: array
+          description: |
+            Params a node card shows as its configuration summary, in display
+            order, at most three rows. An entry is a top-level param name;
+            `a+b` joins two params into one row (HTTP's `method+url`). Absent
+            means the editor falls back to the first three required params.
+          items:
+            type: string
+          maxItems: 3
         description:
           type: string
           description: Reserved; Descriptor has no description today, so the server never writes it.
