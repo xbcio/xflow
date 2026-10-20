@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strconv"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 // QueueLaneLegacy is the lane name the assignment queue depth report uses for
@@ -116,13 +118,15 @@ end
 return result
 `
 
+var redisAssignmentQueueOldestAgesScript = redis.NewScript(redisAssignmentQueueOldestAgesLua)
+
 // AssignmentQueueOldestAges reads every queue's head sample in one round trip.
 // It walks the same keys AssignmentQueueDepths reports, so a depth series and
 // an age series always name the same lanes.
 func (d *RedisRunnerDirectory) AssignmentQueueOldestAges(ctx context.Context) (map[string]time.Duration, error) {
 	queues := d.laneQueueKeys()
 	keys := append(append(make([]string, 0, len(queues)+1), queues...), d.keys.assignmentQueuedAt)
-	raw, err := d.rdb.Eval(ctx, redisAssignmentQueueOldestAgesLua, keys, assignmentQueueAgeSample).StringSlice()
+	raw, err := redisAssignmentQueueOldestAgesScript.Run(ctx, d.rdb, keys, assignmentQueueAgeSample).StringSlice()
 	if err != nil {
 		return nil, fmt.Errorf("read assignment queue oldest ages: %w", err)
 	}

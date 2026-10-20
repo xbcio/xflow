@@ -449,7 +449,7 @@ func (d *RedisRunnerDirectory) Register(ctx context.Context, req RegisterRunnerR
 		return RunnerSession{}, err
 	}
 	session := RunnerSession{RunnerID: req.RunnerID, SessionID: uuid.NewString()}
-	status, err := d.evalStatus(ctx, redisRegisterRunnerLua, d.appendLaneRequeueKeys([]string{
+	status, err := d.evalStatus(ctx, redisRegisterRunnerScript, d.appendLaneRequeueKeys([]string{
 		d.keys.queue,
 		d.keys.assignmentData,
 		d.keys.assignmentState,
@@ -552,7 +552,7 @@ func (d *RedisRunnerDirectory) heartbeat(ctx context.Context, req HeartbeatReque
 		hasObservation = "1"
 		observationGeneration = strconv.FormatUint(observation.generation, 10)
 	}
-	status, err := d.evalStatus(ctx, redisHeartbeatLua, []string{
+	status, err := d.evalStatus(ctx, redisHeartbeatScript, []string{
 		d.keys.runnerSession,
 		d.keys.runnerCapacity,
 		d.keys.runnerInflight,
@@ -595,7 +595,7 @@ func (d *RedisRunnerDirectory) EnqueueAssignment(ctx context.Context, assignment
 		d.keys.assignmentLane,
 		d.keys.assignmentQueuedAt,
 	)
-	status, err := d.evalStatus(ctx, redisEnqueueAssignmentLua, keys,
+	status, err := d.evalStatus(ctx, redisEnqueueAssignmentScript, keys,
 		string(assignment.AssignmentID), payload,
 		strconv.Itoa(len(candidates)), strconv.Itoa(len(targets)), marker)
 	if err != nil {
@@ -1232,7 +1232,7 @@ func (d *RedisRunnerDirectory) ClaimWalkPending(runnerID string) bool {
 // MarkClaimLeaseMayExist writes the durable pre-Build*Lease crash fence. The
 // Lua transition refuses stale/missing claims and leaves capacity unchanged.
 func (d *RedisRunnerDirectory) MarkClaimLeaseMayExist(ctx context.Context, claimID ClaimID) error {
-	status, err := d.evalStatus(ctx, redisMarkHandoffLeaseMayExistLua, []string{
+	status, err := d.evalStatus(ctx, redisMarkHandoffLeaseMayExistScript, []string{
 		d.keys.assignmentState,
 		d.keys.assignmentClaim,
 		d.keys.claimsAssignment,
@@ -1261,7 +1261,7 @@ func (d *RedisRunnerDirectory) RecordClaimLeaseCreated(ctx context.Context, clai
 	if err != nil {
 		return err
 	}
-	status, err := d.evalStatus(ctx, redisRecordHandoffLeaseCreatedLua, []string{
+	status, err := d.evalStatus(ctx, redisRecordHandoffLeaseCreatedScript, []string{
 		d.keys.assignmentState,
 		d.keys.assignmentClaim,
 		d.keys.claimsAssignment,
@@ -1286,7 +1286,7 @@ func (d *RedisRunnerDirectory) RecordClaimLeaseCreated(ctx context.Context, clai
 // failure. A crash before this call is made recoverable by claim expiry or
 // session replacement, never by silently requeueing unknown work.
 func (d *RedisRunnerDirectory) MakeClaimHandoffRecoverable(ctx context.Context, claimID ClaimID) error {
-	status, err := d.evalStatus(ctx, redisMakeHandoffRecoverableLua, []string{
+	status, err := d.evalStatus(ctx, redisMakeHandoffRecoverableScript, []string{
 		d.keys.handoffState,
 		d.keys.handoffClaim,
 		d.keys.handoffRecoveryReady,
@@ -1312,7 +1312,7 @@ func (d *RedisRunnerDirectory) SettleClaimHandoff(ctx context.Context, claimID C
 	if !ok {
 		return nil
 	}
-	status, err := d.evalStatus(ctx, redisSettleHandoffLua, d.appendLaneRequeueKeys([]string{
+	status, err := d.evalStatus(ctx, redisSettleHandoffScript, d.appendLaneRequeueKeys([]string{
 		d.keys.queue,
 		d.keys.seen,
 		d.keys.assignmentData,
@@ -1432,7 +1432,7 @@ func (d *RedisRunnerDirectory) recoverableHandoff(ctx context.Context, runnerID,
 // second take before the first token's deadline is a "busy", which is what keeps
 // two resolvers from settling the same claim against the engine twice.
 func (d *RedisRunnerDirectory) takeHandoffRecovery(ctx context.Context, claimID string) (string, error) {
-	return d.evalStatus(ctx, redisTakeHandoffRecoveryLua, []string{
+	return d.evalStatus(ctx, redisTakeHandoffRecoveryScript, []string{
 		d.keys.handoffState,
 		d.keys.handoffClaim,
 		d.keys.handoffRecoveryReady,
@@ -1843,7 +1843,7 @@ func (d *RedisRunnerDirectory) releaseStrandedLease(ctx context.Context, assignm
 // not necessarily the legacy queue: an assignment a lane holds must leave that
 // lane, and the transition's LREM is what makes the claim exclusive.
 func (d *RedisRunnerDirectory) claim(ctx context.Context, target, runnerID, sessionID, assignmentID, expectedData string, claimID ClaimID) (string, error) {
-	status, err := d.evalStatus(ctx, redisClaimAssignmentLua, []string{
+	status, err := d.evalStatus(ctx, redisClaimAssignmentScript, []string{
 		target,
 		d.keys.assignmentData,
 		d.keys.assignmentState,
@@ -1915,7 +1915,7 @@ func (d *RedisRunnerDirectory) FinalizeClaim(ctx context.Context, claimID ClaimI
 		leaseID = string(lease.LeaseID)
 		leaseToken = string(lease.LeaseToken)
 	}
-	status, err := d.evalStatus(ctx, redisFinalizeClaimLua, []string{
+	status, err := d.evalStatus(ctx, redisFinalizeClaimScript, []string{
 		d.keys.assignmentState,
 		d.keys.assignmentClaim,
 		d.keys.assignmentRunner,
@@ -1975,7 +1975,7 @@ func (d *RedisRunnerDirectory) ReleaseClaim(ctx context.Context, claimID ClaimID
 	if !ok {
 		return nil
 	}
-	status, err := d.evalStatus(ctx, redisReleaseClaimLua, d.appendLaneRequeueKeys([]string{
+	status, err := d.evalStatus(ctx, redisReleaseClaimScript, d.appendLaneRequeueKeys([]string{
 		d.keys.queue,
 		d.keys.seen,
 		d.keys.assignmentData,
@@ -2029,7 +2029,7 @@ func (d *RedisRunnerDirectory) ReleaseLeased(ctx context.Context, req ReleaseLea
 	if err != nil {
 		return err
 	}
-	status, err := d.evalStatus(ctx, redisReleaseLeasedLua, d.appendLaneRequeueKeys([]string{
+	status, err := d.evalStatus(ctx, redisReleaseLeasedScript, d.appendLaneRequeueKeys([]string{
 		d.keys.runnerSession,
 		d.keys.assignmentData,
 		d.keys.assignmentState,
@@ -2267,7 +2267,7 @@ func (d *RedisRunnerDirectory) RefreshLeaseMeta(ctx context.Context, runnerID, s
 		}
 		// The Lua re-checks state, runner and session, so a candidate that a
 		// release or re-register overtook is a no-op rather than an error.
-		status, err := d.evalStatus(ctx, redisRefreshLeaseMetaLua, []string{
+		status, err := d.evalStatus(ctx, redisRefreshLeaseMetaScript, []string{
 			d.keys.assignmentState,
 			d.keys.assignmentRunner,
 			d.keys.assignmentSession,
@@ -2364,7 +2364,7 @@ func (d *RedisRunnerDirectory) claimRunnerID(ctx context.Context, claimID ClaimI
 // capacity before engine reclaim but intentionally retains the finalized
 // handoff debt until the sweeper observes a conclusive engine outcome.
 func (d *RedisRunnerDirectory) ReleaseExpiredLease(ctx context.Context, req ExpiredDirectoryLeaseRequest) (ExpiredDirectoryLeaseOutcome, error) {
-	status, err := d.evalStatus(ctx, redisReleaseExpiredLeaseLua, d.appendLaneRequeueKeys([]string{
+	status, err := d.evalStatus(ctx, redisReleaseExpiredLeaseScript, d.appendLaneRequeueKeys([]string{
 		d.keys.assignmentData,
 		d.keys.assignmentState,
 		d.keys.assignmentRunner,
@@ -2407,7 +2407,7 @@ func (d *RedisRunnerDirectory) ReleaseExpiredLease(ctx context.Context, req Expi
 // SettleFinalizedHandoff clears a durable finalized debt only after a
 // token-fenced engine reclaim/commit outcome has made the lease terminal.
 func (d *RedisRunnerDirectory) SettleFinalizedHandoff(ctx context.Context, assignmentID AssignmentID, leaseID engine.LeaseID, leaseToken engine.LeaseToken) error {
-	status, err := d.evalStatus(ctx, redisSettleFinalizedHandoffLua, []string{
+	status, err := d.evalStatus(ctx, redisSettleFinalizedHandoffScript, []string{
 		d.keys.handoffState,
 		d.keys.handoffGeneration,
 		d.keys.handoffLeaseMeta,
@@ -2434,7 +2434,7 @@ func (d *RedisRunnerDirectory) SettleFinalizedHandoff(ctx context.Context, assig
 // ClearAssignment removes the assignment from durable queue, claim, lease,
 // dedupe, and matching handoff records.
 func (d *RedisRunnerDirectory) ClearAssignment(ctx context.Context, assignmentID AssignmentID) error {
-	status, err := d.evalStatus(ctx, redisClearAssignmentLua, d.appendLaneRequeueKeys([]string{
+	status, err := d.evalStatus(ctx, redisClearAssignmentScript, d.appendLaneRequeueKeys([]string{
 		d.keys.queue,
 		d.keys.seen,
 		d.keys.assignmentData,
@@ -2808,7 +2808,7 @@ func atoiDefault(raw string) int {
 // this can never observe one. 'leased' assignments that stranded after their
 // lease metadata TTL'd out are the stranded-lease reaper's job, not this scan's.
 func (d *RedisRunnerDirectory) ReclaimExpiredClaims(ctx context.Context) error {
-	reclaimed, err := d.rdb.Eval(ctx, redisRecoverExpiredClaimsLua, d.appendLaneRequeueKeys([]string{
+	reclaimed, err := redisRecoverExpiredClaimsScript.Run(ctx, d.rdb, d.appendLaneRequeueKeys([]string{
 		d.keys.queue,
 		d.keys.assignmentData,
 		d.keys.assignmentState,
@@ -2880,8 +2880,8 @@ func (d *RedisRunnerDirectory) assignmentLeaseMetaTTLMillisFor(live time.Duratio
 	return 1
 }
 
-func (d *RedisRunnerDirectory) evalStatus(ctx context.Context, script string, keys []string, args ...interface{}) (string, error) {
-	value, err := d.rdb.Eval(ctx, script, keys, args...).Result()
+func (d *RedisRunnerDirectory) evalStatus(ctx context.Context, script *redis.Script, keys []string, args ...interface{}) (string, error) {
+	value, err := script.Run(ctx, d.rdb, keys, args...).Result()
 	if err != nil {
 		return "", err
 	}
@@ -3111,6 +3111,8 @@ end
 return 'registered'
 `
 
+var redisRegisterRunnerScript = redis.NewScript(redisRegisterRunnerLua)
+
 const redisHeartbeatLua = `
 local current = redis.call('HGET', KEYS[1], ARGV[1])
 if not current then
@@ -3131,6 +3133,8 @@ else
 end
 return 'ok'
 `
+
+var redisHeartbeatScript = redis.NewScript(redisHeartbeatLua)
 
 // redisEnqueueAssignmentLua inserts a durable assignment, deduplicating against
 // the seen set.
@@ -3195,6 +3199,8 @@ local now = redis.call('TIME')
 redis.call('HSET', KEYS[base+11], ARGV[1], string.format('%.0f', tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)))
 return 'enqueued'
 `
+
+var redisEnqueueAssignmentScript = redis.NewScript(redisEnqueueAssignmentLua)
 
 const redisRecoverExpiredClaimsLua = redisLaneRequeueLua + `
 local function deleteHandoff(claimID, assignmentID)
@@ -3274,6 +3280,8 @@ for _, claimID in ipairs(redis.call('HKEYS', KEYS[7])) do if redis.call('ZSCORE'
 return recovered
 `
 
+var redisRecoverExpiredClaimsScript = redis.NewScript(redisRecoverExpiredClaimsLua)
+
 const redisClaimAssignmentLua = `
 local current = redis.call('HGET', KEYS[12], ARGV[1])
 if not current then return 'not_found' end
@@ -3316,6 +3324,8 @@ redis.call('HDEL', KEYS[25], ARGV[5])
 redis.call('HDEL', KEYS[26], ARGV[5])
 return 'claimed'
 `
+
+var redisClaimAssignmentScript = redis.NewScript(redisClaimAssignmentLua)
 
 const redisFinalizeClaimLua = `
 local claimID = ARGV[1]
@@ -3365,6 +3375,8 @@ redis.call('HDEL', KEYS[26], claimID)
 return 'finalized'
 `
 
+var redisFinalizeClaimScript = redis.NewScript(redisFinalizeClaimLua)
+
 const redisMarkHandoffLeaseMayExistLua = `
 local claimID = ARGV[1]
 local assignmentID = redis.call('HGET', KEYS[3], claimID)
@@ -3377,6 +3389,8 @@ redis.call('HDEL', KEYS[6], claimID)
 redis.call('HSET', KEYS[7], claimID, tostring(tonumber(ARGV[2]) + tonumber(ARGV[3])))
 return 'marked'
 `
+
+var redisMarkHandoffLeaseMayExistScript = redis.NewScript(redisMarkHandoffLeaseMayExistLua)
 
 const redisRecordHandoffLeaseCreatedLua = `
 local claimID = ARGV[1]
@@ -3395,6 +3409,8 @@ redis.call('HDEL', KEYS[9], claimID)
 return 'recorded'
 `
 
+var redisRecordHandoffLeaseCreatedScript = redis.NewScript(redisRecordHandoffLeaseCreatedLua)
+
 const redisMakeHandoffRecoverableLua = `
 local state = redis.call('HGET', KEYS[1], ARGV[1])
 if state == 'lease_may_exist' or state == 'lease_created' then
@@ -3404,6 +3420,8 @@ if state == 'lease_may_exist' or state == 'lease_created' then
 end
 return 'noop'
 `
+
+var redisMakeHandoffRecoverableScript = redis.NewScript(redisMakeHandoffRecoverableLua)
 
 const redisTakeHandoffRecoveryLua = `
 local state = redis.call('HGET', KEYS[1], ARGV[1])
@@ -3417,6 +3435,8 @@ redis.call('HDEL', KEYS[3], ARGV[1])
 redis.call('HSET', KEYS[4], ARGV[1], tostring(now + tonumber(ARGV[3])))
 return 'taken'
 `
+
+var redisTakeHandoffRecoveryScript = redis.NewScript(redisTakeHandoffRecoveryLua)
 
 const redisSettleHandoffLua = redisLaneRequeueLua + `
 local claimID = ARGV[1]
@@ -3478,6 +3498,8 @@ redis.call('HDEL', KEYS[22], claimID)
 redis.call('HDEL', KEYS[23], claimID)
 return 'settled'
 `
+
+var redisSettleHandoffScript = redis.NewScript(redisSettleHandoffLua)
 
 const redisReleaseClaimLua = redisLaneRequeueLua + `
 local claimID = ARGV[1]
@@ -3563,6 +3585,8 @@ redis.call('HDEL', KEYS[26], claimID)
 return 'released'
 `
 
+var redisReleaseClaimScript = redis.NewScript(redisReleaseClaimLua)
+
 const redisReleaseLeasedLua = redisLaneRequeueLua + `
 if not redis.call('HGET', KEYS[1], ARGV[1]) then return 'not_found' end
 local assignmentID = nil
@@ -3631,6 +3655,8 @@ end
 return 'released'
 `
 
+var redisReleaseLeasedScript = redis.NewScript(redisReleaseLeasedLua)
+
 const redisSettleFinalizedHandoffLua = `
 local assignmentID = ARGV[1]
 local leaseID = ARGV[2]
@@ -3652,6 +3678,8 @@ redis.call('HDEL', KEYS[10], claimID)
 redis.call('HDEL', KEYS[11], claimID)
 return 'settled'
 `
+
+var redisSettleFinalizedHandoffScript = redis.NewScript(redisSettleFinalizedHandoffLua)
 
 // Like the reap transition, this one ends in laneDrop: the record is being
 // erased, so every queue copy of it and its lane marker go with it. The clear
@@ -3717,6 +3745,8 @@ end
 return 'cleared'
 `
 
+var redisClearAssignmentScript = redis.NewScript(redisClearAssignmentLua)
+
 const redisReleaseExpiredLeaseLua = redisLaneRequeueLua + `
 local assignmentID = ARGV[1]
 local leaseID = ARGV[2]
@@ -3749,6 +3779,8 @@ laneDrop(assignmentID)
 return 'released'
 `
 
+var redisReleaseExpiredLeaseScript = redis.NewScript(redisReleaseExpiredLeaseLua)
+
 // redisRefreshLeaseMetaLua pushes a live lease's metadata expiry forward.
 //
 // KEYS: 1=assignment:state 2=assignment:runner 3=assignment:session
@@ -3772,12 +3804,14 @@ redis.call('PEXPIRE', KEYS[4], tonumber(ARGV[4]))
 return 'refreshed'
 `
 
+var redisRefreshLeaseMetaScript = redis.NewScript(redisRefreshLeaseMetaLua)
+
 // Deregister implements RunnerDeregisterer.
 func (d *RedisRunnerDirectory) Deregister(ctx context.Context, runnerID, sessionID string) error {
 	if runnerID == "" {
 		return ErrRunnerIDRequired
 	}
-	status, err := d.evalStatus(ctx, redisDeregisterRunnerLua, []string{
+	status, err := d.evalStatus(ctx, redisDeregisterRunnerScript, []string{
 		d.keys.runnerSession,
 		d.keys.runnerHeartbeat,
 		d.keys.runnerInstanceUID,
@@ -3801,6 +3835,8 @@ redis.call('HDEL', KEYS[3], ARGV[1])
 return 'ok'
 `
 
+var redisDeregisterRunnerScript = redis.NewScript(redisDeregisterRunnerLua)
+
 // RemoveRunner implements RunnerRemover. One Lua transition checks the same
 // server-side debt that gates drain completion, then deletes every scalar
 // runner field and both runner-derived indexes atomically.
@@ -3808,7 +3844,7 @@ func (d *RedisRunnerDirectory) RemoveRunner(ctx context.Context, runnerID string
 	if runnerID == "" {
 		return ErrRunnerIDRequired
 	}
-	status, err := d.evalStatus(ctx, redisRemoveRunnerLua, []string{
+	status, err := d.evalStatus(ctx, redisRemoveRunnerScript, []string{
 		d.keys.runnerSession,
 		d.keys.runnerCapacity,
 		d.keys.runnerInflight,
@@ -3893,3 +3929,5 @@ redis.call('DEL', KEYS[26])
 redis.call('DEL', KEYS[27])
 return 'removed'
 `
+
+var redisRemoveRunnerScript = redis.NewScript(redisRemoveRunnerLua)
