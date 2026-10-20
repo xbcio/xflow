@@ -9,9 +9,11 @@ import {
   type ExecutionDetail,
   type ExecutionStatus,
   type RegisterWorkflowResult,
+  type RollbackWorkflowResult,
   type WaitExecutionTimeout,
   type WorkflowListPage,
-  type WorkflowSummary
+  type WorkflowSummary,
+  type WorkflowVersionPage
 } from "./index";
 
 function success(data: unknown, status = 200): Response {
@@ -109,6 +111,31 @@ describe("createXFlowApiClient", () => {
     expect(error?.message).toBe("boom");
     expect(error?.traceId).toBe("t-1");
     expect(error?.requestId).toBeUndefined();
+  });
+
+  it("reads the caller's identity and scopes from GET /v1/current-user", async () => {
+    const fetcher = vi.fn().mockResolvedValue(
+      success({ subject: "dev-operator", namespace: "default", scopes: ["workflow", "execution.control"] })
+    );
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    await expect(client.getCurrentUser()).resolves.toEqual({
+      subject: "dev-operator",
+      namespace: "default",
+      scopes: ["workflow", "execution.control"]
+    });
+    expect(fetcher).toHaveBeenCalledWith("/v1/current-user", undefined);
+  });
+
+  it("rejects a current-user payload whose scopes are absent instead of reading them as no scopes", async () => {
+    const fetcher = vi.fn().mockResolvedValue(success({ subject: "dev-operator", namespace: "default" }));
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    await expect(client.getCurrentUser()).rejects.toMatchObject({
+      name: "XFlowApiError",
+      status: 200,
+      message: "invalid API response"
+    });
   });
 
   it("keeps the no-argument workflow list call compatible while unwrapping the default page", async () => {
@@ -312,6 +339,146 @@ describe("createXFlowApiClient", () => {
 
     expect(result.workflow.nodes?.[0]).toEqual({ id: "n-start", name: "start" });
     expect(result.viewport).toBeUndefined();
+  });
+
+  it("lists a workflow's versions with page/page_size and maps the label rows", async () => {
+    const requests: string[] = [];
+    const client = createXFlowApiClient({
+      baseUrl: "/api",
+      fetcher: async (input) => {
+        requests.push(String(input));
+        return success({
+          list: [
+            {
+              version: "1.2.0",
+              definition_hash: "c07d1234",
+              registry_revision: 21,
+              current: true,
+              archived: false
+            },
+            {
+              version: "1.1.4",
+              definition_hash: "a91c9e2f",
+              registry_revision: 19,
+              current: false,
+              archived: true
+            }
+          ],
+          total: 2
+        });
+      }
+    });
+
+    const page = await client.listWorkflowVersions("wf /1", { page: 2, pageSize: 50 });
+
+    expect(requests).toEqual(["/api/workflows/wf%20%2F1/versions?page=2&page_size=50"]);
+    expect(page).toEqual({
+      list: [
+        { version: "1.2.0", definitionHash: "c07d1234", registryRevision: 21, current: true, archived: false },
+        { version: "1.1.4", definitionHash: "a91c9e2f", registryRevision: 19, current: false, archived: true }
+      ],
+      total: 2
+    } satisfies WorkflowVersionPage);
+  });
+
+  it("rejects a version row whose state flags are not booleans", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () =>
+        success({
+          list: [{ version: "1.2.0", definition_hash: "h", registry_revision: 1, current: "yes", archived: false }],
+          total: 1
+        })
+    });
+
+    await expect(client.listWorkflowVersions("wf-1")).rejects.toMatchObject({
+      name: "XFlowApiError",
+      status: 200,
+      message: "invalid API response"
+    });
+  });
+
+  it("reads one version's definition and merges its editor_metadata", async () => {
+    const requests: string[] = [];
+    const client = createXFlowApiClient({
+      baseUrl: "/api",
+      fetcher: async (input) => {
+        requests.push(String(input));
+        return success({
+          id: "wf-1",
+          name: "Demo",
+          version: "1.1.4",
+          nodes: [{ id: "n-start", name: "start" }],
+          editor_metadata: {
+            positions: { "n-start": { x: 3, y: 4 } },
+            viewport: { x: 0, y: 0, zoom: 1 }
+          }
+        });
+      }
+    });
+
+    const result = await client.getWorkflowVersion("wf-1", "v 1/2");
+
+    expect(requests).toEqual(["/api/workflows/wf-1/versions/v%201%2F2"]);
+    expect(result.workflow.nodes?.[0]).toEqual({ id: "n-start", name: "start", position: { x: 3, y: 4 } });
+    expect(result.viewport).toEqual({ x: 0, y: 0, zoom: 1 });
+  });
+
+  it("rolls back by posting the version and maps the unchanged outcome", async () => {
+    const requests: Array<{ url: string; method?: string; body?: unknown }> = [];
+    const client = createXFlowApiClient({
+      baseUrl: "/api",
+      fetcher: async (input, init) => {
+        requests.push({
+          url: String(input),
+          method: init?.method,
+          body: init?.body ? JSON.parse(String(init.body)) : undefined
+        });
+        return success({ workflow_id: "wf-1", version: "1.1.0", unchanged: true });
+      }
+    });
+
+    const result = await client.rollbackWorkflow("wf-1", "1.1.0");
+
+    expect(requests).toEqual([
+      { url: "/api/workflows/wf-1/rollback", method: "POST", body: { version: "1.1.0" } }
+    ]);
+    expect(result).toEqual({ workflowId: "wf-1", version: "1.1.0", unchanged: true } satisfies RollbackWorkflowResult);
+  });
+
+  it("rejects a rollback payload without a boolean unchanged flag", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () => success({ workflow_id: "wf-1", version: "1.1.0", unchanged: "no" })
+    });
+
+    await expect(client.rollbackWorkflow("wf-1", "1.1.0")).rejects.toMatchObject({
+      name: "XFlowApiError",
+      status: 200,
+      message: "invalid API response"
+    });
+  });
+
+  it("surfaces the 409 workflow_version_unavailable code of a rollback", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () =>
+        new Response(
+          JSON.stringify({
+            success: false,
+            code: "workflow_version_unavailable",
+            message: "workflow version is not reproducible under the current compiler",
+            trace_id: "t-1"
+          }),
+          { status: 409, headers: { "content-type": "application/json" } }
+        )
+    });
+
+    await expect(client.rollbackWorkflow("wf-1", "1.1.0")).rejects.toMatchObject({
+      name: "XFlowApiError",
+      status: 409,
+      code: "workflow_version_unavailable"
+    });
   });
 
   it("sends the caller's viewport in editor_metadata when saving a workflow", async () => {
@@ -547,6 +714,123 @@ describe("createXFlowApiClient", () => {
     } satisfies ExecutionDetail);
   });
 
+  it("carries the workflow identity captured on the execution snapshot", async () => {
+    const requests: string[] = [];
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async (input) => {
+        requests.push(String(input));
+        return success({
+          execution_id: "exec-attr",
+          workflow_id: "customer_sync",
+          workflow_version: "1.4.2",
+          status: "success"
+        });
+      }
+    });
+
+    const detail = await client.getExecution("exec-attr");
+
+    expect(requests).toEqual(["/v1/executions/exec-attr"]);
+    expect(detail).toEqual({
+      executionId: "exec-attr",
+      workflowId: "customer_sync",
+      workflowVersion: "1.4.2",
+      status: "success"
+    } satisfies ExecutionDetail);
+  });
+
+  it("carries the execution timestamps and the derivation lineage", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () => success({
+        execution_id: "exec-rerun",
+        status: "failed",
+        created_at: "2026-10-19T13:51:02Z",
+        updated_at: "2026-10-19T13:51:06Z",
+        parent_execution_id: "exec-8411",
+        rerun_from: "enrich_score",
+        nodes: [
+          {
+            name: "enrich_score",
+            status: "failed",
+            started_at: "2026-10-19T13:51:03Z",
+            finished_at: "2026-10-19T13:51:06Z"
+          }
+        ]
+      })
+    });
+
+    const detail = await client.getExecution("exec-rerun");
+
+    expect(detail).toEqual({
+      executionId: "exec-rerun",
+      status: "failed",
+      createdAt: "2026-10-19T13:51:02Z",
+      updatedAt: "2026-10-19T13:51:06Z",
+      parentExecutionId: "exec-8411",
+      rerunFrom: "enrich_score",
+      nodes: [
+        {
+          name: "enrich_score",
+          status: "failed",
+          startedAt: "2026-10-19T13:51:03Z",
+          finishedAt: "2026-10-19T13:51:06Z"
+        }
+      ]
+    } satisfies ExecutionDetail);
+  });
+
+  it("distinguishes a sub-workflow child from a rerun by its parent node", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () => success({
+        execution_id: "exec-child",
+        status: "running",
+        parent_execution_id: "exec-parent",
+        parent_node: "fan_out"
+      })
+    });
+
+    const detail = await client.getExecution("exec-child");
+
+    expect(detail.parentExecutionId).toBe("exec-parent");
+    expect(detail.parentNode).toBe("fan_out");
+    expect(detail).not.toHaveProperty("rerunFrom");
+  });
+
+
+  it("keeps workflow identity absent when the server omits it", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () => success({ execution_id: "exec-legacy", status: "success" })
+    });
+
+    const detail = await client.getExecution("exec-legacy");
+
+    // Go's `omitempty` makes an unattributed run indistinguishable from one
+    // recorded before the fields existed. The client must not invent a value:
+    // the editor reads the run's definition from these fields, not the name.
+    expect(detail).not.toHaveProperty("workflowId");
+    expect(detail).not.toHaveProperty("workflowVersion");
+  });
+
+  it("carries the queue position of a queued execution", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () => success({ execution_id: "exec-q", status: "queued", queue_position: 2 })
+    });
+
+    const detail = await client.getExecution("exec-q");
+
+    // The run bar renders 排队 · 第 2 位 from this field, not from a guess.
+    expect(detail).toEqual({
+      executionId: "exec-q",
+      status: "queued",
+      queuePosition: 2
+    } satisfies ExecutionDetail);
+  });
+
   it("returns terminal execution details from wait responses", async () => {
     const requests: string[] = [];
     const client = createXFlowApiClient({
@@ -587,6 +871,413 @@ describe("createXFlowApiClient", () => {
   });
 });
 
+describe("execution list", () => {
+  const row = (overrides: Record<string, unknown> = {}) => ({
+    execution_id: "exec-9",
+    namespace: "ns-a",
+    workflow_id: "wf-1",
+    workflow_name: "客户同步",
+    status: "paused",
+    error: "",
+    created_at: "2026-10-19T14:02:23Z",
+    updated_at: "2026-10-19T14:02:29Z",
+    ...overrides
+  });
+
+  it("sends pagination and the single server-supported status filter", async () => {
+    const fetcher = vi.fn().mockResolvedValue(success({ list: [row()], total: 41 }));
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    const page = await client.listExecutions({ page: 2, pageSize: 20, status: "paused" });
+
+    expect(fetcher).toHaveBeenCalledWith("/v1/executions?page=2&page_size=20&status=paused", undefined);
+    expect(page).toEqual({
+      list: [
+        {
+          executionId: "exec-9",
+          namespace: "ns-a",
+          workflowId: "wf-1",
+          workflowName: "客户同步",
+          status: "paused",
+          error: "",
+          createdAt: "2026-10-19T14:02:23Z",
+          updatedAt: "2026-10-19T14:02:29Z"
+        }
+      ],
+      total: 41
+    });
+  });
+
+  it("maps a queued row's queue_position and refuses a malformed one", async () => {
+    const queued = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () => success({ list: [row({ status: "queued", queue_position: 3 })], total: 1 })
+    });
+    const page = await queued.listExecutions();
+    expect(page.list[0].queuePosition).toBe(3);
+
+    // Absent is the normal shape for a row that is not queued, and it must map
+    // to "no property" rather than a 0 a client could display as a position.
+    const plain = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () => success({ list: [row()], total: 1 })
+    });
+    const absent = await plain.listExecutions();
+    expect(absent.list[0]).not.toHaveProperty("queuePosition");
+
+    for (const bad of ["3", 1.5]) {
+      const malformed = createXFlowApiClient({
+        baseUrl: "/v1",
+        fetcher: async () => success({ list: [row({ queue_position: bad })], total: 1 })
+      });
+      await expect(malformed.listExecutions()).rejects.toMatchObject({
+        name: "XFlowApiError",
+        message: "invalid API response"
+      });
+    }
+  });
+
+  it("sends the workflow identity and the created_at bounds as query parameters", async () => {
+    const fetcher = vi.fn().mockResolvedValue(success({ list: [], total: 0 }));
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    await client.listExecutions({
+      page: 1,
+      pageSize: 20,
+      workflowId: "wf-1",
+      createdAfter: "2026-10-19T00:00:00Z",
+      createdBefore: "2026-10-20T00:00:00Z"
+    });
+
+    expect(fetcher).toHaveBeenCalledWith(
+      "/v1/executions?page=1&page_size=20&workflow_id=wf-1&created_after=2026-10-19T00%3A00%3A00Z&created_before=2026-10-20T00%3A00%3A00Z",
+      undefined
+    );
+  });
+
+  it("requests the server's first page when only filters are given", async () => {
+    const fetcher = vi.fn().mockResolvedValue(success({ list: [], total: 0 }));
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    await client.listExecutions({ workflowId: "wf-1", status: "failed" });
+
+    expect(fetcher).toHaveBeenCalledWith("/v1/executions?status=failed&workflow_id=wf-1", undefined);
+  });
+
+  it("omits every absent option instead of sending defaults", async () => {
+    const fetcher = vi.fn().mockImplementation(async () => success({ list: [], total: 0 }));
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    await client.listExecutions();
+    await client.listExecutions({});
+
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual(["/v1/executions", "/v1/executions"]);
+  });
+
+  it("rejects a row with a missing field or an unknown status", async () => {
+    const missing = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () => success({ list: [row({ workflow_name: undefined })], total: 1 })
+    });
+    await expect(missing.listExecutions()).rejects.toMatchObject({
+      name: "XFlowApiError",
+      message: "invalid API response"
+    });
+
+    const unknown = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () => success({ list: [row({ status: "not-a-status" })], total: 1 })
+    });
+    await expect(unknown.listExecutions()).rejects.toMatchObject({ name: "XFlowApiError" });
+  });
+
+  it("rejects a payload that is not the {list,total} envelope shape", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () => success({ list: [], total: "1" })
+    });
+
+    await expect(client.listExecutions()).rejects.toMatchObject({ name: "XFlowApiError" });
+  });
+});
+
+describe("execution control", () => {
+  it("posts pause and maps the resulting execution detail", async () => {
+    const fetcher = vi.fn().mockResolvedValue(
+      success({
+        execution_id: "exec-1",
+        status: "paused",
+        nodes: [{ name: "fetch", status: "suspended", port: "approved" }]
+      })
+    );
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    const detail = await client.pauseExecution("exec 1");
+
+    expect(fetcher).toHaveBeenCalledWith("/v1/executions/exec%201/pause", { method: "POST" });
+    expect(detail).toEqual({
+      executionId: "exec-1",
+      status: "paused",
+      nodes: [{ name: "fetch", status: "suspended", port: "approved" }]
+    } satisfies ExecutionDetail);
+  });
+
+  it("posts resume and maps the resulting execution detail", async () => {
+    const fetcher = vi.fn().mockResolvedValue(
+      success({ execution_id: "exec-2", status: "running", nodes: [{ name: "fetch", status: "running" }] })
+    );
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    const detail = await client.resumeExecution("exec-2");
+
+    expect(fetcher).toHaveBeenCalledWith("/v1/executions/exec-2/resume", { method: "POST" });
+    expect(detail.status).toBe("running");
+    expect(detail.nodes).toEqual([{ name: "fetch", status: "running" }]);
+  });
+
+  it("posts cancel and maps the accepted flag", async () => {
+    const fetcher = vi.fn().mockResolvedValue(success({ accepted: true }));
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    await expect(client.cancelExecution("exec-3")).resolves.toEqual({ accepted: true });
+    expect(fetcher).toHaveBeenCalledWith("/v1/executions/exec-3/cancel", { method: "POST" });
+  });
+
+  it("rejects a cancel payload whose accepted flag is not a boolean", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () => success({ accepted: "true" })
+    });
+
+    await expect(client.cancelExecution("exec-3")).rejects.toMatchObject({
+      name: "XFlowApiError",
+      message: "invalid API response"
+    });
+  });
+
+  it("surfaces the 409 control codes unchanged", async () => {
+    const fetcher = vi.fn().mockImplementation(async () => new Response(
+      JSON.stringify({
+        success: false,
+        code: "execution_not_pausable",
+        message: "execution is not in a pausable status",
+        trace_id: "t-409"
+      }),
+      { status: 409 }
+    ));
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    await expect(client.pauseExecution("exec-1")).rejects.toMatchObject({
+      status: 409,
+      code: "execution_not_pausable",
+      traceId: "t-409"
+    });
+    await expect(client.resumeExecution("exec-1")).rejects.toMatchObject({
+      status: 409,
+      code: "execution_not_pausable",
+      traceId: "t-409"
+    });
+  });
+
+  it("surfaces 429 with its business code and 403 as a permission failure", async () => {
+    const responses = [
+      new Response(
+        JSON.stringify({
+          success: false,
+          code: "rate_limited",
+          message: "too many requests",
+          trace_id: "t-429"
+        }),
+        { status: 429, headers: { "retry-after": "1" } }
+      ),
+      new Response(
+        JSON.stringify({
+          success: false,
+          code: "forbidden",
+          message: "missing execution.control scope",
+          trace_id: "t-403"
+        }),
+        { status: 403 }
+      )
+    ];
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(responses[0])
+      .mockResolvedValueOnce(responses[1]);
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    await expect(client.pauseExecution("exec-1")).rejects.toMatchObject({
+      status: 429,
+      code: "rate_limited"
+    });
+    await expect(client.cancelExecution("exec-1")).rejects.toMatchObject({
+      status: 403,
+      code: "forbidden"
+    });
+  });
+});
+
+describe("execution signals", () => {
+  it("delivers a named signal with its payload to the signals collection", async () => {
+    const fetcher = vi.fn().mockResolvedValue(success({ accepted: true }));
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    const result = await client.deliverSignal("exec 1", {
+      name: "manager_approval/approval/finance-mgr",
+      data: { action: "approve", comment: "金额在额度内" }
+    });
+
+    expect(result).toEqual({ accepted: true });
+    expect(fetcher).toHaveBeenCalledWith("/v1/executions/exec%201/signals", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "manager_approval/approval/finance-mgr",
+        data: { action: "approve", comment: "金额在额度内" }
+      })
+    });
+  });
+
+  it("percent-encodes the signal name so its slashes stay one path segment", async () => {
+    const fetcher = vi.fn().mockResolvedValue(success({ revoked: true }));
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    await expect(client.revokeSignal("exec-1", "manager_approval/approval/finance-mgr")).resolves.toEqual({
+      revoked: true
+    });
+    expect(fetcher).toHaveBeenCalledWith(
+      "/v1/executions/exec-1/signals/manager_approval%2Fapproval%2Ffinance-mgr",
+      { method: "DELETE" }
+    );
+  });
+
+  it("surfaces signal_consumed unchanged and rejects a malformed revoke payload", async () => {
+    const consumed = new Response(
+      JSON.stringify({
+        success: false,
+        code: "signal_consumed",
+        message: "signal already consumed or not found",
+        trace_id: "t-409"
+      }),
+      { status: 409 }
+    );
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(consumed)
+      .mockResolvedValueOnce(success({ revoked: "yes" }));
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    await expect(client.revokeSignal("exec-1", "node/approval")).rejects.toMatchObject({
+      status: 409,
+      code: "signal_consumed"
+    });
+    await expect(client.revokeSignal("exec-1", "node/approval")).rejects.toMatchObject({
+      name: "XFlowApiError",
+      message: "invalid API response"
+    });
+  });
+});
+
+describe("rerun execution", () => {
+  it("posts from_node and include_success with the Idempotency-Key header", async () => {
+    const fetcher = vi.fn().mockResolvedValue(
+      success({ execution_id: "exec-new", status: "queued", queue_position: 2, duplicate: true })
+    );
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    const result = await client.rerunExecution("exec-1", {
+      fromNode: "fetch_profile",
+      includeSuccess: true,
+      idempotencyKey: "rerun-1:key"
+    });
+
+    expect(fetcher).toHaveBeenCalledWith("/v1/executions/exec-1/rerun", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "Idempotency-Key": "rerun-1:key"
+      },
+      body: JSON.stringify({ from_node: "fetch_profile", include_success: true })
+    });
+    expect(result).toEqual({
+      executionId: "exec-new",
+      status: "queued",
+      queuePosition: 2,
+      duplicate: true
+    });
+  });
+
+  it("sends include_success:false for a non-success source and keeps an absent duplicate absent", async () => {
+    const fetcher = vi.fn().mockResolvedValue(success({ execution_id: "exec-2", status: "running" }));
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    const result = await client.rerunExecution("exec-1", {
+      fromNode: "notify_sales",
+      idempotencyKey: "k-2"
+    });
+
+    expect(JSON.parse(String((fetcher.mock.calls[0][1] as RequestInit).body))).toEqual({
+      from_node: "notify_sales",
+      include_success: false
+    });
+    expect(result).toEqual({ executionId: "exec-2", status: "running" });
+  });
+
+  it("surfaces the 409 rerun source codes unchanged", async () => {
+    const fetcher = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          success: false,
+          code: "execution_not_rerunnable",
+          message: "execution is not in a rerunnable status",
+          trace_id: "t-409"
+        }),
+        { status: 409 }
+      )
+    );
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    await expect(
+      client.rerunExecution("exec-1", { fromNode: "n", idempotencyKey: "k" })
+    ).rejects.toMatchObject({ status: 409, code: "execution_not_rerunnable", traceId: "t-409" });
+  });
+
+  it("surfaces 429 with its business code so the host can say retry later", async () => {
+    const fetcher = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          success: false,
+          code: "workflow_concurrency_limit",
+          message: "workflow is at its concurrency limit",
+          trace_id: "t-429"
+        }),
+        { status: 429, headers: { "retry-after": "1" } }
+      )
+    );
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    await expect(
+      client.rerunExecution("exec-1", { fromNode: "n", idempotencyKey: "k" })
+    ).rejects.toMatchObject({ status: 429, code: "workflow_concurrency_limit" });
+  });
+
+  it("rejects a malformed rerun payload instead of inventing a result", async () => {
+    const missing = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () => success({ status: "success" })
+    });
+    await expect(
+      missing.rerunExecution("exec-1", { fromNode: "n", idempotencyKey: "k" })
+    ).rejects.toMatchObject({ name: "XFlowApiError" });
+
+    const badDuplicate = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () => success({ execution_id: "exec-2", duplicate: "yes" })
+    });
+    await expect(
+      badDuplicate.rerunExecution("exec-1", { fromNode: "n", idempotencyKey: "k" })
+    ).rejects.toMatchObject({ name: "XFlowApiError" });
+  });
+});
+
 describe("executionDetailToRuntimeSnapshot", () => {
   it("maps server-only transitional states to the core runtime projection", () => {
     const snapshot = executionDetailToRuntimeSnapshot({
@@ -609,6 +1300,27 @@ describe("executionDetailToRuntimeSnapshot", () => {
     });
   });
 
+  it("derives a node duration from the B2b timestamps only when both are ordered", () => {
+    const snapshot = executionDetailToRuntimeSnapshot({
+      executionId: "exec-1",
+      status: "failed",
+      nodes: [
+        {
+          name: "timed",
+          status: "failed",
+          startedAt: "2026-10-19T13:51:03.000Z",
+          finishedAt: "2026-10-19T13:51:07.100Z"
+        },
+        { name: "open", status: "running", startedAt: "2026-10-19T13:51:03.000Z" },
+        { name: "inverted", status: "failed", startedAt: "2026-10-19T13:51:07.000Z", finishedAt: "2026-10-19T13:51:03.000Z" }
+      ]
+    });
+
+    expect(snapshot.nodes?.timed.durationMs).toBe(4100);
+    expect(snapshot.nodes?.open.durationMs).toBeUndefined();
+    expect(snapshot.nodes?.inverted.durationMs).toBeUndefined();
+  });
+
   it("accepts a pinned node and projects it as success", async () => {
     const client = createXFlowApiClient({
       baseUrl: "/v1",
@@ -623,7 +1335,49 @@ describe("executionDetailToRuntimeSnapshot", () => {
     const detail = await client.getExecution("exec-pin");
 
     expect(detail.nodes).toEqual([{ name: "fetch", status: "pinned", output: { value: "mock" } }]);
-    expect(executionDetailToRuntimeSnapshot(detail).nodes).toEqual({ fetch: { status: "success" } });
+    expect(executionDetailToRuntimeSnapshot(detail).nodes).toEqual({
+      fetch: { status: "success", output: { value: "mock" } }
+    });
+  });
+
+  it("carries the port, structured error and output into the runtime projection", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () =>
+        success({
+          execution_id: "exec-fields",
+          status: "failed",
+          nodes: [
+            {
+              name: "approve",
+              status: "failed",
+              attempt: 2,
+              port: "rejected",
+              error_details: { code: "approval_rejected", at: "manager_approval" },
+              output: { approved: false }
+            },
+            {
+              name: "child",
+              status: "success",
+              child_execution_id: "exec-sw-1"
+            }
+          ]
+        })
+    });
+
+    const detail = await client.getExecution("exec-fields");
+
+    expect(detail.nodes?.[1]).toEqual({ name: "child", status: "success", childExecutionId: "exec-sw-1" });
+    expect(executionDetailToRuntimeSnapshot(detail).nodes).toEqual({
+      approve: {
+        status: "failed",
+        attempts: 2,
+        port: "rejected",
+        errorDetails: { code: "approval_rejected", at: "manager_approval" },
+        output: { approved: false }
+      },
+      child: { status: "success", childExecutionId: "exec-sw-1" }
+    });
   });
 
   it("accepts a queued execution and projects it as not yet started", async () => {
@@ -643,6 +1397,25 @@ describe("executionDetailToRuntimeSnapshot", () => {
     // submission reports until a concurrency slot frees.
     expect(detail.status).toBe("queued");
     expect(executionDetailToRuntimeSnapshot(detail).status).toBe("pending");
+  });
+
+  it("accepts a paused execution and keeps it live in the runtime projection", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () =>
+        success({
+          execution_id: "exec-paused",
+          status: "paused",
+          nodes: [{ name: "ingest", status: "success" }]
+        })
+    });
+
+    const detail = await client.getExecution("exec-paused");
+
+    expect(detail.status).toBe("paused");
+    // Suspended dispatch is not "never started": the runtime vocabulary has no
+    // paused member, so the execution stays in the live bucket.
+    expect(executionDetailToRuntimeSnapshot(detail).status).toBe("running");
   });
 
   it("accepts an expired node and keeps it in the runtime projection", async () => {
@@ -675,6 +1448,7 @@ describe("executionStatusToRuntimeStatus", () => {
     const projections: Record<ExecutionStatus, RuntimeSnapshot["status"]> = {
       pending: "pending",
       queued: "pending",
+      paused: "running",
       running: "running",
       canceling: "running",
       success: "success",

@@ -14,6 +14,18 @@ import type {
 } from "@xflow/core";
 import { mergeEditorMetadata, splitEditorMetadata } from "@xflow/core";
 
+/**
+ * GET /v1/current-user payload (OpenAPI `CurrentUserResponse`): the caller's
+ * own verified identity. Every field is server-issued from the presented
+ * credential; no request parameter can name a principal, so this can only
+ * ever describe the caller.
+ */
+export interface CurrentIdentity {
+  subject: string;
+  namespace: string;
+  scopes: string[];
+}
+
 /** One summary row returned by GET /v1/workflows. */
 export interface WorkflowSummary {
   id: string;
@@ -67,6 +79,12 @@ export type ExecutionStatus =
    * (`types.ExecutionStatusQueued`).
    */
   | "queued"
+  /**
+   * An operator suspended dispatch. Not terminal: the execution can still be
+   * resumed or canceled, and `waitExecution` keeps waiting on it
+   * (`types.ExecutionStatusPaused`).
+   */
+  | "paused"
   | "running"
   | "success"
   | "failed"
@@ -102,15 +120,53 @@ export interface ExecutionNodeDetail {
   attempt?: number;
   port?: string;
   error?: string;
+  /** First lease granted (B2b). Absent when the node never started. */
+  startedAt?: string;
+  /** First terminal status (B2b). Absent while the node has not finished. */
+  finishedAt?: string;
   /** Structured failure data emitted by the current Go execution handler. */
   errorDetails?: Record<string, unknown>;
   output?: Record<string, unknown>;
+  /**
+   * The child execution a sub-workflow node waited on (`child_execution_id`),
+   * absent on every other node. It survives the node's commit, so a finished
+   * node's child stays drillable.
+   */
+  childExecutionId?: string;
 }
 
 /** Audit snapshot returned by GET /v1/executions/{id}. */
 export interface ExecutionDetail {
   executionId: string;
+  /**
+   * The workflow definition this execution ran, captured at submission. Absent
+   * when the submission carried no identity (an inline definition with no
+   * server id, or a run recorded before the field existed): an unattributed
+   * execution must not be reported under a guessed workflow.
+   */
+  workflowId?: string;
+  /**
+   * The version label captured with {@link workflowId}; absent when there is no
+   * recorded identity or the definition declares no version. The editor reads
+   * the run's definition snapshot with `GET /v1/workflows/{id}/versions/{version}`.
+   */
+  workflowVersion?: string;
   status: ExecutionStatus;
+  /** When the backend recorded the execution (B2b). Absent on older rows. */
+  createdAt?: string;
+  /** Wall clock of the latest accepted status transition (B2b). */
+  updatedAt?: string;
+  /**
+   * The execution this one derives from. Set on a rerun result (together with
+   * `rerunFrom`) and on a sub-workflow child (together with `parentNode`).
+   */
+  parentExecutionId?: string;
+  /** The node a rerun started at; upstream results were copied, not rerun. */
+  rerunFrom?: string;
+  /** The parent's `xflow.subworkflow` node this child execution satisfies. */
+  parentNode?: string;
+  /** 1-based place in the workflow's concurrency queue while `queued`. */
+  queuePosition?: number;
   error?: string;
   nodes?: ExecutionNodeDetail[];
 }
@@ -133,6 +189,133 @@ export interface WaitExecutionTimeout {
  */
 export type WaitExecutionResult = ExecutionDetail | WaitExecutionTimeout;
 
+/** Offset-pagination and filters for GET /v1/executions. */
+export interface ListExecutionsOptions {
+  /** 1-based page number. Omit to let the server use its default. */
+  page?: number;
+  /** Number of rows per page. Sent to the server as `page_size`. */
+  pageSize?: number;
+  /**
+   * Narrow the page to one lifecycle status. The server narrows `total` too;
+   * an unknown value is a 400 `execution_status_invalid`, never an empty page.
+   */
+  status?: ExecutionStatus;
+  /**
+   * Narrow to one workflow identity (B1). The comparison is exact and a row
+   * recorded without a definition id (`workflow_id: ""`) matches no value, so
+   * an unattributed execution is never guessed into a workflow.
+   */
+  workflowId?: string;
+  /** Lower bound on `created_at`, RFC3339 and exclusive (server-side). */
+  createdAfter?: string;
+  /** Upper bound on `created_at`, RFC3339 and exclusive (server-side). */
+  createdBefore?: string;
+}
+
+/**
+ * One row of GET /v1/executions (OpenAPI `ExecutionListItem`). It is a summary,
+ * not a snapshot: `workflow_name` is a display string recorded at submit time,
+ * while `workflow_id` is the immutable identity the list can be filtered by.
+ */
+export interface ExecutionListItem {
+  executionId: string;
+  /** The server-issued isolation scope the row belongs to. */
+  namespace: string;
+  /** Server-assigned id of the workflow the execution ran; `""` = unattributed. */
+  workflowId: string;
+  workflowName: string;
+  status: ExecutionStatus;
+  /** Failure message when the execution failed; `""` otherwise. */
+  error: string;
+  /** RFC3339 timestamp; the listing's descending primary sort key. */
+  createdAt: string;
+  /** RFC3339 timestamp of the row's last update. */
+  updatedAt: string;
+  /**
+   * 1-based place in the workflow's concurrency queue while `queued`, read
+   * from live queue state at list time. Absent for every other status and when
+   * the server could not read it — absence means unknown, never the head of
+   * the line (the head is `1`). Same semantics as
+   * {@link ExecutionDetail.queuePosition}.
+   */
+  queuePosition?: number;
+}
+
+/**
+ * The `data` payload of POST /v1/executions/{id}/cancel (OpenAPI
+ * `AcceptedResponse`). `accepted` means the cancellation request was taken —
+ * not that the execution is already terminal; poll `getExecution` for that.
+ */
+export interface CancelExecutionResult {
+  accepted: boolean;
+}
+
+/**
+ * A signal delivered to an execution (OpenAPI `SignalRequest`). The approval
+ * node names its signals `<node>/approval`, `<node>/approval/<subject>` and
+ * `<node>/approval/force`; the *action* (`approve`, `reject`, `return`,
+ * `delegate`, `add_signer`, `force`) travels in `data.action`. Never put an
+ * approver identity in `data`: the server injects the verified `_actor` and
+ * refuses a payload that carries the reserved key.
+ */
+export interface SignalDelivery {
+  name: string;
+  data?: Record<string, unknown>;
+}
+
+/** The `data` payload of POST /v1/executions/{id}/signals. */
+export interface DeliverSignalResult {
+  accepted: boolean;
+}
+
+/**
+ * The `data` payload of DELETE /v1/executions/{id}/signals/{name}. `revoked`
+ * answers the delete itself; a 409 `signal_consumed` means the node already
+ * consumed it or it was never queued.
+ */
+export interface RevokeSignalResult {
+  revoked: boolean;
+}
+
+/** The `{list,total}` payload returned by GET /v1/executions. */
+export interface ExecutionListPage {
+  list: ExecutionListItem[];
+  total: number;
+}
+
+/**
+ * Options for POST /v1/executions/{id}/rerun (OpenAPI
+ * `RerunExecutionRequest`). Everything upstream of `fromNode` is copied from
+ * the source execution; that node and everything downstream run again.
+ */
+export interface RerunExecutionOptions {
+  /** The node the new execution starts at (wire `from_node`, required). */
+  fromNode: string;
+  /**
+   * Accept a `success` source. `failed`, `canceled` and `timeout` sources are
+   * accepted either way; every other status stays 409
+   * `execution_not_rerunnable`.
+   */
+  includeSuccess?: boolean;
+  /**
+   * Retry-safe key sent as the `Idempotency-Key` header (1-255 characters of
+   * [A-Za-z0-9._:-]). A retry with the same key and same request answers
+   * `duplicate: true` with the execution the first attempt created.
+   */
+  idempotencyKey: string;
+}
+
+/** The `data` payload of a rerun response (OpenAPI `RerunExecutionResponse`). */
+export interface RerunExecutionResult {
+  /** The NEW execution. The source execution is unchanged. */
+  executionId: string;
+  status?: ExecutionStatus;
+  /** 1-based queue position while `queued`; absent for executions that never queued. */
+  queuePosition?: number;
+  /** True when an idempotent retry returned the execution the first attempt created. */
+  duplicate?: boolean;
+}
+
 /**
  * Result of reading a workflow definition (GET /v1/workflows/{id}).
  * `workflow` is the editor's internal (merged) model: `editor_metadata`'s
@@ -144,6 +327,60 @@ export type WaitExecutionResult = ExecutionDetail | WaitExecutionTimeout;
 export interface GetWorkflowResult {
   workflow: WorkflowDef;
   viewport?: Viewport;
+}
+
+/**
+ * One row of GET /v1/workflows/{id}/versions (OpenAPI `WorkflowVersionListItem`):
+ * a label, not a definition. The definition is read one version at a time with
+ * `getWorkflowVersion`.
+ */
+export interface WorkflowVersion {
+  /** The version label. Immutable once published. */
+  version: string;
+  /** Opaque identifier of this version's stored definition; compare only for equality. */
+  definitionHash: string;
+  /**
+   * The current row's live compare-and-swap revision, or an archived row's
+   * retirement order (newest first down the list).
+   */
+  registryRevision: number;
+  /** Whether this row is the version the live record represents. */
+  current: boolean;
+  /** Whether this row is a retired history entry (complementary to `current`). */
+  archived: boolean;
+}
+
+/** The `{list,total}` payload of GET /v1/workflows/{id}/versions. */
+export interface WorkflowVersionPage {
+  /** Current version first, then retired versions newest-retirement first. */
+  list: WorkflowVersion[];
+  /** Exact history size (current + retained archived), independent of the page. */
+  total: number;
+}
+
+/** Offset-pagination options for GET /v1/workflows/{id}/versions. */
+export interface ListWorkflowVersionsOptions {
+  /** 1-based page number. Omit to let the server use its default (1). */
+  page?: number;
+  /** Rows per page. Sent as `page_size`; the server clamps above 200. */
+  pageSize?: number;
+}
+
+/**
+ * The `data` payload of POST /v1/workflows/{id}/rollback (OpenAPI
+ * `RollbackWorkflowResponse`). The rollback installs an archived version as the
+ * live record; the version it replaced goes to history.
+ */
+export interface RollbackWorkflowResult {
+  /** The workflow id — unchanged by a rollback (version ownership follows the id). */
+  workflowId: string;
+  /** The version that is now current. */
+  version: string;
+  /**
+   * True when nothing was written because the requested version already was
+   * the current one (including on a replayed request).
+   */
+  unchanged: boolean;
 }
 
 /**
@@ -197,6 +434,12 @@ export interface XFlowApiClient {
   listWorkflows(): Promise<WorkflowSummary[]>;
   /** Fetches a paginated workflow collection and retains its exact `total`. */
   listWorkflows(options: ListWorkflowsOptions): Promise<WorkflowListPage>;
+  /**
+   * GET /v1/current-user: the caller's own verified identity and scopes. A
+   * console maps `scopes` onto editor capabilities; the server stays the
+   * authority and still refuses a route those scopes do not cover.
+   */
+  getCurrentUser(): Promise<CurrentIdentity>;
   createWorkflow(workflow?: WorkflowDef, options?: SaveWorkflowOptions): Promise<RegisterWorkflowResult>;
   /**
    * Reads a workflow definition and merges its `editor_metadata` sibling
@@ -207,9 +450,76 @@ export interface XFlowApiClient {
    */
   getWorkflow(id: string): Promise<GetWorkflowResult>;
   saveWorkflow(workflow: WorkflowDef, options?: SaveWorkflowOptions): Promise<RegisterWorkflowResult>;
+  /**
+   * GET /v1/workflows/{id}/versions: one offset-paginated page of the
+   * workflow's version history — the current version first, then retired
+   * versions newest-retirement first. Rows are labels; read a definition with
+   * {@link getWorkflowVersion}. Exactly the current version until the first
+   * replacement.
+   */
+  listWorkflowVersions(id: string, options?: ListWorkflowVersionsOptions): Promise<WorkflowVersionPage>;
+  /**
+   * GET /v1/workflows/{id}/versions/{version}: one version's definition, in
+   * the same merged shape as {@link getWorkflow}. An unknown version rejects
+   * 404 `workflow_version_not_found` (distinct from a missing workflow's
+   * `workflow_not_found`).
+   */
+  getWorkflowVersion(id: string, version: string): Promise<GetWorkflowResult>;
+  /**
+   * POST /v1/workflows/{id}/rollback: install an archived version as the live
+   * record. `unchanged: true` means the requested version already was current.
+   * A version the current compiler cannot reproduce rejects 409
+   * `workflow_version_unavailable`; the live record is left untouched.
+   */
+  rollbackWorkflow(id: string, version: string): Promise<RollbackWorkflowResult>;
   runWorkflow(workflowId: string): Promise<ExecuteWorkflowResult>;
   getExecution(id: string): Promise<ExecutionDetail>;
   waitExecution(id: string, options?: WaitExecutionOptions): Promise<WaitExecutionResult>;
+  /**
+   * POST /v1/executions/{id}/pause: suspends dispatch and answers with the
+   * resulting detail (`status: "paused"`). Pausing an already-paused execution
+   * is idempotent; a queued or terminal one rejects 409
+   * `execution_not_pausable`. Requires the `execution.control` scope.
+   */
+  pauseExecution(id: string): Promise<ExecutionDetail>;
+  /**
+   * POST /v1/executions/{id}/resume: releases the dispatch a pause held and
+   * answers with the resulting detail. Anything but `paused` rejects 409
+   * `execution_not_paused`. Requires the `execution.control` scope.
+   */
+  resumeExecution(id: string): Promise<ExecutionDetail>;
+  /**
+   * POST /v1/executions/{id}/cancel: requests cancellation. `accepted` only
+   * says the request was taken — the execution reaches `canceled` later, so a
+   * caller that needs the terminal state polls {@link getExecution}.
+   */
+  cancelExecution(id: string): Promise<CancelExecutionResult>;
+  /**
+   * POST /v1/executions/{id}/signals: delivers one named signal. A 200 only
+   * means the signal was accepted for delivery — the node may still refuse it
+   * (an approver not in the chain, a signal name for the wrong mode), which is
+   * visible only in the node's published `ignored` trail. Requires the
+   * `execution` scope.
+   */
+  deliverSignal(id: string, signal: SignalDelivery): Promise<DeliverSignalResult>;
+  /**
+   * DELETE /v1/executions/{id}/signals/{name}: removes a delivered signal the
+   * node has not consumed yet (e.g. while the execution is paused). A signal
+   * already consumed rejects 409 `signal_consumed`.
+   */
+  revokeSignal(id: string, name: string): Promise<RevokeSignalResult>;
+  /**
+   * GET /v1/executions: one offset-paginated page of the caller's namespace,
+   * newest first. Wraps `page`, `page_size`, one lifecycle `status`, the
+   * `workflow_id` identity filter and the exclusive `created_after` /
+   * `created_before` RFC3339 bounds.
+   */
+  listExecutions(options?: ListExecutionsOptions): Promise<ExecutionListPage>;
+  /**
+   * POST /v1/executions/{id}/rerun: derive a new execution from a terminal
+   * one, starting at `fromNode`. Safe to retry with the same Idempotency-Key.
+   */
+  rerunExecution(id: string, options: RerunExecutionOptions): Promise<RerunExecutionResult>;
   /**
    * GET /v1/node-types: the NodeFormSchema of every node type registered in
    * the server process, plus the server's param validation mode. With a
@@ -270,6 +580,7 @@ const INVALID_RESPONSE_MESSAGE = "invalid API response";
 const executionStatuses = new Set<string>([
   "pending",
   "queued",
+  "paused",
   "running",
   "success",
   "failed",
@@ -373,6 +684,25 @@ interface WorkflowListWire {
   total: number;
 }
 
+interface WorkflowVersionListItemWire {
+  version: string;
+  definition_hash: string;
+  registry_revision: number;
+  current: boolean;
+  archived: boolean;
+}
+
+interface WorkflowVersionListWire {
+  list: WorkflowVersionListItemWire[];
+  total: number;
+}
+
+interface RollbackWorkflowWire {
+  workflow_id: string;
+  version: string;
+  unchanged: boolean;
+}
+
 interface ExecutionNodeDetailWire {
   name: string;
   status: ExecutionNodeStatus;
@@ -381,11 +711,31 @@ interface ExecutionNodeDetailWire {
   error?: string;
   error_details?: Record<string, unknown>;
   output?: Record<string, unknown>;
+  child_execution_id?: string;
+  started_at?: string;
+  finished_at?: string;
+}
+
+interface AcceptedWire {
+  accepted: boolean;
+}
+
+interface RevokeSignalWire {
+  revoked: boolean;
 }
 
 interface ExecutionDetailWire {
   execution_id: string;
+  /** `engine.ExecutionDetail` JSON; `omitempty` on the server. */
+  workflow_id?: string;
+  workflow_version?: string;
   status: ExecutionStatus;
+  created_at?: string;
+  updated_at?: string;
+  parent_execution_id?: string;
+  rerun_from?: string;
+  parent_node?: string;
+  queue_position?: number;
   error?: string;
   nodes?: ExecutionNodeDetailWire[];
 }
@@ -394,6 +744,30 @@ interface WaitExecutionTimeoutWire {
   execution_id: string;
   status: ExecutionStatus;
   timed_out: true;
+}
+
+interface ExecutionListItemWire {
+  execution_id: string;
+  namespace: string;
+  workflow_id: string;
+  workflow_name: string;
+  status: ExecutionStatus;
+  error: string;
+  created_at: string;
+  updated_at: string;
+  queue_position?: number;
+}
+
+interface ExecutionListWire {
+  list: ExecutionListItemWire[];
+  total: number;
+}
+
+interface RerunExecutionWire {
+  execution_id: string;
+  status?: ExecutionStatus;
+  queue_position?: number;
+  duplicate?: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -465,6 +839,14 @@ function optionalString(record: Record<string, unknown>, key: string, response: 
 function requireInteger(record: Record<string, unknown>, key: string, response: ApiResponse<unknown>): number {
   const value = record[key];
   if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    invalidResponse(response);
+  }
+  return value;
+}
+
+function requireBoolean(record: Record<string, unknown>, key: string, response: ApiResponse<unknown>): boolean {
+  const value = record[key];
+  if (typeof value !== "boolean") {
     invalidResponse(response);
   }
   return value;
@@ -657,6 +1039,37 @@ function mapWorkflowList(response: ApiResponse<unknown>): WorkflowListPage {
   };
 }
 
+function mapWorkflowVersionList(response: ApiResponse<unknown>): WorkflowVersionPage {
+  const data = requireRecord(response.data, response);
+  const list = data.list;
+  if (!Array.isArray(list)) {
+    invalidResponse(response);
+  }
+
+  return {
+    list: list.map((value) => {
+      const item = requireRecord(value, response);
+      return {
+        version: requireString(item, "version", response),
+        definitionHash: requireString(item, "definition_hash", response),
+        registryRevision: requireInteger(item, "registry_revision", response),
+        current: requireBoolean(item, "current", response),
+        archived: requireBoolean(item, "archived", response)
+      };
+    }),
+    total: requireInteger(data, "total", response)
+  };
+}
+
+function mapRollbackWorkflow(response: ApiResponse<unknown>): RollbackWorkflowResult {
+  const data = requireRecord(response.data, response);
+  return {
+    workflowId: requireString(data, "workflow_id", response),
+    version: requireString(data, "version", response),
+    unchanged: requireBoolean(data, "unchanged", response)
+  };
+}
+
 const paramValidationModes = new Set<string>(["off", "warn", "enforce"]);
 
 /**
@@ -702,6 +1115,9 @@ function mapExecutionNode(value: unknown, response: ApiResponse<unknown>): Execu
   const error = optionalString(data, "error", response);
   const errorDetails = optionalRecord(data, "error_details", response);
   const output = optionalRecord(data, "output", response);
+  const childExecutionId = optionalString(data, "child_execution_id", response);
+  const startedAt = optionalString(data, "started_at", response);
+  const finishedAt = optionalString(data, "finished_at", response);
 
   if (attempt !== undefined) {
     node.attempt = attempt;
@@ -718,6 +1134,15 @@ function mapExecutionNode(value: unknown, response: ApiResponse<unknown>): Execu
   if (output !== undefined) {
     node.output = output;
   }
+  if (childExecutionId !== undefined) {
+    node.childExecutionId = childExecutionId;
+  }
+  if (startedAt !== undefined) {
+    node.startedAt = startedAt;
+  }
+  if (finishedAt !== undefined) {
+    node.finishedAt = finishedAt;
+  }
   return node;
 }
 
@@ -727,9 +1152,43 @@ function mapExecutionDetail(response: ApiResponse<unknown>): ExecutionDetail {
     executionId: requireString(data, "execution_id", response),
     status: requireExecutionStatus(data.status, response)
   };
+  const workflowId = optionalString(data, "workflow_id", response);
+  if (workflowId !== undefined) {
+    detail.workflowId = workflowId;
+  }
+  const workflowVersion = optionalString(data, "workflow_version", response);
+  if (workflowVersion !== undefined) {
+    detail.workflowVersion = workflowVersion;
+  }
+  const createdAt = optionalString(data, "created_at", response);
+  if (createdAt !== undefined) {
+    detail.createdAt = createdAt;
+  }
+  const updatedAt = optionalString(data, "updated_at", response);
+  if (updatedAt !== undefined) {
+    detail.updatedAt = updatedAt;
+  }
+  const parentExecutionId = optionalString(data, "parent_execution_id", response);
+  if (parentExecutionId !== undefined) {
+    detail.parentExecutionId = parentExecutionId;
+  }
+  const rerunFrom = optionalString(data, "rerun_from", response);
+  if (rerunFrom !== undefined) {
+    detail.rerunFrom = rerunFrom;
+  }
+  const parentNode = optionalString(data, "parent_node", response);
+  if (parentNode !== undefined) {
+    detail.parentNode = parentNode;
+  }
   const error = optionalString(data, "error", response);
   if (error !== undefined) {
     detail.error = error;
+  }
+  // `omitempty` on the server: absent for every execution that is not queued,
+  // so an absent field must stay absent (a 0 is not a real place in line).
+  const queuePosition = optionalInteger(data, "queue_position", response);
+  if (queuePosition !== undefined) {
+    detail.queuePosition = queuePosition;
   }
 
   if (data.nodes !== undefined) {
@@ -751,6 +1210,67 @@ function mapWaitExecutionTimeout(response: ApiResponse<unknown>): WaitExecutionT
     status: requireExecutionStatus(data.status, response),
     timedOut: true
   };
+}
+
+function mapExecutionListItem(value: unknown, response: ApiResponse<unknown>): ExecutionListItem {
+  const row = requireRecord(value, response);
+  const item: ExecutionListItem = {
+    executionId: requireString(row, "execution_id", response),
+    namespace: requireString(row, "namespace", response),
+    workflowId: requireString(row, "workflow_id", response),
+    workflowName: requireString(row, "workflow_name", response),
+    status: requireExecutionStatus(row.status, response),
+    error: requireString(row, "error", response),
+    createdAt: requireString(row, "created_at", response),
+    updatedAt: requireString(row, "updated_at", response)
+  };
+  const queuePosition = optionalInteger(row, "queue_position", response);
+  if (queuePosition !== undefined) {
+    item.queuePosition = queuePosition;
+  }
+  return item;
+}
+
+function mapExecutionList(response: ApiResponse<unknown>): ExecutionListPage {
+  const data = requireRecord(response.data, response);
+  if (!Array.isArray(data.list)) {
+    invalidResponse(response);
+  }
+  return {
+    list: data.list.map((row) => mapExecutionListItem(row, response)),
+    total: requireInteger(data, "total", response)
+  };
+}
+
+function mapRerunExecution(response: ApiResponse<unknown>): RerunExecutionResult {
+  const data = requireRecord(response.data, response);
+  const result: RerunExecutionResult = {
+    executionId: requireString(data, "execution_id", response)
+  };
+  if (data.status !== undefined) {
+    result.status = requireExecutionStatus(data.status, response);
+  }
+  const queuePosition = optionalInteger(data, "queue_position", response);
+  if (queuePosition !== undefined) {
+    result.queuePosition = queuePosition;
+  }
+  if (data.duplicate !== undefined) {
+    if (typeof data.duplicate !== "boolean") {
+      invalidResponse(response);
+    }
+    result.duplicate = data.duplicate;
+  }
+  return result;
+}
+
+function mapCancelExecution(response: ApiResponse<unknown>): CancelExecutionResult {
+  const data = requireRecord(response.data, response);
+  return { accepted: requireBoolean(data, "accepted", response) };
+}
+
+function mapRevokeSignal(response: ApiResponse<unknown>): RevokeSignalResult {
+  const data = requireRecord(response.data, response);
+  return { revoked: requireBoolean(data, "revoked", response) };
 }
 
 function listWorkflowPage(
@@ -807,6 +1327,30 @@ export function executionDetailToRuntimeSnapshot(detail: ExecutionDetail): Runti
       if (node.error !== undefined) {
         runtimeNode.error = node.error;
       }
+      // The Inspector's 运行 tab reads these from the runtime projection: the
+      // editor has no execution model of its own (it never imports @xflow/api).
+      if (node.port !== undefined) {
+        runtimeNode.port = node.port;
+      }
+      if (node.errorDetails !== undefined) {
+        runtimeNode.errorDetails = node.errorDetails;
+      }
+      if (node.output !== undefined) {
+        runtimeNode.output = node.output;
+      }
+      if (node.childExecutionId !== undefined) {
+        runtimeNode.childExecutionId = node.childExecutionId;
+      }
+      // B2b stamps the node's first lease and first terminal status. A
+      // duration only exists when both are present and ordered; otherwise it
+      // stays absent, which the Inspector renders as "-" rather than a guess.
+      if (node.startedAt !== undefined && node.finishedAt !== undefined) {
+        const started = Date.parse(node.startedAt);
+        const finished = Date.parse(node.finishedAt);
+        if (Number.isFinite(started) && Number.isFinite(finished) && finished >= started) {
+          runtimeNode.durationMs = finished - started;
+        }
+      }
       nodes[node.name] = runtimeNode;
     }
     snapshot.nodes = nodes;
@@ -832,8 +1376,12 @@ export function executionStatusToRuntimeStatus(status: ExecutionStatus): Runtime
       // honest projection. It stays a distinct server-side status because the
       // queue is what a caller waits on or cancels.
       return "pending";
+    // A paused execution has started and is still live: dispatch is suspended,
+    // not undone, so "not started yet" would be false. The runtime vocabulary
+    // has no paused member; live is the honest projection.
     case "running":
     case "canceling":
+    case "paused":
       return "running";
     case "success":
       return "success";
@@ -881,11 +1429,33 @@ function executionNodeStatusToRuntimeStatus(status: ExecutionNodeStatus): Runtim
   }
 }
 
+/**
+ * Parses GET /v1/current-user. `scopes` is required by the contract; an
+ * absent list is a broken response rather than "no scopes" (the server sends
+ * `[]` for that). Keeping the two distinct stops a malformed payload from
+ * silently demoting the caller to read-only.
+ */
+function mapCurrentUser(response: ApiResponse<unknown>): CurrentIdentity {
+  const data = requireRecord(response.data, response);
+  const scopes = optionalStringArray(data, "scopes", response);
+  if (scopes === undefined) {
+    invalidResponse(response);
+  }
+  return {
+    subject: requireString(data, "subject", response),
+    namespace: requireString(data, "namespace", response),
+    scopes
+  };
+}
+
 export function createXFlowApiClient(options: XFlowApiClientOptions): XFlowApiClient {
   const fetcher = options.fetcher ?? fetch;
 
   return {
     listWorkflows: createListWorkflows(fetcher, options.baseUrl),
+    getCurrentUser() {
+      return request<unknown>(fetcher, joinUrl(options.baseUrl, "/current-user")).then(mapCurrentUser);
+    },
     createWorkflow(workflow, saveOptions) {
       return request<RegisterWorkflowWire>(fetcher, joinUrl(options.baseUrl, "/workflows"), {
         method: "POST",
@@ -919,6 +1489,30 @@ export function createXFlowApiClient(options: XFlowApiClientOptions): XFlowApiCl
         }
       ).then(mapRegisterWorkflow);
     },
+    listWorkflowVersions(id, listOptions) {
+      const path = withQuery(`${workflowPath(id)}/versions`, {
+        page: listOptions?.page === undefined ? undefined : String(listOptions.page),
+        page_size: listOptions?.pageSize === undefined ? undefined : String(listOptions.pageSize)
+      });
+      return request<WorkflowVersionListWire>(fetcher, joinUrl(options.baseUrl, path)).then(mapWorkflowVersionList);
+    },
+    getWorkflowVersion(id, version) {
+      // Same wire body as GET /workflows/{id}: the definition plus its
+      // editor_metadata sibling, merged the same way (ADR-D4 §2.5).
+      return request<WireWorkflowDefWithMetadata>(
+        fetcher,
+        joinUrl(options.baseUrl, `${workflowPath(id)}/versions/${pathSegment(version)}`)
+      ).then(({ data }) => mapWorkflowDef(data));
+    },
+    rollbackWorkflow(id, version) {
+      return request<RollbackWorkflowWire>(fetcher, joinUrl(options.baseUrl, `${workflowPath(id)}/rollback`), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({ version })
+      }).then(mapRollbackWorkflow);
+    },
     runWorkflow(workflowId) {
       return request<ExecuteWorkflowWire>(
         fetcher,
@@ -928,6 +1522,48 @@ export function createXFlowApiClient(options: XFlowApiClientOptions): XFlowApiCl
     },
     getExecution(id) {
       return request<ExecutionDetailWire>(fetcher, joinUrl(options.baseUrl, executionPath(id))).then(mapExecutionDetail);
+    },
+    pauseExecution(id) {
+      return request<ExecutionDetailWire>(
+        fetcher,
+        joinUrl(options.baseUrl, `${executionPath(id)}/pause`),
+        { method: "POST" }
+      ).then(mapExecutionDetail);
+    },
+    resumeExecution(id) {
+      return request<ExecutionDetailWire>(
+        fetcher,
+        joinUrl(options.baseUrl, `${executionPath(id)}/resume`),
+        { method: "POST" }
+      ).then(mapExecutionDetail);
+    },
+    cancelExecution(id) {
+      return request<AcceptedWire>(
+        fetcher,
+        joinUrl(options.baseUrl, `${executionPath(id)}/cancel`),
+        { method: "POST" }
+      ).then(mapCancelExecution);
+    },
+    deliverSignal(id, signal) {
+      return request<AcceptedWire>(
+        fetcher,
+        joinUrl(options.baseUrl, `${executionPath(id)}/signals`),
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: signal.name, data: signal.data })
+        }
+      ).then(mapCancelExecution);
+    },
+    revokeSignal(id, name) {
+      // The name is one path segment and may contain `/` (an approval signal
+      // is `<node>/approval/<subject>`), so it is percent-encoded: an unencoded
+      // slash would make the mux match a different route.
+      return request<RevokeSignalWire>(
+        fetcher,
+        joinUrl(options.baseUrl, `${executionPath(id)}/signals/${pathSegment(name)}`),
+        { method: "DELETE" }
+      ).then(mapRevokeSignal);
     },
     waitExecution(id, waitOptions) {
       const path = withQuery(`${executionPath(id)}/wait`, {
@@ -944,6 +1580,34 @@ export function createXFlowApiClient(options: XFlowApiClientOptions): XFlowApiCl
           invalidResponse(response);
         }
       );
+    },
+    listExecutions(listOptions) {
+      const path = withQuery("/executions", {
+        page: listOptions?.page === undefined ? undefined : String(listOptions.page),
+        page_size: listOptions?.pageSize === undefined ? undefined : String(listOptions.pageSize),
+        status: listOptions?.status,
+        workflow_id: listOptions?.workflowId,
+        created_after: listOptions?.createdAfter,
+        created_before: listOptions?.createdBefore
+      });
+      return request<ExecutionListWire>(fetcher, joinUrl(options.baseUrl, path)).then(mapExecutionList);
+    },
+    rerunExecution(id, rerunOptions) {
+      return request<RerunExecutionWire>(
+        fetcher,
+        joinUrl(options.baseUrl, `${executionPath(id)}/rerun`),
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "Idempotency-Key": rerunOptions.idempotencyKey
+          },
+          body: JSON.stringify({
+            from_node: rerunOptions.fromNode,
+            include_success: rerunOptions.includeSuccess === true
+          })
+        }
+      ).then(mapRerunExecution);
     },
     listNodeTypes(listOptions) {
       const path = withQuery("/node-types", {
