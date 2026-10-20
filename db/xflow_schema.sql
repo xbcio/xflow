@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS xflow_executions (
     id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
     execution_id VARCHAR(64)  NOT NULL              COMMENT '执行唯一标识 (exec-<hex>)',
     namespace    VARCHAR(64)  NOT NULL DEFAULT ''    COMMENT '服务端签发的隔离域；空串表示本列新增前写入的未归属行，对任何 namespace 查询均不可见（fail-closed）',
+    workflow_id  VARCHAR(64)  NOT NULL DEFAULT ''    COMMENT '执行所属工作流的服务端 id（提交时由 definition 写入）；空串表示本列新增前写入或提交未携带 definition 的未归属行，对任何 workflow_id 过滤均不可见（fail-closed）',
     workflow_name VARCHAR(255) NOT NULL DEFAULT ''   COMMENT '工作流名称，用于查询过滤',
     workflow_def JSON         NOT NULL              COMMENT '完整 WorkflowDef JSON',
     params       JSON                               COMMENT '提交时的输入参数 JSON',
@@ -31,6 +32,7 @@ CREATE TABLE IF NOT EXISTS xflow_executions (
     updated_at   DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
     UNIQUE INDEX uk_execution_id (execution_id),
     INDEX idx_namespace_created_at (namespace, created_at),
+    INDEX idx_namespace_workflow_id_created_at (namespace, workflow_id, created_at),
     INDEX idx_status (status),
     INDEX idx_workflow_name (workflow_name),
     INDEX idx_created_at (created_at),
@@ -52,6 +54,8 @@ CREATE TABLE IF NOT EXISTS xflow_nodes (
     signal_name  VARCHAR(255) NOT NULL DEFAULT ''   COMMENT '挂起节点等待的信号名称',
     signal_config JSON                              COMMENT '多信号等待配置 JSON',
     timeout_at   DATETIME(3)                        COMMENT '挂起超时截止时间',
+    started_at   DATETIME(3)    NULL                COMMENT '首次发放租约的时间；NULL = 从未开始（跳过/种子节点或本列新增前的历史行）',
+    finished_at  DATETIME(3)    NULL                COMMENT '首次进入终态的时间；NULL = 尚未结束（或本列新增前的历史行）',
     created_at   DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     updated_at   DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
     UNIQUE INDEX uk_execution_id_node_name (execution_id, node_name),
@@ -1019,6 +1023,92 @@ END$$
 DELIMITER ;
 CALL xflow_add_execution_namespace_index();
 DROP PROCEDURE IF EXISTS xflow_add_execution_namespace_index;
+
+-- 执行记录的 workflow_id 列。与 namespace 同一条纯 ADD COLUMN：NOT NULL
+-- DEFAULT '' 是常量缺省，不是数据转换，MySQL 8 对它可以走 INSTANT DDL，历史行
+-- 不需要重写。不要在这一步给历史行"猜"一个 workflow —— 执行行里没有任何列能可
+-- 靠地推导出它（workflow_name 只是展示字符串，不是身份），猜错会把一次执行塞进
+-- 另一个工作流的运行记录。历史行保持 ''，即"未归属"；store.ListExecutions 的
+-- workflow_id 过滤只做等值匹配，空串因此对任何工作流过滤都不可见（fail-closed）。
+DROP PROCEDURE IF EXISTS xflow_add_execution_workflow_id_column;
+DELIMITER $$
+CREATE PROCEDURE xflow_add_execution_workflow_id_column()
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_executions'
+          AND COLUMN_NAME = 'workflow_id'
+    ) THEN
+        ALTER TABLE xflow_executions
+            ADD COLUMN workflow_id VARCHAR(64) NOT NULL DEFAULT ''
+                COMMENT '执行所属工作流的服务端 id（提交时由 definition 写入）；空串表示本列新增前写入或提交未携带 definition 的未归属行，对任何 workflow_id 过滤均不可见（fail-closed）'
+                AFTER namespace;
+    END IF;
+END$$
+DELIMITER ;
+CALL xflow_add_execution_workflow_id_column();
+DROP PROCEDURE IF EXISTS xflow_add_execution_workflow_id_column;
+
+
+-- 列举索引 (namespace, workflow_id, created_at)。按工作流过滤的列举把 namespace
+-- 与 workflow_id 两个等值条件、created_at 倒序取页都收进一次范围扫描；不带
+-- workflow_id 的列举仍走 idx_namespace_created_at。id 只是同一毫秒内的稳定
+-- tiebreak，不需要进索引（InnoDB 二级索引项尾部已经隐含主键）。
+DROP PROCEDURE IF EXISTS xflow_add_execution_workflow_id_index;
+DELIMITER $$
+CREATE PROCEDURE xflow_add_execution_workflow_id_index()
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_executions'
+          AND INDEX_NAME = 'idx_namespace_workflow_id_created_at'
+    ) THEN
+        ALTER TABLE xflow_executions
+            ADD INDEX idx_namespace_workflow_id_created_at (namespace, workflow_id, created_at);
+    END IF;
+END$$
+DELIMITER ;
+CALL xflow_add_execution_workflow_id_index();
+DROP PROCEDURE IF EXISTS xflow_add_execution_workflow_id_index;
+
+-- 节点计时列 started_at / finished_at。与其余补列同一写法：CREATE TABLE IF NOT
+-- EXISTS 对已存在的表是 no-op，故用 INFORMATION_SCHEMA 守卫逐列补。两列都 NULL
+-- 而非 DEFAULT：NULL 表达"这个事实没发生过"（尚未开始 / 尚未结束 / 本列新增前的
+-- 历史行），与 epoch 或 0 区分开。写侧一次写入后不再覆盖（ON CONFLICT 用
+-- COALESCE(existing, new)），所以重试不会改写首次 started，重复提交不会改写首次
+-- finished。
+DROP PROCEDURE IF EXISTS xflow_add_node_timing_columns;
+DELIMITER $$
+CREATE PROCEDURE xflow_add_node_timing_columns()
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_nodes'
+          AND COLUMN_NAME = 'started_at'
+    ) THEN
+        ALTER TABLE xflow_nodes
+            ADD COLUMN started_at DATETIME(3) NULL
+                COMMENT '首次发放租约的时间；NULL = 从未开始（跳过/种子节点或本列新增前的历史行）'
+                AFTER timeout_at;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_nodes'
+          AND COLUMN_NAME = 'finished_at'
+    ) THEN
+        ALTER TABLE xflow_nodes
+            ADD COLUMN finished_at DATETIME(3) NULL
+                COMMENT '首次进入终态的时间；NULL = 尚未结束（或本列新增前的历史行）'
+                AFTER started_at;
+    END IF;
+END$$
+DELIMITER ;
+CALL xflow_add_node_timing_columns();
+DROP PROCEDURE IF EXISTS xflow_add_node_timing_columns;
 
 -- Runner pool 绑定与 credential rotation 列。CREATE TABLE IF NOT EXISTS 对老表是
 -- no-op，故每列和索引独立用 INFORMATION_SCHEMA 守卫，任意中间态都能幂等收敛。
