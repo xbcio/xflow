@@ -80,6 +80,15 @@ type runnerConfigFile struct {
 	HTTPHostPolicy struct {
 		Allow *[]string `yaml:"allow"`
 		Deny  *[]string `yaml:"deny"`
+		// BlockPrivateIPs controls the dial-time address guard for xflow.http
+		// and xflow.grpc. Nil means "not set" and keeps the secure default
+		// (enabled); false restores the historical unfiltered dial behavior.
+		BlockPrivateIPs *bool `yaml:"block_private_ips"`
+		// BlockPrivateIPsAllow is the address guard's own exemption list. It is
+		// separate from allow on purpose: allow also switches the name-level
+		// policy into allowlist-only mode, so using it for a private-host
+		// exemption would reject every public destination not listed there.
+		BlockPrivateIPsAllow *[]string `yaml:"block_private_ips_allow"`
 	} `yaml:"http_host_policy"`
 	// SupplyPullAllowedHosts is the runner-level allowlist for supply pull
 	// sources (xflow.supply.http). Nil keeps the default policy: only public
@@ -140,6 +149,7 @@ func defaultRunnerConfig() runnerConfig {
 		reportMetricsInterval:    "15s",
 		identityStoreKind:        identityStoreEphemeral,
 		autoLabels:               true,
+		httpBlockPrivateIPs:      true,
 	}
 }
 
@@ -269,6 +279,12 @@ func loadRunnerConfigFromBytesForProfile(data []byte, profile Profile) (runnerCo
 	if file.HTTPHostPolicy.Deny != nil {
 		cfg.httpHostPolicyDeny = copyStringsPreservingEmpty(*file.HTTPHostPolicy.Deny)
 	}
+	if file.HTTPHostPolicy.BlockPrivateIPs != nil {
+		cfg.httpBlockPrivateIPs = *file.HTTPHostPolicy.BlockPrivateIPs
+	}
+	if file.HTTPHostPolicy.BlockPrivateIPsAllow != nil {
+		cfg.httpBlockPrivateIPsAllow = copyStringsPreservingEmpty(*file.HTTPHostPolicy.BlockPrivateIPsAllow)
+	}
 	if file.SupplyPullAllowedHosts != nil {
 		cfg.supplyPullAllowedHosts = copyTrimmedHosts(*file.SupplyPullAllowedHosts)
 	}
@@ -342,6 +358,7 @@ var runnerConfigIssueOrder = []string{
 	"poll-wait",
 	"seed-request-timeout",
 	"supply-poll-interval",
+	"block-private-ips",
 	"allow-plaintext",
 	"require-supply-encryption",
 	"auto-labels",
@@ -404,6 +421,21 @@ func applyLookupEnvOverrides(cfg runnerConfig, lookupEnv func(string) (string, b
 	}
 	if v, ok := lookupEnv("XFLOW_HTTP_HOST_POLICY_DENY"); ok {
 		cfg.httpHostPolicyDeny = splitCSVPreservingExplicitEmpty(v)
+	}
+	// Same explicit-empty convention as the other two host lists; the flag and
+	// YAML spellings use the same underlying field.
+	if v, ok := lookupEnv("XFLOW_HTTP_HOST_POLICY_BLOCK_PRIVATE_IPS_ALLOW"); ok {
+		cfg.httpBlockPrivateIPsAllow = splitCSVPreservingExplicitEmpty(v)
+	}
+	if v, ok := lookupEnv("XFLOW_HTTP_HOST_POLICY_BLOCK_PRIVATE_IPS"); ok {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			setRunnerConfigIssue(&cfg, "block-private-ips",
+				fmt.Errorf("XFLOW_HTTP_HOST_POLICY_BLOCK_PRIVATE_IPS must be a valid boolean: %w", err))
+		} else {
+			clearRunnerConfigIssue(&cfg, "block-private-ips")
+			cfg.httpBlockPrivateIPs = b
+		}
 	}
 	if v, ok := lookupEnv("XFLOW_SUPPLY_PULL_ALLOWED_HOSTS"); ok {
 		cfg.supplyPullAllowedHosts = splitCSV(v)
@@ -633,6 +665,9 @@ func validateRunnerConfig(cfg runnerConfig) error {
 		return err
 	}
 	if err := validateHostOnlyList("HTTP host policy denylist", cfg.httpHostPolicyDeny); err != nil {
+		return err
+	}
+	if err := validateHostOnlyList("private-IP blocking allowlist", cfg.httpBlockPrivateIPsAllow); err != nil {
 		return err
 	}
 	if err := validateHostOnlyList("supply pull allowed hosts", cfg.supplyPullAllowedHosts); err != nil {
@@ -966,6 +1001,13 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 	if base.changed["http-host-deny"] {
 		cfg.httpHostPolicyDeny = normalizeExplicitEmptyStringArray(base.httpHostPolicyDeny)
 	}
+	if base.changed["http-block-private-ips-allow"] {
+		cfg.httpBlockPrivateIPsAllow = normalizeExplicitEmptyStringArray(base.httpBlockPrivateIPsAllow)
+	}
+	if base.changed["http-block-private-ips"] {
+		clearRunnerConfigIssue(&cfg, "block-private-ips")
+		cfg.httpBlockPrivateIPs = base.httpBlockPrivateIPs
+	}
 	if base.changed["supply-pull-allowed-hosts"] {
 		cfg.supplyPullAllowedHosts = copyTrimmedHosts(base.supplyPullAllowedHosts)
 	}
@@ -1163,9 +1205,18 @@ heartbeat:
 # Shared destination policy for xflow.http requests and Browser navigation.
 # Host patterns only: exact hosts, suffixes prefixed by ".", and wildcards
 # prefixed by "*." are accepted; schemes, ports, paths, and userinfo are rejected.
+# block_private_ips (default true) separately refuses xflow.http and xflow.grpc
+# dials whose destination resolves to a loopback, private, link-local,
+# unspecified, multicast, or otherwise non-public address. block_private_ips_allow
+# is the guard's own exemption list: a matching host is dialed wherever it
+# resolves, and — unlike the name-level allow list — it does not turn the policy
+# into allowlist-only mode for every other destination. Set block_private_ips to
+# false to keep the historical unfiltered dial behavior.
 # http_host_policy:
 #   allow: ["app.example.internal"]
 #   deny: ["metadata.google.internal"]
+#   block_private_ips: true
+#   block_private_ips_allow: ["internal-db.corp.example"]
 
 # Browser CDP uses an existing remote-debugging endpoint; it never starts a
 # browser. An empty endpoints list (the secure default) denies all endpoint

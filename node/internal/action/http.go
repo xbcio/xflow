@@ -372,6 +372,19 @@ func (n *HTTPNode) Execute(ctx context.Context, input *types.Input) (*types.Outp
 		client.Transport = transport
 	}
 
+	// The dial-time address guard (loopback/private/link-local and other
+	// non-public destination refusal) is installed process-wide by the runner.
+	// It wraps the transport's dialer, so every redirect hop handled by this
+	// client is dialed under the same guard. A guard that cannot wrap the
+	// configured transport fails closed instead of sending unfiltered.
+	if guard := currentAddressGuard(); guard != nil {
+		transport, guardErr := withAddressGuard(client.Transport, guard)
+		if guardErr != nil {
+			return nil, guardErr
+		}
+		client.Transport = transport
+	}
+
 	// Enforce the host policy (SSRF allow/deny) after the final URL is resolved
 	// but before any request is dispatched. When no policy is configured the
 	// node performs no filtering, preserving backward compatibility.
