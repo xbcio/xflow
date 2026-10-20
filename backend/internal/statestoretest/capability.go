@@ -37,6 +37,7 @@ const (
 	CapabilityOutboxReleaser   Capability = "OutboxReleaser"
 
 	CapabilityExecutionStatusReader       Capability = "ExecutionStatusReader"
+	CapabilityRouteCheckedLeaseAcquirer   Capability = "RouteCheckedLeaseAcquirer"
 	CapabilitySuspendedNodeCanceler       Capability = "SuspendedNodeCanceler"
 	CapabilityDurableSignalDeliverer      Capability = "DurableSignalDeliverer"
 	CapabilityNodeLeaseRenewer            Capability = "NodeLeaseRenewer"
@@ -109,6 +110,14 @@ var capabilitySpecs = map[Capability]capabilitySpec{
 		summary: "narrow execution-status read without loading the snapshot (GetExecutionStatus)",
 		implements: func(v any) bool {
 			_, ok := v.(engine.ExecutionStatusReader)
+			return ok
+		},
+	},
+	CapabilityRouteCheckedLeaseAcquirer: {
+		iface:   "engine.RouteCheckedLeaseAcquirer",
+		summary: "lease acquire that re-decides execution liveness and node routing in the same transition (AcquireTaskLeaseChecked)",
+		implements: func(v any) bool {
+			_, ok := v.(engine.RouteCheckedLeaseAcquirer)
 			return ok
 		},
 	},

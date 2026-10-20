@@ -22,6 +22,15 @@ func TestMemoryNodeLeaseRenewContract(t *testing.T) {
 	})
 }
 
+// TestMemoryRouteCheckedLeaseContract runs the shared route-checked acquire
+// contract against the in-memory backend, so its verdicts stay identical to the
+// Redis/Lua script's.
+func TestMemoryRouteCheckedLeaseContract(t *testing.T) {
+	statestoretest.RunRouteCheckedLeaseContract(t, memoryCapabilityManifest(), func(t *testing.T) statestoretest.RouteCheckedLeaseStore {
+		return New().State().(statestoretest.RouteCheckedLeaseStore)
+	})
+}
+
 // TestMemoryBatchOutputContract runs the shared batch-output contract against
 // the in-memory backend. The backend has no round trips to save, but the
 // engine's fan-in and $nodes paths pick the batch form by capability, so the

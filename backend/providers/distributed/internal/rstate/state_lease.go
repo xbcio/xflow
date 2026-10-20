@@ -16,14 +16,45 @@ import (
 )
 
 var _ engine.LeaseSuspender = (*Store)(nil)
+var _ engine.RouteCheckedLeaseAcquirer = (*Store)(nil)
 
+// AcquireTaskLease keeps the legacy acquire contract: it validates the node's
+// lease guards and writes the lease, but it deliberately does NOT re-check the
+// execution or the node's route. Callers that need those checks folded into the
+// same transition use AcquireTaskLeaseChecked; the engine's lease path does so
+// whenever the backend implements the capability.
 func (s *Store) AcquireTaskLease(ctx context.Context, lease *engine.TaskLease) (previous *engine.NodeSnapshot, acquired bool, err error) {
+	res, err := s.acquireTaskLease(ctx, lease, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	return res.Previous, res.Acquired, nil
+}
+
+// AcquireTaskLeaseChecked is AcquireTaskLease plus the execution-liveness and
+// node-route checks, decided inside the same Lua transition that writes the
+// lease.
+//
+// It exists to close the read-then-write race BuildTaskLease used to have: the
+// engine read the execution status and the node snapshot, then asked for the
+// lease, and an execution or node that changed state between those reads still
+// received a lease. It also removes the two reads from the hot path — one
+// EVALSHA now answers what three round trips used to.
+func (s *Store) AcquireTaskLeaseChecked(ctx context.Context, lease *engine.TaskLease, opts engine.LeaseAcquireOptions) (engine.LeaseAcquireResult, error) {
+	return s.acquireTaskLease(ctx, lease, &opts)
+}
+
+// acquireTaskLease is the shared body of both acquire entry points. route is
+// nil for the legacy contract (the script then skips every route guard) and
+// non-nil for the checked one (the script reads the execution status key and
+// applies the acyclic/cyclic rules).
+func (s *Store) acquireTaskLease(ctx context.Context, lease *engine.TaskLease, route *engine.LeaseAcquireOptions) (res engine.LeaseAcquireResult, err error) {
 	started := time.Now()
 	defer func() {
 		result := "acquired"
 		if err != nil {
 			result = "error"
-		} else if !acquired {
+		} else if !res.Acquired {
 			result = "rejected"
 		}
 		s.observeLeaseAcquire(ctx, result, time.Since(started))
@@ -35,23 +66,39 @@ func (s *Store) AcquireTaskLease(ctx context.Context, lease *engine.TaskLease) (
 	if lease.Task.Payload != nil {
 		encoded, err := json.Marshal(lease.Task.Payload)
 		if err != nil {
-			return nil, false, fmt.Errorf("marshal lease payload %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
+			return engine.LeaseAcquireResult{}, fmt.Errorf("marshal lease payload %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
 		}
 		payloadJSON = string(encoded)
+	}
+	args := []any{
+		string(lease.LeaseID), string(lease.LeaseToken), lease.IssuedAt.UnixMilli(), int(ttl.Seconds()),
+		lease.Task.ActivationID, lease.Task.AutoDepth, lease.TTL.Milliseconds(),
+		leaseExpiryMember(lease.Task.ExecutionID, lease.Task.NodeName), int(lease.Task.Type),
+		payloadJSON, lease.Task.NodeIdx, lease.Task.UnitIdx, lease.Task.Generation,
+	}
+	if route != nil {
+		allowCycles := 0
+		if route.AllowCycles {
+			allowCycles = 1
+		}
+		// ARGV[14]'s presence is what selects route-checked mode; omitting it
+		// keeps the legacy script behavior byte for byte.
+		args = append(args, allowCycles)
 	}
 	result, err := acquireTaskLeaseLua.Run(ctx, s.rdb,
 		[]string{
 			nodeStatusKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
 			nodeMetaKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
 			leaseExpiryZSetKey(t, lease.Task.ExecutionID),
+			execKey(t, lease.Task.ExecutionID, "status"),
 		},
-		string(lease.LeaseID), string(lease.LeaseToken), lease.IssuedAt.UnixMilli(), int(ttl.Seconds()), lease.Task.ActivationID, lease.Task.AutoDepth, lease.TTL.Milliseconds(), leaseExpiryMember(lease.Task.ExecutionID, lease.Task.NodeName), int(lease.Task.Type), payloadJSON, lease.Task.NodeIdx, lease.Task.UnitIdx, lease.Task.Generation,
+		args...,
 	).Slice()
 	if err != nil {
-		return nil, false, fmt.Errorf("acquire task lease %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
+		return engine.LeaseAcquireResult{}, fmt.Errorf("acquire task lease %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
 	}
-	if len(result) != 8 {
-		return nil, false, fmt.Errorf("acquire task lease %q/%q: unexpected result %v", lease.Task.ExecutionID, lease.Task.NodeName, result)
+	if len(result) != 9 {
+		return engine.LeaseAcquireResult{}, fmt.Errorf("acquire task lease %q/%q: unexpected result %v", lease.Task.ExecutionID, lease.Task.NodeName, result)
 	}
 
 	asInt64 := func(v any) int64 {
@@ -73,11 +120,10 @@ func (s *Store) AcquireTaskLease(ctx context.Context, lease *engine.TaskLease) (
 		return ""
 	}
 
-	acquired = asInt64(result[0]) == 1
+	res.Acquired = asInt64(result[0]) == 1
 	prevStatus := asString(result[1])
-	var prev *engine.NodeSnapshot
 	if prevStatus != "" {
-		prev = &engine.NodeSnapshot{
+		res.Previous = &engine.NodeSnapshot{
 			ExecutionID:  lease.Task.ExecutionID,
 			Name:         lease.Task.NodeName,
 			NodeIdx:      lease.Task.NodeIdx,
@@ -89,14 +135,21 @@ func (s *Store) AcquireTaskLease(ctx context.Context, lease *engine.TaskLease) (
 			LeaseToken:   engine.LeaseToken(asString(result[5])),
 		}
 		if ms := asInt64(result[6]); ms > 0 {
-			prev.LeaseIssuedAt = time.UnixMilli(ms).UTC()
+			res.Previous.LeaseIssuedAt = time.UnixMilli(ms).UTC()
 		}
 		if ms := asInt64(result[7]); ms > 0 {
-			prev.LeaseTTL = time.Duration(ms) * time.Millisecond
+			res.Previous.LeaseTTL = time.Duration(ms) * time.Millisecond
 		}
 	}
-	if !acquired {
-		return prev, false, nil
+	// Empty means the execution status record does not exist. In legacy mode
+	// the script never reads the key, so it is always empty there and the
+	// legacy contract (which never reported this) is preserved.
+	if execStatus := asString(result[8]); execStatus != "" {
+		res.ExecutionFound = true
+		res.ExecutionStatus = types.ExecutionStatus(execStatus)
+	}
+	if !res.Acquired {
+		return res, nil
 	}
 
 	if err := s.refreshTransientTTL(ctx, lease.Task.ExecutionID,
@@ -104,7 +157,7 @@ func (s *Store) AcquireTaskLease(ctx context.Context, lease *engine.TaskLease) (
 		nodeMetaKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
 		leaseExpiryZSetKey(t, lease.Task.ExecutionID),
 	); err != nil {
-		return nil, false, err
+		return engine.LeaseAcquireResult{}, err
 	}
 
 	// isTransient, not just s.db != nil: the three other UpsertNode sites
@@ -121,8 +174,8 @@ func (s *Store) AcquireTaskLease(ctx context.Context, lease *engine.TaskLease) (
 	// mode promises.
 	if s.db != nil && !s.isTransient(ctx, lease.Task.ExecutionID) {
 		attempt := 1
-		if prev != nil {
-			attempt = prev.Attempt + 1
+		if res.Previous != nil {
+			attempt = res.Previous.Attempt + 1
 		}
 		rec := &store.NodeRecord{
 			ExecutionID: lease.Task.ExecutionID,
@@ -138,7 +191,7 @@ func (s *Store) AcquireTaskLease(ctx context.Context, lease *engine.TaskLease) (
 		})
 	}
 
-	return prev, true, nil
+	return res, nil
 }
 
 // leaseIndexBatchLimit caps a single ListExpiredLeases call. Small enough that

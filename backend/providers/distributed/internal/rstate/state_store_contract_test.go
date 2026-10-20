@@ -92,6 +92,29 @@ func TestRedisNodeLeaseRenewContract(t *testing.T) {
 	})
 }
 
+// Route-checked acquires decide execution liveness and node routing inside the
+// acquire script; the shared contract pins that the in-memory backend reaches
+// the same verdicts.
+func TestMiniredisRouteCheckedLeaseContract(t *testing.T) {
+	statestoretest.RunRouteCheckedLeaseContract(t, rstateCapabilityManifest(), func(t *testing.T) statestoretest.RouteCheckedLeaseStore {
+		srv, err := miniredis.Run()
+		if err != nil {
+			t.Fatalf("miniredis.Run() error = %v", err)
+		}
+		t.Cleanup(srv.Close)
+		rdb := redis.NewClient(&redis.Options{Addr: srv.Addr()})
+		t.Cleanup(func() { _ = rdb.Close() })
+		return New(rdb, nil, time.Minute)
+	})
+}
+
+func TestRedisRouteCheckedLeaseContract(t *testing.T) {
+	addr := realRedisAddr(t)
+	statestoretest.RunRouteCheckedLeaseContract(t, rstateCapabilityManifest(), func(t *testing.T) statestoretest.RouteCheckedLeaseStore {
+		return New(freshRealRedis(t, addr), nil, time.Minute)
+	})
+}
+
 // Dead-letter replay is decided inside replayDeadLetterLua; the shared
 // contract keeps the memory backend's replay verdicts identical to it.
 func TestMiniredisDeadLetterReplayContract(t *testing.T) {

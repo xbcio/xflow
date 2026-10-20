@@ -64,6 +64,63 @@ type Nodes interface {
 	RevokeLease(ctx context.Context, id types.ExecutionID, name string, token LeaseToken) (bool, error)
 }
 
+// LeaseAcquireOptions carries the route decision the caller already resolved
+// from the compiled graph, so an acquire can re-decide node routing itself
+// instead of trusting reads made before it.
+type LeaseAcquireOptions struct {
+	// AllowCycles selects the cyclic graph's activation rules: a cyclic task
+	// must carry a positive activation id, and a terminal node may be re-entered
+	// by a strictly higher activation. An acyclic graph rejects a terminal node
+	// outright, whatever activation the task carries.
+	AllowCycles bool
+}
+
+// LeaseAcquireResult is the full verdict of an acquire that checked the
+// execution and the node's route in the same transition as the lease write.
+type LeaseAcquireResult struct {
+	// Acquired reports whether the node was transitioned to Running.
+	Acquired bool
+	// Previous is the node snapshot observed before the transition (nil when no
+	// snapshot existed), with the same fields AcquireTaskLease returns.
+	Previous *NodeSnapshot
+	// ExecutionStatus is the execution's lifecycle status observed by the
+	// acquire. It is meaningful only when ExecutionFound is true.
+	ExecutionStatus types.ExecutionStatus
+	// ExecutionFound reports whether the execution status record existed. A
+	// missing record is not a lease refusal by itself: the backend refuses the
+	// acquire too, and the caller evicts the execution and reports it inactive.
+	ExecutionFound bool
+}
+
+// RouteCheckedLeaseAcquirer is the optional StateStore capability that folds
+// the two reads the lease path used to make before its one write into the
+// write's own atomic transition:
+//
+//	GetExecutionStatus (is the execution still non-terminal?)
+//	GetNode            (is the node's route still active?)
+//	AcquireTaskLease
+//
+// Both reads answered questions the lease write then had to trust, and the
+// answer could go stale between a read and the write. The decisive case is the
+// execution one: an execution that terminalizes in that window would still
+// receive a lease, and its runner would execute and commit a node for work the
+// control plane already accounted for as over. Folding the checks into the
+// acquire closes that race and removes two round trips from the hot dispatch
+// path (three become one on the Redis backend).
+//
+// The implementation MUST refuse, without mutating state:
+//   - an acquire whose execution record is absent or terminal
+//     (types.IsTerminalExecutionStatus; canceling and paused are live statuses
+//     and stay acquirable);
+//   - an acyclic acquire for a terminal node, whatever activation it carries;
+//   - a cyclic acquire whose task carries no activation id (<= 0);
+//
+// and MUST keep every guard AcquireTaskLease applies. A backend without this
+// interface keeps the engine's read-then-write path unchanged.
+type RouteCheckedLeaseAcquirer interface {
+	AcquireTaskLeaseChecked(ctx context.Context, lease *TaskLease, opts LeaseAcquireOptions) (LeaseAcquireResult, error)
+}
+
 // Scheduling stores DAG scheduling counters and completion state.
 type Scheduling interface {
 	DecrementInDegree(ctx context.Context, id types.ExecutionID, unitIdx int, portActive bool) (remainingInDeg, arrivedActiveIn int, err error)

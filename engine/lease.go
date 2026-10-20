@@ -107,15 +107,38 @@ func (e *Engine) BuildTaskLease(ctx context.Context, t *Task) (*TaskLease, error
 		return nil, ErrBatchLeaseRequired
 	}
 
-	g, active, err := e.loadActiveGraph(ctx, t.ExecutionID)
-	if err != nil {
-		return nil, err
-	}
-	if !active {
-		return nil, ErrExecutionInactive
-	}
-	if _, err := e.checkTaskRouteActive(ctx, g, t); err != nil {
-		return nil, err
+	// Route-checked acquires fold the two reads below into the lease write.
+	// They are strictly better when the backend supports them: the status and
+	// node questions are re-decided by the same atomic transition that writes
+	// the lease, so an execution or node that changes between a read and the
+	// write can no longer receive a lease, and the hot path pays one round trip
+	// instead of three. Backends without the capability keep the read-then-write
+	// path unchanged.
+	acquirer, routeChecked := e.state.(RouteCheckedLeaseAcquirer)
+	var g *graph.Graph
+	if routeChecked {
+		var err error
+		g, err = e.loadGraph(ctx, t.ExecutionID)
+		if err != nil {
+			return nil, err
+		}
+		if g == nil {
+			// No cached and no persisted graph: the execution cannot be routed.
+			return nil, ErrExecutionInactive
+		}
+	} else {
+		var active bool
+		var err error
+		g, active, err = e.loadActiveGraph(ctx, t.ExecutionID)
+		if err != nil {
+			return nil, err
+		}
+		if !active {
+			return nil, ErrExecutionInactive
+		}
+		if _, err := e.checkTaskRouteActive(ctx, g, t); err != nil {
+			return nil, err
+		}
 	}
 
 	leaseID, leaseToken := newLeaseCredentials()
@@ -128,12 +151,32 @@ func (e *Engine) BuildTaskLease(ctx context.Context, t *Task) (*TaskLease, error
 		IssuedAt:   issuedAt,
 		TTL:        ttl,
 	}
-	prev, acquired, err := e.state.AcquireTaskLease(ctx, lease)
-	if err != nil {
-		return nil, err
-	}
-	if !acquired {
-		return nil, e.classifyLeaseAcquireFailure(g, t, prev, issuedAt)
+	var prev *NodeSnapshot
+	if routeChecked {
+		res, err := acquirer.AcquireTaskLeaseChecked(ctx, lease, LeaseAcquireOptions{AllowCycles: g.AllowCycles()})
+		if err != nil {
+			return nil, err
+		}
+		if !res.ExecutionFound || types.IsTerminalExecutionStatus(res.ExecutionStatus) {
+			// The acquire observed the execution as gone or finished. Evict any
+			// cached graph so a late dispatch cannot keep routing against it.
+			e.EvictExecution(t.ExecutionID)
+			return nil, ErrExecutionInactive
+		}
+		if !res.Acquired {
+			return nil, e.classifyLeaseAcquireFailure(g, t, res.Previous, issuedAt)
+		}
+		prev = res.Previous
+	} else {
+		var acquired bool
+		var err error
+		prev, acquired, err = e.state.AcquireTaskLease(ctx, lease)
+		if err != nil {
+			return nil, err
+		}
+		if !acquired {
+			return nil, e.classifyLeaseAcquireFailure(g, t, prev, issuedAt)
+		}
 	}
 
 	// Attempt counts retries WITHIN a single activation. A cyclic node that

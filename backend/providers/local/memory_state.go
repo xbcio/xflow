@@ -879,23 +879,71 @@ func cloneLeasePayload(payload *types.SignalPayload) *types.SignalPayload {
 func (s *memoryState) AcquireTaskLease(_ context.Context, lease *engine.TaskLease) (*engine.NodeSnapshot, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	previous, acquired := s.acquireTaskLeaseLocked(lease)
+	return previous, acquired, nil
+}
 
+var _ engine.RouteCheckedLeaseAcquirer = (*memoryState)(nil)
+
+// AcquireTaskLeaseChecked is AcquireTaskLease plus the execution-liveness and
+// node-route checks the engine used to issue as separate reads before asking
+// for the lease, decided under the same lock as the lease write.
+//
+// It mirrors acquireTaskLeaseLua's route-checked mode exactly: a missing or
+// terminal execution refuses the acquire (canceling and paused are live), an
+// acyclic task refuses a terminal node whatever activation it carries, and a
+// cyclic task must carry a positive activation. Every guard AcquireTaskLease
+// applies is kept unchanged.
+func (s *memoryState) AcquireTaskLeaseChecked(_ context.Context, lease *engine.TaskLease, opts engine.LeaseAcquireOptions) (engine.LeaseAcquireResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	res := engine.LeaseAcquireResult{}
+	entry, found := s.executions[lease.Task.ExecutionID]
+	if !found {
+		return res, nil
+	}
+	res.ExecutionFound = true
+	res.ExecutionStatus = entry.snap.Status
+	if types.IsTerminalExecutionStatus(entry.snap.Status) {
+		return res, nil
+	}
+
+	key := memoryNodeKey(lease.Task.ExecutionID, lease.Task.NodeName)
+	current := s.nodes[key]
+	if opts.AllowCycles {
+		if lease.Task.ActivationID <= 0 {
+			res.Previous = s.publicNodeSnapshotLocked(key, current)
+			return res, nil
+		}
+	} else if current != nil && isTerminalNode(current.Status) {
+		res.Previous = s.publicNodeSnapshotLocked(key, current)
+		return res, nil
+	}
+
+	res.Previous, res.Acquired = s.acquireTaskLeaseLocked(lease)
+	return res, nil
+}
+
+// acquireTaskLeaseLocked is the node-level body shared by both acquire entry
+// points. Callers must hold s.mu.
+func (s *memoryState) acquireTaskLeaseLocked(lease *engine.TaskLease) (*engine.NodeSnapshot, bool) {
 	key := memoryNodeKey(lease.Task.ExecutionID, lease.Task.NodeName)
 	current := s.nodes[key]
 	if current != nil {
 		if lease.Task.ActivationID > 0 && current.ActivationID > lease.Task.ActivationID {
-			return s.publicNodeSnapshotLocked(key, current), false, nil
+			return s.publicNodeSnapshotLocked(key, current), false
 		}
 		if isTerminalNode(current.Status) && (lease.Task.ActivationID <= 0 || current.ActivationID >= lease.Task.ActivationID) {
-			return s.publicNodeSnapshotLocked(key, current), false, nil
+			return s.publicNodeSnapshotLocked(key, current), false
 		}
 		if current.Status == types.NodeStatusCommitting || current.Status == types.NodeStatusWaiting {
-			return s.publicNodeSnapshotLocked(key, current), false, nil
+			return s.publicNodeSnapshotLocked(key, current), false
 		}
 		if current.Status == types.NodeStatusRunning && current.LeaseToken != "" {
 			deadline := current.LeaseIssuedAt.Add(current.LeaseTTL)
 			if current.LeaseIssuedAt.IsZero() || current.LeaseTTL <= 0 || lease.IssuedAt.Before(deadline) {
-				return s.publicNodeSnapshotLocked(key, current), false, nil
+				return s.publicNodeSnapshotLocked(key, current), false
 			}
 		}
 	}
@@ -936,7 +984,7 @@ func (s *memoryState) AcquireTaskLease(_ context.Context, lease *engine.TaskLeas
 		node.ChildExecutionID = current.ChildExecutionID
 	}
 	s.nodes[key] = node
-	return s.publicNodeSnapshotLocked(key, current), true, nil
+	return s.publicNodeSnapshotLocked(key, current), true
 }
 
 // ResetNodeForRetryWithOutbox atomically creates the retry delivery intent
