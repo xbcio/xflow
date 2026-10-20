@@ -33,8 +33,15 @@ type Capability string
 
 const (
 	CapabilityAtomicStateStore Capability = "AtomicStateStore"
-	CapabilityOutboxLeaser     Capability = "OutboxLeaser"
-	CapabilityOutboxReleaser   Capability = "OutboxReleaser"
+	// CapabilityAtomicArrivalFolding is the semantic capability behind
+	// engine.ArrivalFoldingCommitter: CommitNode applies CommitNodeRequest.Arrivals
+	// and reports the resolved skips in CommitNodeResult.Skipped. The interface
+	// assertion is necessary but not sufficient — it is satisfied structurally by
+	// any CommitNode implementation — so the declaration promises the shared
+	// arrival-folding contract as well.
+	CapabilityAtomicArrivalFolding Capability = "AtomicArrivalFolding"
+	CapabilityOutboxLeaser         Capability = "OutboxLeaser"
+	CapabilityOutboxReleaser       Capability = "OutboxReleaser"
 
 	CapabilityExecutionStatusReader       Capability = "ExecutionStatusReader"
 	CapabilityRouteCheckedLeaseAcquirer   Capability = "RouteCheckedLeaseAcquirer"
@@ -86,6 +93,14 @@ var capabilitySpecs = map[Capability]capabilitySpec{
 		summary: "atomic execution/outbox transitions (CreateExecutionWithOutbox, CommitNode, ListOutbox, ...)",
 		implements: func(v any) bool {
 			_, ok := v.(engine.AtomicStateStore)
+			return ok
+		},
+	},
+	CapabilityAtomicArrivalFolding: {
+		iface:   "engine.ArrivalFoldingCommitter",
+		summary: "downstream arrivals folded into CommitNode with skip reporting (CommitNodeResult.Skipped)",
+		implements: func(v any) bool {
+			_, ok := v.(engine.ArrivalFoldingCommitter)
 			return ok
 		},
 	},

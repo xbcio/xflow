@@ -16,6 +16,14 @@ func TestMemoryStateStoreContract(t *testing.T) {
 	statestoretest.RunStateStoreContract(t, memoryCapabilityManifest(), state)
 }
 
+// TestMemoryArrivalFoldingContract runs the shared arrival-folding contract
+// against the in-memory backend. Folding is a semantic capability no interface
+// assertion can prove, so this suite — not the manifest — is what shows the two
+// backends apply CommitNodeRequest.Arrivals the same way.
+func TestMemoryArrivalFoldingContract(t *testing.T) {
+	statestoretest.RunArrivalFoldingContract(t, memoryCapabilityManifest(), New().State())
+}
+
 func TestMemoryNodeLeaseRenewContract(t *testing.T) {
 	statestoretest.RunNodeLeaseRenewContract(t, memoryCapabilityManifest(), func(t *testing.T) statestoretest.NodeLeaseRenewStore {
 		return New().State().(statestoretest.NodeLeaseRenewStore)

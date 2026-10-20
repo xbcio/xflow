@@ -16,6 +16,7 @@ import (
 
 var _ engine.AtomicStateStore = (*Store)(nil)
 var _ engine.LegacyNodeCommitter = (*Store)(nil)
+var _ engine.ArrivalFoldingCommitter = (*Store)(nil)
 
 // CommitLeasedNode reuses the fenced Redis node transition for legacy cycle
 // paths, whose follow-up scheduling remains outside CommitNode's DAG counter.
@@ -196,12 +197,6 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 	for _, name := range req.ReclaimOutputNames {
 		reclaimKeys = append(reclaimKeys, outputKey(t, req.ExecutionID, name))
 	}
-	// Three trailing arguments live after the variable-length cyclic outbox
-	// suffix, and commitNodeLua reads them from the END of ARGV so neither the
-	// reclaim count nor the privacy/error-detail fields can perturb the suffix's
-	// fixed base index. Their order is the contract: reclaim count, privacy bit,
-	// then the node's structured error detail.
-	args = append(args, len(reclaimKeys), privateOutput, errorDetailsJSON)
 	keys := []string{
 		execKey(t, req.ExecutionID, "status"),
 		execKey(t, req.ExecutionID, "error"),
@@ -232,11 +227,38 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 	// consumers. They are deleted by commitNodeLua only after the commit fence
 	// accepts this terminal transition.
 	keys = append(keys, reclaimKeys...)
+	// Folded arrivals follow the reclaim keys: three counter keys per arrival,
+	// in the same order AdvanceNode builds them. Their ARGV block follows the
+	// cyclic suffix, then the arrival count, and only then the three trailing
+	// arguments commitNodeLua reads from the END. Getting either base wrong
+	// silently mis-decodes a counter key or a slot, so both paths share
+	// appendArrivalArgs.
+	arrivalIDs := make([]string, 0, len(req.Arrivals)*2)
+	for _, arrival := range req.Arrivals {
+		var executeID, skipID string
+		var err error
+		keys, args, executeID, skipID, err = appendArrivalArgs(keys, args, t,
+			req.ExecutionID, req.ActivationID, req.AutoDepth, arrival)
+		if err != nil {
+			return engine.CommitNodeResult{}, err
+		}
+		arrivalIDs = append(arrivalIDs, executeID, skipID)
+	}
+	args = append(args, len(req.Arrivals))
+	// Three trailing arguments live after the variable-length cyclic outbox and
+	// arrival suffixes, and commitNodeLua reads them from the END of ARGV so
+	// neither the reclaim count nor the privacy/error-detail fields can perturb
+	// either fixed base index. Their order is the contract: reclaim count,
+	// privacy bit, then the node's structured error detail.
+	args = append(args, len(reclaimKeys), privateOutput, errorDetailsJSON)
 	result, err := commitNodeLua.Run(ctx, s.rdb, keys, args...).Slice()
 	if err != nil {
 		return engine.CommitNodeResult{}, fmt.Errorf("commit node %q/%q: %w", req.ExecutionID, req.NodeName, err)
 	}
-	if len(result) != 4 {
+	// Four elements on every early return; five on the accepted path, whose last
+	// element is the skip list. A trailing empty Lua table may collapse on the
+	// wire, which is why a four-element accepted reply is legal too.
+	if len(result) != 4 && len(result) != 5 {
 		return engine.CommitNodeResult{}, fmt.Errorf("commit node %q/%q: unexpected result %v", req.ExecutionID, req.NodeName, result)
 	}
 	effectivePrivate, err := redisResultBit(result[3])
@@ -253,6 +275,13 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 		out.Applied = true
 		out.ExecutionDone = redisResultInt(result[1]) == 1
 		out.ExecutionStatus = types.ExecutionStatus(redisResultString(result[2]))
+		if len(result) == 5 {
+			// The skip list is the fifth element of the accepted reply. An empty
+			// Lua table can collapse on the wire, which is why the shape check
+			// above accepts four elements too; skippedUnitsFromLua treats a
+			// non-list as "no skips" either way.
+			out.Skipped = skippedUnitsFromLua(result[4])
+		}
 		if !out.ExecutionDone && !req.Fatal {
 			if advanceID != "" {
 				out.OutboxIDs = append(out.OutboxIDs, advanceID)
@@ -260,6 +289,12 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 			for _, entry := range req.CyclicOutbox {
 				out.OutboxIDs = append(out.OutboxIDs, entry.ID)
 			}
+			// Both candidate intents per arrival: only the script knows which
+			// of the two it wrote, so OutboxIDs is a candidate hint rather
+			// than a write log (see engine.CommitNodeResult.OutboxIDs). The
+			// memory backend reports the same candidates, including when its
+			// canceling guard suppressed the fold, so the two agree.
+			out.OutboxIDs = append(out.OutboxIDs, arrivalIDs...)
 		}
 	case 2:
 		out.Outcome = engine.CommitOutcomeDuplicateTerminal
@@ -329,6 +364,65 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 	return out, nil
 }
 
+// appendArrivalArgs appends one destination's three scheduling-counter keys
+// (in-degree, active inputs, schedule) and its eight ARGV slots, in the exact
+// order commitNodeLua and advanceNodeLua read them.
+//
+// It returns the two candidate outbox IDs. The script writes exactly one of
+// them, depending on the counters it observes; which one is derivable only in
+// Lua, which is why OutboxIDs reports both and Skipped reports the answer.
+//
+// Both commit paths share this builder because both scripts read ONE layout. A
+// slot order that drifted between them — or between a Go writer and its Lua
+// reader — would not fail to run: it would decode an arrival count as an active
+// count, or a body as an ID, and corrupt the scheduling counters silently.
+//
+// The destination node name rides along in the eighth slot, read only by the
+// skip branch: the script names the units it skipped so the caller does not
+// have to re-derive them from a count. Nothing replays an advance intent out of
+// a durable body written by an older revision — engine.LeaseNotRecoverable
+// exists precisely because advance and skip tasks never leave the engine — so
+// the slot cannot be absent for a body this binary produced.
+func appendArrivalArgs(keys []string, args []any, t namespace.Namespace, id types.ExecutionID, activationID, autoDepth int, arrival engine.DownstreamArrival) ([]string, []any, string, string, error) {
+	keys = append(keys,
+		inDegreeKey(t, id, arrival.UnitIdx),
+		activeInputsKey(t, id, arrival.UnitIdx),
+		scheduleKey(t, id, arrival.UnitIdx),
+	)
+	execTaskType := arrival.ExecTaskType
+	if execTaskType == 0 {
+		execTaskType = engine.TaskTypeNodeExec
+	}
+	executeID := redisExecuteOutboxID(id, arrival.NodeName, activationID)
+	skipID := redisSkipOutboxID(id, arrival.NodeName, activationID)
+	executeJSON, err := marshalRedisOutboxEntry(executeID, engine.Task{
+		ExecutionID:  id,
+		NodeName:     arrival.NodeName,
+		NodeIdx:      arrival.NodeIdx,
+		UnitIdx:      arrival.UnitIdx,
+		Type:         execTaskType,
+		ActivationID: activationID,
+		AutoDepth:    autoDepth,
+	}, time.Time{})
+	if err != nil {
+		return nil, nil, "", "", err
+	}
+	skipJSON, err := marshalRedisOutboxEntry(skipID, engine.Task{
+		ExecutionID:  id,
+		NodeName:     arrival.NodeName,
+		NodeIdx:      arrival.NodeIdx,
+		UnitIdx:      arrival.UnitIdx,
+		Type:         engine.TaskTypeNodeSkip,
+		ActivationID: activationID,
+		AutoDepth:    autoDepth,
+	}, time.Time{})
+	if err != nil {
+		return nil, nil, "", "", err
+	}
+	args = append(args, arrival.ArrivalCount, arrival.ActiveCount, arrival.MergeMode, executeID, executeJSON, skipID, skipJSON, arrival.NodeName)
+	return keys, args, executeID, skipID, nil
+}
+
 // AdvanceNode implements engine.AtomicStateStore by atomically applying all
 // destination arrivals and creating durable execution/skip intents.
 func (s *Store) AdvanceNode(ctx context.Context, req engine.AdvanceNodeRequest) (engine.AdvanceNodeResult, error) {
@@ -359,51 +453,15 @@ func (s *Store) AdvanceNode(ctx context.Context, req engine.AdvanceNodeRequest) 
 		outboxBodyKey(t, req.ExecutionID),
 	}
 	args := []any{req.ActivationID, int(ttl.Seconds()), len(req.Arrivals), time.Now().UTC().UnixMilli()}
-	outboxIDs := make([]string, 0, len(req.Arrivals))
+	outboxIDs := make([]string, 0, len(req.Arrivals)*2)
 	for _, arrival := range req.Arrivals {
-		keys = append(keys,
-			inDegreeKey(t, req.ExecutionID, arrival.UnitIdx),
-			activeInputsKey(t, req.ExecutionID, arrival.UnitIdx),
-			scheduleKey(t, req.ExecutionID, arrival.UnitIdx),
-		)
-		execTaskType := arrival.ExecTaskType
-		if execTaskType == 0 {
-			execTaskType = engine.TaskTypeNodeExec
-		}
-		executeID := redisExecuteOutboxID(req.ExecutionID, arrival.NodeName, req.ActivationID)
-		skipID := redisSkipOutboxID(req.ExecutionID, arrival.NodeName, req.ActivationID)
-		executeJSON, err := marshalRedisOutboxEntry(executeID, engine.Task{
-			ExecutionID:  req.ExecutionID,
-			NodeName:     arrival.NodeName,
-			NodeIdx:      arrival.NodeIdx,
-			UnitIdx:      arrival.UnitIdx,
-			Type:         execTaskType,
-			ActivationID: req.ActivationID,
-			AutoDepth:    req.AutoDepth,
-		}, time.Time{})
+		var executeID, skipID string
+		var err error
+		keys, args, executeID, skipID, err = appendArrivalArgs(keys, args, t,
+			req.ExecutionID, req.ActivationID, req.AutoDepth, arrival)
 		if err != nil {
 			return engine.AdvanceNodeResult{}, err
 		}
-		skipJSON, err := marshalRedisOutboxEntry(skipID, engine.Task{
-			ExecutionID:  req.ExecutionID,
-			NodeName:     arrival.NodeName,
-			NodeIdx:      arrival.NodeIdx,
-			UnitIdx:      arrival.UnitIdx,
-			Type:         engine.TaskTypeNodeSkip,
-			ActivationID: req.ActivationID,
-			AutoDepth:    req.AutoDepth,
-		}, time.Time{})
-		if err != nil {
-			return engine.AdvanceNodeResult{}, err
-		}
-		// The destination node name rides along in an eighth per-arrival slot,
-		// read only by the skip branch: the script names the units it skipped so
-		// the caller does not have to re-derive them from a count. Nothing
-		// replays an advance intent out of a durable body written by an older
-		// revision — engine.LeaseNotRecoverable exists precisely because advance
-		// and skip tasks never leave the engine — so the slot cannot be absent
-		// for a body this binary produced.
-		args = append(args, arrival.ArrivalCount, arrival.ActiveCount, arrival.MergeMode, executeID, executeJSON, skipID, skipJSON, arrival.NodeName)
 		outboxIDs = append(outboxIDs, executeID, skipID)
 	}
 	applied, err := runAdvanceNodeLua(ctx, advanceNodeLua, s.rdb, keys, args)

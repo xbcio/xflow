@@ -18,6 +18,7 @@ import (
 // proves parking/promotion/FIFO, and memoryState passes it.
 var memoryCapabilities = []statestoretest.Capability{
 	statestoretest.CapabilityAtomicStateStore,
+	statestoretest.CapabilityAtomicArrivalFolding,
 	statestoretest.CapabilityOutboxLeaser,
 	statestoretest.CapabilityOutboxReleaser,
 	statestoretest.CapabilityExecutionStatusReader,

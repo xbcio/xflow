@@ -18,6 +18,7 @@ import (
 // without miniredis or a real server.
 var rstateCapabilities = []statestoretest.Capability{
 	statestoretest.CapabilityAtomicStateStore,
+	statestoretest.CapabilityAtomicArrivalFolding,
 	statestoretest.CapabilityOutboxLeaser,
 	statestoretest.CapabilityOutboxReleaser,
 	statestoretest.CapabilityExecutionStatusReader,

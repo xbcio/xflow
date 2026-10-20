@@ -113,7 +113,25 @@ type CommitNodeRequest struct {
 	Fatal bool
 	// AdvanceTask is the acyclic downstream scheduling task. Cyclic downstream
 	// travels in CyclicOutbox; setting this on a cyclic commit is rejected.
+	//
+	// It is the alternative to Arrivals, not a companion: both consume the same
+	// downstream in-degree, so setting both is rejected (see Validate).
 	AdvanceTask *Task
+	// Arrivals folds this node's downstream scheduling into the commit itself:
+	// a capable backend applies the counters and writes the execute/skip intents
+	// in the same fenced transition as the terminal node write, instead of
+	// requiring a later AdvanceNode call. Skipped reports what that transition
+	// resolved as skip.
+	//
+	// It is acyclic-only. A cyclic commit schedules through CyclicOutbox and a
+	// fatal commit finalizes the execution before any downstream work can run, so
+	// carrying Arrivals on either is a programming error (see Validate).
+	//
+	// It is the alternative to AdvanceTask: both apply the same downstream
+	// in-degree, so a request carrying both would count every arrival twice and
+	// could resolve a unit from a branch the other path already consumed. That is
+	// also rejected (see Validate).
+	Arrivals []DownstreamArrival
 	// AllowCycles is the graph type of the execution being committed. It selects
 	// which of the two mutually exclusive completion protocols the backend runs,
 	// so it must describe the compiled graph — never a backend guess.
@@ -156,7 +174,26 @@ type CommitNodeRequest struct {
 // prevent: cyclic intents dropped, an unseeded counter decremented. Every field
 // below belongs to exactly one protocol, so a mismatch is a programming error
 // and is worth failing the commit over rather than guessing which half is right.
+//
+// Acyclic downstream scheduling has two alternative carriers, AdvanceTask and
+// Arrivals, and at most one may be set. They consume the same destination
+// in-degree: a request with both would fold the arrival into this transition
+// and then decrement the same counters again when the advance task runs, which
+// can drive an in-degree to zero early and schedule a unit from a branch that
+// was never actually consumed. That is rejected here too.
 func (r CommitNodeRequest) Validate() error {
+	if len(r.Arrivals) > 0 && r.AllowCycles {
+		return fmt.Errorf("commit %s/%s: Arrivals is acyclic downstream scheduling; "+
+			"cyclic downstream travels in CyclicOutbox", r.ExecutionID, r.NodeName)
+	}
+	if len(r.Arrivals) > 0 && r.Fatal {
+		return fmt.Errorf("commit %s/%s: Arrivals cannot be folded into a Fatal commit; a "+
+			"fatal commit finalizes the execution before downstream work can be scheduled", r.ExecutionID, r.NodeName)
+	}
+	if len(r.Arrivals) > 0 && r.AdvanceTask != nil {
+		return fmt.Errorf("commit %s/%s: Arrivals and AdvanceTask are alternative acyclic "+
+			"scheduling paths; setting both would count the same arrival twice", r.ExecutionID, r.NodeName)
+	}
 	if len(r.ReclaimOutputNames) > 0 && (r.AllowCycles || r.Fatal || r.System || r.Status != types.NodeStatusSuccess) {
 		return fmt.Errorf("commit %s/%s: ReclaimOutputNames is only valid for a non-system, non-fatal successful acyclic commit", r.ExecutionID, r.NodeName)
 	}
@@ -188,7 +225,34 @@ type CommitNodeResult struct {
 	Applied         bool
 	ExecutionDone   bool
 	ExecutionStatus types.ExecutionStatus
-	OutboxIDs       []string
+	// OutboxIDs is a candidate hint, not a write log. It may name intents this
+	// transition did not write, and its length is not the number of entries the
+	// transition created.
+	//
+	// For a folded arrival the backends report both candidates, execute and
+	// skip, because only the backend's transition observes which of the two the
+	// counters resolved to; exactly one is written, or neither when the
+	// destination is not yet scheduled. Advance and cyclic intent IDs are
+	// reported as part of the same hint, under the same no-count guarantee.
+	// Callers must not infer from this field which intent an arrival produced —
+	// CommitNodeResult.Skipped is that answer — nor whether any intent at all
+	// was written. A non-empty slice is only a conservative "a flush may have
+	// work" signal; an empty one says nothing. The durable outbox is the
+	// authority.
+	//
+	// Nil when the commit was not applied, and nil for arrivals on a commit that
+	// finalized the execution (nothing may be scheduled after that).
+	OutboxIDs []string
+	// Skipped reports the downstream units this commit resolved as skip while
+	// folding CommitNodeRequest.Arrivals into the transition. It uses the same
+	// shape and meaning as AdvanceNodeResult.Skipped: only the backend knows
+	// which of the two candidate intents per arrival it wrote, and a skip is
+	// invisible otherwise (the intent is durable but no error is raised).
+	//
+	// Nil on an all-execute commit, on a commit without arrivals, and on a
+	// commit whose arrival folding was suppressed (execution finalized, fatal,
+	// or canceling).
+	Skipped []SkippedUnit
 }
 
 // DownstreamArrival aggregates all edges from one source completion to a
@@ -300,6 +364,28 @@ type AtomicStateStore interface {
 	ListOutbox(ctx context.Context, id types.ExecutionID, before time.Time, limit int) ([]OutboxEntry, error)
 	AckOutbox(ctx context.Context, id types.ExecutionID, entryID string) error
 	ListOutboxExecutions(ctx context.Context, limit int) ([]types.ExecutionID, error)
+}
+
+// ArrivalFoldingCommitter marks a store whose CommitNode folds
+// CommitNodeRequest.Arrivals into the same fenced transition as the terminal
+// node write: the downstream scheduling counters are applied, the execute/skip
+// intents are persisted, and the resolved skips are reported in
+// CommitNodeResult.Skipped, all atomically with the node's terminal state.
+//
+// It deliberately reuses AtomicStateStore.CommitNode's signature. Folding is
+// not a second operation a caller invokes; it is a semantic guarantee about
+// what the existing call does with a field every backend already accepts, so a
+// distinct method would only rename the same transaction. The consequence is
+// that the type assertion alone cannot distinguish an implementation that folds
+// from one that ignores the field — the shared arrival-folding contract is what
+// proves the claim, exactly as CapabilityConcurrencyQueueMode is proven by the
+// queue contract rather than by its interface check.
+//
+// The engine does not require this capability yet: the production commit path
+// still schedules through AdvanceNode, and this exists so backends can be
+// implemented and contract-tested before that switch (S4b).
+type ArrivalFoldingCommitter interface {
+	CommitNode(ctx context.Context, req CommitNodeRequest) (CommitNodeResult, error)
 }
 
 // OutboxDeliveryLeaseTTL is how long a delivery lease survives without renewal.
