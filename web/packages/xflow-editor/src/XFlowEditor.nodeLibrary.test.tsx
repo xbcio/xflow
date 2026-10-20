@@ -77,7 +77,9 @@ describe("node library from /v1/node-types (Doc C §6.3)", () => {
     expect(groupOf(tile("xflow.transform.set"))).toBe("数据转换");
     expect(groupOf(tile("xflow.supply.static"))).toBe("供应");
     // ...and every current builtin has an entry, so nothing lands in "其他".
-    expect(within(library()).queryByRole("button", { name: /^其他/ })).toBeNull();
+    // Unanchored: the group icon's accessible name prefixes the title
+    // ("appstore 其他 3 down"), so an anchored match silently passed.
+    expect(within(library()).queryByRole("button", { name: /其他/ })).toBeNull();
     expect(within(library()).getByRole("button", { name: /触发器 5/ })).toBeTruthy();
   });
 

@@ -163,6 +163,20 @@ type reactorHost struct {
 	// that; only attributing a report to a host does.
 	engineCountObserver Observer
 
+	// instanceRecycleObserver, when non-nil, receives THIS host's
+	// OnInstanceRecycled reports in place of the process-wide Observer.
+	// Production leaves it nil.
+	//
+	// Same hazard, same remedy as engineCountObserver above: Observer is
+	// process-wide and OnInstanceRecycled carries no host identity, so a
+	// recorder installed with SetObserver collects every host's teardown. The
+	// reclamation tests assert exact counts ("= 10, want 6" for a test whose own
+	// two pools hold 2 + 4 instances), and under `-race` in a full-package run a
+	// lingering sweep from another host contributed a whole extra pool of 4.
+	// No deadline or tolerance can attribute that report; only routing it to the
+	// host that produced it can.
+	instanceRecycleObserver Observer
+
 	// supplyRefs records, per module key, the supply slots this module is
 	// registered as a consumer of — the fact engine creation needs in order to
 	// resolve the module's config from the registry.

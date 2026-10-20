@@ -68,6 +68,26 @@ func TestLocalEngineObservesMapBodyNodes(t *testing.T) {
 			"would pass vacuously", len(ran), ran)
 	}
 
+	// The engine invokes the completion hooks AFTER the fenced commit that makes
+	// the terminal status visible — Wait returns from that commit's done channel,
+	// while OnExecutionComplete runs later in afterAtomicCommit. The counters are
+	// therefore not guaranteed to be written when Wait returns, even though the
+	// execution is terminal. Poll for the expected set before asserting; a leaked
+	// or missing count never matches, so this delays the failures below rather
+	// than hiding them.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		ready := counterFor(t, m, "xflow_subgraph_node_started_total", "node", "double") == 3 &&
+			counterFor(t, m, "xflow_subgraph_node_completed_total", "node", "double") == 3 &&
+			counterSum(t, m, "xflow_subgraph_execution_completed_total") == 3 &&
+			counterSum(t, m, "xflow_execution_completed_total") == 1 &&
+			counterFor(t, m, "xflow_node_started_total", "node", "start") == 1
+		if ready || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
 	// The body's own node, counted once per item.
 	if got := counterFor(t, m, "xflow_subgraph_node_started_total", "node", "double"); got != 3 {
 		t.Errorf("xflow_subgraph_node_started_total{node=\"double\"} = %v, want 3 "+

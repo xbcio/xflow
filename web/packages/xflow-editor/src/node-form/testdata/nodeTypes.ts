@@ -218,12 +218,12 @@ export const mapSchema: NodeFormSchema = {
 };
 
 const jsRuntimes = [
-  { value: "goja", label: "goja", description: "Fastest cold start; cannot interrupt tight loops" },
-  { value: "qjs", label: "QuickJS", description: "Slower first load; genuine mid-execution termination" }
+  { value: "goja", label: "goja", description: "Fastest cold start; interruptible, but no heap cap (trusted scripts only)" },
+  { value: "qjs", label: "QuickJS", description: "Slower first load; interruptible, 16 MiB heap cap" }
 ];
 const wasmRuntimes = [
-  { value: "wazero", label: "wazero" },
-  { value: "wazero-reactor", label: "wazero (reactor)", description: "Pooled reactor-mode guest instances" }
+  { value: "wazero", label: "wazero", description: "Legacy command model; no batch fast path (a batch trigger evaluates records one by one)" },
+  { value: "wazero-reactor", label: "wazero (reactor)", description: "Pooled reactor-mode guest instances; the batch fast path" }
 ];
 
 export const scriptSchema: NodeFormSchema = {
@@ -261,7 +261,7 @@ export const scriptSchema: NodeFormSchema = {
       type: "string",
       required: true,
       group: "source",
-      help: "Engine: js->goja|qjs, wasm->wazero|wazero-reactor (no default — choose explicitly)",
+      help: "Engine: js->goja|qjs, wasm->wazero|wazero-reactor (no default — choose explicitly); wazero has no batch fast path, so a Kafka batch evaluates serially",
       options: [...jsRuntimes, ...wasmRuntimes],
       options_when: [
         { when: eq("language", "js"), options: jsRuntimes },

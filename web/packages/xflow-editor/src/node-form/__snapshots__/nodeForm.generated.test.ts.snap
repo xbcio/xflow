@@ -2719,7 +2719,7 @@ exports[`A6-generated node-types fixture > xflow.script@1 snapshot 1`] = `
           },
         ],
         "props": {
-          "description": "Engine: js->goja|qjs, wasm->wazero|wazero-reactor (no default — choose explicitly)",
+          "description": "Engine: js->goja|qjs, wasm->wazero|wazero-reactor (no default — choose explicitly); wazero has no batch fast path, so a Kafka batch evaluates serially",
           "expect": {
             "type": "string",
           },
@@ -2753,32 +2753,34 @@ exports[`A6-generated node-types fixture > xflow.script@1 snapshot 1`] = `
               },
               "else": [
                 {
-                  "description": "Fastest cold start; cannot interrupt tight loops",
+                  "description": "Fastest cold start; interruptible, but no heap cap (trusted scripts only)",
                   "label": "goja",
                   "value": "goja",
                 },
                 {
-                  "description": "Slower first load; genuine mid-execution termination",
+                  "description": "Slower first load; interruptible, 16 MiB heap cap",
                   "label": "QuickJS",
                   "value": "qjs",
                 },
                 {
+                  "description": "Legacy command model; no batch fast path (a batch trigger evaluates records one by one)",
                   "label": "wazero",
                   "value": "wazero",
                 },
                 {
-                  "description": "Pooled reactor-mode guest instances",
+                  "description": "Pooled reactor-mode guest instances; the batch fast path",
                   "label": "wazero (reactor)",
                   "value": "wazero-reactor",
                 },
               ],
               "then": [
                 {
+                  "description": "Legacy command model; no batch fast path (a batch trigger evaluates records one by one)",
                   "label": "wazero",
                   "value": "wazero",
                 },
                 {
-                  "description": "Pooled reactor-mode guest instances",
+                  "description": "Pooled reactor-mode guest instances; the batch fast path",
                   "label": "wazero (reactor)",
                   "value": "wazero-reactor",
                 },
@@ -2786,12 +2788,12 @@ exports[`A6-generated node-types fixture > xflow.script@1 snapshot 1`] = `
             },
             "then": [
               {
-                "description": "Fastest cold start; cannot interrupt tight loops",
+                "description": "Fastest cold start; interruptible, but no heap cap (trusted scripts only)",
                 "label": "goja",
                 "value": "goja",
               },
               {
-                "description": "Slower first load; genuine mid-execution termination",
+                "description": "Slower first load; interruptible, 16 MiB heap cap",
                 "label": "QuickJS",
                 "value": "qjs",
               },
@@ -2877,6 +2879,214 @@ exports[`A6-generated node-types fixture > xflow.start@1 snapshot 1`] = `
           "layout": "vertical",
         },
         "type": "Form",
+      },
+    },
+    "minor": 0,
+    "root": "form",
+    "spec": "composer/v1",
+  },
+  "warnings": [],
+}
+`;
+
+exports[`A6-generated node-types fixture > xflow.subworkflow@1 snapshot 1`] = `
+{
+  "spec": {
+    "elements": {
+      "f.parameters.entry": {
+        "props": {
+          "description": "Entry node of the child workflow; empty uses its default start",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Entry",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/entry",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.entry:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.entry:control": {
+        "props": {
+          "label": "Entry",
+          "value": {
+            "$bindState": "/parameters/entry",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.input": {
+        "children": [
+          "f.parameters.input:control",
+        ],
+        "props": {
+          "expect": {
+            "type": "object",
+            "values": "string",
+          },
+          "label": "Input",
+          "mode": "pure",
+          "observed": {
+            "$state": "/parameters/input",
+          },
+        },
+        "type": "ShapeGuard",
+      },
+      "f.parameters.input:control": {
+        "checks": [
+          {
+            "message": "值看起来像凭据，请改用凭据引用",
+            "severity": "warning",
+            "type": "secretLike",
+          },
+        ],
+        "props": {
+          "description": "Expressions producing the child execution's params",
+          "label": "Input",
+          "value": {
+            "$bindState": "/parameters/input",
+          },
+          "valueProps": {
+            "mode": "pure",
+          },
+          "valueType": "ExpressionInput",
+        },
+        "type": "KeyValue",
+      },
+      "f.parameters.output": {
+        "children": [
+          "f.parameters.output:control",
+        ],
+        "props": {
+          "expect": {
+            "type": "object",
+            "values": "string",
+          },
+          "label": "Output",
+          "mode": "pure",
+          "observed": {
+            "$state": "/parameters/output",
+          },
+        },
+        "type": "ShapeGuard",
+      },
+      "f.parameters.output:control": {
+        "checks": [
+          {
+            "message": "值看起来像凭据，请改用凭据引用",
+            "severity": "warning",
+            "type": "secretLike",
+          },
+        ],
+        "props": {
+          "description": "Expressions over the child execution's public node outputs ($child) producing this node's output",
+          "label": "Output",
+          "value": {
+            "$bindState": "/parameters/output",
+          },
+          "valueProps": {
+            "mode": "pure",
+          },
+          "valueType": "ExpressionInput",
+        },
+        "type": "KeyValue",
+      },
+      "f.parameters.version": {
+        "props": {
+          "description": "Version to pin; empty resolves to the latest version at registration time",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Version",
+          "mode": "template",
+          "value": {
+            "$bindState": "/parameters/version",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.version:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.version:control": {
+        "props": {
+          "label": "Version",
+          "value": {
+            "$bindState": "/parameters/version",
+          },
+        },
+        "type": "Input",
+      },
+      "f.parameters.workflow": {
+        "checks": [
+          {
+            "message": "必填",
+            "type": "required",
+          },
+        ],
+        "props": {
+          "description": "Name of the workflow to run, in the same namespace",
+          "expect": {
+            "type": "string",
+          },
+          "fxToggle": true,
+          "label": "Workflow",
+          "mode": "template",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/workflow",
+          },
+        },
+        "slots": {
+          "literal": [
+            "f.parameters.workflow:control",
+          ],
+        },
+        "type": "ExpressionInput",
+      },
+      "f.parameters.workflow:control": {
+        "props": {
+          "label": "Workflow",
+          "required": true,
+          "value": {
+            "$bindState": "/parameters/workflow",
+          },
+        },
+        "type": "Input",
+      },
+      "form": {
+        "children": [
+          "g.type.default",
+        ],
+        "props": {
+          "descriptionPlacement": "tooltip",
+          "layout": "vertical",
+        },
+        "type": "Form",
+      },
+      "g.type.default": {
+        "children": [
+          "f.parameters.workflow",
+          "f.parameters.version",
+          "f.parameters.entry",
+          "f.parameters.input",
+          "f.parameters.output",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "参数",
+        },
+        "type": "FieldGroup",
       },
     },
     "minor": 0,

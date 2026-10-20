@@ -610,6 +610,19 @@ func (e *reactorEngine) borrow(ctx context.Context) (*pooledInstance, *activePoo
 	}
 }
 
+// recycleObserver is the Observer this engine's instance recycles report to:
+// the owning host's own recorder when it carries one (tests), and the
+// process-wide Observer otherwise, which is what production always gets. See
+// reactorHost.instanceRecycleObserver for why recycles need a per-host seam.
+func (e *reactorEngine) recycleObserver() Observer {
+	if e.host != nil {
+		if o := e.host.instanceRecycleObserver; o != nil {
+			return o
+		}
+	}
+	return obs()
+}
+
 // giveBack returns a healthy instance to its pool. If the instance's pool is no
 // longer active (swapped out), the instance is torn down instead of parked.
 func (e *reactorEngine) giveBack(ctx context.Context, p *activePool, inst *pooledInstance) {
@@ -624,7 +637,7 @@ func (e *reactorEngine) giveBack(ctx context.Context, p *activePool, inst *poole
 		// pool being torn down around a borrower that outlived it — the
 		// nearest fit among the documented causes is "shutdown", not a normal
 		// swap or eval failure.
-		obs().OnInstanceRecycled(ctx, "shutdown")
+		e.recycleObserver().OnInstanceRecycled(ctx, "shutdown")
 		inst.teardown(ctx)
 	}
 }
@@ -646,7 +659,7 @@ func (e *reactorEngine) doom(ctx context.Context, p *activePool, inst *pooledIns
 	if ctx.Err() != nil {
 		cause = "timeout"
 	}
-	obs().OnInstanceRecycled(ctx, cause)
+	e.recycleObserver().OnInstanceRecycled(ctx, cause)
 
 	// Close the failed instance on a background context — its own ctx may be
 	// the expired deadline that doomed it.
@@ -661,7 +674,7 @@ func (e *reactorEngine) doom(ctx context.Context, p *activePool, inst *pooledIns
 	// to be installed when it fails is how a late failure leaks into an unrelated
 	// observer -- in the test process, into the NEXT test's recorder. See
 	// SetObserver's contract note.
-	rebuildObserver := obs()
+	rebuildObserver := e.recycleObserver()
 	go func() {
 		repl, err := e.newInstance(bg, p.cfg)
 		if err != nil {
@@ -697,13 +710,13 @@ func (e *reactorEngine) recyclePlanned(p *activePool, inst *pooledInstance) {
 		// silently attributing it to one of the real bounds.
 		cause = "planned"
 	}
-	obs().OnInstanceRecycled(context.Background(), cause)
+	e.recycleObserver().OnInstanceRecycled(context.Background(), cause)
 	bg := context.Background()
 	inst.teardown(bg)
 	if e.active.Load() != p {
 		return
 	}
-	rebuildObserver := obs() // see doom: capture on the spawner, not in the closure
+	rebuildObserver := e.recycleObserver() // see doom: capture on the spawner, not in the closure
 	go func() {
 		repl, err := e.newInstance(bg, p.cfg)
 		if err != nil {
@@ -825,7 +838,7 @@ func (e *reactorEngine) drainPoolWithCause(ctx context.Context, p *activePool, c
 				return
 			}
 			inst.teardown(ctx)
-			obs().OnInstanceRecycled(ctx, cause)
+			e.recycleObserver().OnInstanceRecycled(ctx, cause)
 		case <-timer.C:
 			return
 		case <-ctx.Done():

@@ -197,6 +197,7 @@ func (s *Store) ReplayDeadLetter(ctx context.Context, req engine.ReplayDeadLette
 		execKey(t, req.ExecutionID, "status"),
 		outboxDeadMetaKey(t, req.ExecutionID, req.EntryID),
 		outboxReplayEntryIdxKey(t, req.ExecutionID),
+		outboxReplayReceiptKey(t, req.ExecutionID, requestID),
 	}, req.EntryID, time.Now().UTC().UnixMilli(), int(ttl.Seconds()),
 		requestID, req.Operator, req.Reason, string(req.ExecutionID), string(t)).Slice()
 	if err != nil {

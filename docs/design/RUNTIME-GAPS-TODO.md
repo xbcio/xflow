@@ -51,10 +51,10 @@ Node Group 组级 `on_error`、gRPC `AckActivation`、G1 clean-SHA 重签 `c39a2
 
 3. **工作流级 `outputs:` 从未被求值。** `types.WorkflowDef.Outputs`
    （`types/workflow.go:33`）只进定义哈希（`backend/workflowhash/workflowhash.go:90`）；
-   图 `Graph` 不携带它，全仓无求值/读取点（唯一相关的检查是 FAF 目标的编译拒绝）。
-   声明了 `outputs:` 的工作流编译、注册、执行照常成功，但这些输出从不产生——属
-   「接受字段但静默忽略」类；仓库对该类已有正确先例（`validateGroupRetry` 式编译
-   拒绝）。修法二选一：实现求值并把它落到执行结果/API 面，或编译期明确拒绝。
+   图 `Graph` 不携带它，全仓无求值/读取点。
+   **已解决（2026-10-19）：** 采用「编译期明确拒绝」方案——任何声明了
+   workflow 级 `outputs:` 的定义在 `engine/graph/compile.go` 编译时返回永久错误，
+   文档与 OpenAPI schema 同步移除了该字段；节点输出仍通过 `$nodes` 读取。
 
 ### P3 — 已知限制，记录在案
 

@@ -359,26 +359,16 @@ func (s *Store) cleanupCreatedExecution(ctx context.Context, e *engine.Execution
 	s.ttlMu.Unlock()
 
 	t := namespace.FromContext(ctx)
-	pipe := s.rdb.Pipeline()
-	pipe.Del(ctx,
-		execKey(t, e.ID, "status"),
-		execKey(t, e.ID, "graph"),
-		execKey(t, e.ID, "namespace"),
+	// Every key creation wrote, plus keys later transitions or caches may have
+	// added before the SQL failure was observed. All of them are execution-scoped:
+	// the namespace registry and the workflow-scoped outbox readiness index are
+	// maintained separately (refreshOutboxReadyIndex below), never by this
+	// rollback, so a failed create cannot perturb another execution's state.
+	keys := createdExecutionKeys(t, e.ID, e.Graph)
+	keys = append(keys,
 		execKey(t, e.ID, "error"),
-		execKey(t, e.ID, "params"),
-		execKey(t, e.ID, "runtime"),
-		execKey(t, e.ID, "trace_id"),
-		execKey(t, e.ID, "span_id"),
-		execKey(t, e.ID, "trace_carrier"),
-		execKey(t, e.ID, "test_run"),
-		transientMarkKey(t, e.ID),
 		terminalMarkKey(t, e.ID),
-		retentionRecordKey(t, e.ID),
-		remainingNodesKey(t, e.ID),
-		failedNodesKey(t, e.ID),
 		leaseExpiryZSetKey(t, e.ID),
-		outboxReadyKey(t, e.ID),
-		outboxBodyKey(t, e.ID),
 		outboxAttemptsKey(t, e.ID),
 		outboxDeadKey(t, e.ID),
 		outboxDeadBodyKey(t, e.ID),
@@ -386,21 +376,21 @@ func (s *Store) cleanupCreatedExecution(ctx context.Context, e *engine.Execution
 		timeoutZSetKey(t, e.ID),
 	)
 	if e.Graph != nil {
-		// Same superset argument as the TTL-shortening walk in state.go: the
-		// counter keys are unit-indexed while this loop walks node indices, and
-		// UnitCount <= NodeCount makes the node range cover every unit key.
+		// Node keys can already exist when the SQL write fails: the outbox
+		// dispatcher may have picked an entry up during the SQL-call window. They
+		// are execution-scoped like everything above.
 		for i := 0; i < e.Graph.NodeCount(); i++ {
 			node := e.Graph.NodeAt(i)
-			pipe.Del(ctx,
-				inDegreeKey(t, e.ID, i),
+			keys = append(keys,
 				activeInputsKey(t, e.ID, i),
-				scheduleKey(t, e.ID, i),
 				nodeStatusKey(t, e.ID, node.Name),
 				nodeMetaKey(t, e.ID, node.Name),
 				outputKey(t, e.ID, node.Name),
 			)
 		}
 	}
+	pipe := s.rdb.Pipeline()
+	pipe.Del(ctx, keys...)
 	_, _ = pipe.Exec(ctx)
 	// The execution's ready set is gone, so its readiness-index member has to
 	// go with it. Leaving it would only cost a no-op drain that repairs it

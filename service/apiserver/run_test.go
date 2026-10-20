@@ -12,6 +12,9 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/service/control"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 type runDrainModule struct {
@@ -132,6 +135,45 @@ func TestRunMarksUnreadyBeforeHTTPDrainAndStopsControlPlaneAfterward(t *testing.
 	}
 	if err := srv.Start(context.Background()); !errors.Is(err, control.ErrControlPlaneStopped) {
 		t.Fatalf("control plane state after Run: Start error = %v, want %v", err, control.ErrControlPlaneStopped)
+	}
+}
+
+// TestStopGRPCForcesStopWhenDrainExceedsGrace pins the bound on the gRPC drain
+// phase: GracefulStop must not wait forever on a long-lived stream. The test
+// uses an unknown-service handler that blocks until its stream context is
+// cancelled, which only happens when stopGRPC falls back to Stop.
+func TestStopGRPCForcesStopWhenDrainExceedsGrace(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	entered := make(chan struct{})
+	gs := grpc.NewServer(grpc.UnknownServiceHandler(func(_ any, stream grpc.ServerStream) error {
+		close(entered)
+		<-stream.Context().Done()
+		return stream.Context().Err()
+	}))
+	go func() { _ = gs.Serve(lis) }()
+	t.Cleanup(gs.Stop)
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.NewStream(context.Background(), &grpc.StreamDesc{ServerStreams: true}, "/test.Blocked/Stream"); err != nil {
+		t.Fatalf("new stream: %v", err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("server handler did not start")
+	}
+
+	start := time.Now()
+	stopGRPC(gs, 100*time.Millisecond)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("stopGRPC took %s, want the forced stop to return promptly", elapsed)
 	}
 }
 
