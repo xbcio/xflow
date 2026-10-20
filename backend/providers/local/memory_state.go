@@ -605,6 +605,57 @@ func (s *memoryState) GetExecution(_ context.Context, id types.ExecutionID) (*en
 	return &cp, nil
 }
 
+// GetExecutionInputContext implements engine.ExecutionInputContextReader.
+//
+// It reads the same in-memory snapshot GetExecution reads, so the saving here
+// is a snapshot copy rather than round trips — but the method is implemented
+// anyway so both backends answer buildInput's question through the same narrow
+// capability. If only the Redis backend implemented it, the engine would take a
+// different path per backend and the shared contract could not pin that the two
+// agree field by field.
+//
+// The maps and runtime are deliberately not copied: GetExecution returns a
+// shallow snapshot copy that shares them too, and buildInput clones every map it
+// mutates. A deep copy here would make the narrow read observably different from
+// the full one for no safety gain.
+func (s *memoryState) GetExecutionInputContext(_ context.Context, id types.ExecutionID) (*engine.ExecutionInputContext, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.executions[id]
+	if !ok {
+		return nil, false, nil
+	}
+	snap := &entry.snap
+	return &engine.ExecutionInputContext{
+		Status:  snap.Status,
+		Params:  snap.Params,
+		Runtime: snap.Runtime,
+		Scope:   snap.Scope,
+		TraceID: snap.TraceID,
+		SpanID:  snap.SpanID,
+	}, true, nil
+}
+
+// GetExecutionTraceCarrier implements engine.ExecutionTraceCarrierReader: the
+// carrier the execution was created with, or found=false when the execution is
+// absent or was submitted with tracing disabled.
+//
+// An empty carrier is reported as absent, not as a present empty map: the Redis
+// backend writes the key only when a carrier exists, so "present but empty" is
+// a state that backend cannot represent and the two must answer alike.
+func (s *memoryState) GetExecutionTraceCarrier(_ context.Context, id types.ExecutionID) (map[string]string, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.executions[id]
+	if !ok || len(entry.snap.TraceCarrier) == 0 {
+		return nil, false, nil
+	}
+	return entry.snap.TraceCarrier, true, nil
+}
+
+var _ engine.ExecutionInputContextReader = (*memoryState)(nil)
+var _ engine.ExecutionTraceCarrierReader = (*memoryState)(nil)
+
 // GetExecutionStatus reads back only the lifecycle status
 // (engine.ExecutionStatusReader). Here it saves a snapshot copy rather than
 // round trips — the win is on key-value backends — but it is implemented anyway
@@ -864,23 +915,71 @@ func cloneLeasePayload(payload *types.SignalPayload) *types.SignalPayload {
 func (s *memoryState) AcquireTaskLease(_ context.Context, lease *engine.TaskLease) (*engine.NodeSnapshot, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	previous, acquired := s.acquireTaskLeaseLocked(lease)
+	return previous, acquired, nil
+}
 
+var _ engine.RouteCheckedLeaseAcquirer = (*memoryState)(nil)
+
+// AcquireTaskLeaseChecked is AcquireTaskLease plus the execution-liveness and
+// node-route checks the engine used to issue as separate reads before asking
+// for the lease, decided under the same lock as the lease write.
+//
+// It mirrors acquireTaskLeaseLua's route-checked mode exactly: a missing or
+// terminal execution refuses the acquire (canceling and paused are live), an
+// acyclic task refuses a terminal node whatever activation it carries, and a
+// cyclic task must carry a positive activation. Every guard AcquireTaskLease
+// applies is kept unchanged.
+func (s *memoryState) AcquireTaskLeaseChecked(_ context.Context, lease *engine.TaskLease, opts engine.LeaseAcquireOptions) (engine.LeaseAcquireResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	res := engine.LeaseAcquireResult{}
+	entry, found := s.executions[lease.Task.ExecutionID]
+	if !found {
+		return res, nil
+	}
+	res.ExecutionFound = true
+	res.ExecutionStatus = entry.snap.Status
+	if types.IsTerminalExecutionStatus(entry.snap.Status) {
+		return res, nil
+	}
+
+	key := memoryNodeKey(lease.Task.ExecutionID, lease.Task.NodeName)
+	current := s.nodes[key]
+	if opts.AllowCycles {
+		if lease.Task.ActivationID <= 0 {
+			res.Previous = s.publicNodeSnapshotLocked(key, current)
+			return res, nil
+		}
+	} else if current != nil && isTerminalNode(current.Status) {
+		res.Previous = s.publicNodeSnapshotLocked(key, current)
+		return res, nil
+	}
+
+	res.Previous, res.Acquired = s.acquireTaskLeaseLocked(lease)
+	return res, nil
+}
+
+// acquireTaskLeaseLocked is the node-level body shared by both acquire entry
+// points. Callers must hold s.mu.
+func (s *memoryState) acquireTaskLeaseLocked(lease *engine.TaskLease) (*engine.NodeSnapshot, bool) {
 	key := memoryNodeKey(lease.Task.ExecutionID, lease.Task.NodeName)
 	current := s.nodes[key]
 	if current != nil {
 		if lease.Task.ActivationID > 0 && current.ActivationID > lease.Task.ActivationID {
-			return s.publicNodeSnapshotLocked(key, current), false, nil
+			return s.publicNodeSnapshotLocked(key, current), false
 		}
 		if isTerminalNode(current.Status) && (lease.Task.ActivationID <= 0 || current.ActivationID >= lease.Task.ActivationID) {
-			return s.publicNodeSnapshotLocked(key, current), false, nil
+			return s.publicNodeSnapshotLocked(key, current), false
 		}
 		if current.Status == types.NodeStatusCommitting || current.Status == types.NodeStatusWaiting {
-			return s.publicNodeSnapshotLocked(key, current), false, nil
+			return s.publicNodeSnapshotLocked(key, current), false
 		}
 		if current.Status == types.NodeStatusRunning && current.LeaseToken != "" {
 			deadline := current.LeaseIssuedAt.Add(current.LeaseTTL)
 			if current.LeaseIssuedAt.IsZero() || current.LeaseTTL <= 0 || lease.IssuedAt.Before(deadline) {
-				return s.publicNodeSnapshotLocked(key, current), false, nil
+				return s.publicNodeSnapshotLocked(key, current), false
 			}
 		}
 	}
@@ -936,7 +1035,7 @@ func (s *memoryState) AcquireTaskLease(_ context.Context, lease *engine.TaskLeas
 		node.FinishedAt = current.FinishedAt
 	}
 	s.nodes[key] = node
-	return s.publicNodeSnapshotLocked(key, current), true, nil
+	return s.publicNodeSnapshotLocked(key, current), true
 }
 
 // ResetNodeForRetryWithOutbox atomically creates the retry delivery intent
@@ -1564,6 +1663,27 @@ func (s *memoryState) GetOutput(_ context.Context, id types.ExecutionID, name st
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.outputs[string(id)+"/"+name], nil
+}
+
+// GetOutputs is the batch form of GetOutput (engine.BatchOutputReader). The
+// in-memory store has no round trips to amortize, but implementing the
+// interface keeps the engine's fan-in and $nodes read paths identical on both
+// backends instead of exercising the per-name fallback only in tests.
+//
+// The lock is the store's ordinary mutex: this backend has no RWMutex, and
+// taking the shared lock it does not have would require changing every reader.
+func (s *memoryState) GetOutputs(_ context.Context, id types.ExecutionID, names []string) (map[string]map[string]any, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// A missing name is absent from the result, mirroring GetOutput's nil, nil.
+	outputs := make(map[string]map[string]any, len(names))
+	prefix := string(id) + "/"
+	for _, name := range names {
+		if data, ok := s.outputs[prefix+name]; ok {
+			outputs[name] = data
+		}
+	}
+	return outputs, nil
 }
 
 // ---------------------------------------------------------------------------

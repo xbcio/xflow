@@ -33,14 +33,25 @@ type Capability string
 
 const (
 	CapabilityAtomicStateStore Capability = "AtomicStateStore"
-	CapabilityOutboxLeaser     Capability = "OutboxLeaser"
-	CapabilityOutboxReleaser   Capability = "OutboxReleaser"
+	// CapabilityAtomicArrivalFolding is the semantic capability behind
+	// engine.ArrivalFoldingCommitter: CommitNode applies CommitNodeRequest.Arrivals
+	// and reports the resolved skips in CommitNodeResult.Skipped. The interface
+	// carries an explicit FoldsArrivalsIntoCommit marker, so the assertion below
+	// rejects a backend that merely implements CommitNode; the declaration also
+	// promises the shared arrival-folding contract, which proves the mark true.
+	CapabilityAtomicArrivalFolding Capability = "AtomicArrivalFolding"
+	CapabilityOutboxLeaser         Capability = "OutboxLeaser"
+	CapabilityOutboxReleaser       Capability = "OutboxReleaser"
 
-	CapabilityExecutionStatusReader    Capability = "ExecutionStatusReader"
-	CapabilitySuspendedNodeCanceler    Capability = "SuspendedNodeCanceler"
-	CapabilityDurableSignalDeliverer   Capability = "DurableSignalDeliverer"
-	CapabilityNodeLeaseRenewer         Capability = "NodeLeaseRenewer"
-	CapabilityCancelingExecutionLister Capability = "CancelingExecutionLister"
+	CapabilityExecutionStatusReader       Capability = "ExecutionStatusReader"
+	CapabilityRouteCheckedLeaseAcquirer   Capability = "RouteCheckedLeaseAcquirer"
+	CapabilitySuspendedNodeCanceler       Capability = "SuspendedNodeCanceler"
+	CapabilityDurableSignalDeliverer      Capability = "DurableSignalDeliverer"
+	CapabilityNodeLeaseRenewer            Capability = "NodeLeaseRenewer"
+	CapabilityCancelingExecutionLister    Capability = "CancelingExecutionLister"
+	CapabilityBatchOutputReader           Capability = "BatchOutputReader"
+	CapabilityExecutionInputContextReader Capability = "ExecutionInputContextReader"
+	CapabilityExecutionTraceCarrierReader Capability = "ExecutionTraceCarrierReader"
 
 	CapabilityGroupStateStore      Capability = "GroupStateStore"
 	CapabilityGroupLeaseExpirer    Capability = "GroupLeaseExpirer"
@@ -85,6 +96,14 @@ var capabilitySpecs = map[Capability]capabilitySpec{
 			return ok
 		},
 	},
+	CapabilityAtomicArrivalFolding: {
+		iface:   "engine.ArrivalFoldingCommitter",
+		summary: "downstream arrivals folded into CommitNode with skip reporting (CommitNodeResult.Skipped)",
+		implements: func(v any) bool {
+			committer, ok := v.(engine.ArrivalFoldingCommitter)
+			return ok && committer.FoldsArrivalsIntoCommit()
+		},
+	},
 	CapabilityOutboxLeaser: {
 		iface:   "engine.OutboxLeaser",
 		summary: "delivery leases for outbox entries (LeaseOutbox/RenewOutbox)",
@@ -106,6 +125,14 @@ var capabilitySpecs = map[Capability]capabilitySpec{
 		summary: "narrow execution-status read without loading the snapshot (GetExecutionStatus)",
 		implements: func(v any) bool {
 			_, ok := v.(engine.ExecutionStatusReader)
+			return ok
+		},
+	},
+	CapabilityRouteCheckedLeaseAcquirer: {
+		iface:   "engine.RouteCheckedLeaseAcquirer",
+		summary: "lease acquire that re-decides execution liveness and node routing in the same transition (AcquireTaskLeaseChecked)",
+		implements: func(v any) bool {
+			_, ok := v.(engine.RouteCheckedLeaseAcquirer)
 			return ok
 		},
 	},
@@ -138,6 +165,30 @@ var capabilitySpecs = map[Capability]capabilitySpec{
 		summary: "listing executions stuck in the canceling status (ListCancelingExecutions)",
 		implements: func(v any) bool {
 			_, ok := v.(engine.CancelingExecutionLister)
+			return ok
+		},
+	},
+	CapabilityBatchOutputReader: {
+		iface:   "engine.BatchOutputReader",
+		summary: "reading many node outputs in one round trip (GetOutputs)",
+		implements: func(v any) bool {
+			_, ok := v.(engine.BatchOutputReader)
+			return ok
+		},
+	},
+	CapabilityExecutionInputContextReader: {
+		iface:   "engine.ExecutionInputContextReader",
+		summary: "narrow input read without loading the snapshot (GetExecutionInputContext)",
+		implements: func(v any) bool {
+			_, ok := v.(engine.ExecutionInputContextReader)
+			return ok
+		},
+	},
+	CapabilityExecutionTraceCarrierReader: {
+		iface:   "engine.ExecutionTraceCarrierReader",
+		summary: "single-key trace carrier read for dispatch (GetExecutionTraceCarrier)",
+		implements: func(v any) bool {
+			_, ok := v.(engine.ExecutionTraceCarrierReader)
 			return ok
 		},
 	},

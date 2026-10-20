@@ -68,12 +68,15 @@ func TestAcyclicCommitDoesNotProbeExecutionStatus(t *testing.T) {
 		t.Fatalf("outcome = %s, want %s", outcome, CommitOutcomeAccepted)
 	}
 
-	// One, not zero: the advance intent this commit produced is handled in the
-	// same call and still probes on its own path. Asserting zero would be
-	// asserting a change this test's subject did not make.
-	if state.statusReads != 1 {
-		t.Errorf("execution status reads during an accepted commit = %d, want 1 "+
-			"(the advance handler's, and none for the commit itself)", state.statusReads)
+	// Zero, not one. The commit folds its downstream arrivals into the same
+	// fenced transition (S4b), so the advance handler that used to probe on its
+	// own path does not exist any more: one CommitNode is the whole commit, and
+	// it never asks the engine-visible status question. Asserting one here would
+	// be asserting the round trip this change removed.
+	if state.statusReads != 0 {
+		t.Errorf("execution status reads during an accepted commit = %d, want 0 "+
+			"(the commit asks CommitNode, which decides liveness inside the "+
+			"transition; the folded arrivals need no advance handler)", state.statusReads)
 	}
 	// The count means nothing unless the commit actually landed.
 	node, err := state.GetNode(ctx, id, "start")

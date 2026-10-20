@@ -71,19 +71,22 @@ func startLeaseOnTwoPortGraph(t *testing.T, eng *Engine, state *nodeReaderState,
 	return id, lease
 }
 
-// TestAdvanceDoesNotReadBackTheNodeItJustCommitted pins that a node advance
-// gets the source port from the task rather than from the store.
+// TestAdvanceDoesNotReadBackTheNodeItJustCommitted pins that downstream
+// scheduling gets the source port from the commit itself rather than from the
+// store.
 //
 // The committing side already holds the port -- it is the value it is about to
 // write -- so reading the node back to learn it was a round trip per completed
-// node that carried no information the store did not already have. GetNode's
-// own doc comment named this branch as the reason it is hot-path traffic.
+// node that carried no information the store did not already have. Folding
+// makes the point directly: the commit hands the port to downstreamArrivals, so
+// no advance task and no read-back exist at all. The fallback carriers below
+// keep the same guarantee for entries written before the fold.
 //
 // Nothing about the resulting state changes, which is the whole difficulty:
-// the scheduling outcome is identical whether the port arrives on the task or
-// via a read. Counting the reads is the only assertion that can see it, and
-// the delivery check below is what stops the count from being satisfied by an
-// advance that simply did nothing.
+// the scheduling outcome is identical whether the port arrives on the task, on
+// the folded arrival, or via a read. Counting the reads is the only assertion
+// that can see it, and the delivery check below is what stops the count from
+// being satisfied by a commit that simply did nothing.
 func TestAdvanceDoesNotReadBackTheNodeItJustCommitted(t *testing.T) {
 	ctx := context.Background()
 	state := &nodeReaderState{fakeState: newFakeState()}
@@ -104,11 +107,11 @@ func TestAdvanceDoesNotReadBackTheNodeItJustCommitted(t *testing.T) {
 	}
 
 	if state.nodeReads != 0 {
-		t.Errorf("node reads during commit + advance = %d, want 0 "+
-			"(the port now rides on the advance task)", state.nodeReads)
+		t.Errorf("node reads during the commit = %d, want 0 "+
+			"(the folded arrival consumes the port the commit is writing)", state.nodeReads)
 	}
 
-	// Teeth. Zero reads is trivially satisfiable by an advance that routed
+	// Teeth. Zero reads is trivially satisfiable by a transition that routed
 	// nowhere, so the port has to be shown to have arrived intact: "other",
 	// not "" and not "main".
 	delivered := queue.Drain()
@@ -141,8 +144,8 @@ func TestAdvanceWithoutCarriedPortFallsBackToTheStore(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CommitTaskResultWithOutcome() error = %v", err)
 	}
-	// Drop what the carried-port advance already scheduled; this test is about
-	// what a second, port-less delivery of the same advance does.
+	// Drop what the folded commit already scheduled; this test is about what a
+	// second, port-less delivery of the same advance does.
 	queue.Drain()
 
 	state.nodeReads = 0

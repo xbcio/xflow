@@ -50,6 +50,7 @@ type memoryReplayReceipt struct {
 }
 
 var _ engine.AtomicStateStore = (*memoryState)(nil)
+var _ engine.ArrivalFoldingCommitter = (*memoryState)(nil)
 var _ engine.LegacyNodeCommitter = (*memoryState)(nil)
 var _ engine.LeaseSuspender = (*memoryState)(nil)
 var _ engine.DurableLeaseSuspender = (*memoryState)(nil)
@@ -59,6 +60,14 @@ var _ engine.OutboxReleaser = (*memoryState)(nil)
 var _ engine.OutboxMetricsReader = (*memoryState)(nil)
 var _ engine.DeadLetterStore = (*memoryState)(nil)
 var _ engine.ReplayReceiptReader = (*memoryState)(nil)
+
+// FoldsArrivalsIntoCommit declares the arrival-folding capability: CommitNode
+// applies CommitNodeRequest.Arrivals in the same mutex-guarded transition as
+// the terminal node write. Without this explicit marker the engine treats the
+// store as unable to fold — CommitNode's signature alone is not a capability
+// signal — and keeps emitting AdvanceTask, so the declaration has to stay here
+// for as long as CommitNode honours the field.
+func (s *memoryState) FoldsArrivalsIntoCommit() bool { return true }
 
 // CommitLeasedNode shares the storage fence used by CommitNode while callers
 // retain legacy cycle/expansion scheduling outside the static-DAG counter.
@@ -200,6 +209,29 @@ func (s *memoryState) CommitNode(_ context.Context, req engine.CommitNodeRequest
 		}
 	}
 
+	// Folded arrivals: the same counters the separate AdvanceNode path applies,
+	// in the same locked transition as the terminal node write. The gate mirrors
+	// the distributed script's — acyclic, not fatal, the execution did not just
+	// finalize, and not canceling. Scheduling downstream work for a finished
+	// execution would leave intents nothing can ever consume, and scheduling it
+	// during a Cancel races the teardown cleanupOnCancel performs.
+	if !req.AllowCycles && !req.Fatal && !result.ExecutionDone && entry.snap.Status != types.ExecutionStatusCanceling {
+		_, skipped := s.applyArrivalsLocked(req.ExecutionID, req.ActivationID, req.AutoDepth, req.Arrivals)
+		result.Skipped = skipped
+	}
+	// OutboxIDs is a candidate hint, not a write log (see
+	// engine.CommitNodeResult.OutboxIDs). Both backends report the two intents
+	// each arrival may have resolved to, because only the scheduling transition
+	// observes which one it wrote; exactly one is written, or neither when the
+	// destination is not yet due. The candidates are reported even when the gate
+	// above suppressed the fold (canceling), matching the distributed backend,
+	// whose Go wrapper appends them from the request without asking the script
+	// whether it folded anything.
+	if !req.Fatal && !result.ExecutionDone {
+		result.OutboxIDs = append(result.OutboxIDs,
+			arrivalCandidateOutboxIDs(req.ExecutionID, req.ActivationID, req.Arrivals)...)
+	}
+
 	// Cyclic graphs are not static in-degree counted (the acyclic block above is
 	// skipped for AllowCycles). Persist the engine-computed downstream intents,
 	// or finalize the execution when the branch terminated, in this same locked
@@ -244,11 +276,44 @@ func (s *memoryState) AdvanceNode(_ context.Context, req engine.AdvanceNodeReque
 	s.advanced[advanceKey] = true
 
 	result := engine.AdvanceNodeResult{Applied: true}
-	for _, arrival := range req.Arrivals {
+	result.OutboxIDs, result.Skipped = s.applyArrivalsLocked(req.ExecutionID, req.ActivationID, req.AutoDepth, req.Arrivals)
+	return result, nil
+}
+
+// applyArrivalsLocked converts one scheduling transition's downstream arrivals
+// into execution or skip intents. Callers must hold s.mu.
+//
+// CommitNode and AdvanceNode share it deliberately: the Redis backend reads one
+// Lua layout for both paths, so a second in-memory implementation of the same
+// counter rules is exactly how the two backends drift. The rules here are a
+// line-for-line mirror of the arrival loops in commitNodeLua/advanceNodeLua:
+//
+//   - every arrival decrements its destination unit's in-degree, whether or not
+//     the unit was already scheduled;
+//   - active inputs accumulate, and wait_any resolves on the first active
+//     arrival (previous count 0) before the in-degree reaches zero;
+//   - otherwise the outcome is decided only when the in-degree reaches zero:
+//     execute if any input was active, skip if none was;
+//   - a unit's schedule marker is written once and is what makes a redelivered
+//     transition a no-op rather than a second intent.
+//
+// It returns the intents actually written and the units they skipped. A skip is
+// reported only when its intent was written: a duplicate transition applies
+// nothing new and must not double-count one skip.
+//
+// Two boundary behaviours here are pre-existing AdvanceNode semantics that
+// CommitNode inherited by sharing this function; do not "fix" one side alone.
+// The distributed Lua loops still process an ArrivalCount <= 0 (this loop skips
+// it), and they report a resolved skip even when HSETNX finds the entry already
+// present (this loop requires the write to succeed). Aligning either would be a
+// coordinated change to both backends with its own contract evidence, not a
+// drive-by edit while touching arrival folding.
+func (s *memoryState) applyArrivalsLocked(id types.ExecutionID, activationID, autoDepth int, arrivals []engine.DownstreamArrival) (outboxIDs []string, skipped []engine.SkippedUnit) {
+	for _, arrival := range arrivals {
 		if arrival.ArrivalCount <= 0 {
 			continue
 		}
-		counterKey := memoryCounterKey(req.ExecutionID, arrival.UnitIdx)
+		counterKey := memoryCounterKey(id, arrival.UnitIdx)
 		previousActive := s.activeIns[counterKey]
 		s.inDegrees[counterKey] -= arrival.ArrivalCount
 		if arrival.ActiveCount > 0 {
@@ -276,31 +341,28 @@ func (s *memoryState) AdvanceNode(_ context.Context, req engine.AdvanceNodeReque
 		if taskType == 0 {
 			taskType = engine.TaskTypeNodeExec
 		}
-		outboxID := executeOutboxID(req.ExecutionID, arrival.NodeName, req.ActivationID)
+		outboxID := executeOutboxID(id, arrival.NodeName, activationID)
 		isSkip := schedule == "skip"
 		if isSkip {
 			taskType = engine.TaskTypeNodeSkip
-			outboxID = skipOutboxID(req.ExecutionID, arrival.NodeName, req.ActivationID)
+			outboxID = skipOutboxID(id, arrival.NodeName, activationID)
 		}
-		if s.putOutboxLocked(req.ExecutionID, outboxID, engine.Task{
-			ExecutionID:  req.ExecutionID,
+		if s.putOutboxLocked(id, outboxID, engine.Task{
+			ExecutionID:  id,
 			NodeName:     arrival.NodeName,
 			NodeIdx:      arrival.NodeIdx,
 			UnitIdx:      arrival.UnitIdx,
 			Type:         taskType,
-			ActivationID: req.ActivationID,
-			AutoDepth:    req.AutoDepth,
+			ActivationID: activationID,
+			AutoDepth:    autoDepth,
 		}, time.Time{}) {
-			result.OutboxIDs = append(result.OutboxIDs, outboxID)
-			// Only when the intent was actually written: a redelivered advance
-			// whose skip intent already exists applies nothing new, and
-			// reporting it would double-count one skip.
+			outboxIDs = append(outboxIDs, outboxID)
 			if isSkip {
-				result.Skipped = append(result.Skipped, engine.SkippedUnit{NodeName: arrival.NodeName, Count: 1})
+				skipped = append(skipped, engine.SkippedUnit{NodeName: arrival.NodeName, Count: 1})
 			}
 		}
 	}
-	return result, nil
+	return outboxIDs, skipped
 }
 
 // ListOutbox reports ready delivery intents without changing any state. An
@@ -926,6 +988,24 @@ func executeOutboxID(id types.ExecutionID, name string, activationID int) string
 
 func skipOutboxID(id types.ExecutionID, name string, activationID int) string {
 	return fmt.Sprintf("skip/%s/%s/%d", id, name, activationID)
+}
+
+// arrivalCandidateOutboxIDs names the two intents one folded arrival may
+// resolve to, execute first, matching the order the distributed backend reports
+// them. They are candidates, not writes: the transition writes at most one, and
+// engine.CommitNodeResult.OutboxIDs is defined as this hint rather than a write
+// log.
+func arrivalCandidateOutboxIDs(id types.ExecutionID, activationID int, arrivals []engine.DownstreamArrival) []string {
+	if len(arrivals) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(arrivals)*2)
+	for _, arrival := range arrivals {
+		ids = append(ids,
+			executeOutboxID(id, arrival.NodeName, activationID),
+			skipOutboxID(id, arrival.NodeName, activationID))
+	}
+	return ids
 }
 
 func cloneData(data map[string]any) map[string]any {

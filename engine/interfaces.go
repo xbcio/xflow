@@ -64,6 +64,63 @@ type Nodes interface {
 	RevokeLease(ctx context.Context, id types.ExecutionID, name string, token LeaseToken) (bool, error)
 }
 
+// LeaseAcquireOptions carries the route decision the caller already resolved
+// from the compiled graph, so an acquire can re-decide node routing itself
+// instead of trusting reads made before it.
+type LeaseAcquireOptions struct {
+	// AllowCycles selects the cyclic graph's activation rules: a cyclic task
+	// must carry a positive activation id, and a terminal node may be re-entered
+	// by a strictly higher activation. An acyclic graph rejects a terminal node
+	// outright, whatever activation the task carries.
+	AllowCycles bool
+}
+
+// LeaseAcquireResult is the full verdict of an acquire that checked the
+// execution and the node's route in the same transition as the lease write.
+type LeaseAcquireResult struct {
+	// Acquired reports whether the node was transitioned to Running.
+	Acquired bool
+	// Previous is the node snapshot observed before the transition (nil when no
+	// snapshot existed), with the same fields AcquireTaskLease returns.
+	Previous *NodeSnapshot
+	// ExecutionStatus is the execution's lifecycle status observed by the
+	// acquire. It is meaningful only when ExecutionFound is true.
+	ExecutionStatus types.ExecutionStatus
+	// ExecutionFound reports whether the execution status record existed. A
+	// missing record is not a lease refusal by itself: the backend refuses the
+	// acquire too, and the caller evicts the execution and reports it inactive.
+	ExecutionFound bool
+}
+
+// RouteCheckedLeaseAcquirer is the optional StateStore capability that folds
+// the two reads the lease path used to make before its one write into the
+// write's own atomic transition:
+//
+//	GetExecutionStatus (is the execution still non-terminal?)
+//	GetNode            (is the node's route still active?)
+//	AcquireTaskLease
+//
+// Both reads answered questions the lease write then had to trust, and the
+// answer could go stale between a read and the write. The decisive case is the
+// execution one: an execution that terminalizes in that window would still
+// receive a lease, and its runner would execute and commit a node for work the
+// control plane already accounted for as over. Folding the checks into the
+// acquire closes that race and removes two round trips from the hot dispatch
+// path (three become one on the Redis backend).
+//
+// The implementation MUST refuse, without mutating state:
+//   - an acquire whose execution record is absent or terminal
+//     (types.IsTerminalExecutionStatus; canceling and paused are live statuses
+//     and stay acquirable);
+//   - an acyclic acquire for a terminal node, whatever activation it carries;
+//   - a cyclic acquire whose task carries no activation id (<= 0);
+//
+// and MUST keep every guard AcquireTaskLease applies. A backend without this
+// interface keeps the engine's read-then-write path unchanged.
+type RouteCheckedLeaseAcquirer interface {
+	AcquireTaskLeaseChecked(ctx context.Context, lease *TaskLease, opts LeaseAcquireOptions) (LeaseAcquireResult, error)
+}
+
 // Scheduling stores DAG scheduling counters and completion state.
 type Scheduling interface {
 	DecrementInDegree(ctx context.Context, id types.ExecutionID, unitIdx int, portActive bool) (remainingInDeg, arrivedActiveIn int, err error)
@@ -91,6 +148,91 @@ type SubExecutions interface {
 type Outputs interface {
 	PutOutput(ctx context.Context, id types.ExecutionID, name string, data map[string]any) error
 	GetOutput(ctx context.Context, id types.ExecutionID, name string) (map[string]any, error)
+}
+
+// BatchOutputReader is the optional batch form of Outputs.GetOutput: it reads
+// many node outputs of one execution in a single round trip.
+//
+// buildInput is its only caller, and it reads outputs in exactly the places
+// where a node's shape makes the count large: a fan-in reads one output per
+// inbound edge, and a $nodes prefetch reads one per referenced node. Asked one
+// name at a time, a node with F inbound edges and R references paid F+R
+// sequential round trips before its handler could even start — the read side of
+// the same fan-in cost the batch commit's write side already amortizes.
+//
+// The result maps output name to payload. A name with no stored output is
+// ABSENT from the map, which is the same absence GetOutput reports as
+// (nil, nil); callers must therefore treat a missing key as a nil payload. The
+// returned map's iteration order carries no meaning — callers address it by
+// name — and duplicate names in names are one read, not two.
+//
+// A backend that does not implement this interface is read one name at a time
+// by the caller, so the two forms MUST agree per name for the same reason
+// ExecutionStatusBatchReader and ExecutionStatusReader must.
+type BatchOutputReader interface {
+	GetOutputs(ctx context.Context, id types.ExecutionID, names []string) (map[string]map[string]any, error)
+}
+
+// ExecutionInputContext is the narrow slice of an execution's state that
+// buildInput needs to assemble one node's input.
+//
+// It exists because buildInput runs on every task — BuildTaskLease and
+// RecoverTaskLease both call it — and reads exactly these fields, while the
+// snapshot it used to ask for is assembled from fourteen keys: the parent and
+// rerun links, the terminal error, the test-run flag, the graph pointer and the
+// registration namespace were decoded on every task and then dropped on the
+// floor.
+//
+// Runtime is the SAME typed value GetExecution returns (types.Runtime marshals
+// to {"vars": ...}); decoding it any other way would make the narrow read
+// disagree with the full one for $vars, which every node reads.
+//
+// TraceID and SpanID are part of the slice even though they are not business
+// input: execution/subgraph re-submits a child execution with the entry input's
+// trace identity, so a narrow read that dropped them would detach a whole
+// sub-execution from the caller's trace. A caller that skipped them would have
+// to fall back to the full snapshot and lose the saving entirely.
+type ExecutionInputContext struct {
+	Status  types.ExecutionStatus
+	Params  map[string]any
+	Runtime *types.Runtime
+	Scope   map[string]any
+	TraceID string
+	SpanID  string
+}
+
+// ExecutionInputContextReader is the optional narrow form of
+// Executions.GetExecution used by buildInput.
+//
+// found=false means no such execution, which is the same signal GetExecution
+// encodes as a nil snapshot; it is deliberately distinct from a zero-valued
+// status so callers never mistake "gone" for "created but empty". A backend
+// that does not implement this interface is read through GetExecution, so the
+// two MUST agree field by field — a backend reporting different params, scope,
+// runtime or trace identity here than GetExecution would make a node's input
+// depend on which method the engine happened to call. The shared contract suite
+// pins that agreement.
+type ExecutionInputContextReader interface {
+	GetExecutionInputContext(ctx context.Context, id types.ExecutionID) (*ExecutionInputContext, bool, error)
+}
+
+// ExecutionTraceCarrierReader is the optional narrow read of the W3C
+// traceparent/tracestate carrier captured at submission.
+//
+// The control plane asks for this carrier on every dispatch to parent the
+// asynchronous xflow.task.dispatch span to the original submit/invoke trace.
+// Answering through GetExecution made that one question pay for the whole
+// snapshot; this reads the single carrier key instead.
+//
+// The carrier is written once, when the execution is created, and never
+// updated, which is what makes it safe for a caller to keep the answer. found=false
+// means no carrier — an execution submitted with tracing disabled, or one that
+// does not exist — and the engine treats both as nil, exactly as it does today
+// for a nil snapshot or an empty TraceCarrier. A backend that does not
+// implement this interface is read through GetExecution, so the two MUST agree
+// for an execution that has one.
+type ExecutionTraceCarrierReader interface {
+	GetExecutionTraceCarrier(ctx context.Context, id types.ExecutionID) (map[string]string, bool, error)
 }
 
 // Events publishes and watches execution lifecycle events.

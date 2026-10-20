@@ -1268,3 +1268,113 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 		Namespace:       namespaceVal,
 	}, nil
 }
+
+// GetExecutionInputContext implements engine.ExecutionInputContextReader.
+//
+// buildInput runs on every task and reads only the lifecycle status, the
+// submission params, the runtime, the execution scope and the trace identity.
+// GetExecution assembles those from the same keys but also decodes the parent
+// and rerun links, the terminal error, the test-run flag and the registration
+// namespace, none of which reach a node's input. This issues the six GETs it
+// needs in one pipeline — one round trip, as GetExecution already was — and
+// decodes only those six values.
+//
+// Decoding is deliberately the same per field as GetExecution: params and scope
+// as map[string]any, runtime as types.Runtime, trace ids as plain strings, with
+// redis.Nil tolerated for every optional key. found=false means the status key
+// is absent, the same absence GetExecution reports as a nil snapshot.
+func (s *Store) GetExecutionInputContext(ctx context.Context, id types.ExecutionID) (*engine.ExecutionInputContext, bool, error) {
+	t := namespace.FromContext(ctx)
+	pipe := s.rdb.Pipeline()
+	statusCmd := pipe.Get(ctx, execKey(t, id, "status"))
+	paramsCmd := pipe.Get(ctx, execKey(t, id, "params"))
+	runtimeCmd := pipe.Get(ctx, execKey(t, id, "runtime"))
+	scopeCmd := pipe.Get(ctx, execKey(t, id, "scope"))
+	traceIDCmd := pipe.Get(ctx, execKey(t, id, "trace_id"))
+	spanIDCmd := pipe.Get(ctx, execKey(t, id, "span_id"))
+	// Exec surfaces the first command error, and redis.Nil is the expected answer
+	// for most of these keys. The per-command results below are authoritative.
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		return nil, false, fmt.Errorf("get execution input context %q: %w", id, err)
+	}
+	val, err := statusCmd.Result()
+	if err == redis.Nil {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("get execution input context %q: %w", id, err)
+	}
+	var params map[string]any
+	if raw, err := paramsCmd.Bytes(); err == nil {
+		if err := json.Unmarshal(raw, &params); err != nil {
+			return nil, false, fmt.Errorf("unmarshal execution params %q: %w", id, err)
+		}
+	} else if err != redis.Nil {
+		return nil, false, fmt.Errorf("get execution params %q: %w", id, err)
+	}
+	var runtime *types.Runtime
+	if raw, err := runtimeCmd.Bytes(); err == nil {
+		var decoded types.Runtime
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			return nil, false, fmt.Errorf("unmarshal execution runtime %q: %w", id, err)
+		}
+		runtime = &decoded
+	} else if err != redis.Nil {
+		return nil, false, fmt.Errorf("get execution runtime %q: %w", id, err)
+	}
+	var scope map[string]any
+	if raw, err := scopeCmd.Bytes(); err == nil {
+		if err := json.Unmarshal(raw, &scope); err != nil {
+			return nil, false, fmt.Errorf("unmarshal execution scope %q: %w", id, err)
+		}
+	} else if err != redis.Nil {
+		return nil, false, fmt.Errorf("get execution scope %q: %w", id, err)
+	}
+	var traceID string
+	if raw, err := traceIDCmd.Result(); err == nil {
+		traceID = raw
+	} else if err != redis.Nil {
+		return nil, false, fmt.Errorf("get execution trace ID %q: %w", id, err)
+	}
+	var spanID string
+	if raw, err := spanIDCmd.Result(); err == nil {
+		spanID = raw
+	} else if err != redis.Nil {
+		return nil, false, fmt.Errorf("get execution span ID %q: %w", id, err)
+	}
+	return &engine.ExecutionInputContext{
+		Status:  types.ExecutionStatus(val),
+		Params:  params,
+		Runtime: runtime,
+		Scope:   scope,
+		TraceID: traceID,
+		SpanID:  spanID,
+	}, true, nil
+}
+
+// GetExecutionTraceCarrier implements engine.ExecutionTraceCarrierReader: a
+// single GET of the carrier captured at submission.
+//
+// found=false covers both "no such execution" and "submitted with tracing
+// disabled"; the carrier key is written only when a carrier exists, so the two
+// are the same absence here and the engine treats both as nil. A corrupt value
+// is an error rather than an empty carrier: the control plane would silently
+// detach the dispatch span from the workflow trace.
+func (s *Store) GetExecutionTraceCarrier(ctx context.Context, id types.ExecutionID) (map[string]string, bool, error) {
+	t := namespace.FromContext(ctx)
+	raw, err := s.rdb.Get(ctx, execKey(t, id, "trace_carrier")).Bytes()
+	if err == redis.Nil {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("get execution trace carrier %q: %w", id, err)
+	}
+	var carrier map[string]string
+	if err := json.Unmarshal(raw, &carrier); err != nil {
+		return nil, false, fmt.Errorf("unmarshal execution trace carrier %q: %w", id, err)
+	}
+	return carrier, true, nil
+}
+
+var _ engine.ExecutionInputContextReader = (*Store)(nil)
+var _ engine.ExecutionTraceCarrierReader = (*Store)(nil)

@@ -382,6 +382,11 @@ func (d *RedisRunnerDirectory) reconcileOrphanedLaneMarkers(ctx context.Context,
 	pipe := d.rdb.Pipeline()
 	cmds := make([]*redis.Cmd, 0, len(assignmentIDs))
 	for _, assignmentID := range assignmentIDs {
+		// Deliberately a bare Eval, not a redis.Script: a pipelined command
+		// cannot react to its own NOSCRIPT reply, because the whole batch has
+		// already been sent by the time Exec reports it, so an EVALSHA miss
+		// here would surface as an error rather than a fallback. EVAL sends
+		// the body every time and is the only form that works in a pipeline.
 		cmds = append(cmds, pipe.Eval(ctx, redisReconcileLaneMarkerLua, []string{
 			d.keys.assignmentLane,
 			d.keys.assignmentData,
@@ -588,6 +593,9 @@ func (d *RedisRunnerDirectory) reapQueuedAssignments(ctx context.Context, assign
 	pipe := d.rdb.Pipeline()
 	cmds := make([]*redis.Cmd, 0, len(assignmentIDs))
 	for _, assignmentID := range assignmentIDs {
+		// Deliberately a bare Eval, not a redis.Script: see the note in
+		// reconcileOrphanedLaneMarkers — a pipeline cannot retry an EVALSHA
+		// NOSCRIPT miss per command, so EVAL is the only workable form here.
 		cmds = append(cmds, pipe.Eval(ctx, redisReapDeadQueuedAssignmentLua, d.appendLaneRequeueKeys([]string{
 			d.keys.queue,
 			d.keys.seen,

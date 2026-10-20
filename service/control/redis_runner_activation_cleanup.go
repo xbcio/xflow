@@ -24,7 +24,7 @@ func (d *RedisRunnerDirectory) EnsureDeactivationObligation(ctx context.Context,
 	if err := validateDeactivationObligation(obligation); err != nil {
 		return false, err
 	}
-	status, err := d.evalStatus(ctx, redisEnsureDeactivationObligationLua, []string{
+	status, err := d.evalStatus(ctx, redisEnsureDeactivationObligationScript, []string{
 		d.keys.runnerSession,
 		d.keys.runnerControlDesired,
 		d.keys.runnerControlGeneration,
@@ -63,7 +63,7 @@ func (d *RedisRunnerDirectory) MarkDeactivationObligationReady(ctx context.Conte
 	if err := validateDeactivationObligation(obligation); err != nil {
 		return err
 	}
-	status, err := d.evalStatus(ctx, redisMarkDeactivationObligationReadyLua, []string{
+	status, err := d.evalStatus(ctx, redisMarkDeactivationObligationReadyScript, []string{
 		d.keys.deactivationObligationState,
 	}, deactivationObligationID(obligation))
 	if err != nil {
@@ -86,7 +86,7 @@ func (d *RedisRunnerDirectory) CancelPendingDeactivationObligation(ctx context.C
 	if err := validateDeactivationObligation(obligation); err != nil {
 		return err
 	}
-	status, err := d.evalStatus(ctx, redisCancelPendingDeactivationObligationLua, d.deactivationObligationKeys(), deactivationObligationID(obligation))
+	status, err := d.evalStatus(ctx, redisCancelPendingDeactivationObligationScript, d.deactivationObligationKeys(), deactivationObligationID(obligation))
 	if err != nil {
 		return fmt.Errorf("cancel redis pending deactivation obligation: %w", err)
 	}
@@ -128,7 +128,7 @@ func (d *RedisRunnerDirectory) RebindDeactivationObligations(ctx context.Context
 	if err != nil {
 		return err
 	}
-	status, err := d.evalStatus(ctx, redisRebindDeactivationObligationsLua, []string{
+	status, err := d.evalStatus(ctx, redisRebindDeactivationObligationsScript, []string{
 		d.keys.runnerSession,
 		d.keys.deactivationObligationRunner,
 		d.keys.deactivationObligationSession,
@@ -205,7 +205,7 @@ func (d *RedisRunnerDirectory) AcknowledgeDeactivation(ctx context.Context, ack 
 		return false, ErrInvalidDeactivationReceipt
 	}
 	obligation := deactivationObligationFromAck(namespace.FromContext(ctx), ack)
-	status, err := d.evalStatus(ctx, redisAcknowledgeDeactivationLua, append([]string{d.keys.runnerSession}, d.deactivationObligationKeys()...),
+	status, err := d.evalStatus(ctx, redisAcknowledgeDeactivationScript, append([]string{d.keys.runnerSession}, d.deactivationObligationKeys()...),
 		deactivationObligationID(obligation), ack.RunnerID, ack.SessionID)
 	if err != nil {
 		return false, fmt.Errorf("acknowledge redis deactivation: %w", err)
@@ -312,6 +312,8 @@ redis.call('HSET', KEYS[13], ARGV[1], ARGV[10])
 return 'applicable'
 `
 
+var redisEnsureDeactivationObligationScript = redis.NewScript(redisEnsureDeactivationObligationLua)
+
 const redisMarkDeactivationObligationReadyLua = `
 local state = redis.call('HGET', KEYS[1], ARGV[1])
 if not state then return 'missing' end
@@ -321,6 +323,8 @@ redis.call('HSET', KEYS[1], ARGV[1], 'ready')
 return 'ready'
 `
 
+var redisMarkDeactivationObligationReadyScript = redis.NewScript(redisMarkDeactivationObligationReadyLua)
+
 // KEYS use deactivationObligationKeys order: state, runner, session,
 // namespace, workflowID, workflowVersion, entryUnitID, replica, generation,
 // drainGeneration.
@@ -329,6 +333,8 @@ if redis.call('HGET', KEYS[1], ARGV[1]) ~= 'pending_fence' then return 'noop' en
 for index = 1, #KEYS do redis.call('HDEL', KEYS[index], ARGV[1]) end
 return 'cancelled'
 `
+
+var redisCancelPendingDeactivationObligationScript = redis.NewScript(redisCancelPendingDeactivationObligationLua)
 
 const redisRebindDeactivationObligationsLua = `
 local current = redis.call('HGET', KEYS[1], ARGV[1])
@@ -354,6 +360,8 @@ end
 return 'rebound'
 `
 
+var redisRebindDeactivationObligationsScript = redis.NewScript(redisRebindDeactivationObligationsLua)
+
 // KEYS: runner session, then deactivationObligationKeys order.
 const redisAcknowledgeDeactivationLua = `
 if redis.call('HGET', KEYS[1], ARGV[2]) ~= ARGV[3] then return 'noop' end
@@ -363,3 +371,5 @@ if redis.call('HGET', KEYS[4], ARGV[1]) ~= ARGV[3] then return 'noop' end
 for index = 2, #KEYS do redis.call('HDEL', KEYS[index], ARGV[1]) end
 return 'acknowledged'
 `
+
+var redisAcknowledgeDeactivationScript = redis.NewScript(redisAcknowledgeDeactivationLua)

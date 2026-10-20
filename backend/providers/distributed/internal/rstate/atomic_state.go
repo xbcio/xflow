@@ -31,14 +31,29 @@ var commitNodeLua = redis.NewScript(`
 -- The privacy result is part of this linearized response. SQL projection must
 -- never infer it with a later Redis read, which could race metadata expiry.
 --
--- Three arguments trail the fixed header and the variable-length cyclic outbox
--- pairs, and all are addressed from the END so they cannot perturb the cyclic
--- base index (ARGV[23] onward is the outbox suffix). The engine's side of that
+-- ARGV layout, from the front: ARGV[1..22] is the fixed header, ARGV[23..] the
+-- variable-length cyclic-outbox pairs, then eight slots per folded arrival
+-- (ArrivalCount, ActiveCount, MergeMode, executeID, executeJSON, skipID,
+-- skipJSON, NodeName -- the same shape advanceNodeLua reads), then the arrival
+-- count itself, and finally three trailing arguments.
+--
+-- The three trailing arguments and the arrival count are addressed from the END
+-- so they cannot perturb the cyclic base index (ARGV[23] onward is the outbox
+-- suffix): ARGV[#ARGV] = error detail, [#ARGV-1] = privacy bit, [#ARGV-2] =
+-- reclaim count, [#ARGV-3] = arrival count. The arrival block therefore starts
+-- at #ARGV - 3 - arrivalCount*8 (its first slot) and the engine's side of that
 -- layout is the comment on the args slice in state_commit.go.
+--
+-- KEYS layout: KEYS[1..12] is the fixed header, KEYS[13..12+reclaimCount] are
+-- source outputs this commit may delete, and the arrival counter triplets
+-- (in-degree, active-inputs, schedule) follow at KEYS[13+reclaimCount] onward,
+-- three per arrival. The reclaim loop below deliberately uses KEYS[12+i] so it
+-- cannot reach into the arrival triplets appended after it.
 local existingPrivate = redis.call('HGET', KEYS[6], 'private_output') == '1'
 local errorDetails = ARGV[#ARGV] or ''
 local requestedPrivate = tonumber(ARGV[#ARGV - 1] or '0') == 1
 local reclaimCount = tonumber(ARGV[#ARGV - 2] or '0')
+local arrivalCount = tonumber(ARGV[#ARGV - 3] or '0')
 local effectivePrivate = (existingPrivate or requestedPrivate) and 1 or 0
 local executionStatus = redis.call('GET', KEYS[1])
 if executionStatus == false then
@@ -211,6 +226,83 @@ if tonumber(ARGV[16]) == 1 and done == 0 and tonumber(ARGV[12]) == 0 and redis.c
         end
     end
 end
+-- Downstream arrivals folded into this same fenced transition (acyclic,
+-- non-fatal commits only). The block mirrors advanceNodeLua's arrival loop
+-- exactly, minus the advance marker: the terminal node write above is the
+-- dedup, so a duplicate or stale commit returned before ever reaching here.
+--
+-- The guard is deliberately identical to the advance-intent write above --
+-- allowCycles == 0, the execution not just finalized, not fatal, and not
+-- canceling. Folded arrivals schedule work exactly like an advance intent, so
+-- they must stop under exactly the same conditions; a guard that drifted here
+-- would schedule downstream work during a Cancel that the separate advance
+-- path refuses.
+--
+-- A skip is not a silent drop: it queues a durable TaskTypeNodeSkip intent and
+-- marks the downstream unit scheduled. The names travel back as a flat
+-- {name, count, name, count, ...} list, the same shape advanceNodeLua returns.
+local skips = {}
+if arrivalCount > 0 and tonumber(ARGV[16]) == 0 and done == 0 and tonumber(ARGV[12]) == 0
+    and redis.call('GET', KEYS[1]) ~= 'canceling' then
+    -- First arrival's in-degree key: the 12 fixed keys, then the reclaim keys,
+    -- then the triplets. Each arrival's eight ARGV slots live immediately
+    -- before the arrival count, so the first slot is #ARGV - 3 - arrivalCount*8.
+    local keypos = 13 + reclaimCount
+    local argpos = #ARGV - 3 - arrivalCount * 8
+    for i = 1, arrivalCount do
+        local inDegreeKey = KEYS[keypos]
+        local activeKey = KEYS[keypos + 1]
+        local scheduleKey = KEYS[keypos + 2]
+        local arrivals = tonumber(ARGV[argpos])
+        local activeArrivals = tonumber(ARGV[argpos + 1])
+        local mergeMode = ARGV[argpos + 2]
+        local executeID = ARGV[argpos + 3]
+        local executeBody = ARGV[argpos + 4]
+        local skipID = ARGV[argpos + 5]
+        local skipBody = ARGV[argpos + 6]
+        local arrivalName = ARGV[argpos + 7] or ''
+        local activeBefore = tonumber(redis.call('GET', activeKey) or '0')
+        local remaining = redis.call('DECRBY', inDegreeKey, arrivals)
+        if activeArrivals > 0 then
+            redis.call('INCRBY', activeKey, activeArrivals)
+        end
+        local activeNow = tonumber(redis.call('GET', activeKey) or '0')
+        redis.call('EXPIRE', inDegreeKey, ttl)
+        redis.call('EXPIRE', activeKey, ttl)
+        local action = redis.call('HGET', scheduleKey, 'action') or ''
+        if action == '' then
+            local nextAction = ''
+            if mergeMode == 'wait_any' and activeArrivals > 0 and activeBefore == 0 then
+                nextAction = 'execute'
+            elseif remaining <= 0 then
+                if activeNow > 0 then
+                    nextAction = 'execute'
+                else
+                    nextAction = 'skip'
+                end
+            end
+            if nextAction ~= '' then
+                redis.call('HSET', scheduleKey, 'action', nextAction)
+                redis.call('EXPIRE', scheduleKey, ttl)
+                local outboxID = executeID
+                local outboxBody = executeBody
+                if nextAction == 'skip' then
+                    outboxID = skipID
+                    outboxBody = skipBody
+                    table.insert(skips, arrivalName)
+                    table.insert(skips, 1)
+                end
+                if redis.call('HSETNX', KEYS[10], outboxID, outboxBody) == 1 then
+                    redis.call('ZADD', KEYS[9], tonumber(ARGV[18]), outboxID)
+                    redis.call('EXPIRE', KEYS[9], ttl)
+                    redis.call('EXPIRE', KEYS[10], ttl)
+                end
+            end
+        end
+        keypos = keypos + 3
+        argpos = argpos + 8
+    end
+end
 -- KEYS[13...] are source outputs selected by the engine after it proved they
 -- have no remaining consumers. This is deliberately after every terminal
 -- fence and accepted-transition side effect above: stale, duplicate, and
@@ -218,7 +310,7 @@ end
 for i = 1, reclaimCount do
     redis.call('DEL', KEYS[12 + i])
 end
-return {1, done, finalStatus, effectivePrivate}
+return {1, done, finalStatus, effectivePrivate, skips}
 `)
 
 // advanceNodeLua converts all inbound arrivals from one completed source into

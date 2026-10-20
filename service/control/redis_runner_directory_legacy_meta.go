@@ -3,6 +3,8 @@ package control
 import (
 	"context"
 	"fmt"
+
+	"github.com/redis/go-redis/v9"
 )
 
 // defaultLegacyLeaseMetaReapBatch bounds how many legacy fields one HSCAN can
@@ -148,7 +150,7 @@ func (d *RedisRunnerDirectory) reapLegacyAssignmentLeaseMetaFields(ctx context.C
 	for _, assignmentID := range assignmentIDs {
 		args = append(args, assignmentID)
 	}
-	value, err := d.rdb.Eval(ctx, redisReapLegacyAssignmentLeaseMetaLua, keys, args...).Result()
+	value, err := redisReapLegacyAssignmentLeaseMetaScript.Run(ctx, d.rdb, keys, args...).Result()
 	if err != nil {
 		return 0, fmt.Errorf("reap legacy assignment lease metadata: %w", err)
 	}
@@ -184,3 +186,5 @@ for i = 1, #ARGV do
 end
 return reaped
 `
+
+var redisReapLegacyAssignmentLeaseMetaScript = redis.NewScript(redisReapLegacyAssignmentLeaseMetaLua)

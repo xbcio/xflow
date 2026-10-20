@@ -75,7 +75,7 @@ func (d *RedisRunnerDirectory) ActivationDirectives(ctx context.Context, runnerI
 		return nil, nil, ErrRunnerSessionRequired
 	}
 	key := d.keys.activationDirectiveQueueKey(runnerID, sessionID)
-	raw, err := d.rdb.Eval(ctx, redisDrainActivationDirectivesLua, []string{key}).Result()
+	raw, err := redisDrainActivationDirectivesScript.Run(ctx, d.rdb, []string{key}).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
 		return nil, nil, fmt.Errorf("drain redis activation directives: %w", err)
 	}
@@ -172,6 +172,8 @@ local entries = redis.call('HGETALL', KEYS[1])
 if #entries > 0 then redis.call('DEL', KEYS[1]) end
 return entries
 `
+
+var redisDrainActivationDirectivesScript = redis.NewScript(redisDrainActivationDirectivesLua)
 
 // unmarshalRedisActivationInventory is the inverse of
 // marshalRedisActivationInventory. Absent content decodes to nil (no items).

@@ -95,15 +95,21 @@ func commitOn(t *testing.T, ctx context.Context, eng *Engine, queue *fakeQueue, 
 	}
 }
 
-// TestNotifySkip_AdvanceReportsTheSkippedNode drives real commits and advances
-// through the skip diamond and asserts the observer sees the skipped
-// destination, with the flow label that says an ordinary advance decided it.
+// TestNotifySkip_AdvanceReportsTheSkippedNode drives real commits through the
+// skip diamond and asserts the observer sees the skipped destination, with the
+// flow label that says an ordinary downstream transition decided it.
+//
+// The transition is the source's commit, whose folded arrivals resolve the
+// destination (S4b); the label stays flowAdvance because the skip means the same
+// thing an advance would have decided — this node's outbound routes carried no
+// active port. The pre-upgrade consumer path is the same code, reached from a
+// durable advance entry instead.
 //
 // The skip lands on on_other, and that is the correct answer rather than a
-// compromise. split commits on "main", so the advance of split is the
-// transition that resolves its "other" destination with no active port. join
-// still has the on_other in-edge outstanding, so nothing has been decided about
-// it yet and it is not scheduled at all.
+// compromise. split commits on "main", so split's transition is the one that
+// resolves its "other" destination with no active port. join still has the
+// on_other in-edge outstanding, so nothing has been decided about it yet and it
+// is not scheduled at all.
 //
 // The node assertion is what the count cannot make: a count of one would also
 // hold for an advance that reported the wrong node, or one that reported a skip
@@ -171,14 +177,22 @@ func TestNotifySkip_ExecutePathReportsNothing(t *testing.T) {
 		t.Fatalf("skips = %+v, want none: every destination of this advance was "+
 			"scheduled for execution", got)
 	}
-	// Teeth. A zero skip count is also what an advance that never ran would
-	// report, so the transition itself has to be shown to have happened: the
-	// advance marker start's advance wrote is the durable trace it leaves.
-	marker := "advance/" + string(id) + "/start/0"
-	if !state.atomicAdvanced[marker] {
-		t.Fatalf("advance marker %q absent (advanced=%v), so this fixture never "+
-			"reached an advance and a zero skip count proves nothing",
-			marker, state.atomicAdvanced)
+	// Teeth. A zero skip count is also what a transition that never ran would
+	// report, so the transition itself has to be shown to have happened. The
+	// folded commit (S4b) leaves the same durable trace the advance used to: the
+	// downstream unit's scheduling marker. The advance marker is deliberately
+	// not the witness here — folding is exactly the change that stopped writing
+	// one for an ordinary commit.
+	g := compileSkipDiamondGraph(t)
+	splitIdx, ok := g.NodeIndex("split")
+	if !ok {
+		t.Fatal(`compiled graph has no "split" node`)
+	}
+	markerKey := fakeAtomicCounterKey(id, splitIdx)
+	if got := state.atomicSchedule[markerKey]; got != "execute" {
+		t.Fatalf("scheduling marker %q = %q want execute (schedules=%v), so this "+
+			"fixture never reached the transition and a zero skip count proves nothing",
+			markerKey, got, state.atomicSchedule)
 	}
 }
 

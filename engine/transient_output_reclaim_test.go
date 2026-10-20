@@ -235,6 +235,18 @@ func TestTransientOutputReclaimCommitRequest_RequiresNormalHandlerSuccess(t *tes
 			if !reflect.DeepEqual(request.ReclaimOutputNames, tt.want) {
 				t.Fatalf("CommitNode ReclaimOutputNames = %#v, want %#v", request.ReclaimOutputNames, tt.want)
 			}
+			// S4b: the recording store carries CommitNode, so it advertises the
+			// folding capability and the downstream work must arrive as Arrivals
+			// with no advance task. The empty-arrival case is the one most likely
+			// to regress: falling back to an advance task for a node with no
+			// out-edges would re-create one outbox intent and one flush per
+			// terminal leaf.
+			if request.AdvanceTask != nil {
+				t.Fatalf("CommitNode AdvanceTask = %#v, want nil: a folding store receives Arrivals", request.AdvanceTask)
+			}
+			if want := downstreamArrivals(g, sinkIdx, tt.port); !reflect.DeepEqual(request.Arrivals, want) {
+				t.Fatalf("CommitNode Arrivals = %#v, want %#v", request.Arrivals, want)
+			}
 		})
 	}
 }

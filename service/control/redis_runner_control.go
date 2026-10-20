@@ -27,7 +27,7 @@ func (d *RedisRunnerDirectory) SetRunnerControl(ctx context.Context, req RunnerC
 	receiptID := runnerControlReceiptID(req)
 	expiresAt := now.Add(d.runnerControlReceiptRetention())
 	drainDeadline := now.Add(d.runnerDrainDeadline())
-	status, err := d.evalStatus(ctx, redisSetRunnerControlLua, []string{
+	status, err := d.evalStatus(ctx, redisSetRunnerControlScript, []string{
 		d.keys.runnerSession,
 		d.keys.runnerControlDesired,
 		d.keys.runnerControlGeneration,
@@ -481,3 +481,5 @@ else
 end
 return 'stored'
 `
+
+var redisSetRunnerControlScript = redis.NewScript(redisSetRunnerControlLua)

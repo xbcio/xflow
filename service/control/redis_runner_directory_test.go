@@ -140,6 +140,53 @@ func TestRedisRunnerDirectoryReclaimsExpiredClaim(t *testing.T) {
 	}
 }
 
+// TestReclaimExpiredClaimsIgnoresUnindexedClaims pins the invariant that the
+// expired-claim sweep is driven by claim:expiry alone. An ordinary claim hash
+// row with no expiry entry cannot be produced by any claim transition — the
+// claim script writes both and every removing script clears both — so the sweep
+// must not fall back to scanning claim:assignment for one. (A lease_may_exist or
+// lease_created handoff can briefly hold the claim row without the entry while
+// it waits for a resolver take; that state already carries recovery-ready and
+// the take re-indexes it, so it is not a reason to scan either.)
+func TestReclaimExpiredClaimsIgnoresUnindexedClaims(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	directory := NewRedisRunnerDirectory(rdb, WithRedisRunnerDirectoryClaimTTL(10*time.Second))
+	session := registerRedisDirectoryRunner(t, ctx, directory, "runner-1", 1)
+	assignment := redisDirectoryTestAssignment("exec-1/node-unindexed/activation-1")
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
+	claimed := claimRedisDirectoryAssignment(t, ctx, directory, session, 1)
+
+	// Build the unreachable state directly: the claim hash still names the
+	// claim, but the expiry index no longer does. The old HKEYS fallback would
+	// have requeued this claim.
+	if err := rdb.ZRem(ctx, directory.keys.claimsExpiry, string(claimed.ClaimID)).Err(); err != nil {
+		t.Fatalf("remove claim expiry index entry: %v", err)
+	}
+	if stored, err := rdb.HGet(ctx, directory.keys.claimsAssignment, string(claimed.ClaimID)).Result(); err != nil || stored != string(assignment.AssignmentID) {
+		t.Fatalf("claim assignment entry = %q, %v; want %q", stored, err, assignment.AssignmentID)
+	}
+
+	if err := directory.ReclaimExpiredClaims(ctx); err != nil {
+		t.Fatalf("ReclaimExpiredClaims() error = %v", err)
+	}
+	if state, err := rdb.HGet(ctx, directory.keys.assignmentState, string(assignment.AssignmentID)).Result(); err != nil || state != "claimed" {
+		t.Fatalf("assignment state after reclaim = %q, %v; want claimed", state, err)
+	}
+	if _, err := rdb.HGet(ctx, directory.keys.claimsAssignment, string(claimed.ClaimID)).Result(); err != nil {
+		t.Fatalf("claim assignment entry was removed, want the unindexed claim untouched: %v", err)
+	}
+
+	// The runner still owns the claim, so the ordinary release path can requeue
+	// it — proof the sweep above left every claim record intact.
+	if err := directory.ReleaseClaim(ctx, claimed.ClaimID, ReleaseClaimRequeue); err != nil {
+		t.Fatalf("ReleaseClaim() error = %v", err)
+	}
+	if state, err := rdb.HGet(ctx, directory.keys.assignmentState, string(assignment.AssignmentID)).Result(); err != nil || state != "queued" {
+		t.Fatalf("assignment state after release = %q, %v; want queued", state, err)
+	}
+}
+
 func TestRedisRunnerDirectoryFencesLeasedReleaseByToken(t *testing.T) {
 	ctx := context.Background()
 	_, rdb := newRedisRunnerDirectoryTestClient(t)

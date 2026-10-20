@@ -480,7 +480,23 @@ return {1, '', '', ''}
 // acquireTaskLeaseLua atomically validates whether a queued task may become a
 // running lease and, when allowed, writes the status, metadata, and its
 // execution-scoped expiry-index member in one Redis Cluster-safe command.
+//
+// ARGV[14] selects route-checked mode (0 = acyclic graph, 1 = cyclic graph).
+// In that mode the script also reads the execution status key and re-decides
+// the execution-liveness and node-route questions the engine used to answer
+// with two reads before this write. That closes the status-read/acquire-write
+// race — an execution that terminalizes between the two can no longer receive
+// a lease — and removes the two round trips. Without ARGV[14] the script is the
+// legacy acquire: AcquireTaskLease keeps its original semantics (and the engine
+// call sites that are not route-checked).
+//
+// The node guards below are deliberately STRICTER than engine.classifyNodeForTask
+// in refusing a `waiting` node: a wait is parked under a live lease and is never
+// acquirable by a plain task, so that refusal predates route-checked mode and is
+// kept as is.
+//
 // KEYS[1] = node status key, KEYS[2] = node meta hash, KEYS[3] = lease expiry ZSET
+// KEYS[4] = execution status key (read only in route-checked mode)
 // ARGV[1] = new lease id
 // ARGV[2] = new lease token
 // ARGV[3] = issued-at unix millis
@@ -494,8 +510,11 @@ return {1, '', '', ''}
 // ARGV[11] = queued task node index
 // ARGV[12] = queued task unit index
 // ARGV[13] = queued task generation
+// ARGV[14] = allowCycles 0/1 (optional; present = route-checked mode)
 // Returns {acquired, prev_status, prev_attempt, prev_activation_id,
-// prev_auto_depth, prev_lease_token, prev_issued_at_ms, prev_lease_ttl_ms}.
+// prev_auto_depth, prev_lease_token, prev_issued_at_ms, prev_lease_ttl_ms,
+// exec_status}. exec_status is the execution status observed by this command,
+// or empty when the execution record is absent (or in legacy mode).
 var acquireTaskLeaseLua = redis.NewScript(`
 local status = redis.call('GET', KEYS[1])
 local prevAttempt = tonumber(redis.call('HGET', KEYS[2], 'attempt') or '0')
@@ -506,19 +525,55 @@ local prevIssuedAtMs = tonumber(redis.call('HGET', KEYS[2], 'lease_issued_at_ms'
 local prevLeaseTTLms = tonumber(redis.call('HGET', KEYS[2], 'lease_ttl_ms') or '0')
 local taskActivation = tonumber(ARGV[5] or '0')
 local nowMs = tonumber(ARGV[3] or '0')
+local allowCycles = ARGV[14]
+
+local function isTerminalNode(s)
+    return s == 'success' or s == 'failed' or s == 'skipped' or s == 'canceled' or s == 'continued' or s == 'pinned'
+end
+
+local execStatus = ''
+if allowCycles then
+    execStatus = redis.call('GET', KEYS[4]) or ''
+    if execStatus == '' then
+        -- The execution does not exist: there is no work to lease. The engine
+        -- evicts its graph and reports the execution inactive.
+        return {0, status or '', prevAttempt, prevActivation, prevAutoDepth, prevLeaseToken, prevIssuedAtMs, prevLeaseTTLms, execStatus}
+    end
+    if execStatus == 'success' or execStatus == 'failed' or execStatus == 'canceled' or execStatus == 'timeout' then
+        -- Mirrors types.IsTerminalExecutionStatus. canceling and paused are
+        -- deliberately NOT terminal: their running work must still be able to
+        -- acquire a lease.
+        return {0, status or '', prevAttempt, prevActivation, prevAutoDepth, prevLeaseToken, prevIssuedAtMs, prevLeaseTTLms, execStatus}
+    end
+    if allowCycles == '0' then
+        -- The acyclic counterpart of engine.classifyNodeForTask: a terminal node
+        -- can never be routed again, whatever activation the task carries. The
+        -- existing terminal guard below only refuses it when the task carries no
+        -- activation or the node's activation is at least the task's, which is
+        -- the cyclic rule; this is the missing acyclic half.
+        if isTerminalNode(status) then
+            return {0, status, prevAttempt, prevActivation, prevAutoDepth, prevLeaseToken, prevIssuedAtMs, prevLeaseTTLms, execStatus}
+        end
+    elseif taskActivation <= 0 then
+        -- A cyclic task without an activation cannot identify the node
+        -- generation it belongs to; engine/lease.go refuses the same shape
+        -- before the store is asked.
+        return {0, status or '', prevAttempt, prevActivation, prevAutoDepth, prevLeaseToken, prevIssuedAtMs, prevLeaseTTLms, execStatus}
+    end
+end
 
 if taskActivation > 0 and prevActivation > taskActivation then
-	return {0, status or '', prevAttempt, prevActivation, prevAutoDepth, prevLeaseToken, prevIssuedAtMs, prevLeaseTTLms}
+	return {0, status or '', prevAttempt, prevActivation, prevAutoDepth, prevLeaseToken, prevIssuedAtMs, prevLeaseTTLms, execStatus}
 end
 
 if status == 'success' or status == 'failed' or status == 'skipped' or status == 'canceled' or status == 'continued' or status == 'pinned' then
 	if taskActivation <= 0 or prevActivation >= taskActivation then
-		return {0, status, prevAttempt, prevActivation, prevAutoDepth, prevLeaseToken, prevIssuedAtMs, prevLeaseTTLms}
+		return {0, status, prevAttempt, prevActivation, prevAutoDepth, prevLeaseToken, prevIssuedAtMs, prevLeaseTTLms, execStatus}
 	end
 end
 
 if status == 'committing' or status == 'waiting' then
-	return {0, status, prevAttempt, prevActivation, prevAutoDepth, prevLeaseToken, prevIssuedAtMs, prevLeaseTTLms}
+	return {0, status, prevAttempt, prevActivation, prevAutoDepth, prevLeaseToken, prevIssuedAtMs, prevLeaseTTLms, execStatus}
 end
 
 if status == 'running' and prevLeaseToken ~= '' then
@@ -539,7 +594,7 @@ if status == 'running' and prevLeaseToken ~= '' then
 		leaseValid = nowMs < (prevIssuedAtMs + prevLeaseTTLms)
 	end
 	if leaseValid then
-		return {0, status, prevAttempt, prevActivation, prevAutoDepth, prevLeaseToken, prevIssuedAtMs, prevLeaseTTLms}
+		return {0, status, prevAttempt, prevActivation, prevAutoDepth, prevLeaseToken, prevIssuedAtMs, prevLeaseTTLms, execStatus}
 	end
 end
 
@@ -583,7 +638,7 @@ if leaseTTLms > 0 and ARGV[2] ~= '' then
 else
     redis.call('ZREM', KEYS[3], ARGV[8])
 end
-return {1, status or '', prevAttempt, prevActivation, prevAutoDepth, prevLeaseToken, prevIssuedAtMs, prevLeaseTTLms}
+return {1, status or '', prevAttempt, prevActivation, prevAutoDepth, prevLeaseToken, prevIssuedAtMs, prevLeaseTTLms, execStatus}
 `)
 
 // Returns 1 (acquired) or 0 (already locked).

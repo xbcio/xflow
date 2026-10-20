@@ -65,6 +65,15 @@ func drivingKey(id types.ExecutionID, idx int) string {
 	return fmt.Sprintf("%s/%d", id, idx)
 }
 
+var _ ArrivalFoldingCommitter = (*drivingState)(nil)
+
+// FoldsArrivalsIntoCommit declares that drivingState.CommitNode applies
+// req.Arrivals in the same mutex-guarded transition as the terminal node write,
+// mirroring the real backends. Without the marker the engine would keep sending
+// AdvanceTask, and the folded-commit assertions in this file would stop
+// exercising the carrier they were written for.
+func (s *drivingState) FoldsArrivalsIntoCommit() bool { return true }
+
 // --- StateStore ---
 
 func (s *drivingState) CreateExecution(_ context.Context, e *ExecutionSnapshot) error {
@@ -335,6 +344,17 @@ func (s *drivingState) CommitNode(_ context.Context, req CommitNodeRequest) (Com
 		s.putOutboxLocked(req.ExecutionID, entry)
 		result.OutboxIDs = append(result.OutboxIDs, entry.ID)
 	}
+	// Folded arrivals: same counters, same transition, gated exactly like the
+	// backends (acyclic, non-fatal, execution not just finalized, not
+	// canceling). The engine sends Arrivals instead of an advance task when the
+	// store advertises ArrivalFoldingCommitter, and this store's CommitNode
+	// carries the same signature, so it must fold or the cascade silently stops.
+	if e := s.executions[req.ExecutionID]; e != nil && e.Graph != nil && !e.Graph.AllowCycles() &&
+		!req.Fatal && !result.ExecutionDone && e.Status != types.ExecutionStatusCanceling {
+		outboxIDs, skipped := s.applyArrivalsLocked(req.ExecutionID, req.ActivationID, req.AutoDepth, req.Arrivals)
+		result.OutboxIDs = append(result.OutboxIDs, outboxIDs...)
+		result.Skipped = skipped
+	}
 	return result, nil
 }
 
@@ -353,11 +373,19 @@ func (s *drivingState) AdvanceNode(_ context.Context, req AdvanceNodeRequest) (A
 	s.advanced[advKey] = true
 
 	result := AdvanceNodeResult{Applied: true}
-	for _, arrival := range req.Arrivals {
+	result.OutboxIDs, result.Skipped = s.applyArrivalsLocked(req.ExecutionID, req.ActivationID, req.AutoDepth, req.Arrivals)
+	return result, nil
+}
+
+// applyArrivalsLocked is the shared counter transition for the driving store's
+// two acyclic scheduling carriers, mirroring the real backends. Callers must
+// hold s.mu.
+func (s *drivingState) applyArrivalsLocked(id types.ExecutionID, activationID, autoDepth int, arrivals []DownstreamArrival) (outboxIDs []string, skipped []SkippedUnit) {
+	for _, arrival := range arrivals {
 		if arrival.ArrivalCount <= 0 {
 			continue
 		}
-		counterKey := drivingKey(req.ExecutionID, arrival.UnitIdx)
+		counterKey := drivingKey(id, arrival.UnitIdx)
 		previousActive := s.activeIns[counterKey]
 		s.inDegrees[counterKey] -= arrival.ArrivalCount
 		if arrival.ActiveCount > 0 {
@@ -384,26 +412,30 @@ func (s *drivingState) AdvanceNode(_ context.Context, req AdvanceNodeRequest) (A
 		if taskType == 0 {
 			taskType = TaskTypeNodeExec
 		}
-		outboxID := fmt.Sprintf("exec/%s/%s/%d", req.ExecutionID, arrival.NodeName, req.ActivationID)
+		outboxID := fmt.Sprintf("exec/%s/%s/%d", id, arrival.NodeName, activationID)
 		if schedule == "skip" {
 			taskType = TaskTypeNodeSkip
-			outboxID = fmt.Sprintf("skip/%s/%s/%d", req.ExecutionID, arrival.NodeName, req.ActivationID)
+			outboxID = fmt.Sprintf("skip/%s/%s/%d", id, arrival.NodeName, activationID)
 		}
 		entry := OutboxEntry{
 			ID: outboxID,
 			Task: Task{
-				ExecutionID:  req.ExecutionID,
+				ExecutionID:  id,
 				NodeName:     arrival.NodeName,
 				NodeIdx:      arrival.NodeIdx,
 				UnitIdx:      arrival.UnitIdx,
 				Type:         taskType,
-				ActivationID: req.ActivationID,
+				ActivationID: activationID,
+				AutoDepth:    autoDepth,
 			},
 		}
-		s.putOutboxLocked(req.ExecutionID, entry)
-		result.OutboxIDs = append(result.OutboxIDs, outboxID)
+		s.putOutboxLocked(id, entry)
+		outboxIDs = append(outboxIDs, outboxID)
+		if schedule == "skip" {
+			skipped = append(skipped, SkippedUnit{NodeName: arrival.NodeName, Count: 1})
+		}
 	}
-	return result, nil
+	return outboxIDs, skipped
 }
 
 // ListOutbox does not lease, for the same reason fakeState's does not: this
