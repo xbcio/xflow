@@ -766,9 +766,16 @@ runtime hash 已通过 hash-local 镜像（`runtimeSelectorHashPayload`）与 wi
 **注意两个端点在此处并不对称**：workflow 索引会自愈、历史记录可枚举；
 execution 不回填、历史记录不可枚举。不要假定两者行为一致。
 
-**过滤能力**：executions 只广告 `status`、`created_after`、`created_before`。
-按 workflow / runner 过滤**不被数据模型支持**（该表无 workflow id/key/hash 列，
-`runner_id` 也不是该表列），故不暴露——并有负向测试锁死其不被半途加入。
+**过滤能力**：executions 广告 `status`、`workflow_id`、`created_after`、
+`created_before`。`workflow_id` 是服务端签发、提交时盖戳的工作流身份
+（`xflow_executions.workflow_id`，`VARCHAR(64)`），按**精确相等**匹配而非名称或
+前缀，并同时收窄列表与 `total`；参数缺省或为空表示不过滤，超过 64 字符的值返回
+400 `execution_workflow_id_invalid` 而不是被忽略。**历史行不回填**：该列加入之前
+产生的行、以及提交时没有 definition id 的行保持 `''`（未归属），它们不匹配任何
+非空的 `workflow_id` 过滤——这是与 namespace 相同的 fail-closed 取向，绝不猜测
+归属。按 workflow **名称**过滤不暴露（名称是显示串、不是身份：跨 namespace 可重名，
+同一 id 重新注册时可变）；按 **runner** 过滤仍**不被数据模型支持**（`runner_id`
+不是该表列，可靠的 per-execution 投影尚未建立）。
 分页按 §3.3 的 **offset** 语义（非 cursor），默认 20、硬上限 200 作为有文档的安全控制。
 
 契约侧：`api/openapi/xflow-v1.yaml` 已描述两条 `get`（`listWorkflows`、
