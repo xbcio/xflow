@@ -115,8 +115,8 @@ const host = vi.hoisted(() => {
 });
 
 vi.mock('@umijs/max', () => ({
-  // `authorizedFetch` reads `history.location.pathname` before deciding whether
-  // to send a 401 to /login; the getter keeps that read live in the real module.
+  // `authorizedFetch` reads `history.location.pathname` before deciding where a
+  // 401 should land; the getter keeps that read live in the real module.
   history: {
     get location() {
       return { pathname: host.pathname, search: host.search };
@@ -160,6 +160,7 @@ vi.mock('@xflow/editor', () => ({
 }));
 
 import { executionDetailToRuntimeSnapshot } from '@xflow/api';
+import { UNAUTHORIZED_PATH } from '../../auth';
 import { authorizedFetch } from '../../services/http';
 import { clearToken, getToken, setToken } from '../../services/token';
 import WorkflowDetailPage from './detail';
@@ -1336,7 +1337,7 @@ describe('authenticated API client', () => {
     expect((init.headers as Headers).get('Authorization')).toBe('Bearer tok-detail');
   });
 
-  it('clears the token and returns to login when a read is rejected with 401', async () => {
+  it('clears the token and lands on the unauthorized page when a read is rejected with 401', async () => {
     await mounted();
     setToken('tok-detail');
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ status: 401 } as Response));
@@ -1345,6 +1346,6 @@ describe('authenticated API client', () => {
 
     expect(response.status).toBe(401);
     expect(getToken()).toBeNull();
-    expect(host.replace).toHaveBeenCalledWith('/login');
+    expect(host.replace).toHaveBeenCalledWith(UNAUTHORIZED_PATH);
   });
 });
