@@ -26,6 +26,8 @@ func (n *FilterNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.transform.filter",
 		DisplayName: "Filter",
+		Category:    "transform",
+		CardSummary: []string{"items", "condition"},
 		Params: []types.ParamSpec{
 			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to filter",
 				Widget: nodeinternal.WidgetExpression, Constraints: nodeinternal.Format(nodeinternal.FormatExpression)},

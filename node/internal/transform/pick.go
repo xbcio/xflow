@@ -25,6 +25,8 @@ func (n *PickNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.transform.pick",
 		DisplayName: "Pick",
+		Category:    "transform",
+		CardSummary: []string{"fields"},
 		Params: []types.ParamSpec{
 			{Name: "fields", DisplayName: "Fields", Type: types.ParamArray, Required: true,
 				Description: "Field names to keep; all others are removed",

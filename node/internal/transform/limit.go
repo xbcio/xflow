@@ -24,6 +24,8 @@ func (n *LimitNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.transform.limit",
 		DisplayName: "Limit",
+		Category:    "transform",
+		CardSummary: []string{"items", "max"},
 		Params: []types.ParamSpec{
 			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to limit",
 				Widget: nodeinternal.WidgetExpression, Constraints: nodeinternal.Format(nodeinternal.FormatExpression)},

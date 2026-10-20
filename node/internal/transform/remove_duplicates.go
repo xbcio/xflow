@@ -26,6 +26,8 @@ func (n *RemoveDuplicatesNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.transform.remove_duplicates",
 		DisplayName: "Remove Duplicates",
+		Category:    "transform",
+		CardSummary: []string{"items", "fields"},
 		Params: []types.ParamSpec{
 			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to deduplicate",
 				Widget: nodeinternal.WidgetExpression, Constraints: nodeinternal.Format(nodeinternal.FormatExpression)},

@@ -31,6 +31,8 @@ func (n *SetNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.transform.set",
 		DisplayName: "Set",
+		Category:    "transform",
+		CardSummary: []string{"fields", "expressions"},
 		Params: []types.ParamSpec{
 			{Name: "fields", DisplayName: "Fields", Type: types.ParamObject, Required: false, Description: "Literal fields to assign"},
 			{Name: "expressions", DisplayName: "Expressions", Type: types.ParamObject, Required: false, Description: "Fields computed from expressions",

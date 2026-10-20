@@ -45,6 +45,8 @@ func (n *AggregateNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.transform.aggregate",
 		DisplayName: "Aggregate",
+		Category:    "transform",
+		CardSummary: []string{"items", "operations"},
 		Params: []types.ParamSpec{
 			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to aggregate",
 				Widget: nodeinternal.WidgetExpression, Constraints: nodeinternal.Format(nodeinternal.FormatExpression)},

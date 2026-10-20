@@ -34,6 +34,8 @@ func (n *SortNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.transform.sort",
 		DisplayName: "Sort",
+		Category:    "transform",
+		CardSummary: []string{"items", "fields"},
 		Params: []types.ParamSpec{
 			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to sort",
 				Widget: nodeinternal.WidgetExpression, Constraints: nodeinternal.Format(nodeinternal.FormatExpression)},
