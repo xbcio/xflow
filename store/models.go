@@ -25,7 +25,21 @@ type ExecutionRecord struct {
 	// and never match an empty value, so an unattributed row is invisible to
 	// every namespace — deliberately: it is better to under-report an execution
 	// than to show one tenant another tenant's row.
-	Namespace    string
+	Namespace string
+	// WorkflowID is the server-assigned id of the workflow this execution ran,
+	// taken from the definition attached to the submission context at creation
+	// time. It is an identity, not a display string: WorkflowName is the latter
+	// and two namespaces can hold the same name.
+	//
+	// The empty string means UNATTRIBUTED, and — exactly like Namespace — it is
+	// not equivalent to "some workflow". Two things produce it: an inline
+	// definition that carries no id, and every row written before the column
+	// existed (db/xflow_schema.sql adds it NOT NULL DEFAULT '' so the migration
+	// is a pure ADD COLUMN). ListExecutions only matches a non-empty
+	// WorkflowID filter by exact equality, so an unattributed row is invisible
+	// to every workflow filter — deliberately: it is better to under-report an
+	// execution than to attribute it to a workflow it may not have run.
+	WorkflowID   types.WorkflowID
 	WorkflowName string
 	WorkflowDef  []byte
 	Params       []byte
@@ -54,8 +68,17 @@ type NodeRecord struct {
 	SignalName   string
 	SignalConfig []byte
 	Timeout      *time.Time
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	// StartedAt / FinishedAt are the node's timing facts, captured by the state
+	// layer: the issue time of the first lease and the moment the node first
+	// reached a terminal status. They are write-once — an upsert never replaces
+	// a non-NULL value — because a retry must not move the start line and a
+	// duplicate terminal write must not move the end line. nil means the fact
+	// never happened: a skipped or seeded node never started, a live one has
+	// not finished, and rows written before the columns existed carry NULL.
+	StartedAt  *time.Time
+	FinishedAt *time.Time
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 // SignalRecord holds a signal payload delivered to a workflow execution.

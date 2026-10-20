@@ -88,10 +88,11 @@ func TestUpsertNodeUpdateFields_Wellformed(t *testing.T) {
 	// are the conflict key, created_at is preserved, and updated_at is refreshed
 	// by each backend outside this set. Listing one would make the derived
 	// sqlstore column list assert the wrong thing.
-	for _, excluded := range []string{"ID", "ExecutionID", "NodeName", "CreatedAt", "UpdatedAt"} {
+	for _, excluded := range []string{"ID", "ExecutionID", "NodeName", "CreatedAt", "UpdatedAt", "StartedAt", "FinishedAt"} {
 		if seen[excluded] {
 			t.Errorf("UpsertNodeUpdateFields must not list %q: it is either the conflict "+
-				"key or maintained outside the ON CONFLICT update set", excluded)
+				"key, maintained outside the ON CONFLICT update set, or write-once "+
+				"timing that an upsert must not overwrite", excluded)
 		}
 	}
 }

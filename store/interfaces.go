@@ -47,16 +47,18 @@ type Executions interface {
 	// fix.
 	//
 	// Filtering is limited to what the row actually stores. Supported:
-	// ExecutionFilter.Status (the status column) and ExecutionFilter.CreatedAfter/
-	// CreatedBefore (created_at). NOT supported, with the column-level reason:
+	// ExecutionFilter.Status (the status column), ExecutionFilter.WorkflowID
+	// (the workflow_id column, exact match) and ExecutionFilter.CreatedAfter/
+	// CreatedBefore (created_at). A row whose workflow_id is empty
+	// (unattributed) matches no non-empty WorkflowID filter, the same
+	// fail-closed rule the namespace scope applies. NOT supported, with the
+	// column-level reason:
 	//
-	//   - by workflow: xflow_executions stores workflow_name only. There is no
-	//     workflow_id / workflow_key / definition-hash column, and that is not an
-	//     omission — types.WorkflowID belongs to the workflow registry, and a
-	//     name is not an identity: two namespaces can hold the same name, and the
-	//     name is not immutable across a re-registration under the same id. A
-	//     name filter would therefore be a filter on a display string that does
-	//     not resolve to a workflow.
+	//   - by workflow NAME: xflow_executions stores workflow_name, but a name is
+	//     not an identity: two namespaces can hold the same name, and the name is
+	//     not immutable across a re-registration under the same id. A name
+	//     filter would therefore be a filter on a display string that does not
+	//     resolve to a workflow; use the workflow_id column instead.
 	//   - by runner: runner_id is not a column of xflow_executions at all. It
 	//     lives in the enrollment/identity tables (xflow_enroll_audit,
 	//     xflow_issued_identities) and in the node lease columns, neither of

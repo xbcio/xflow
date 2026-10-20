@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
@@ -68,8 +69,8 @@ func hasNamespaceDelimiter(ns string) bool {
 // separate, validation-guarded parameter instead.
 //
 // Only fields the persisted row genuinely supports are here. See the
-// ListExecutions doc in store/interfaces.go for the two that were rejected and
-// the column-level reason.
+// ListExecutions doc in store/interfaces.go for the filter that is still
+// rejected and the column-level reason.
 type ExecutionFilter struct {
 	// Status narrows to one lifecycle status. Empty means "every status".
 	// A non-empty value must be one of the types.ExecutionStatus constants; an
@@ -77,6 +78,14 @@ type ExecutionFilter struct {
 	// otherwise return an empty page that is indistinguishable from "no
 	// executions match a real status".
 	Status types.ExecutionStatus
+	// WorkflowID narrows to one workflow by its server-assigned id, matched by
+	// EXACT equality. Empty means "every workflow".
+	//
+	// A row whose stored WorkflowID is empty (unattributed: written before the
+	// column existed, or submitted without a definition id) matches NO non-empty
+	// filter value. That is the same fail-closed choice Namespace makes: the
+	// filter never guesses an owner, it only narrows within one it can prove.
+	WorkflowID types.WorkflowID
 	// CreatedAfter and CreatedBefore bound created_at. Zero means unbounded on
 	// that side. The bounds are exclusive on both ends — an execution created
 	// exactly at a bound is not returned — so that a caller walking adjacent
@@ -85,18 +94,51 @@ type ExecutionFilter struct {
 	CreatedBefore time.Time
 }
 
+// MaxExecutionWorkflowIDLen is the declared width of the persisted
+// workflow_id column (VARCHAR(64)). A value longer than this can never equal a
+// stored id, and MySQL would silently truncate the comparison rather than
+// report the mistake, so it is refused at the boundary instead. The bound is
+// counted in characters, matching VARCHAR(64) and the OpenAPI maxLength, not
+// in bytes.
+const MaxExecutionWorkflowIDLen = 64
+
+// ErrInvalidWorkflowID is returned when an execution row is written with a
+// workflow id the persistence column cannot hold. It is a fail-closed refusal:
+// silently truncating the identity would attribute the execution to a
+// different (or no) workflow.
+var ErrInvalidWorkflowID = errors.New("store: invalid execution workflow id")
+
+// ValidateExecutionWorkflowID checks a workflow id about to be persisted on an
+// execution row. Empty is valid and means UNATTRIBUTED; the value is otherwise
+// opaque to this package (ids are server-assigned) except for the column bound
+// above.
+func ValidateExecutionWorkflowID(id string) error {
+	if utf8.RuneCountInString(id) > MaxExecutionWorkflowIDLen {
+		return fmt.Errorf("%w: longer than %d characters", ErrInvalidWorkflowID, MaxExecutionWorkflowIDLen)
+	}
+	return nil
+}
+
+// ValidateExecutionWorkflowIDFilter checks a workflow id used to narrow an
+// execution listing. Empty is valid and means "no workflow narrowing"; the
+// value is otherwise opaque to this package (ids are server-assigned) except
+// for the column bound above.
+func ValidateExecutionWorkflowIDFilter(id string) error {
+	if err := ValidateExecutionWorkflowID(id); err != nil {
+		return fmt.Errorf("%w (as a listing filter)", err)
+	}
+	return nil
+}
+
 // Validate reports whether the filter can be applied as written. Both backends
 // call it before touching their storage, so an unusable filter gets one answer
 // rather than one per backend — and so a status typo fails loudly instead of
 // reading back as "no executions match".
 func (f ExecutionFilter) Validate() error {
-	if f.Status == "" {
-		return nil
-	}
-	if !knownExecutionStatus(f.Status) {
+	if f.Status != "" && !knownExecutionStatus(f.Status) {
 		return fmt.Errorf("store: unknown execution status filter %q", f.Status)
 	}
-	return nil
+	return ValidateExecutionWorkflowIDFilter(string(f.WorkflowID))
 }
 
 func knownExecutionStatus(s types.ExecutionStatus) bool {
