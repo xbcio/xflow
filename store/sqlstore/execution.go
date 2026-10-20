@@ -19,6 +19,9 @@ type executionRepo struct {
 var _ store.Executions = (*executionRepo)(nil)
 
 func (r *executionRepo) CreateExecution(ctx context.Context, rec *store.ExecutionRecord) error {
+	if err := store.ValidateExecutionWorkflowID(string(rec.WorkflowID)); err != nil {
+		return err
+	}
 	d := toDBExecution(rec)
 	if err := wrapDBErr(fmt.Sprintf("create execution %q", rec.ExecutionID), r.db.WithContext(ctx).Create(d).Error); err != nil {
 		return err
@@ -71,6 +74,12 @@ func (r *executionRepo) executionQuery(ctx context.Context, ns namespace.Namespa
 		Where("namespace = ?", string(ns))
 	if filter.Status != "" {
 		q = q.Where("status = ?", string(filter.Status))
+	}
+	// Exact equality, never LIKE: a workflow filter is an identity lookup, and a
+	// row stored with an empty workflow_id (unattributed) matches no non-empty
+	// value — the same fail-closed rule the namespace predicate above applies.
+	if filter.WorkflowID != "" {
+		q = q.Where("workflow_id = ?", string(filter.WorkflowID))
 	}
 	// Exclusive on both sides, so adjacent windows tile without overlapping.
 	if !filter.CreatedAfter.IsZero() {

@@ -138,6 +138,29 @@ func TestListExecutionsQueryShape(t *testing.T) {
 		}
 	})
 
+	t.Run("workflow filter", func(t *testing.T) {
+		sql := capture.sql(t, func() {
+			if _, err := repo.ListExecutions(ctx, "tenant-a", store.ExecutionFilter{WorkflowID: "wfid-a"}, store.DefaultListOptions()); err != nil {
+				t.Fatalf("ListExecutions: %v", err)
+			}
+		})
+		if !strings.Contains(sql, "workflow_id = 'wfid-a'") {
+			t.Fatalf("generated SQL does not filter on the workflow_id column:\n%s", sql)
+		}
+		// Identity, not a pattern: a LIKE here would turn one workflow's filter
+		// into a prefix match over every workflow in the namespace.
+		if strings.Contains(strings.ToUpper(sql), "LIKE") {
+			t.Fatalf("generated SQL uses LIKE for the workflow id filter:\n%s", sql)
+		}
+	})
+
+	t.Run("overlong workflow id is refused before SQL", func(t *testing.T) {
+		long := types.WorkflowID(strings.Repeat("w", store.MaxExecutionWorkflowIDLen+1))
+		if _, err := repo.ListExecutions(ctx, "tenant-a", store.ExecutionFilter{WorkflowID: long}, store.DefaultListOptions()); err == nil {
+			t.Fatal("an overlong workflow id filter was accepted")
+		}
+	})
+
 	t.Run("unknown status is refused before SQL", func(t *testing.T) {
 		if _, err := repo.ListExecutions(ctx, "tenant-a", store.ExecutionFilter{Status: types.ExecutionStatus("nope")}, store.DefaultListOptions()); err == nil {
 			t.Fatal("an unrecognized status filter was accepted")
@@ -170,11 +193,17 @@ func TestExecutionNamespaceRoundTrip(t *testing.T) {
 		ID:          42,
 		ExecutionID: types.ExecutionID("exec-round-trip"),
 		Namespace:   ns,
+		WorkflowID:  "wfid-round-trip",
 		Status:      types.ExecutionStatusSuccess,
 	}
 	back := fromDBExecution(toDBExecution(rec))
 	if back.Namespace != ns {
 		t.Fatalf("namespace after a round trip = %q, want %q", back.Namespace, ns)
+	}
+	if back.WorkflowID != rec.WorkflowID {
+		t.Fatalf("workflow id after a round trip = %q, want %q: a mapper that dropped the "+
+			"field would still pass an SQL-shape test while every filtered listing returned nothing",
+			back.WorkflowID, rec.WorkflowID)
 	}
 	if back.ID != rec.ID || back.ExecutionID != rec.ExecutionID {
 		t.Fatalf("round trip changed identity fields: %+v", back)

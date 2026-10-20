@@ -141,7 +141,8 @@ func fromDBSupply(d *dbSupply) *store.SupplyResource {
 type dbExecution struct {
 	ID           uint64                `gorm:"column:id;primaryKey;autoIncrement"`
 	ExecutionID  types.ExecutionID     `gorm:"column:execution_id;type:varchar(64);uniqueIndex:uk_execution_id"`
-	Namespace    string                `gorm:"column:namespace;type:varchar(64);not null;default:'';index:idx_namespace_created_at,priority:1"`
+	Namespace    string                `gorm:"column:namespace;type:varchar(64);not null;default:'';index:idx_namespace_created_at,priority:1;index:idx_namespace_workflow_id_created_at,priority:1"`
+	WorkflowID   string                `gorm:"column:workflow_id;type:varchar(64);not null;default:'';index:idx_namespace_workflow_id_created_at,priority:2"`
 	WorkflowName string                `gorm:"column:workflow_name;type:varchar(255)"`
 	WorkflowDef  jsonBytes             `gorm:"column:workflow_def;type:json"`
 	Params       jsonBytes             `gorm:"column:params;type:json"`
@@ -150,7 +151,7 @@ type dbExecution struct {
 	SpanID       string                `gorm:"column:span_id;type:varchar(32)"`
 	Status       types.ExecutionStatus `gorm:"column:status;type:varchar(20)"`
 	Error        string                `gorm:"column:error_msg;type:text"`
-	CreatedAt    time.Time             `gorm:"column:created_at;autoCreateTime:milli;index:idx_namespace_created_at,priority:2"`
+	CreatedAt    time.Time             `gorm:"column:created_at;autoCreateTime:milli;index:idx_namespace_created_at,priority:2;index:idx_namespace_workflow_id_created_at,priority:3"`
 	UpdatedAt    time.Time             `gorm:"column:updated_at;autoUpdateTime:milli"`
 }
 
@@ -161,6 +162,7 @@ func toDBExecution(r *store.ExecutionRecord) *dbExecution {
 		ID:           r.ID,
 		ExecutionID:  r.ExecutionID,
 		Namespace:    r.Namespace,
+		WorkflowID:   string(r.WorkflowID),
 		WorkflowName: r.WorkflowName,
 		WorkflowDef:  jsonBytes(r.WorkflowDef),
 		Params:       jsonBytes(r.Params),
@@ -179,6 +181,7 @@ func fromDBExecution(d *dbExecution) *store.ExecutionRecord {
 		ID:           d.ID,
 		ExecutionID:  d.ExecutionID,
 		Namespace:    d.Namespace,
+		WorkflowID:   types.WorkflowID(d.WorkflowID),
 		WorkflowName: d.WorkflowName,
 		WorkflowDef:  []byte(d.WorkflowDef),
 		Params:       []byte(d.Params),
@@ -219,6 +222,8 @@ type dbNode struct {
 	SignalName   string            `gorm:"column:signal_name;type:varchar(255)"`
 	SignalConfig jsonBytes         `gorm:"column:signal_config;type:json"`
 	Timeout      *time.Time        `gorm:"column:timeout_at"`
+	StartedAt    *time.Time        `gorm:"column:started_at"`
+	FinishedAt   *time.Time        `gorm:"column:finished_at"`
 	CreatedAt    time.Time         `gorm:"column:created_at;autoCreateTime:milli"`
 	UpdatedAt    time.Time         `gorm:"column:updated_at;autoUpdateTime:milli"`
 }
@@ -240,6 +245,8 @@ func toDBNode(r *store.NodeRecord) *dbNode {
 		SignalName:   r.SignalName,
 		SignalConfig: jsonBytes(r.SignalConfig),
 		Timeout:      r.Timeout,
+		StartedAt:    r.StartedAt,
+		FinishedAt:   r.FinishedAt,
 		CreatedAt:    r.CreatedAt,
 		UpdatedAt:    r.UpdatedAt,
 	}
@@ -260,6 +267,8 @@ func fromDBNode(d *dbNode) *store.NodeRecord {
 		SignalName:   d.SignalName,
 		SignalConfig: []byte(d.SignalConfig),
 		Timeout:      d.Timeout,
+		StartedAt:    d.StartedAt,
+		FinishedAt:   d.FinishedAt,
 		CreatedAt:    d.CreatedAt,
 		UpdatedAt:    d.UpdatedAt,
 	}
