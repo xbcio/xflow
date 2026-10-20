@@ -4,6 +4,12 @@
   "node_version": 1,
   "kind": "action",
   "display_name": "Wait",
+  "category": "control",
+  "card_summary": [
+    "mode",
+    "signal_name",
+    "timeout"
+  ],
   "ports": {
     "inputs": [
       {

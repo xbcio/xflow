@@ -289,6 +289,26 @@ func TestNodeFormFieldMapping(t *testing.T) {
 	}
 }
 
+// TestProjectNodeFormCarriesCategoryAndCardSummary pins the wire spelling of
+// the two editor node-card fields (spec §5 / §6.1.1): they project unchanged
+// under their snake_case keys, and a type that declares no summary omits the
+// key rather than writing null or [].
+func TestProjectNodeFormCarriesCategoryAndCardSummary(t *testing.T) {
+	raw := marshalString(t, projectBuiltin(t, "xflow.http"))
+	for _, want := range []string{`"category":"action"`, `"card_summary":["method+url","authentication"]`} {
+		if !strings.Contains(raw, want) {
+			t.Errorf("xflow.http schema is missing %s: %s", want, raw)
+		}
+	}
+	raw = marshalString(t, projectBuiltin(t, "xflow.start"))
+	if !strings.Contains(raw, `"category":"control"`) {
+		t.Errorf("xflow.start schema is missing its category: %s", raw)
+	}
+	if strings.Contains(raw, "card_summary") {
+		t.Errorf("xflow.start wrote a card_summary: %s", raw)
+	}
+}
+
 func TestNodeFormSyntheticDescriptor(t *testing.T) {
 	zero, one := 0.0, 5.0
 	two, three := 2, 3

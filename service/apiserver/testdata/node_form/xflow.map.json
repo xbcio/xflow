@@ -4,6 +4,11 @@
   "node_version": 1,
   "kind": "action",
   "display_name": "Map",
+  "category": "control",
+  "card_summary": [
+    "items",
+    "batch_size"
+  ],
   "ports": {
     "inputs": [
       {

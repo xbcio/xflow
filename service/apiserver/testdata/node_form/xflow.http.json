@@ -4,6 +4,11 @@
   "node_version": 1,
   "kind": "action",
   "display_name": "HTTP Request",
+  "category": "action",
+  "card_summary": [
+    "method+url",
+    "authentication"
+  ],
   "credentials": [
     "http_auth"
   ],

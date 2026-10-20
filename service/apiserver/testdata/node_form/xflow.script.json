@@ -4,6 +4,11 @@
   "node_version": 1,
   "kind": "action",
   "display_name": "Script",
+  "category": "code",
+  "card_summary": [
+    "language+runtime",
+    "code"
+  ],
   "ports": {
     "inputs": [
       {

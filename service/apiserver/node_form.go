@@ -40,6 +40,8 @@ type nodeFormSchema struct {
 	NodeVersion  int             `json:"node_version"`
 	Kind         types.NodeKind  `json:"kind"`
 	DisplayName  string          `json:"display_name,omitempty"`
+	Category     string          `json:"category,omitempty"`
+	CardSummary  []string        `json:"card_summary,omitempty"`
 	Docs         string          `json:"docs,omitempty"`
 	Capabilities []string        `json:"capabilities,omitempty"`
 	Credentials  []string        `json:"credentials,omitempty"`
@@ -206,6 +208,8 @@ func projectNodeForm(rd registry.RegisteredDescriptor, fallbacks nodeFormFallbac
 		NodeVersion:  rd.Version,
 		Kind:         kind,
 		DisplayName:  d.DisplayName,
+		Category:     d.Category,
+		CardSummary:  d.CardSummary,
 		Docs:         d.Docs,
 		Capabilities: d.Capabilities,
 		Credentials:  d.Credentials,

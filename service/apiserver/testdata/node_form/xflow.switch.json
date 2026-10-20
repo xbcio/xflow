@@ -4,6 +4,11 @@
   "node_version": 1,
   "kind": "action",
   "display_name": "Switch",
+  "category": "control",
+  "card_summary": [
+    "rules",
+    "expression"
+  ],
   "ports": {
     "inputs": [
       {
