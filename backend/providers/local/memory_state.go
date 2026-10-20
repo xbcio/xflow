@@ -3,6 +3,7 @@ package local
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -76,6 +77,13 @@ type memoryState struct {
 	// done channels allow Wait() callers to block until execution completes.
 	doneCh        map[types.ExecutionID]chan struct{}
 	eventWatchers map[types.ExecutionID][]chan engine.ExecutionEvent
+
+	// cancelingSince records when each execution entered canceling, for
+	// engine.CancelingExecutionLister. It is maintained in the same locked
+	// transition as the status write — the local equivalent of the distributed
+	// backend's register-before-write — and an entry is removed when the
+	// execution goes terminal.
+	cancelingSince map[types.ExecutionID]time.Time
 }
 
 type execEntry struct {
@@ -108,6 +116,7 @@ func newMemoryState() *memoryState {
 		groupUnits:       make(map[string]*groupUnitState),
 		doneCh:           make(map[types.ExecutionID]chan struct{}),
 		eventWatchers:    make(map[types.ExecutionID][]chan engine.ExecutionEvent),
+		cancelingSince:   make(map[types.ExecutionID]time.Time),
 	}
 }
 
@@ -547,6 +556,16 @@ func (s *memoryState) updateExecutionStatusLocked(id types.ExecutionID, status t
 	if current == types.ExecutionStatusCanceling && status != types.ExecutionStatusCanceled {
 		return nil
 	}
+	// Register the canceling age in the same locked transition as the status
+	// write (engine.CancelingExecutionLister's register-before-write rule; here
+	// the two are atomic under s.mu). The entry is only recorded on a transition
+	// that actually lands, and an existing entry is never re-stamped: repeated
+	// Cancel calls must not keep pushing the stuck age forward.
+	if status == types.ExecutionStatusCanceling {
+		if _, tracked := s.cancelingSince[id]; !tracked {
+			s.cancelingSince[id] = time.Now().UTC()
+		}
+	}
 	entry.snap.Status = status
 	// Every accepted status transition, terminal or not, is the execution's
 	// "last update" for the inspect timing fields. Setting it only on terminal
@@ -562,6 +581,7 @@ func (s *memoryState) updateExecutionStatusLocked(id types.ExecutionID, status t
 	}
 	// Close the done channel on terminal status so Wait() unblocks.
 	if isTerminalStatus(status) {
+		delete(s.cancelingSince, id)
 		s.releaseWorkflowSlotLocked(id)
 		if !entry.closed {
 			entry.closed = true
@@ -616,6 +636,56 @@ func (s *memoryState) GetExecutionStatuses(_ context.Context, ids []types.Execut
 	}
 	return out, nil
 }
+
+// ListCancelingExecutions reports the executions parked in canceling for the
+// leader-driven reaper (engine.CancelingExecutionLister).
+//
+// It reads the registration map maintained by updateExecutionStatusLocked
+// rather than scanning executions: canceling is rare and transient, so a full
+// scan every sweep would be O(live executions) for an answer that is almost
+// always empty. Entries whose execution has meanwhile gone terminal or
+// disappeared are repaired here — that is the only place a registration whose
+// canceling transition never landed (or whose terminal removal was skipped) can
+// be dropped — and such entries are never returned.
+//
+// The memory backend has no namespace dimension: executions are keyed by ID
+// alone, so Namespace is left empty for the caller to run its cancel without a
+// namespace context. Results are ordered oldest-first so a bounded page always
+// favors the executions that have been stuck longest.
+func (s *memoryState) ListCancelingExecutions(_ context.Context, olderThan time.Time, limit int) ([]engine.CancelingExecution, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]engine.CancelingExecution, 0, limit)
+	for id, since := range s.cancelingSince {
+		entry, ok := s.executions[id]
+		if !ok || entry.snap.Status != types.ExecutionStatusCanceling {
+			delete(s.cancelingSince, id)
+			continue
+		}
+		if since.After(olderThan) {
+			continue
+		}
+		out = append(out, engine.CancelingExecution{
+			ExecutionID: id,
+			Since:       since,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Since.Equal(out[j].Since) {
+			return out[i].Since.Before(out[j].Since)
+		}
+		return out[i].ExecutionID < out[j].ExecutionID
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+var _ engine.CancelingExecutionLister = (*memoryState)(nil)
 
 func (s *memoryState) LoadGraph(_ context.Context, id types.ExecutionID) (*graph.Graph, error) {
 	s.mu.Lock()

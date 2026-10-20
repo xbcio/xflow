@@ -74,6 +74,37 @@ func (a *AtRest) NeedsReseal(stored []byte) bool {
 	return env.KeyID != a.key.ID
 }
 
+// EnvelopeKeyID classifies stored bytes for diagnostics. isEnvelope uses the
+// same IsEncrypted prefix test Open uses, so the classifier and the read path
+// can never disagree about which rows are plaintext; kid is the envelope's
+// self-reported key ID, and "" when the bytes claim to be an envelope but do
+// not parse or carry no key ID.
+//
+// This is deliberately NOT a completion criterion for a key rotation. kid is a
+// self-reported field and Decrypt selects a key by it, so a row can report the
+// current kid while its ciphertext is sealed under another key. Only opening
+// the row with the intended key (and checking the content hash) proves it is
+// readable under that key.
+func EnvelopeKeyID(stored []byte) (kid string, isEnvelope bool) {
+	if !IsEncrypted(stored) {
+		return "", false
+	}
+	var env struct {
+		KeyID string `json:"kid"`
+	}
+	if err := json.Unmarshal(stored, &env); err != nil {
+		return "", true
+	}
+	return env.KeyID, true
+}
+
+// EnvelopeKeyID reports the same classification as the package function. It
+// exists as a method so the storage layer, which must stay independent of
+// concrete cryptography, can consume it through an interface.
+func (a *AtRest) EnvelopeKeyID(stored []byte) (string, bool) {
+	return EnvelopeKeyID(stored)
+}
+
 // Seal encrypts plaintext into a storable envelope.
 func (a *AtRest) Seal(plaintext []byte) ([]byte, error) {
 	return Encrypt(a.key, plaintext)

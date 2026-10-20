@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -329,6 +330,58 @@ const ExecutionRetentionUnknown time.Duration = -1
 // GetExecution must.
 type ExecutionStatusBatchReader interface {
 	GetExecutionStatuses(ctx context.Context, ids []types.ExecutionID) ([]types.ExecutionStatus, error)
+}
+
+// CancelingExecution is one execution a backend has parked in
+// types.ExecutionStatusCanceling, as reported by CancelingExecutionLister.
+type CancelingExecution struct {
+	ExecutionID types.ExecutionID
+	// Namespace is the namespace the execution's keys live under, so a
+	// maintenance sweep can re-drive the cancel against the namespace-scoped
+	// store. It is empty when the backend has no namespace dimension (the
+	// in-memory backend).
+	Namespace namespace.Namespace
+	// Since is the instant the backend first recorded the execution entering
+	// canceling. It is a lower bound on the transition: a backend registers the
+	// entry before it writes the status, so the value can precede the write by
+	// one round trip — which can only make the execution look older, never
+	// younger, so a stuck-threshold comparison stays conservative.
+	Since time.Time
+}
+
+// CancelingExecutionLister is the optional StateStore capability a
+// leader-driven maintenance sweep uses to find executions left in canceling by
+// an interrupted Cancel.
+//
+// Cancel is idempotent and resumable (engine.Cancel): every step is fenced and
+// can be re-run, and a second call on a canceling execution carries on from
+// where the first one stopped. What it cannot do is run after the request that
+// started it is gone. A crash, a canceled context, or one failed store step
+// between the canceling write and the canceled write leaves the execution —
+// and its workflow concurrency slot — in canceling with no actor left to finish
+// it. This capability is what makes such an execution discoverable again.
+//
+// The invariant a backend must hold is REGISTER-BEFORE-WRITE: the entry for an
+// execution is recorded before (or atomically with) a transition to canceling,
+// and a failure to record it must fail that transition. A registration whose
+// transition never landed is harmless — List verifies the live status and
+// repairs the entry — but a canceling execution with no entry is exactly the
+// invisible stuck state this exists to prevent. The timestamp is taken from the
+// registration, and a repeated registration must not move it: the age is what
+// the caller compares against its stuck threshold, so re-registering on every
+// retried Cancel would reset the clock forever.
+//
+// ListCancelingExecutions returns at most limit entries whose Since is at or
+// before olderThan — the caller's stuck threshold. It must:
+//   - report the namespace alongside each execution;
+//   - return only executions whose live status is still canceling, dropping
+//     (or tolerating until dropped) entries whose execution left canceling or
+//     no longer exists;
+//   - be safe to run concurrently with ordinary cancel writes; and
+//   - not require a namespace in ctx: the scan spans the namespaces the
+//     backend serves.
+type CancelingExecutionLister interface {
+	ListCancelingExecutions(ctx context.Context, olderThan time.Time, limit int) ([]CancelingExecution, error)
 }
 
 // LeaseSuspender atomically converts a previously claimed lease into a

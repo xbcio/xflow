@@ -10,7 +10,7 @@ import (
 // contract against the in-memory backend, so keyed submissions mean the same
 // thing here as on Redis.
 func TestMemoryIdempotencyContract(t *testing.T) {
-	statestoretest.RunIdempotencyContract(t, func(t *testing.T) statestoretest.IdempotencyHarness {
+	statestoretest.RunIdempotencyContract(t, memoryCapabilityManifest(), func(t *testing.T) statestoretest.IdempotencyHarness {
 		return statestoretest.IdempotencyHarness{State: New().State()}
 	})
 }

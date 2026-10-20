@@ -25,7 +25,25 @@ const (
 	// word means one thing across the two axes: this record was read and would
 	// have been dropped for buffer pressure.
 	deadLetterReasonOverflow = "buffer_overflow"
+	// deadLetterReasonEmit is the legacy per-message emit axis
+	// (emit_retry.on_failure=dead_letter). Unlike the other two it is a PREFIX
+	// rather than a whole reason: emitFailureReason appends the last emit error,
+	// because "could not be delivered" is not actionable on its own — the error
+	// says whether the workflow refused the record, the runtime was unreachable,
+	// or the payload was rejected.
+	deadLetterReasonEmit = "emit"
 )
+
+// emitFailureReason builds the dead-letter reason for a record the legacy emit
+// path could not deliver. The stable prefix stays filterable; the suffix is the
+// last error, verbatim, because that is the first thing an operator asks about
+// a parked record and the only place it is recorded.
+func emitFailureReason(err error) string {
+	if err == nil {
+		return deadLetterReasonEmit
+	}
+	return deadLetterReasonEmit + ": " + err.Error()
+}
 
 // DeadLetterPublisher republishes messages the trigger could not process.
 // It is an interface so tests can assert dead-letter behaviour without a broker

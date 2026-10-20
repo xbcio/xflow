@@ -27,6 +27,7 @@ import type {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { authorizedFetch } from '../../services/http';
+import { saveThenRun, type SavedWorkflowResult } from './run';
 
 const NEW_WORKFLOW_ROUTE = 'new';
 
@@ -94,6 +95,19 @@ export default function WorkflowDetailPage() {
   // never trigger a re-render of its own.
   const viewportRef = useRef<Viewport | undefined>(undefined);
   const [defaultViewport, setDefaultViewport] = useState<Viewport>();
+  // The workflow id whose definition is already in state. A create redirects
+  // `/workflows/new` to `/workflows/{id}`; that route change re-runs the load
+  // effect without changing the definition, and a refetch there would flip
+  // `loading` on and unmount the editor mid-run (the run snapshot resolves
+  // into the unmounted instance). The ref makes that one re-run a no-op.
+  const loadedIdRef = useRef<string | undefined>(undefined);
+  // The newest id the host knows about, including one just issued by create.
+  // The editor's draft may not carry it yet (a save/run started before the
+  // create response landed), so saves and runs fall back to this.
+  const workflowIdRef = useRef<string | undefined>(undefined);
+  // Host-initiated saves run one at a time: Save followed by Run on a new
+  // workflow must not race two creates for the same draft.
+  const saveChainRef = useRef<Promise<void>>(Promise.resolve());
   const { initialState, refresh } = useModel('@@initialState');
   const { message, modal } = App.useApp();
   // What the server last had (loaded or saved), to tell an unsaved draft from a clean one.
@@ -195,6 +209,13 @@ export default function WorkflowDetailPage() {
   }, []);
 
   const loadWorkflow = useCallback(async () => {
+    if (loadedIdRef.current === workflowId) {
+      // Already loaded (e.g. the `/workflows/new` → `/workflows/{id}` redirect
+      // after create): a refetch would clear the editor and drop the running
+      // execution's snapshot on the floor.
+      return;
+    }
+
     // A different route id is a different workflow. 另存为副本 stays on the
     // same /workflows/:id route and only swaps the param, so without this the
     // previous run's bar, node colours and poll would follow the user across.
@@ -213,6 +234,8 @@ export default function WorkflowDetailPage() {
     failedExecutionIdsRef.current.clear();
     executionListRequestRef.current += 1;
     if (isNewWorkflow) {
+      loadedIdRef.current = undefined;
+      workflowIdRef.current = undefined;
       const empty = createEmptyWorkflow();
       persistedRef.current = JSON.stringify(empty);
       setWorkflow(empty);
@@ -230,6 +253,8 @@ export default function WorkflowDetailPage() {
       // Keep the route identity when hydrating so subsequent save/run operations
       // update this workflow instead of treating it as a new draft.
       const loaded = await api.getWorkflow(workflowId);
+      loadedIdRef.current = workflowId;
+      workflowIdRef.current = workflowId;
       const fresh = { ...loaded.workflow, id: workflowId };
       persistedRef.current = JSON.stringify(fresh);
       setWorkflow(fresh);
@@ -250,23 +275,38 @@ export default function WorkflowDetailPage() {
 
   // Resolves to { workflow, paramIssues } so the editor places the server's
   // warn-mode param_issues on their fields; an enforce-mode 400 rejects with
-  // an XFlowApiError whose `paramIssues` the editor reads the same way.
-  const saveWorkflow = useCallback(async (nextWorkflow: WorkflowDef): Promise<XFlowEditorSaveResult> => {
+  // an XFlowApiError whose `paramIssues` the editor reads the same way. The
+  // resolved workflow always carries the server id (SavedWorkflowResult), which
+  // is what Run executes.
+  //
+  // One request against the newest known id. Never called concurrently:
+  // saveWorkflow below serialises host-initiated saves.
+  const persistWorkflow = useCallback(async (nextWorkflow: WorkflowDef): Promise<SavedWorkflowResult> => {
     const saveOptions = { viewport: viewportRef.current };
     try {
-      if (!nextWorkflow.id) {
+      const targetId = nextWorkflow.id ?? workflowIdRef.current;
+      if (!targetId) {
         const result = await api.createWorkflow(nextWorkflow, saveOptions);
+        if (!result.workflowId) {
+          throw new Error('创建工作流失败：服务端未返回工作流 id。');
+        }
+        workflowIdRef.current = result.workflowId;
+        loadedIdRef.current = result.workflowId;
         const createdWorkflow = { ...nextWorkflow, id: result.workflowId };
         persistedRef.current = JSON.stringify(createdWorkflow);
-        setWorkflow(createdWorkflow);
+        // Only the exact draft that was saved may be replaced by its saved form.
+        // Edits made while the request was in flight are a newer object and must
+        // survive (the editor's value effect would otherwise reset the canvas).
+        setWorkflow((current) => (current === nextWorkflow ? createdWorkflow : current));
         history.replace(`/workflows/${result.workflowId}`);
         return { workflow: createdWorkflow, paramIssues: result.paramIssues };
       }
 
-      const result = await api.saveWorkflow(nextWorkflow, saveOptions);
-      persistedRef.current = JSON.stringify(nextWorkflow);
-      setWorkflow(nextWorkflow);
-      return { workflow: nextWorkflow, paramIssues: result.paramIssues };
+      const result = await api.saveWorkflow({ ...nextWorkflow, id: targetId }, saveOptions);
+      const savedWorkflow = { ...nextWorkflow, id: targetId };
+      persistedRef.current = JSON.stringify(savedWorkflow);
+      setWorkflow((current) => (current === nextWorkflow ? savedWorkflow : current));
+      return { workflow: savedWorkflow, paramIssues: result.paramIssues };
     } catch (error) {
       // The editor surfaces the failure itself; the host only adds the 403
       // capability refresh and rethrows so the editor's message is unchanged.
@@ -274,6 +314,20 @@ export default function WorkflowDetailPage() {
       throw error;
     }
   }, [api, reportForbidden]);
+
+  // Serialise host-initiated saves: Save clicked while a Run's save is in
+  // flight (or two Runs back to back) must queue behind it, otherwise both
+  // see "no id yet" and create two workflows. A failed save does not break
+  // the chain for the next one.
+  const saveWorkflow = useCallback((nextWorkflow: WorkflowDef): Promise<SavedWorkflowResult> => {
+    const performSave = () => persistWorkflow(nextWorkflow);
+    const chained = saveChainRef.current.then(performSave, performSave);
+    saveChainRef.current = chained.then(
+      () => undefined,
+      () => undefined,
+    );
+    return chained;
+  }, [persistWorkflow]);
 
   // Publishing is a save with a new version label. The editor's live region
   // announces the result, but that region is visually hidden, so the host also
@@ -652,35 +706,46 @@ export default function WorkflowDetailPage() {
     }
   }, [api, loadExecutions, message, mode, reportForbidden, selectExecution]);
 
+  // Run is save-then-run: the draft on screen may be newer than the stored
+  // definition (or not stored at all for a new workflow), while executing by id
+  // runs the server copy. `saveThenRun` documents the trade-off (one idempotent
+  // PUT per Run in exchange for running exactly what is on screen); a save
+  // failure aborts the run, and warn-mode param_issues do not.
   const runWorkflow = useCallback(async (nextWorkflow: WorkflowDef): Promise<RuntimeSnapshot> => {
-    if (!nextWorkflow.id) {
-      throw new Error('请先保存工作流，再运行。');
-    }
-
     try {
-      const started = await api.runWorkflow(nextWorkflow.id);
-      // A new run replaces the previous bar and snapshot before the first read.
-      setExecution(undefined);
-      setTrackedExecutionId(started.executionId);
-      const result = await api.waitExecution(started.executionId, { timeout: '10s' });
-      if ('timedOut' in result) {
-        // A minimal detail: the bar shows the live status while the poll fills
-        // in node state. No guessed nodes.
-        setExecution({ executionId: result.executionId, status: result.status });
-        return { status: executionStatusToRuntimeStatus(result.status) };
-      }
-      setExecution(result);
-      if (workflowStatusMeta[result.status].terminal) {
-        setTrackedExecutionId((current) => (current === result.executionId ? undefined : current));
-      }
-      return executionDetailToRuntimeSnapshot(result);
+      return await saveThenRun(nextWorkflow, {
+        save: saveWorkflow,
+        run: (workflowIdToRun) => api.runWorkflow(workflowIdToRun),
+        wait: async (executionId) => {
+          // A new run replaces the previous bar and snapshot before the first read.
+          setExecution(undefined);
+          setTrackedExecutionId(executionId);
+          const result = await api.waitExecution(executionId, { timeout: '10s' });
+          if ('timedOut' in result) {
+            // A minimal detail: the bar shows the live status while the poll
+            // fills in node state. No guessed nodes.
+            setExecution({ executionId: result.executionId, status: result.status });
+          } else {
+            setExecution(result);
+            if (workflowStatusMeta[result.status].terminal) {
+              setTrackedExecutionId((current) => (current === result.executionId ? undefined : current));
+            }
+          }
+          return result;
+        },
+        toSnapshot: (result) => (
+          'timedOut' in result
+            ? { status: executionStatusToRuntimeStatus(result.status) }
+            : executionDetailToRuntimeSnapshot(result)
+        ),
+      });
     } catch (error) {
       // The editor surfaces the failure itself; the host only adds the 403
       // capability refresh and rethrows so the editor's message is unchanged.
       reportForbidden(error);
       throw error;
     }
-  }, [api, reportForbidden]);
+  }, [api, reportForbidden, saveWorkflow]);
 
   // 2s polling while the page is visible; the interval is removed the moment
   // the execution reaches a terminal status (whether via the poll or an action

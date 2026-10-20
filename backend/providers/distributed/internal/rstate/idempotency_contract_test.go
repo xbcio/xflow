@@ -14,7 +14,7 @@ import (
 // when told to, so the harness fast-forwards it alongside the wall-clock sleep
 // the claim lease is judged by.
 func TestMiniredisIdempotencyContract(t *testing.T) {
-	statestoretest.RunIdempotencyContract(t, func(t *testing.T) statestoretest.IdempotencyHarness {
+	statestoretest.RunIdempotencyContract(t, rstateCapabilityManifest(), func(t *testing.T) statestoretest.IdempotencyHarness {
 		t.Helper()
 		srv, err := miniredis.Run()
 		if err != nil {
@@ -38,7 +38,7 @@ func TestMiniredisIdempotencyContract(t *testing.T) {
 // is what proves the claim script means the same thing on a server.
 func TestRedisIdempotencyContract(t *testing.T) {
 	addr := realRedisAddr(t)
-	statestoretest.RunIdempotencyContract(t, func(t *testing.T) statestoretest.IdempotencyHarness {
+	statestoretest.RunIdempotencyContract(t, rstateCapabilityManifest(), func(t *testing.T) statestoretest.IdempotencyHarness {
 		t.Helper()
 		return statestoretest.IdempotencyHarness{State: New(freshRealRedis(t, addr), nil, time.Minute)}
 	})

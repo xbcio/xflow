@@ -132,6 +132,30 @@ subtest"——是主动选择，不是疏漏。但它选错了对象：required 
 
 ---
 
+## 能力型跳过 ✅ 已完成（2026-10-20，路线图 2.11）
+
+**原判断**（2026-09-10 盘点）：`backend/internal/statestoretest/` 的契约套件在后端未实现
+某可选接口时，用内联类型断言加 `t.Skip`，整段子测试消失且包报 ok；仓库里也没有清单规定
+「哪个后端必须实现哪个接口」。当时的实例是 `node_lease_renew_contract.go:216` 与
+`group_state_contract.go:364,575,579`（本次复核实际在 `:417,628,632`，行号漂移、行为未变）。
+同型事故写在 `group_state_contract.go` 的注释里：把 `wait_any` 分支从两端一起删掉，
+整个 `./backend/...` 仍然全绿。
+
+**实际改法**：`backend/internal/statestoretest/capability.go` 引入显式能力清单。
+每个后端在自己的 manifest 测试里声明能力（`NewManifest("local/memory", ...)`、
+`NewManifest("distributed/rstate", ...)`），契约套件接收 `*Manifest`：
+
+- 套件入口 `Report` 打印「declares N/M capabilities」以及未声明集合；
+- 套件不能缺少的能力用 `RequireDeclared`，未声明直接失败；
+- 可选能力用 `OptionalCapability` / `SkipUnlessDeclared`，跳过时输出
+  `CAPABILITY-SKIP <capability>: backend ...` 并登记进清单的 skipped 集合，
+  cleanup 再汇总打印「N SKIPPED, not covered」；
+- `Verify` 把「声明了但后端没实现」判为失败；第一方后端用
+  `CheckSet(AllCapabilities()...)` 把清单钉死为全集，新增能力会在两端强制做决定。
+
+同一批还补齐了 `store/storetest/` 的 nodes / signals / audit 契约（memstore 与 sqlstore
+各自调用），这两层此前只有 executions/supply/schedule 的跨后端契约。
+
 ## 已知且接受的代价
 
 - **`//go:build integration` 下约 40 个文件在默认 `go test ./...` 里连 skip 行都不打印**，
@@ -142,12 +166,6 @@ subtest"——是主动选择，不是疏漏。但它选错了对象：required 
   `test/stress/group_throughput_test.go:93,167,228`、
   `execution/subgraph/map_body_scale_test.go:55`）在 `make test` 下会执行——`test:` 目标
   不传 `-short`。只有手工加 `-short` 才略过。不改。
-- **能力型跳过**（`backend/internal/statestoretest/node_lease_renew_contract.go:216`、
-  `group_state_contract.go:364,575,579`）：后端未实现某可选接口时整段契约子测试消失并报 ok，
-  且没有清单强制哪个后端必须实现。`group_state_contract.go:355-362` 记录过同型事故
-  （老断言是 `len(OutboxIDs) != 0`，「Deleting the wait_any branch outright from BOTH
-  backends left the entire ./backend/... tree green」）。这条值得做，但它要先回答
-  「哪个后端必须实现哪个接口」这个设计问题，不属于本批的机械修复。
 - **`test/security/tracked_content_test.go:72`**（不在 git 工作树时跳过）与
   **`node/layering_test.go:34`**（go 工具链不在 PATH 时跳过）：跳过条件合理——前者无树可扫，
   后者已经写得较好（`LookPath` 也失败才 skip，否则 `t.Fatalf`）。不改。

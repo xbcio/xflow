@@ -31,8 +31,9 @@ type StoreFactory func(t *testing.T) engine.StateStore
 // RunStateStoreConcurrencySuite executes every concurrent contract case
 // against the given factory. The factory is called once per sub-test, so
 // shared state cannot leak across cases.
-func RunStateStoreConcurrencySuite(t *testing.T, newStore StoreFactory) {
+func RunStateStoreConcurrencySuite(t *testing.T, manifest *Manifest, newStore StoreFactory) {
 	t.Helper()
+	manifest.Report(t)
 	t.Run("DecrementInDegreeAtomic", func(t *testing.T) {
 		decrementInDegreeAtomicCase(t, newStore(t))
 	})
@@ -49,7 +50,7 @@ func RunStateStoreConcurrencySuite(t *testing.T, newStore StoreFactory) {
 		checkCompletionConvergenceCase(t, newStore(t))
 	})
 	t.Run("ConcurrencyAdmissionAtomic", func(t *testing.T) {
-		concurrencyAdmissionAtomicCase(t, newStore(t))
+		concurrencyAdmissionAtomicCase(t, manifest, newStore(t))
 	})
 }
 
@@ -431,10 +432,10 @@ var node1Mode = types.ModeSignal
 // exactly one release — only appear when the submitters actually overlap,
 // which is why it runs under -race with the barrier rather than with plain
 // goroutines.
-func concurrencyAdmissionAtomicCase(t *testing.T, state engine.StateStore) {
-	limited, ok := state.(engine.ConcurrencyLimitedStateStore)
+func concurrencyAdmissionAtomicCase(t *testing.T, manifest *Manifest, state engine.StateStore) {
+	limited, ok := OptionalCapability[engine.ConcurrencyLimitedStateStore](t, manifest, CapabilityConcurrencyLimitedStateStore, state)
 	if !ok {
-		t.Skipf("%T does not implement engine.ConcurrencyLimitedStateStore", state)
+		return
 	}
 	const (
 		limit      = 4

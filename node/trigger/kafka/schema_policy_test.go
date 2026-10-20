@@ -167,6 +167,16 @@ type fakePublisher struct {
 	topics    []string
 	reasons   []string
 	err       error
+	// recoverAfter makes the first N calls fail with err and later calls
+	// succeed. Zero keeps err permanent, which is what the withhold tests rely
+	// on; a recovery test sets err AND recoverAfter to script a DLQ that comes
+	// back.
+	recoverAfter int
+	calls        int
+	// onPublish, when non-nil, runs after a successful publish, outside the
+	// mutex. A test uses it to prove the publish happened before the commit
+	// that follows it, and to hold the caller at that boundary.
+	onPublish func(Message)
 	closed    bool
 	notify    chan struct{}
 }
@@ -177,16 +187,29 @@ func newFakePublisher() *fakePublisher {
 
 func (p *fakePublisher) Publish(_ context.Context, topic string, msg Message, reason string) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.err != nil {
+	p.calls++
+	call := p.calls
+	if p.err != nil && (p.recoverAfter == 0 || call <= p.recoverAfter) {
+		p.mu.Unlock()
 		return p.err
 	}
+	hook := p.onPublish
 	p.published = append(p.published, msg)
 	p.topics = append(p.topics, topic)
 	p.reasons = append(p.reasons, reason)
 	close(p.notify)
 	p.notify = make(chan struct{})
+	p.mu.Unlock()
+	if hook != nil {
+		hook(msg)
+	}
 	return nil
+}
+
+func (p *fakePublisher) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
 }
 
 func (p *fakePublisher) Close() error {

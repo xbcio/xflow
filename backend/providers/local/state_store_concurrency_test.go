@@ -10,7 +10,7 @@ import (
 )
 
 func TestMemoryStateStore_Concurrency(t *testing.T) {
-	statestoretest.RunStateStoreConcurrencySuite(t, func(t *testing.T) engine.StateStore {
+	statestoretest.RunStateStoreConcurrencySuite(t, memoryCapabilityManifest(), func(t *testing.T) engine.StateStore {
 		return New().State()
 	})
 }

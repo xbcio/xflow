@@ -294,6 +294,22 @@ func leaseExpiryZSetKey(t namespace.Namespace, id types.ExecutionID) string {
 	return execKey(t, id, "leases")
 }
 
+// cancelingIndexKey is the namespace-scoped index of executions parked in the
+// canceling status: a ZSET whose member is the execution ID and whose score is
+// the millisecond instant the backend first recorded the canceling transition.
+//
+// It deliberately carries no execution hash tag and is never touched inside
+// Lua: Redis Cluster refuses a script that spans slots, so the registration is
+// an ordinary ZADD performed BEFORE the per-execution status write rather than
+// atomically with it. That ordering is what keeps the index complete — a status
+// write is only attempted after its registration succeeded, so no execution can
+// reach canceling without an entry (engine.CancelingExecutionLister documents
+// the invariant; see backend/providers/distributed/internal/rstate/canceling_index.go
+// for the full argument).
+func cancelingIndexKey(t namespace.Namespace) string {
+	return fmt.Sprintf("xflow:ns:%s:cancel:index", t)
+}
+
 // timeoutZSetKey is the execution-scoped timeout index keyed by the node
 // timeout deadline. It shares the execution hash tag ({id}) so that
 // suspend/deliver/resume state and the timeout index can be updated in one

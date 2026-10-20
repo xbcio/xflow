@@ -133,5 +133,5 @@ func TestOutputCompressionCoversTheGroupExitPath(t *testing.T) {
 
 	// Compression must stay confined to storage: the shared contract has to pass
 	// against a backend that has just written a compressed boundary value.
-	statestoretest.RunStateStoreContract(t, state)
+	statestoretest.RunStateStoreContract(t, rstateCapabilityManifest(), state)
 }

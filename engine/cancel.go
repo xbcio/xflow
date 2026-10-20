@@ -7,10 +7,40 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-// Cancel marks an execution as canceled, transitions all suspended nodes to
-// canceled status, cancels the child executions its sub-workflow nodes are
-// waiting on and finalizes those parked nodes, and removes the execution from
-// the in-memory cache.
+// Cancel marks an execution as canceled. The transition is driven in five
+// steps:
+//
+//  1. mark the execution canceling;
+//  2. cancel every suspended node it still has;
+//  3. cancel the child executions its sub-workflow nodes are waiting on;
+//  4. finalize those parked sub-workflow nodes (Waiting → Canceled);
+//  5. mark the execution canceled, notify completion, and evict its graph.
+//
+// Cancel is idempotent and RESUMABLE. Every step is fenced at the store and
+// tolerates already having been applied by an earlier attempt: the canceling
+// write is a no-op on a canceling execution, the suspended-node transition is a
+// fenced compare-and-set that skips nodes no longer Suspended, the child
+// cascade tolerates a child that already concluded, and the parked-node
+// finalization only rewrites nodes still Waiting. The final write into canceled
+// is likewise accepted from canceling. A second call on an execution left in
+// canceling therefore carries on from wherever the interrupted call stopped
+// rather than starting over or refusing.
+//
+// The one thing Cancel cannot do is run after the caller that started it is
+// gone. Steps 2–5 each leave the execution in canceling with intermediate state
+// half-reconciled, and nothing in the request path retries. That recovery is
+// the leader-driven canceling-execution reaper's job (see
+// engine.CancelingExecutionLister and service/control's LeaseSweeper): it finds
+// executions that stayed canceling past a stuck threshold and calls Cancel
+// again, which resumes exactly as above. Because the reaper's call is subject
+// to the same concurrency as any other, the steps are also safe to run while an
+// original Cancel is still in flight — each store transition decides its own
+// race.
+//
+// Completion notification (step 5) is deliberately after the durable canceled
+// write and remains best-effort: a crash between them loses the hook, not the
+// cancellation. The execution is terminal either way, so it is not a state
+// the reaper can or should revisit.
 func (e *Engine) Cancel(ctx context.Context, id types.ExecutionID) error {
 	// The graph cache is shared across namespaces, so a cache hit alone is not
 	// sufficient to authorize a cancel. loadActiveGraph confirms the execution

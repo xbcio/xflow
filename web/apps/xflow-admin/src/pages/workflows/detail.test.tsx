@@ -178,6 +178,9 @@ beforeEach(() => {
   host.currentUser = { namespace: 'ns-a', scopes: host.scopes };
   clearToken();
   host.api.getWorkflow.mockResolvedValue({ workflow: { ...stored, id: undefined } });
+  // Run is save-then-run, so every onRun test also goes through the save path.
+  // `{}` is enough: the host builds the saved form from the draft plus the id.
+  host.api.saveWorkflow.mockResolvedValue({});
   host.api.listNodeTypes.mockResolvedValue({ node_types: [] });
   host.api.listExecutions.mockResolvedValue({ list: [], total: 0 });
 });
@@ -409,6 +412,152 @@ describe('capabilities from current-user', () => {
     await mounted();
 
     await waitFor(() => expect(editor().nodeTypesError).toEqual({ message: '502 bad gateway' }));
+    expect(host.refresh).not.toHaveBeenCalled();
+  });
+});
+
+describe('save before run (0.17)', () => {
+  const draft: WorkflowDef = { name: '未命名工作流', spec: '1.0', nodes: [], connections: {} };
+
+  /** A draft route: the page starts on `/workflows/new`, so it issues no GET. */
+  const mountedDraft = async () => {
+    host.paramId = 'new';
+    host.pathname = '/workflows/new';
+    render(<WorkflowDetailPage />);
+    await screen.findByTestId('editor');
+  };
+
+  /** A create the test settles by hand, to hold the save in flight. */
+  const deferredCreate = () => {
+    let settle: (result: { workflowId: string }) => void = () => {};
+    host.api.createWorkflow.mockReturnValue(new Promise<{ workflowId: string }>((resolve) => {
+      settle = resolve;
+    }));
+    return { resolve: (workflowId: string) => settle({ workflowId }) };
+  };
+
+  it('saves a new draft, runs the id the server issued, and does not refetch when the route takes it', async () => {
+    const snapshot = { status: 'success' as const };
+    vi.mocked(executionDetailToRuntimeSnapshot).mockReturnValue(snapshot as never);
+    host.api.createWorkflow.mockResolvedValue({ workflowId: 'wf-new' });
+    host.api.runWorkflow.mockResolvedValue({ executionId: 'exec-new' });
+    host.api.waitExecution.mockResolvedValue({ executionId: 'exec-new', status: 'success' });
+
+    host.paramId = 'new';
+    host.pathname = '/workflows/new';
+    const { rerender } = render(<WorkflowDetailPage />);
+    await screen.findByTestId('editor');
+
+    let result: unknown;
+    await act(async () => {
+      // The editor hands Run its current draft, which is the page's own state.
+      result = await editor().onRun!(editor().value!);
+    });
+
+    expect(host.api.createWorkflow).toHaveBeenCalledTimes(1);
+    expect(host.api.createWorkflow.mock.calls[0][0]).toMatchObject({ name: '未命名工作流' });
+    expect(host.api.runWorkflow).toHaveBeenCalledWith('wf-new');
+    expect(host.api.waitExecution).toHaveBeenCalledWith('exec-new', { timeout: '10s' });
+    expect(host.replace).toHaveBeenCalledWith('/workflows/wf-new');
+    expect(result).toBe(snapshot);
+
+    // The create redirects /workflows/new → /workflows/{id}; the definition in
+    // state is already the saved draft, so a refetch there would swap the editor
+    // for the loading spinner and land the run snapshot on an unmounted instance.
+    host.paramId = 'wf-new';
+    host.pathname = '/workflows/wf-new';
+    await act(async () => {
+      rerender(<WorkflowDetailPage />);
+    });
+
+    expect(host.api.getWorkflow).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('editor')).not.toBeNull();
+    expect(editor().value?.id).toBe('wf-new');
+  });
+
+  it('queues a second Run behind the first create so the draft is created only once', async () => {
+    host.api.saveWorkflow.mockResolvedValue({});
+    host.api.runWorkflow.mockResolvedValue({ executionId: 'exec-1' });
+    host.api.waitExecution.mockResolvedValue({ executionId: 'exec-1', status: 'success' });
+    const create = deferredCreate();
+    await mountedDraft();
+
+    let first!: Promise<unknown>;
+    let second!: Promise<unknown>;
+    await act(async () => {
+      first = editor().onRun!(draft);
+      second = editor().onRun!(draft);
+    });
+
+    await waitFor(() => expect(host.api.createWorkflow).toHaveBeenCalledTimes(1));
+    // The second save must wait for the first: seeing "no id yet" on both would
+    // create two workflows for one draft.
+    expect(host.api.saveWorkflow).not.toHaveBeenCalled();
+
+    await act(async () => {
+      create.resolve('wf-new');
+      await Promise.all([first, second]);
+    });
+
+    expect(host.api.createWorkflow).toHaveBeenCalledTimes(1);
+    expect(host.api.saveWorkflow).toHaveBeenCalledTimes(1);
+    expect(host.api.saveWorkflow.mock.calls[0]?.[0]).toMatchObject({ id: 'wf-new' });
+    expect(host.api.runWorkflow).toHaveBeenCalledTimes(2);
+    expect(host.api.runWorkflow.mock.calls.map((call) => call[0])).toEqual(['wf-new', 'wf-new']);
+    expect(host.api.waitExecution).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails the save when a create returns no id, without navigating or running', async () => {
+    host.api.createWorkflow.mockResolvedValue({ workflowId: '' });
+    await mountedDraft();
+
+    await expect(editor().onSave!(draft)).rejects.toThrow('服务端未返回工作流 id');
+
+    expect(host.replace).not.toHaveBeenCalled();
+    expect(host.api.runWorkflow).not.toHaveBeenCalled();
+  });
+
+  it('keeps an edit made while the save is in flight instead of replacing it with the saved form', async () => {
+    const create = deferredCreate();
+    await mountedDraft();
+
+    let savePromise!: Promise<unknown>;
+    await act(async () => {
+      savePromise = editor().onSave!(draft);
+    });
+    await waitFor(() => expect(host.api.createWorkflow).toHaveBeenCalledTimes(1));
+
+    const edited: WorkflowDef = { ...draft, name: '编辑中的名称' };
+    await act(async () => {
+      editor().onChange(edited);
+    });
+    expect(editor().value).toBe(edited);
+
+    await act(async () => {
+      create.resolve('wf-new');
+      await savePromise;
+    });
+
+    await waitFor(() => expect(host.replace).toHaveBeenCalledWith('/workflows/wf-new'));
+    expect(editor().value).toBe(edited);
+    expect(editor().value?.name).toBe('编辑中的名称');
+  });
+
+  it('aborts the run when the save is rejected, so nothing executes', async () => {
+    await mounted();
+    const failure = Object.assign(new Error('workflow_param_invalid'), {
+      status: 400,
+      paramIssues: [{ node: 'start', path: '/url', code: 'required', message: '缺少 url', severity: 'error' }],
+    });
+    host.api.saveWorkflow.mockRejectedValue(failure);
+
+    await act(async () => {
+      await expect(editor().onRun!(stored)).rejects.toBe(failure);
+    });
+
+    expect(host.api.runWorkflow).not.toHaveBeenCalled();
+    expect(host.api.waitExecution).not.toHaveBeenCalled();
+    // A 400 is a validation answer, not a stale capability set.
     expect(host.refresh).not.toHaveBeenCalled();
   });
 });

@@ -25,7 +25,7 @@ func TestMiniredisStateStoreContract(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: srv.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
 	state := New(rdb, nil, time.Minute)
-	statestoretest.RunStateStoreContract(t, state)
+	statestoretest.RunStateStoreContract(t, rstateCapabilityManifest(), state)
 }
 
 // TestMiniredisStateStoreContractWithOutputCompression reruns the whole contract
@@ -52,7 +52,7 @@ func TestMiniredisStateStoreContractWithOutputCompression(t *testing.T) {
 	t.Cleanup(func() { _ = rdb.Close() })
 	state := New(rdb, nil, time.Minute)
 	state.ConfigureOutputCompression(true)
-	statestoretest.RunStateStoreContract(t, state)
+	statestoretest.RunStateStoreContract(t, rstateCapabilityManifest(), state)
 }
 
 // TestRedisStateStoreContract runs the same suite against a real Redis when
@@ -65,7 +65,7 @@ func TestMiniredisStateStoreContractWithOutputCompression(t *testing.T) {
 // than Redis does.
 func TestRedisStateStoreContract(t *testing.T) {
 	addr := realRedisAddr(t)
-	statestoretest.RunStateStoreContract(t, New(freshRealRedis(t, addr), nil, time.Minute))
+	statestoretest.RunStateStoreContract(t, rstateCapabilityManifest(), New(freshRealRedis(t, addr), nil, time.Minute))
 }
 
 // Node lease renewal is what keeps a handler that legitimately outruns the
@@ -73,7 +73,7 @@ func TestRedisStateStoreContract(t *testing.T) {
 // the expiry scan reads a separate ZSET, so renewal has to move the index and
 // not just the metadata hash — a distinction the memory backend cannot expose.
 func TestMiniredisNodeLeaseRenewContract(t *testing.T) {
-	statestoretest.RunNodeLeaseRenewContract(t, func(t *testing.T) statestoretest.NodeLeaseRenewStore {
+	statestoretest.RunNodeLeaseRenewContract(t, rstateCapabilityManifest(), func(t *testing.T) statestoretest.NodeLeaseRenewStore {
 		srv, err := miniredis.Run()
 		if err != nil {
 			t.Fatalf("miniredis.Run() error = %v", err)
@@ -87,7 +87,7 @@ func TestMiniredisNodeLeaseRenewContract(t *testing.T) {
 
 func TestRedisNodeLeaseRenewContract(t *testing.T) {
 	addr := realRedisAddr(t)
-	statestoretest.RunNodeLeaseRenewContract(t, func(t *testing.T) statestoretest.NodeLeaseRenewStore {
+	statestoretest.RunNodeLeaseRenewContract(t, rstateCapabilityManifest(), func(t *testing.T) statestoretest.NodeLeaseRenewStore {
 		return New(freshRealRedis(t, addr), nil, time.Minute)
 	})
 }

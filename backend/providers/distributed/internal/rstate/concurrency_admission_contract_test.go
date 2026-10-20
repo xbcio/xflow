@@ -17,7 +17,7 @@ import (
 // scripts at least execute; TestRedisConcurrencyAdmissionContract against a real
 // server is what proves they mean the same thing there.
 func TestMiniredisConcurrencyAdmissionContract(t *testing.T) {
-	statestoretest.RunConcurrencyAdmissionContract(t, func(t *testing.T) engine.StateStore {
+	statestoretest.RunConcurrencyAdmissionContract(t, rstateCapabilityManifest(), func(t *testing.T) engine.StateStore {
 		t.Helper()
 		srv, err := miniredis.Run()
 		if err != nil {
@@ -33,7 +33,7 @@ func TestMiniredisConcurrencyAdmissionContract(t *testing.T) {
 // TestMiniredisConcurrencyQueueContract runs the queue half of the shared
 // contract against the Redis backend.
 func TestMiniredisConcurrencyQueueContract(t *testing.T) {
-	statestoretest.RunConcurrencyQueueContract(t, func(t *testing.T) engine.StateStore {
+	statestoretest.RunConcurrencyQueueContract(t, rstateCapabilityManifest(), func(t *testing.T) engine.StateStore {
 		t.Helper()
 		srv, err := miniredis.Run()
 		if err != nil {
@@ -52,7 +52,7 @@ func TestMiniredisConcurrencyQueueContract(t *testing.T) {
 // through two transitions instead of one, so this is where that split is
 // exercised.
 func TestMiniredisConcurrencySeedContract(t *testing.T) {
-	statestoretest.RunConcurrencySeedContract(t, func(t *testing.T) engine.StateStore {
+	statestoretest.RunConcurrencySeedContract(t, rstateCapabilityManifest(), func(t *testing.T) engine.StateStore {
 		t.Helper()
 		srv, err := miniredis.Run()
 		if err != nil {
@@ -69,7 +69,7 @@ func TestMiniredisConcurrencySeedContract(t *testing.T) {
 // XFLOW_TEST_REDIS_ADDR is set.
 func TestRedisConcurrencySeedContract(t *testing.T) {
 	addr := realRedisAddr(t)
-	statestoretest.RunConcurrencySeedContract(t, func(t *testing.T) engine.StateStore {
+	statestoretest.RunConcurrencySeedContract(t, rstateCapabilityManifest(), func(t *testing.T) engine.StateStore {
 		t.Helper()
 		return New(freshRealRedis(t, addr), nil, time.Minute)
 	})
@@ -79,7 +79,7 @@ func TestRedisConcurrencySeedContract(t *testing.T) {
 // against a real Redis when XFLOW_TEST_REDIS_ADDR is set.
 func TestRedisConcurrencyQueueContract(t *testing.T) {
 	addr := realRedisAddr(t)
-	statestoretest.RunConcurrencyQueueContract(t, func(t *testing.T) engine.StateStore {
+	statestoretest.RunConcurrencyQueueContract(t, rstateCapabilityManifest(), func(t *testing.T) engine.StateStore {
 		t.Helper()
 		return New(freshRealRedis(t, addr), nil, time.Minute)
 	})
@@ -89,7 +89,7 @@ func TestRedisConcurrencyQueueContract(t *testing.T) {
 // Redis when XFLOW_TEST_REDIS_ADDR is set.
 func TestRedisConcurrencyAdmissionContract(t *testing.T) {
 	addr := realRedisAddr(t)
-	statestoretest.RunConcurrencyAdmissionContract(t, func(t *testing.T) engine.StateStore {
+	statestoretest.RunConcurrencyAdmissionContract(t, rstateCapabilityManifest(), func(t *testing.T) engine.StateStore {
 		t.Helper()
 		return New(freshRealRedis(t, addr), nil, time.Minute)
 	})

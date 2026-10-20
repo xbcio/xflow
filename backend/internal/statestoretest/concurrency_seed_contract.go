@@ -27,8 +27,10 @@ import (
 // a queued seed is parked with its intents held) and the release (whatever a
 // seeded execution took is given back on the same paths a submitted one's is,
 // including the retry that never created anything).
-func RunConcurrencySeedContract(t *testing.T, newStore ConcurrencyStoreFactory) {
+func RunConcurrencySeedContract(t *testing.T, manifest *Manifest, newStore ConcurrencyStoreFactory) {
 	t.Helper()
+	manifest.Report(t)
+	manifest.RequireDeclared(t, CapabilityConcurrencyLimitedEntryAdmissionStore)
 	t.Run("RefusesWithoutPersisting", func(t *testing.T) {
 		seedRefusesWithoutPersisting(t, newStore(t))
 	})
@@ -45,7 +47,7 @@ func RunConcurrencySeedContract(t *testing.T, newStore ConcurrencyStoreFactory) 
 		seedRefusesWhenTheQueueIsFull(t, newStore(t))
 	})
 	t.Run("TerminalSeedLeavesTheLine", func(t *testing.T) {
-		seedTerminalSeedLeavesTheLine(t, newStore(t))
+		seedTerminalSeedLeavesTheLine(t, manifest, newStore(t))
 	})
 	t.Run("DuplicateAfterCompletionReleasesItsCharge", func(t *testing.T) {
 		seedDuplicateAfterCompletionReleasesItsCharge(t, newStore(t))
@@ -334,7 +336,7 @@ func seedRefusesWhenTheQueueIsFull(t *testing.T, state engine.StateStore) {
 // a queued admission of one has nothing left to wait for: it must give its place
 // back rather than hold capacity no one will ever release, and it must not report
 // a wait it is not in.
-func seedTerminalSeedLeavesTheLine(t *testing.T, state engine.StateStore) {
+func seedTerminalSeedLeavesTheLine(t *testing.T, manifest *Manifest, state engine.StateStore) {
 	ctx := context.Background()
 	// UnitCount=1: the trigger group is the whole workflow, so the admission
 	// itself finalizes the execution.
@@ -358,11 +360,19 @@ func seedTerminalSeedLeavesTheLine(t *testing.T, state engine.StateStore) {
 	if snap == nil || snap.Status != types.ExecutionStatusSuccess {
 		t.Fatalf("seeded execution = %+v, want a finished %q", snap, types.ExecutionStatusSuccess)
 	}
-	if inspector, ok := state.(engine.ConcurrencyQueueInspector); ok {
+	// The position read is a separate capability and a separate subtest: a
+	// backend that queues without an inspector must not lose the release
+	// assertions below, but the omitted assertion must still be visible as a
+	// CAPABILITY-SKIP rather than folded into a passing parent.
+	t.Run("InspectorReportsNoPositionForTheFinishedSeed", func(t *testing.T) {
+		inspector, ok := OptionalCapability[engine.ConcurrencyQueueInspector](t, manifest, CapabilityConcurrencyQueueInspector, state)
+		if !ok {
+			return
+		}
 		if got := queuePosition(t, inspector, ctx, resp.ExecutionID); got != 0 {
 			t.Fatalf("position of the finished seeded execution = %d, want 0: it is not waiting for anything", got)
 		}
-	}
+	})
 
 	// The place was given back rather than held: an arrival behind it is the head
 	// of the line. A finished execution still occupying its place would make this

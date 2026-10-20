@@ -13,7 +13,7 @@ import (
 )
 
 func TestRedisStateStore_Concurrency(t *testing.T) {
-	statestoretest.RunStateStoreConcurrencySuite(t, func(t *testing.T) engine.StateStore {
+	statestoretest.RunStateStoreConcurrencySuite(t, rstateCapabilityManifest(), func(t *testing.T) engine.StateStore {
 		t.Helper()
 		srv, err := miniredis.Run()
 		if err != nil {
