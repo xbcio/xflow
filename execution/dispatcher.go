@@ -151,7 +151,7 @@ func (d *Dispatcher) tracer() tracing.Tracer {
 // HandleTask converts a queued engine task into a runner lease and commits the
 // executor result back through the engine. It only releases a lease immediately
 // when an Executor explicitly proves dispatch failed before execution began.
-func (d *Dispatcher) HandleTask(ctx context.Context, t *engine.Task) error {
+func (d *Dispatcher) HandleTask(ctx context.Context, t *engine.Task) (err error) {
 	lease, err := d.engine.BuildTaskLease(ctx, t)
 	if err != nil {
 		if errors.Is(err, engine.ErrSystemTaskHandled) || errors.Is(err, engine.ErrExecutionInactive) || errors.Is(err, engine.ErrLeaseAlreadyActive) {
@@ -168,6 +168,11 @@ func (d *Dispatcher) HandleTask(ctx context.Context, t *engine.Task) error {
 	// second one (see startLocalTaskSpan).
 	ctx, span := startLocalTaskSpan(ctx, d.tracer(), lease)
 	defer span.End()
+	// An attempt that fails must say so on its span instead of ending blank.
+	// This records whatever error ends the attempt — a failed commit or lease
+	// release included — using the facade's existing convention (RecordError is
+	// what the Runner applies to its own attempt span); a nil error is ignored.
+	defer func() { span.RecordError(err) }()
 
 	result, executeErr := d.executor.Execute(ctx, lease)
 	if executeErr == nil {
@@ -176,9 +181,13 @@ func (d *Dispatcher) HandleTask(ctx context.Context, t *engine.Task) error {
 
 	switch ClassifyExecutorFailure(executeErr) {
 	case ExecutorFailureNode:
+		// The commit below may succeed while recording this failure in the
+		// result, so record it here: it is still what ended the attempt.
+		span.RecordError(executeErr)
 		result.Error = joinTaskErrors(result.Error, executeErr)
 		return d.engine.CommitTaskResult(ctx, lease, result)
 	case ExecutorFailurePermanentConfiguration:
+		span.RecordError(executeErr)
 		result.Error = errors.Join(types.ErrPermanent, joinTaskErrors(result.Error, executeErr))
 		return d.engine.CommitTaskResult(ctx, lease, result)
 	case ExecutorFailureDispatch:
@@ -189,6 +198,9 @@ func (d *Dispatcher) HandleTask(ctx context.Context, t *engine.Task) error {
 		if _, releaseErr := releaser.ReleaseTaskLease(ctx, lease); releaseErr != nil {
 			return errors.Join(executeErr, fmt.Errorf("release task lease after dispatch failure: %w", releaseErr))
 		}
+		// The lease was requeued, so nothing downstream will report this
+		// attempt's failure; the span is the only remaining record of it.
+		span.RecordError(executeErr)
 		return nil
 	default:
 		// The executor may have started the handler but lost its response. Leave
