@@ -80,6 +80,51 @@ type Executions interface {
 	CountExecutions(ctx context.Context, ns namespace.Namespace, filter ExecutionFilter) (int64, error)
 }
 
+// ExecutionDriftCandidate is one durable execution row the drift scan
+// considers possibly stale: the SQL projection still says "running" and its
+// updated_at has not moved for the scan's staleness window. It carries only
+// what the repair needs to identify the row and re-read its authority — the
+// execution's id, its namespace (which the authoritative read needs to address
+// the right key) and the timestamp that made it a candidate.
+type ExecutionDriftCandidate struct {
+	ID        types.ExecutionID
+	Namespace namespace.Namespace
+	UpdatedAt time.Time
+}
+
+// ExecutionDriftScanner is the optional durable-projection capability the
+// execution drift repair worker depends on.
+//
+// The SQL executions table is a best-effort mirror of Redis-as-authority: a
+// status projection that fails (or a process that exits before writing it)
+// leaves a row reading "running" for an execution Redis has already finished.
+// No per-write path can repair that — the failed write is gone — so a
+// background scan asks Redis for each stale row's authoritative status and
+// rewrites the projection only when Redis explicitly reports a terminal one.
+//
+// This is deliberately NOT part of Store or Executions: it is a repair-only
+// read that a backend without a durable secondary (memstore) has nothing to
+// implement. The worker is built only when the store advertises it.
+type ExecutionDriftScanner interface {
+	// ListStaleRunningExecutions returns at most limit executions whose
+	// durable row says "running" and whose updated_at is strictly before
+	// updatedBefore, oldest first (updated_at ASC, then the row id ASC, so the
+	// order is total and a fixed window advances as rows are repaired).
+	//
+	// owned nil or empty is the legacy cross-namespace scan: every namespace
+	// (including rows stored with an empty namespace) is eligible. A non-empty
+	// set restricts the scan to those namespaces, matched by exact equality —
+	// same as the namespace column's own rule, an empty namespace is
+	// UNATTRIBUTED rather than the default namespace, so it is never widened
+	// into an owned scan. A malformed owned entry is refused with
+	// ErrInvalidNamespace rather than silently narrowed or widened.
+	//
+	// limit must be positive; a non-positive limit is refused rather than read
+	// as "unbounded", because this scan feeds writes back into the projection
+	// and an accidental whole-table sweep is not recoverable by retrying.
+	ListStaleRunningExecutions(ctx context.Context, owned []namespace.Namespace, updatedBefore time.Time, limit int) ([]ExecutionDriftCandidate, error)
+}
+
 // Nodes persists per-node execution state.
 type Nodes interface {
 	UpsertNode(ctx context.Context, rec *NodeRecord) error

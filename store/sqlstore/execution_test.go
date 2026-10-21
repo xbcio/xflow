@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/store"
@@ -218,4 +219,77 @@ func TestExecutionNamespaceRoundTrip(t *testing.T) {
 	if len(page) != 0 {
 		t.Fatalf("fromDBExecutions(nil) returned %d rows", len(page))
 	}
+}
+
+// TestListStaleRunningExecutionsQueryShape pins the repair scan at the SQL
+// level. The properties that matter are all invisible in a result-set test: a
+// status predicate that is not an exact equality, a comparison that is
+// inclusive (re-scanning a row every sweep until its updated_at moves past a
+// boundary it can never cross), a partial order (a fixed LIMIT window that can
+// starve the rest of the backlog), and an owned scope that widened to a
+// wildcard.
+func TestListStaleRunningExecutionsQueryShape(t *testing.T) {
+	capture := newSQLCapture(t)
+	repo := &executionRepo{db: capture.db}
+	ctx := context.Background()
+	before := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+
+	t.Run("unscoped scan", func(t *testing.T) {
+		sql := capture.sql(t, func() {
+			if _, err := repo.ListStaleRunningExecutions(ctx, nil, before, 7); err != nil {
+				t.Fatalf("ListStaleRunningExecutions: %v", err)
+			}
+		})
+		for _, want := range []string{
+			"FROM `xflow_executions`",
+			"status = 'running'",
+			"updated_at < '2026-10-21 12:00:00'",
+			"ORDER BY updated_at ASC,id ASC",
+			"LIMIT 7",
+		} {
+			if !strings.Contains(sql, want) {
+				t.Fatalf("generated SQL does not contain %q:\n%s", want, sql)
+			}
+		}
+		// Fail-closed on scope: the unscoped scan is the absence of a namespace
+		// predicate, never a wildcard that happens to match every row.
+		for _, forbidden := range []string{"LIKE", "IN (", "OR namespace", "namespace IS NULL", "<="} {
+			if strings.Contains(strings.ToUpper(sql), forbidden) {
+				t.Fatalf("generated SQL contains %q:\n%s", forbidden, sql)
+			}
+		}
+	})
+
+	t.Run("owned scan is exact namespace membership", func(t *testing.T) {
+		sql := capture.sql(t, func() {
+			if _, err := repo.ListStaleRunningExecutions(ctx, []namespace.Namespace{"tenant-a", "tenant-b"}, before, 3); err != nil {
+				t.Fatalf("ListStaleRunningExecutions: %v", err)
+			}
+		})
+		if !strings.Contains(sql, "namespace IN ('tenant-a','tenant-b')") {
+			t.Fatalf("generated SQL does not scope by owned namespaces:\n%s", sql)
+		}
+		if strings.Contains(strings.ToUpper(sql), "LIKE") {
+			t.Fatalf("generated SQL widens the owned scope with LIKE:\n%s", sql)
+		}
+	})
+
+	t.Run("invalid owned namespace is refused before SQL", func(t *testing.T) {
+		_, err := repo.ListStaleRunningExecutions(ctx, []namespace.Namespace{"tenant-a", "ns:*"}, before, 3)
+		if !errors.Is(err, store.ErrInvalidNamespace) {
+			t.Fatalf("ListStaleRunningExecutions(owned with glob) = %v, want store.ErrInvalidNamespace", err)
+		}
+		_, err = repo.ListStaleRunningExecutions(ctx, []namespace.Namespace{""}, before, 3)
+		if !errors.Is(err, store.ErrInvalidNamespace) {
+			t.Fatalf("ListStaleRunningExecutions(owned with empty entry) = %v, want store.ErrInvalidNamespace", err)
+		}
+	})
+
+	t.Run("non-positive limit is refused rather than unbounded", func(t *testing.T) {
+		for _, limit := range []int{0, -1} {
+			if _, err := repo.ListStaleRunningExecutions(ctx, nil, before, limit); err == nil {
+				t.Fatalf("ListStaleRunningExecutions(limit=%d) error = nil, want a refusal", limit)
+			}
+		}
+	})
 }

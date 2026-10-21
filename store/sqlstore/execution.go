@@ -3,6 +3,7 @@ package sqlstore
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -17,6 +18,7 @@ type executionRepo struct {
 }
 
 var _ store.Executions = (*executionRepo)(nil)
+var _ store.ExecutionDriftScanner = (*executionRepo)(nil)
 
 func (r *executionRepo) CreateExecution(ctx context.Context, rec *store.ExecutionRecord) error {
 	if err := store.ValidateExecutionWorkflowID(string(rec.WorkflowID)); err != nil {
@@ -122,4 +124,48 @@ func (r *executionRepo) CountExecutions(ctx context.Context, ns namespace.Namesp
 		return 0, err
 	}
 	return count, nil
+}
+
+// ListStaleRunningExecutions implements store.ExecutionDriftScanner: the
+// durable projection's "running" rows whose updated_at has not moved for the
+// caller's staleness window. Only the three columns the repair needs are read;
+// the rest of the row (definition, params, runtime) is not.
+//
+// Two fail-closed choices, both about not widening a repair into a sweep:
+// a non-positive limit is refused instead of being read as "no limit", and a
+// malformed owned entry is refused before any SQL is built. An empty owned set
+// is the legacy cross-namespace scan the interface documents.
+func (r *executionRepo) ListStaleRunningExecutions(ctx context.Context, owned []namespace.Namespace, updatedBefore time.Time, limit int) ([]store.ExecutionDriftCandidate, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("list stale running executions: limit must be positive, got %d", limit)
+	}
+	q := r.db.WithContext(ctx).
+		Model(&dbExecution{}).
+		Select("execution_id", "namespace", "updated_at").
+		Where("status = ?", string(types.ExecutionStatusRunning)).
+		Where("updated_at < ?", updatedBefore)
+	if len(owned) > 0 {
+		values := make([]string, 0, len(owned))
+		for _, ns := range owned {
+			if err := store.ValidateNamespaceScope(ns); err != nil {
+				return nil, err
+			}
+			values = append(values, string(ns))
+		}
+		q = q.Where("namespace IN ?", values)
+	}
+	var rows []dbExecution
+	err := q.Order("updated_at ASC").Order("id ASC").Limit(limit).Find(&rows).Error
+	if err := wrapDBErr("list stale running executions", err); err != nil {
+		return nil, err
+	}
+	out := make([]store.ExecutionDriftCandidate, 0, len(rows))
+	for i := range rows {
+		out = append(out, store.ExecutionDriftCandidate{
+			ID:        rows[i].ExecutionID,
+			Namespace: namespace.Namespace(rows[i].Namespace),
+			UpdatedAt: rows[i].UpdatedAt,
+		})
+	}
+	return out, nil
 }
