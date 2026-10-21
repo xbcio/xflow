@@ -298,8 +298,31 @@ func TestListStaleRunningExecutionsQueryShape(t *testing.T) {
 		if !strings.Contains(sql, "namespace IN ('tenant-a','tenant-b')") {
 			t.Fatalf("generated SQL does not scope by owned namespaces:\n%s", sql)
 		}
-		if strings.Contains(strings.ToUpper(sql), "LIKE") {
-			t.Fatalf("generated SQL widens the owned scope with LIKE:\n%s", sql)
+		// The same fail-closed list as the unscoped scan above, minus IN ( itself:
+		// membership is exactly the scope here, but no wildcard, null-tolerant or
+		// empty-string predicate may widen it. Uppercase both sides: the SQL is
+		// uppercased, so a mixed-case needle would never match and the assertion
+		// would be dead.
+		upper := strings.ToUpper(sql)
+		for _, forbidden := range []string{"LIKE", "OR NAMESPACE", "NAMESPACE IS NULL", "NAMESPACE = ''", "OR 1=1"} {
+			if strings.Contains(upper, strings.ToUpper(forbidden)) {
+				t.Fatalf("generated SQL contains %q, which could widen the owned scope past membership:\n%s", forbidden, sql)
+			}
+		}
+		// Membership must be the only namespace predicate. `namespace IN (...)
+		// OR namespace = ''` matches every row and would survive the containment
+		// and LIKE assertions above, so pin the WHERE clause as a conjunction of
+		// one namespace condition. M3 mutation: a disjunction makes this red.
+		whereIdx := strings.Index(upper, " WHERE ")
+		if whereIdx < 0 {
+			t.Fatalf("generated SQL has no WHERE clause:\n%s", sql)
+		}
+		where := upper[whereIdx:]
+		if strings.Contains(where, " OR ") {
+			t.Fatalf("owned scan WHERE clause joins a second predicate with OR:\n%s", sql)
+		}
+		if got := strings.Count(where, "NAMESPACE"); got != 1 {
+			t.Fatalf("owned scan WHERE clause has %d namespace predicates, want exactly the membership list:\n%s", got, sql)
 		}
 	})
 
