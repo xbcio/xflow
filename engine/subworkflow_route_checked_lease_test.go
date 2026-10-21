@@ -41,7 +41,7 @@ func (s *subWorkflowCheckedLeaseState) AcquireTaskLeaseChecked(ctx context.Conte
 	s.checkedAcquires++
 	s.lastOptions = opts
 	res := LeaseAcquireResult{}
-	snap, err := s.subWorkflowLinkState.GetExecution(ctx, lease.Task.ExecutionID)
+	snap, err := s.GetExecution(ctx, lease.Task.ExecutionID)
 	if err != nil {
 		return LeaseAcquireResult{}, err
 	}
@@ -54,7 +54,7 @@ func (s *subWorkflowCheckedLeaseState) AcquireTaskLeaseChecked(ctx context.Conte
 		return res, nil
 	}
 	if s.acquiredVerdict != nil && !*s.acquiredVerdict {
-		prev, err := s.subWorkflowLinkState.GetNode(ctx, lease.Task.ExecutionID, lease.Task.NodeName)
+		prev, err := s.GetNode(ctx, lease.Task.ExecutionID, lease.Task.NodeName)
 		if err != nil {
 			return LeaseAcquireResult{}, err
 		}
