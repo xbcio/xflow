@@ -25,13 +25,16 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-// defaultRunnerShutdownTimeout bounds how long Run waits for in-flight workers
-// to finish after the run context is cancelled. A worker already inside a
-// handler is not interrupted by that cancellation — its execution context is
-// detached from the run context (see executeAndReport) — so this is the real
-// upper bound on how long an operator stop can take, not merely a safety net.
-// Work still running when it expires is abandoned by this process; its lease is
-// reclaimed and replayed by the server (at-least-once).
+// defaultRunnerShutdownTimeout bounds the two handler-owned phases of a stop:
+// the wait for in-flight workers after the run context is cancelled, and the
+// activation-tracker cleanup that follows it (both share one budget). A worker
+// already inside a handler is not interrupted by that cancellation — its
+// execution context is detached from the run context (see executeAndReport) —
+// so this wait, not the cancellation, ends a SIGTERM. Work still running when
+// the budget expires is abandoned by this process; its lease is reclaimed and
+// replayed by the server (at-least-once). The bound is not the whole process
+// exit: the goodbye deregister call and Runner.Close have their own fixed caps
+// (deregisterTimeout, the pool close timeout) and run after it.
 const defaultRunnerShutdownTimeout = 10 * time.Second
 
 // defaultReportTimeout bounds how long executeAndReport waits for the server
@@ -87,13 +90,16 @@ type Config struct {
 	DescriptorsJSON   json.RawMessage
 	HeartbeatInterval time.Duration
 	PollWait          time.Duration
-	// ShutdownTimeout bounds how long Run waits, after its context is
-	// cancelled, for in-flight handlers to finish and report before returning.
-	// Cancelling the run context stops polling but does not cancel a running
-	// handler, so this is the deadline that ends a graceful stop. Zero or
-	// negative keeps defaultRunnerShutdownTimeout (10s). Keep it below the
-	// orchestrator's terminationGracePeriodSeconds (commonly 30s): work still
-	// running at this deadline is abandoned and replayed by the server.
+	// ShutdownTimeout bounds a stop once Run's context is cancelled: the wait
+	// for in-flight handlers to finish and report, plus the activation-tracker
+	// cleanup that follows, share this one budget. Cancelling the run context
+	// stops polling but does not cancel a running handler, so this is the
+	// deadline that ends a graceful stop; unfinished work is then abandoned and
+	// replayed by the server. Zero or negative keeps
+	// defaultRunnerShutdownTimeout (10s). Keep it below the orchestrator's
+	// terminationGracePeriodSeconds (commonly 30s): this budget starts when the
+	// stop begins, and the goodbye deregister plus Runner.Close add their own
+	// small fixed caps on top.
 	ShutdownTimeout time.Duration
 	// Tracer, when set, enables the server→runner→server trace graph: the
 	// runner extracts the remote parent from the lease's TraceCarrier, starts
@@ -235,9 +241,12 @@ type Runner struct {
 	// claim Concurrency more leases on top of them and heartbeat an InFlight
 	// that omits them.
 	inFlight atomic.Int32
-	// shutdownTimeout bounds Run's wait for busy workers after an operator
-	// stop; a session that fails does not wait. Config.ShutdownTimeout when
-	// positive, otherwise defaultRunnerShutdownTimeout.
+	// shutdownTimeout bounds the stop path's handler-owned phases: Run's wait
+	// for busy workers after an operator stop and the activation-tracker
+	// cleanup that follows, measured from the start of that wait. A session
+	// that fails does not wait for its workers, so only the cleanup runs and
+	// gets the full budget. Config.ShutdownTimeout when positive, otherwise
+	// defaultRunnerShutdownTimeout.
 	shutdownTimeout time.Duration
 	// heartbeatGrace is how long heartbeats may keep failing, measured from
 	// the last success (or from registration), before the session is ended.
@@ -461,6 +470,13 @@ func (r *Runner) Run(ctx context.Context) error {
 	// that work runs. The skipped workers touch nothing of the next Run: each
 	// Run has its own leaseCh and errCh, and they leave active and inFlight
 	// when their report attempt ends, then exit on the closed leaseCh.
+
+	// The whole drain shares one budget: the wait for in-flight workers and the
+	// activation cleanup that follows are both handler-owned work that can
+	// outlive the stop. The clock starts here, where the stop path begins its
+	// wait.
+	shutdownDeadline := time.Now().Add(r.shutdownTimeout)
+
 	drained := false
 	if ctx.Err() != nil {
 		waitDone := make(chan struct{})
@@ -468,15 +484,40 @@ func (r *Runner) Run(ctx context.Context) error {
 		select {
 		case <-waitDone:
 			drained = true
-		case <-time.After(r.shutdownTimeout):
+		case <-time.After(time.Until(shutdownDeadline)):
+			// The grace window is gone and workers are still holding leases.
+			// Nothing on the runner side can stop them, so name the work being
+			// abandoned: without this line a degraded drain looks like a clean
+			// one in the logs, and the only evidence is a server-side replay.
+			slog.Default().Warn("shutdown grace expired; unfinished work will be reclaimed and replayed by the server",
+				"in_flight", inFlight.Load(),
+				"active", len(active.snapshot()),
+				"shutdown_timeout", r.shutdownTimeout)
 		}
 	}
 	releaseUnstartedLeases(leaseCh, inFlight, active)
 
-	// Shutdown activation tracker if configured.
+	// Shutdown activation tracker if configured. Its cleanup runs through the
+	// activation handler, whose Close may perform network I/O, so it gets what
+	// is left of the same drain budget. The call is also wrapped in its own
+	// goroutine with a wait on that deadline: the handler's Deactivate takes no
+	// context, so a hung Close cannot be interrupted from here, and the process
+	// must give up the session and exit regardless.
 	if r.activationTracker != nil {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), defaultRunnerShutdownTimeout)
-		r.activationTracker.Shutdown(shutdownCtx)
+		activeActivations := r.activationTracker.ActiveCount()
+		shutdownCtx, shutdownCancel := context.WithDeadline(context.Background(), shutdownDeadline)
+		shutdownDone := make(chan struct{})
+		go func() {
+			defer close(shutdownDone)
+			r.activationTracker.Shutdown(shutdownCtx)
+		}()
+		select {
+		case <-shutdownDone:
+		case <-shutdownCtx.Done():
+			slog.Default().Warn("shutdown budget expired before activation cleanup finished; subscriptions are left to server-side redelivery",
+				"active", activeActivations,
+				"shutdown_timeout", r.shutdownTimeout)
+		}
 		shutdownCancel()
 	}
 

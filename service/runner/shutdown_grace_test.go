@@ -1,7 +1,10 @@
 package runner
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -250,4 +253,155 @@ func TestNewAppliesTheConfiguredShutdownTimeout(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A drain that times out must say so. Without a distinguishable log line an
+// operator cannot tell a clean stop from one that abandoned working leases;
+// the only other evidence is a server-side replay much later.
+func TestShutdownTimeoutLogsTheAbandonedWork(t *testing.T) {
+	prevLogger := slog.Default()
+	var buf bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	handler := &ctxAwareHandler{started: make(chan context.Context, 1), release: make(chan struct{})}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(handler.release) }) }
+	defer release()
+	client := &drainClient{concurrency: 1, leases: 1, failHeartbeats: make(chan struct{})}
+	r := newShutdownTestRunner(client, handler)
+	const timeout = 20 * time.Millisecond
+	r.shutdownTimeout = timeout
+
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+	select {
+	case <-handler.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler never started")
+	}
+
+	cancel()
+	startedShutdown := time.Now()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Run did not return within the test window after its %s shutdown timeout", timeout)
+	}
+	elapsed := time.Since(startedShutdown)
+	if elapsed < timeout {
+		t.Fatalf("Run returned %v after the stop, before its %s shutdown timeout", elapsed, timeout)
+	}
+	// Generous against scheduler load; the point is that the wait is the
+	// configured budget, not that it is measured to the millisecond.
+	if elapsed > 2*time.Second {
+		t.Fatalf("Run returned %v after the stop, want roughly its %s shutdown timeout", elapsed, timeout)
+	}
+
+	var warnLine string
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(line, "shutdown grace expired") {
+			warnLine = line
+			break
+		}
+	}
+	if warnLine == "" {
+		t.Fatalf("no shutdown grace warning logged after the drain timed out; logs:\n%s", buf.String())
+	}
+	for _, want := range []string{
+		"unfinished work will be reclaimed and replayed by the server",
+		"in_flight=1",
+		"active=1",
+		"shutdown_timeout=" + timeout.String(),
+	} {
+		if !strings.Contains(warnLine, want) {
+			t.Fatalf("shutdown grace warning %q does not contain %q", warnLine, want)
+		}
+	}
+}
+
+// activationBlocker ignores the shutdown budget: Deactivate blocks until the
+// test releases it. That is what a close call on a dead connection looks like,
+// and it is exactly the phase ShutdownTimeout must still bound.
+type activationBlocker struct {
+	release chan struct{}
+	once    sync.Once
+}
+
+func (*activationBlocker) Activate(context.Context, protocol.ActivateDirective) error {
+	return nil
+}
+
+func (h *activationBlocker) Deactivate(protocol.DeactivateDirective) error {
+	<-h.release
+	return nil
+}
+
+func (h *activationBlocker) unblock() { h.once.Do(func() { close(h.release) }) }
+
+// Activation cleanup deactivates trigger subscriptions through the handler and
+// can perform network I/O. It shares the shutdown budget: a handler that never
+// returns from Close must not pin Run past ShutdownTimeout.
+func TestShutdownTimeoutBoundsActivationCleanup(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	handler := &activationBlocker{release: make(chan struct{})}
+	defer handler.unblock()
+	tracker := NewActivationTracker(handler, slog.Default())
+	if err := tracker.ProcessDirectives(context.Background(), &protocol.HeartbeatActivations{
+		Activate: []protocol.ActivateDirective{{
+			WorkflowID:  "wf-1",
+			EntryUnitID: "grp-1",
+			Generation:  1,
+		}},
+	}); err != nil {
+		t.Fatalf("activating the test subscription: %v", err)
+	}
+
+	client := &drainClient{concurrency: 1, failHeartbeats: make(chan struct{})}
+	// No leases: the worker wait ends immediately, so the whole budget is
+	// available to (and exhausted by) the activation cleanup.
+	r := newShutdownTestRunner(client, &ctxAwareHandler{started: make(chan context.Context, 1), release: make(chan struct{})})
+	r.activationTracker = tracker
+	const timeout = 50 * time.Millisecond
+	r.shutdownTimeout = timeout
+
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+	waitUntil(t, "the runner to register", func() bool {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		return client.session > 0
+	})
+
+	cancel()
+	startedShutdown := time.Now()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run = %v after an operator stop, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Run was pinned by a blocked activation cleanup for more than 5s; "+
+			"shutdown timeout %s did not bound it", timeout)
+	}
+	elapsed := time.Since(startedShutdown)
+	if elapsed < timeout {
+		t.Fatalf("Run returned %v after the stop, before its %s shutdown timeout", elapsed, timeout)
+	}
+	// Generous upper bound: the deadline is the budget, load may add overhead.
+	if elapsed > 2*time.Second {
+		t.Fatalf("Run returned %v after the stop, want roughly its %s shutdown timeout", elapsed, timeout)
+	}
+
+	// Run gave up on the blocked cleanup; release it so the test leaves no
+	// goroutine holding the tracker, and wait for Shutdown to finish.
+	handler.unblock()
+	waitUntil(t, "the abandoned activation cleanup to finish", func() bool {
+		return tracker.ActiveCount() == 0
+	})
 }
