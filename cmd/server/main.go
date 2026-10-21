@@ -73,6 +73,17 @@ type serverConfig struct {
 	// xflowsdk.WithServerQueueBackpressure.
 	queueMaxDepth            int
 	queueDepthSampleInterval time.Duration
+	// executionDrift* configure the opt-in durable-projection repair worker:
+	// it scans SQL execution rows still reading "running" after
+	// executionDriftStaleAfter and rewrites the ones whose authoritative Redis
+	// status is terminal. They are the CLI face of
+	// xflowsdk.WithServerExecutionDriftRepair. Disabled by default because the
+	// worker writes to the durable store.
+	executionDriftRepairEnabled bool
+	executionDriftInterval      time.Duration
+	executionDriftStaleAfter    time.Duration
+	executionDriftBatch         int
+	executionDriftDryRun        bool
 	// redisMode selects the Redis deployment topology: single (default),
 	// sentinel, or cluster.
 	redisMode string
@@ -253,6 +264,16 @@ func parseServerConfig(args []string) (serverConfig, error) {
 		"Producer-side queue backpressure: stop flushing the outbox into an asynq queue once it holds this many pending+active tasks (0 disables; env XFLOW_QUEUE_MAX_DEPTH)")
 	fs.DurationVar(&cfg.queueDepthSampleInterval, "queue-depth-sample-interval", time.Second,
 		"How often the queue depth behind --queue-max-depth is sampled (env XFLOW_QUEUE_DEPTH_SAMPLE_INTERVAL)")
+	fs.BoolVar(&cfg.executionDriftRepairEnabled, "execution-drift-repair-enabled", false,
+		"Repair SQL execution rows stuck at running after Redis reports a terminal status (writes the durable projection; leader-only; env XFLOW_EXECUTION_DRIFT_REPAIR_ENABLED)")
+	fs.DurationVar(&cfg.executionDriftInterval, "execution-drift-interval", control.DefaultExecutionDriftPeriod,
+		"How often the execution drift repair worker scans (env XFLOW_EXECUTION_DRIFT_INTERVAL)")
+	fs.DurationVar(&cfg.executionDriftStaleAfter, "execution-drift-stale-after", control.DefaultExecutionDriftStaleAfter,
+		"How long a durable running row must be untouched before it is a repair candidate (env XFLOW_EXECUTION_DRIFT_STALE_AFTER)")
+	fs.IntVar(&cfg.executionDriftBatch, "execution-drift-batch", control.DefaultExecutionDriftBatch,
+		"Maximum candidate rows one execution drift repair scan fetches; rows skipped as unrepairable count toward it (env XFLOW_EXECUTION_DRIFT_BATCH)")
+	fs.BoolVar(&cfg.executionDriftDryRun, "execution-drift-dry-run", false,
+		"Classify execution drift without writing the durable projection (env XFLOW_EXECUTION_DRIFT_DRY_RUN)")
 	fs.StringVar(&cfg.authPolicy, "auth-policy", "", "Path to runners.yaml (empty = auth disabled); SIGHUP re-reads this file without a restart")
 	fs.BoolVar(&cfg.authDryRun, "auth-dry-run", false, "Log auth violations but let requests through (rollout aid)")
 	fs.BoolVar(&cfg.enroll, "enroll", false, "Enable the runner enrollment endpoint (/v1/runners/enroll)")
@@ -318,6 +339,9 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	if err := applyQueueEnv(&cfg, os.LookupEnv); err != nil {
 		return serverConfig{}, err
 	}
+	if err := applyExecutionDriftEnv(&cfg, os.LookupEnv); err != nil {
+		return serverConfig{}, err
+	}
 	if err := validateAPILimitFlags(cfg.apiLimits); err != nil {
 		return serverConfig{}, err
 	}
@@ -370,6 +394,18 @@ func parseServerConfig(args []string) (serverConfig, error) {
 		// value is an operator who meant something this binary cannot honour,
 		// so it fails loudly instead of silently sampling at a different rate.
 		return serverConfig{}, fmt.Errorf("--queue-depth-sample-interval must be positive")
+	}
+	// The repair worker's knobs are validated even when it is disabled: a
+	// negative value is a typo either way, and discovering it on the day the
+	// worker is enabled is worse than at startup.
+	if cfg.executionDriftInterval <= 0 {
+		return serverConfig{}, fmt.Errorf("--execution-drift-interval must be positive")
+	}
+	if cfg.executionDriftStaleAfter <= 0 {
+		return serverConfig{}, fmt.Errorf("--execution-drift-stale-after must be positive")
+	}
+	if cfg.executionDriftBatch <= 0 {
+		return serverConfig{}, fmt.Errorf("--execution-drift-batch must be positive")
 	}
 	cfg.paramValidation = xflowsdk.ParamValidationMode(paramValidation)
 	if cfg.paramValidation != "" && !cfg.paramValidation.Valid() {
@@ -450,6 +486,61 @@ func applyQueueEnv(cfg *serverConfig, lookup func(string) (string, bool)) error 
 			return fmt.Errorf("%s: %q is not a duration", envQueueDepthSampleInterval, v)
 		}
 		cfg.queueDepthSampleInterval = d
+	}
+	return nil
+}
+
+// Execution drift repair environment variables, following the same overlay
+// rule as the XFLOW_QUEUE_* set: a non-empty value overrides the flag, and an
+// unparseable one fails startup rather than silently keeping the flag.
+const (
+	envExecutionDriftRepairEnabled = "XFLOW_EXECUTION_DRIFT_REPAIR_ENABLED"
+	envExecutionDriftInterval      = "XFLOW_EXECUTION_DRIFT_INTERVAL"
+	envExecutionDriftStaleAfter    = "XFLOW_EXECUTION_DRIFT_STALE_AFTER"
+	envExecutionDriftBatch         = "XFLOW_EXECUTION_DRIFT_BATCH"
+	envExecutionDriftDryRun        = "XFLOW_EXECUTION_DRIFT_DRY_RUN"
+)
+
+// applyExecutionDriftEnv overlays the XFLOW_EXECUTION_DRIFT_* environment onto
+// cfg. The booleans are parsed rather than read as "set means true" so an
+// operator can turn a value baked into an image's environment back off.
+func applyExecutionDriftEnv(cfg *serverConfig, lookup func(string) (string, bool)) error {
+	for _, e := range []struct {
+		name string
+		dst  *bool
+	}{
+		{envExecutionDriftRepairEnabled, &cfg.executionDriftRepairEnabled},
+		{envExecutionDriftDryRun, &cfg.executionDriftDryRun},
+	} {
+		if v, ok := lookup(e.name); ok && v != "" {
+			b, err := strconv.ParseBool(v)
+			if err != nil {
+				return fmt.Errorf("%s: %q is not a boolean", e.name, v)
+			}
+			*e.dst = b
+		}
+	}
+	for _, e := range []struct {
+		name string
+		dst  *time.Duration
+	}{
+		{envExecutionDriftInterval, &cfg.executionDriftInterval},
+		{envExecutionDriftStaleAfter, &cfg.executionDriftStaleAfter},
+	} {
+		if v, ok := lookup(e.name); ok && v != "" {
+			d, err := time.ParseDuration(v)
+			if err != nil {
+				return fmt.Errorf("%s: %q is not a duration", e.name, v)
+			}
+			*e.dst = d
+		}
+	}
+	if v, ok := lookup(envExecutionDriftBatch); ok && v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("%s: %q is not an integer", envExecutionDriftBatch, v)
+		}
+		cfg.executionDriftBatch = n
 	}
 	return nil
 }
@@ -682,6 +773,17 @@ func buildServerOptions(cfg serverConfig, deps serverDeps) []xflowsdk.ServerOpti
 	}
 	if cfg.enableRunnerMetricsProxy {
 		serverOpts = append(serverOpts, xflowsdk.WithServerRunnerMetricsProxy())
+	}
+	// The drift repair worker is opt-in because it writes to the durable
+	// projection. The other knobs are forwarded only with it: passing them
+	// unconditionally would read as "configured" while the worker stays off.
+	if cfg.executionDriftRepairEnabled {
+		serverOpts = append(serverOpts, xflowsdk.WithServerExecutionDriftRepair(
+			cfg.executionDriftInterval,
+			cfg.executionDriftStaleAfter,
+			cfg.executionDriftBatch,
+			cfg.executionDriftDryRun,
+		))
 	}
 	// Runner-auth posture. buildAuthenticator returns DisabledAuthenticator{}
 	// for an empty --auth-policy, which control.IsConfigured rejects — so

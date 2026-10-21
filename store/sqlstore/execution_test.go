@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/store"
@@ -73,8 +74,10 @@ func TestListExecutionsQueryShape(t *testing.T) {
 		if !strings.Contains(sql, "namespace = 'tenant-a'") {
 			t.Fatalf("generated SQL does not scope by exact namespace equality:\n%s", sql)
 		}
-		for _, forbidden := range []string{"LIKE", "IN (", "OR namespace", "namespace IS NULL"} {
-			if strings.Contains(strings.ToUpper(sql), forbidden) {
+		// Uppercase both sides: the SQL is uppercased, so a mixed-case needle
+		// would never match and the assertion would be dead.
+		for _, forbidden := range []string{"LIKE", "IN (", "OR NAMESPACE", "NAMESPACE IS NULL"} {
+			if strings.Contains(strings.ToUpper(sql), strings.ToUpper(forbidden)) {
 				t.Fatalf("generated SQL contains %q, which could widen the scope past one namespace:\n%s", forbidden, sql)
 			}
 		}
@@ -218,4 +221,159 @@ func TestExecutionNamespaceRoundTrip(t *testing.T) {
 	if len(page) != 0 {
 		t.Fatalf("fromDBExecutions(nil) returned %d rows", len(page))
 	}
+}
+
+// TestListStaleRunningExecutionsQueryShape pins the repair scan at the SQL
+// level. The properties that matter are all invisible in a result-set test: a
+// status predicate that is not an exact equality, a comparison that is
+// inclusive (re-scanning a row every sweep until its updated_at moves past a
+// boundary it can never cross), a partial order (a fixed LIMIT window that can
+// starve the rest of the backlog), and an owned scope that widened to a
+// wildcard.
+func TestListStaleRunningExecutionsQueryShape(t *testing.T) {
+	capture := newSQLCapture(t)
+	repo := &executionRepo{db: capture.db}
+	ctx := context.Background()
+	before := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+
+	t.Run("unscoped scan", func(t *testing.T) {
+		sql := capture.sql(t, func() {
+			if _, err := repo.ListStaleRunningExecutions(ctx, nil, before, store.ExecutionDriftCursor{}, 7); err != nil {
+				t.Fatalf("ListStaleRunningExecutions: %v", err)
+			}
+		})
+		for _, want := range []string{
+			"FROM `xflow_executions`",
+			"status = 'running'",
+			"updated_at < '2026-10-21 12:00:00'",
+			"ORDER BY updated_at ASC,id ASC",
+			"LIMIT 7",
+		} {
+			if !strings.Contains(sql, want) {
+				t.Fatalf("generated SQL does not contain %q:\n%s", want, sql)
+			}
+		}
+		// Fail-closed on scope: the unscoped scan is the absence of a namespace
+		// predicate, never a wildcard that happens to match every row. Uppercase
+		// both sides: the SQL is uppercased, so a mixed-case needle would never
+		// match and the assertion would be dead.
+		for _, forbidden := range []string{"LIKE", "IN (", "OR NAMESPACE", "NAMESPACE IS NULL", "<="} {
+			if strings.Contains(strings.ToUpper(sql), strings.ToUpper(forbidden)) {
+				t.Fatalf("generated SQL contains %q:\n%s", forbidden, sql)
+			}
+		}
+	})
+
+	t.Run("cursor resumes strictly after the last row in scan order", func(t *testing.T) {
+		cursor := store.ExecutionDriftCursor{
+			UpdatedAt: time.Date(2026, 10, 21, 11, 55, 0, 0, time.UTC),
+			RowID:     41,
+		}
+		sql := capture.sql(t, func() {
+			if _, err := repo.ListStaleRunningExecutions(ctx, nil, before, cursor, 7); err != nil {
+				t.Fatalf("ListStaleRunningExecutions: %v", err)
+			}
+		})
+		want := "(updated_at > '2026-10-21 11:55:00' OR (updated_at = '2026-10-21 11:55:00' AND id > 41))"
+		if !strings.Contains(sql, want) {
+			t.Fatalf("generated SQL does not resume strictly after the cursor:\nwant substring: %s\ngot:\n%s", want, sql)
+		}
+		// The predicate must resume in exactly the order the query sorts by, or
+		// a page can skip rows (wrong tiebreak) or loop on them (inclusive
+		// comparison).
+		if !strings.Contains(sql, "ORDER BY updated_at ASC,id ASC") {
+			t.Fatalf("cursor query does not use the documented total order:\n%s", sql)
+		}
+		if strings.Contains(sql, "<=") {
+			t.Fatalf("cursor comparison is inclusive, so a page would repeat its boundary row:\n%s", sql)
+		}
+	})
+
+	t.Run("owned scan is exact namespace membership", func(t *testing.T) {
+		sql := capture.sql(t, func() {
+			if _, err := repo.ListStaleRunningExecutions(ctx, []namespace.Namespace{"tenant-a", "tenant-b"}, before, store.ExecutionDriftCursor{}, 3); err != nil {
+				t.Fatalf("ListStaleRunningExecutions: %v", err)
+			}
+		})
+		if !strings.Contains(sql, "namespace IN ('tenant-a','tenant-b')") {
+			t.Fatalf("generated SQL does not scope by owned namespaces:\n%s", sql)
+		}
+		// The same fail-closed list as the unscoped scan above, minus IN ( itself:
+		// membership is exactly the scope here, but no wildcard, null-tolerant or
+		// empty-string predicate may widen it. Uppercase both sides: the SQL is
+		// uppercased, so a mixed-case needle would never match and the assertion
+		// would be dead.
+		upper := strings.ToUpper(sql)
+		for _, forbidden := range []string{"LIKE", "OR NAMESPACE", "NAMESPACE IS NULL", "NAMESPACE = ''", "OR 1=1"} {
+			if strings.Contains(upper, strings.ToUpper(forbidden)) {
+				t.Fatalf("generated SQL contains %q, which could widen the owned scope past membership:\n%s", forbidden, sql)
+			}
+		}
+		// Membership must be the only namespace predicate. `namespace IN (...)
+		// OR namespace = ''` matches every row and would survive the containment
+		// and LIKE assertions above, so pin the WHERE clause as a conjunction of
+		// one namespace condition. M3 mutation: a disjunction makes this red.
+		whereIdx := strings.Index(upper, " WHERE ")
+		if whereIdx < 0 {
+			t.Fatalf("generated SQL has no WHERE clause:\n%s", sql)
+		}
+		where := upper[whereIdx:]
+		if strings.Contains(where, " OR ") {
+			t.Fatalf("owned scan WHERE clause joins a second predicate with OR:\n%s", sql)
+		}
+		if got := strings.Count(where, "NAMESPACE"); got != 1 {
+			t.Fatalf("owned scan WHERE clause has %d namespace predicates, want exactly the membership list:\n%s", got, sql)
+		}
+	})
+
+	t.Run("invalid owned namespace is refused before SQL", func(t *testing.T) {
+		_, err := repo.ListStaleRunningExecutions(ctx, []namespace.Namespace{"tenant-a", "ns:*"}, before, store.ExecutionDriftCursor{}, 3)
+		if !errors.Is(err, store.ErrInvalidNamespace) {
+			t.Fatalf("ListStaleRunningExecutions(owned with glob) = %v, want store.ErrInvalidNamespace", err)
+		}
+		_, err = repo.ListStaleRunningExecutions(ctx, []namespace.Namespace{""}, before, store.ExecutionDriftCursor{}, 3)
+		if !errors.Is(err, store.ErrInvalidNamespace) {
+			t.Fatalf("ListStaleRunningExecutions(owned with empty entry) = %v, want store.ErrInvalidNamespace", err)
+		}
+	})
+
+	t.Run("non-positive limit is refused rather than unbounded", func(t *testing.T) {
+		for _, limit := range []int{0, -1} {
+			if _, err := repo.ListStaleRunningExecutions(ctx, nil, before, store.ExecutionDriftCursor{}, limit); err == nil {
+				t.Fatalf("ListStaleRunningExecutions(limit=%d) error = nil, want a refusal", limit)
+			}
+		}
+	})
+
+	// The repair is a conditional write: it may only rewrite a row that still
+	// reads "running". Between the scan and this write the ordinary projection
+	// path may advance the row with its own terminal status and error_msg, and
+	// an unconditional update would erase that message.
+	t.Run("repair write is conditional on the row still running", func(t *testing.T) {
+		sql := capture.updateSQL(t, func() {
+			repaired, err := repo.RepairRunningExecutionStatus(ctx, "exec-drift", types.ExecutionStatusFailed)
+			if err != nil {
+				t.Fatalf("RepairRunningExecutionStatus: %v", err)
+			}
+			// Under DryRun nothing executes, so no row matches; a dry run that
+			// claimed a repair would be reporting a write that did not happen.
+			if repaired {
+				t.Fatal("RepairRunningExecutionStatus reported a repaired row in a dry run")
+			}
+		})
+		for _, want := range []string{
+			"UPDATE `xflow_executions`",
+			"execution_id = 'exec-drift' AND status = 'running'",
+			"`status`='failed'",
+		} {
+			if !strings.Contains(sql, want) {
+				t.Fatalf("generated SQL does not contain %q:\n%s", want, sql)
+			}
+		}
+		// error_msg is cleared only by this same conditional statement; there
+		// must be no unconditional update of it anywhere in the path.
+		if !strings.Contains(sql, "`error_msg`=''") {
+			t.Fatalf("the conditional repair does not clear error_msg:\n%s", sql)
+		}
+	})
 }
