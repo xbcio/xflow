@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -137,6 +138,16 @@ func NewEmbeddedDispatcher(eng Engine, registry engine.HandlerRegistry, opts ...
 	return NewDispatcher(eng, NewRunner(registry, opts...))
 }
 
+// tracer resolves the tracer for this dispatcher's local task spans from its
+// executor. The embedded Runner is the only executor that carries one today; a
+// custom Executor (or none) simply reports no local span.
+func (d *Dispatcher) tracer() tracing.Tracer {
+	if src, ok := d.executor.(interface{ taskTracer() tracing.Tracer }); ok {
+		return src.taskTracer()
+	}
+	return nil
+}
+
 // HandleTask converts a queued engine task into a runner lease and commits the
 // executor result back through the engine. It only releases a lease immediately
 // when an Executor explicitly proves dispatch failed before execution began.
@@ -148,6 +159,15 @@ func (d *Dispatcher) HandleTask(ctx context.Context, t *engine.Task) error {
 		}
 		return err
 	}
+
+	// xflow.local.task covers the attempt, not just the handler call: a local
+	// execution has no network dispatch, so the interesting boundary is
+	// "lease built → result committed". Opened after BuildTaskLease because the
+	// lease is what carries the submission trace the span is parented to, and
+	// the Runner sharing this dispatcher reuses this span instead of nesting a
+	// second one (see startLocalTaskSpan).
+	ctx, span := startLocalTaskSpan(ctx, d.tracer(), lease)
+	defer span.End()
 
 	result, executeErr := d.executor.Execute(ctx, lease)
 	if executeErr == nil {
