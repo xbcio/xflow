@@ -217,11 +217,38 @@ func expansionChildID(lease *TaskLease, batchIndex int) types.ExecutionID {
 // Deployments that route batches to a runner never reach this path (see
 // WithRemoteBatchExecution); the runner's own body runtime does the same work
 // and reports through CommitSubgraphResult.
-func (e *Engine) ExecuteBatch(ctx context.Context, t *Task) error {
+func (e *Engine) ExecuteBatch(ctx context.Context, t *Task) (err error) {
 	lease, childExecID, items, err := expansionBatchLease(t)
 	if err != nil {
 		return err
 	}
+	// One xflow.map.batch span per BATCH, never one per item. A map over N
+	// items is N sub-executions, so a per-item span would multiply the span
+	// count by exactly the fan-out the batch exists to bound. item_count is
+	// this batch's width; batch_count is the expansion's total, recovered from
+	// the payload that stamped it (all_items/batch_size), so one batch span
+	// says where it sits in the whole map without reading an item.
+	//
+	// The span is opened on the task's ctx after the same carrier re-anchor as
+	// every other engine span: a batch is delivered by the outbox dispatcher on
+	// a background context, and without the submission carrier this half of the
+	// map would be a detached root.
+	allItems, batchSize := mapBatchingContext(t, len(items))
+	batchCount := 1
+	if batchSize > 0 && len(allItems) > 0 {
+		batchCount = (len(allItems) + batchSize - 1) / batchSize
+	}
+	ctx, span := e.startExecutionSpan(ctx, lease.Task.ExecutionID, "xflow.map.batch",
+		"node_name", lease.Task.NodeName,
+		"item_count", len(items),
+		"batch_count", batchCount,
+	)
+	defer span.End()
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+		}
+	}()
 	// Everything in this function runs on the TASK's ctx. Its namespace is
 	// the one the execution's records live under — the same namespace every
 	// other task path addresses them with. The batch lease's own namespace

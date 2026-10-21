@@ -151,6 +151,30 @@ func (e *Engine) BuildTaskLease(ctx context.Context, t *Task) (*TaskLease, error
 		IssuedAt:   issuedAt,
 		TTL:        ttl,
 	}
+	// Carry the submission trace onto the lease. An embedded (local) backend
+	// executes the task on a queue worker whose ctx starts from
+	// context.Background(), so this carrier is the only path by which a local
+	// task span can join the workflow's trace. It is deliberately the execution
+	// snapshot's carrier, not one injected here: the control plane replaces it
+	// with its own dispatch span's carrier before the lease leaves the process
+	// (dispatchNodeLease / dispatchSubgraphLease / dispatchGroupLease in
+	// service/control), so cluster dispatch keeps its child-of-dispatch shape.
+	//
+	// Only backends that expose the NARROW carrier read do this. A backend
+	// without it would answer through GetExecution, adding a whole-snapshot
+	// round trip to every lease acquisition — the exact cost the arrival-folding
+	// commit budget exists to keep out of this path. The capability is the
+	// documented opt-in for exactly this shape of read (engine interfaces,
+	// ExecutionTraceCarrierReader), and both real backends (local memory state,
+	// distributed state) declare it.
+	//
+	// Failures are swallowed: tracing must never decide whether a lease can be
+	// issued, and a backend whose carrier read fails still has the lease.
+	if _, ok := e.state.(ExecutionTraceCarrierReader); ok {
+		if carrier, carrierErr := e.ExecutionTraceCarrier(ctx, t.ExecutionID); carrierErr == nil && len(carrier) > 0 {
+			lease.TraceCarrier = carrier
+		}
+	}
 	var prev *NodeSnapshot
 	if routeChecked {
 		res, err := acquirer.AcquireTaskLeaseChecked(ctx, lease, LeaseAcquireOptions{AllowCycles: g.AllowCycles()})
