@@ -282,7 +282,7 @@ func (w *ExecutionDriftWorker) ReconcileOnce(ctx context.Context) int {
 	}
 	before := w.clock().Add(-w.staleAfter)
 	started := time.Now()
-	repaired, scanned := 0, 0
+	repaired, scanned, examined := 0, 0, 0
 	var scanErr error
 	for page := 0; page < w.maxPages; page++ {
 		candidates, err := w.scanner.ListStaleRunningExecutions(ctx, w.owned, before, w.cursor, w.batch)
@@ -292,15 +292,18 @@ func (w *ExecutionDriftWorker) ReconcileOnce(ctx context.Context) int {
 		}
 		scanned += len(candidates)
 		stopped := false
-		for i, candidate := range candidates {
+		for _, candidate := range candidates {
 			// Leadership can change while a bounded sweep is in flight; stop
 			// writing rather than keep repairing projections the new leader will
 			// scan again (the rewrite is idempotent, but the work is not ours).
-			if i > 0 && i%leaderRecheckInterval == 0 && leaderLost(w.elector) {
+			// examined is cumulative across pages on purpose: a page-local index
+			// never reaches the interval when Batch < leaderRecheckInterval, which
+			// would silently disable the re-check for a small page bound.
+			if examined > 0 && examined%leaderRecheckInterval == 0 && leaderLost(w.elector) {
 				if w.log != nil {
 					w.log.Info("execution drift repair stopped early",
 						"repaired", repaired,
-						"inspected", scanned-len(candidates)+i,
+						"inspected", examined,
 						"candidates", scanned,
 					)
 				}
@@ -312,6 +315,7 @@ func (w *ExecutionDriftWorker) ReconcileOnce(ctx context.Context) int {
 			// the next sweep that starts from the beginning, not by re-reading
 			// it inside this one.
 			w.cursor = store.ExecutionDriftCursor{UpdatedAt: candidate.UpdatedAt, RowID: candidate.RowID}
+			examined++
 			if w.repair(ctx, candidate) {
 				repaired++
 			}

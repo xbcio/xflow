@@ -609,6 +609,53 @@ func TestExecutionDriftRepairStopsWhenLeadershipIsLostMidPass(t *testing.T) {
 	}
 }
 
+// A page bound smaller than leaderRecheckInterval must not disable the
+// mid-sweep re-check: the count has to carry across pages. A page-local index
+// never reaches the interval when Batch < leaderRecheckInterval, so a demoted
+// replica would keep repairing to the end of the sweep.
+func TestExecutionDriftRepairRechecksLeadershipAcrossPages(t *testing.T) {
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	const total = 80
+	const batch = 20 // below leaderRecheckInterval: no page-local index reaches it
+	candidates := make([]store.ExecutionDriftCandidate, total)
+	statuses := &fakeDriftStatuses{statuses: make(map[types.ExecutionID]types.ExecutionStatus, total)}
+	for i := range candidates {
+		id := types.ExecutionID("exec-" + strconv.Itoa(i))
+		candidates[i] = store.ExecutionDriftCandidate{
+			ID:        id,
+			Namespace: "default",
+			UpdatedAt: now.Add(-time.Hour),
+			RowID:     uint64(i + 1),
+		}
+		statuses.statuses[id] = types.ExecutionStatusSuccess
+	}
+	scanner := &fakeDriftScanner{candidates: candidates}
+	recorder := &fakeDriftRecorder{}
+	// allow=1 passes the entry gate and fails the first mid-sweep re-check,
+	// which falls in the second page because the examined count is cumulative.
+	gate := &flipAfterGate{allow: 1}
+	w := newDriftWorkerForTest(scanner, statuses, recorder, ExecutionDriftConfig{Elector: gate, Batch: batch})
+
+	if repaired := w.ReconcileOnce(context.Background()); repaired != leaderRecheckInterval {
+		t.Fatalf("ReconcileOnce repaired %d rows, want %d before the cross-page leadership re-check",
+			repaired, leaderRecheckInterval)
+	}
+	if calls := scanner.scanCalls(); calls != 2 {
+		t.Fatalf("scanner calls = %d, want 2: the re-check must fire while reading the second page", calls)
+	}
+	if got := len(recorder.recorded()); got != leaderRecheckInterval {
+		t.Fatalf("writes = %d, want %d: the remaining candidates must be left for the new leader",
+			got, leaderRecheckInterval)
+	}
+	if got := gate.callCount(); got != 2 {
+		t.Fatalf("leadership checks = %d, want 2 (entry + one cumulative re-check)", got)
+	}
+	last := candidates[leaderRecheckInterval-1]
+	if !w.cursor.UpdatedAt.Equal(last.UpdatedAt) || w.cursor.RowID != last.RowID {
+		t.Fatalf("cursor after the mid-page stop = %+v, want the last classified row (id=%d)", w.cursor, last.RowID)
+	}
+}
+
 // DryRun classifies exactly like a real sweep and writes nothing.
 func TestExecutionDriftRepairDryRunWritesNothing(t *testing.T) {
 	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
