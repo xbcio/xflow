@@ -134,9 +134,22 @@ func TestLocalMapEmitsOneSpanPerBatchNeverPerItem(t *testing.T) {
 			t.Errorf("xflow.map.batch batch_count = %d, present=%t; want at least 1", n, ok)
 		}
 	}
+	batchSpanIDs := make(map[oteltrace.SpanID]struct{}, len(batches))
+	for _, span := range batches {
+		batchSpanIDs[span.SpanContext().SpanID()] = struct{}{}
+	}
 	for _, span := range bodies {
 		if got := span.SpanContext().TraceID(); got != parentSC.TraceID() {
 			t.Errorf("xflow.map.body trace = %s, want submission trace %s", got, parentSC.TraceID())
+		}
+		// The body runs inside the batch's ExecuteBatch, on the batch span's
+		// context: one body per batch must be that batch span's child, not a
+		// sibling root that merely shares the trace.
+		if _, ok := batchSpanIDs[span.Parent().SpanID()]; !ok {
+			t.Errorf("xflow.map.body parent = %s, want the xflow.map.batch span that ran it", span.Parent().SpanID())
+		}
+		if span.Parent().IsRemote() {
+			t.Errorf("xflow.map.body parent is remote; the enclosing batch span is local to this process")
 		}
 	}
 	// The item executions go through subgraph.Executor.Execute; the body marks
