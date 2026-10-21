@@ -51,15 +51,28 @@ func (e *Engine) handleDisabledNode(ctx context.Context, task *Task, flush bool)
 	}
 
 	port := "main"
-	advance := &Task{
-		ExecutionID:  task.ExecutionID,
-		NodeName:     task.NodeName,
-		NodeIdx:      task.NodeIdx,
-		UnitIdx:      unitIdx,
-		Type:         TaskTypeNodeAdvance,
-		ActivationID: task.ActivationID,
-		AutoDepth:    task.AutoDepth,
-		Port:         &port,
+	// Same two alternative carriers as the pin hook and the ordinary acyclic
+	// commit: a folding-capable store takes the arrivals inside this fenced
+	// transition and gets no advance intent, a store without the capability
+	// keeps the pre-fold advance task. This hook returned early for a cyclic
+	// graph and a disabled commit is never fatal, so the store's capability is
+	// the only remaining input to the decision.
+	foldArrivals := e.supportsArrivalFolding()
+	var advance *Task
+	var arrivals []DownstreamArrival
+	if foldArrivals {
+		arrivals = downstreamArrivals(g, task.NodeIdx, port)
+	} else {
+		advance = &Task{
+			ExecutionID:  task.ExecutionID,
+			NodeName:     task.NodeName,
+			NodeIdx:      task.NodeIdx,
+			UnitIdx:      unitIdx,
+			Type:         TaskTypeNodeAdvance,
+			ActivationID: task.ActivationID,
+			AutoDepth:    task.AutoDepth,
+			Port:         &port,
+		}
 	}
 	req := CommitNodeRequest{
 		ExecutionID:   task.ExecutionID,
@@ -73,10 +86,18 @@ func (e *Engine) handleDisabledNode(ctx context.Context, task *Task, flush bool)
 		Port:          port,
 		System:        true,
 		AdvanceTask:   advance,
+		Arrivals:      arrivals,
 	}
 	result, err := e.commitNode(ctx, req)
 	if err != nil {
 		return true, fmt.Errorf("commit disabled node %q/%q: %w", task.ExecutionID, task.NodeName, err)
+	}
+	// A folded commit IS the advance the separate AdvanceNode call used to
+	// perform, so the skips that transition resolved are reported from its
+	// result. A fallback commit reports nothing here: its advance task reports
+	// them when HandleSystemTask consumes it.
+	if foldArrivals && result.Outcome == CommitOutcomeAccepted {
+		e.notifySkip(ctx, flowAdvance, result.Skipped)
 	}
 	return true, e.afterAtomicCommitWithFlush(ctx, req, result, flush)
 }
