@@ -33,20 +33,10 @@ type traceCarrierCacheEntry struct {
 // the memo alongside the graph cache. A hit returns a copy, so a caller that
 // mutates the map cannot poison later dispatches.
 //
-// A backend without the capability still reads through GetExecution, unchanged.
+// A backend without the capability reads the full snapshot via GetExecution.
+// That answer is memoized the same way: the carrier is immutable, and tracing
+// must not re-read a snapshot on every background span of an execution.
 func (e *Engine) ExecutionTraceCarrier(ctx context.Context, id types.ExecutionID) (map[string]string, error) {
-	reader, ok := e.state.(ExecutionTraceCarrierReader)
-	if !ok {
-		snap, err := e.state.GetExecution(ctx, id)
-		if err != nil {
-			return nil, err
-		}
-		if snap == nil {
-			return nil, nil
-		}
-		return snap.TraceCarrier, nil
-	}
-
 	e.mu.RLock()
 	cached, hit := e.traceCarriers[id]
 	e.mu.RUnlock()
@@ -54,12 +44,25 @@ func (e *Engine) ExecutionTraceCarrier(ctx context.Context, id types.ExecutionID
 		return cloneTraceCarrier(cached.carrier), nil
 	}
 
-	carrier, found, err := reader.GetExecutionTraceCarrier(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	if !found {
-		carrier = nil
+	var carrier map[string]string
+	if reader, ok := e.state.(ExecutionTraceCarrierReader); ok {
+		found := false
+		var err error
+		carrier, found, err = reader.GetExecutionTraceCarrier(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			carrier = nil
+		}
+	} else {
+		snap, err := e.state.GetExecution(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if snap != nil {
+			carrier = snap.TraceCarrier
+		}
 	}
 	// Store the backend's answer even when it is empty: the entry itself is the
 	// sentinel that stops a carrier-less execution from re-reading on every
