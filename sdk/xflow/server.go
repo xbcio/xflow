@@ -540,7 +540,10 @@ type executionDriftRepairConfig struct {
 // classifies candidates and reports them without writing.
 //
 // Zero or negative period/staleAfter/batch keep the control defaults (1m, 5m,
-// 256). The scan is scoped to WithServerNamespaces' owned set when one is
+// 256); batch is one scan page and is capped at control.MaxExecutionDriftBatch,
+// because a sweep pages through candidates rather than reading one fixed
+// window (an unrepairable row at the head of the order must not starve the rows
+// behind it). The scan is scoped to WithServerNamespaces' owned set when one is
 // declared, and leader-gated like the other maintenance workers. A store that
 // does not implement store.ExecutionDriftScanner (an in-memory one) or a
 // backend that does not implement engine.ExecutionStatusReader leaves the

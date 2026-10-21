@@ -173,7 +173,7 @@ type driftScanningStore struct {
 	owned  []namespace.Namespace
 }
 
-func (s *driftScanningStore) ListStaleRunningExecutions(_ context.Context, owned []namespace.Namespace, before time.Time, limit int) ([]store.ExecutionDriftCandidate, error) {
+func (s *driftScanningStore) ListStaleRunningExecutions(_ context.Context, owned []namespace.Namespace, before time.Time, _ store.ExecutionDriftCursor, limit int) ([]store.ExecutionDriftCandidate, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++

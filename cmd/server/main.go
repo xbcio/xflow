@@ -271,7 +271,7 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	fs.DurationVar(&cfg.executionDriftStaleAfter, "execution-drift-stale-after", control.DefaultExecutionDriftStaleAfter,
 		"How long a durable running row must be untouched before it is a repair candidate (env XFLOW_EXECUTION_DRIFT_STALE_AFTER)")
 	fs.IntVar(&cfg.executionDriftBatch, "execution-drift-batch", control.DefaultExecutionDriftBatch,
-		"Maximum durable rows one execution drift repair sweep rewrites (env XFLOW_EXECUTION_DRIFT_BATCH)")
+		"Maximum candidate rows one execution drift repair scan fetches; rows skipped as unrepairable count toward it (env XFLOW_EXECUTION_DRIFT_BATCH)")
 	fs.BoolVar(&cfg.executionDriftDryRun, "execution-drift-dry-run", false,
 		"Classify execution drift without writing the durable projection (env XFLOW_EXECUTION_DRIFT_DRY_RUN)")
 	fs.StringVar(&cfg.authPolicy, "auth-policy", "", "Path to runners.yaml (empty = auth disabled); SIGHUP re-reads this file without a restart")

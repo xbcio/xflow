@@ -22,9 +22,20 @@ const (
 	// DefaultExecutionDriftStaleAfter is how long a durable "running" row
 	// must have been untouched before it becomes a repair candidate.
 	DefaultExecutionDriftStaleAfter = 5 * time.Minute
-	// DefaultExecutionDriftBatch bounds one sweep so a large drift backlog
+	// DefaultExecutionDriftBatch bounds one scan page so a large drift backlog
 	// cannot hold a scan lock or starve the leader's other maintenance work.
 	DefaultExecutionDriftBatch = 256
+	// MaxExecutionDriftBatch is the ceiling ExecutionDriftConfig.Batch is
+	// clamped to. One page is one SQL read plus an authoritative status read
+	// per row, so a mistyped --execution-drift-batch must not turn a page into
+	// a table-sized pass.
+	MaxExecutionDriftBatch = 1024
+	// DefaultExecutionDriftMaxPages bounds how many pages one sweep walks.
+	// Paging is what stops unrepairable rows at the head of the scan order
+	// from starving the rows behind them, but an unbounded walk would turn one
+	// sweep into a full-table pass; with the default batch this caps a sweep
+	// at 2048 candidate rows.
+	DefaultExecutionDriftMaxPages = 8
 )
 
 // Skip reasons reported through ExecutionDriftObserver.OnExecutionDriftSkipped.
@@ -44,6 +55,15 @@ const (
 	// evidence of a terminal status; fabricating one here would turn a
 	// retention artifact into a durable lie.
 	ExecutionDriftSkipNotFound = "not_found"
+	// ExecutionDriftSkipAlreadyAdvanced means the conditional repair matched
+	// no row: between the scan and the write the ordinary projection path
+	// advanced the durable row itself (with its own error_msg), or the row was
+	// deleted. Nothing is wrong and nothing is written.
+	ExecutionDriftSkipAlreadyAdvanced = "already_advanced"
+	// ExecutionDriftSkipRepairUnsupported means the store advertises the scan
+	// but not the conditional write (store.ExecutionDriftRepairer). The sweep
+	// can still classify candidates, but it cannot repair them.
+	ExecutionDriftSkipRepairUnsupported = "repair_unsupported"
 )
 
 // ExecutionDriftObserver receives drift repair outcomes so observability
@@ -59,7 +79,8 @@ type ExecutionDriftObserver interface {
 	OnExecutionDriftRepaired(ctx context.Context, id types.ExecutionID, status types.ExecutionStatus, age time.Duration, applied bool)
 	// OnExecutionDriftSkipped reports a candidate left untouched, by reason
 	// (ExecutionDriftSkipRunning, ExecutionDriftSkipNonTerminal,
-	// ExecutionDriftSkipNotFound).
+	// ExecutionDriftSkipNotFound, ExecutionDriftSkipAlreadyAdvanced,
+	// ExecutionDriftSkipRepairUnsupported).
 	OnExecutionDriftSkipped(ctx context.Context, reason string)
 	// OnExecutionDriftError reports a per-candidate error (authority read or
 	// projection write). The row stays as it was and is retried next sweep.
@@ -75,7 +96,11 @@ type ExecutionDriftConfig struct {
 	// untouched to become a candidate. Defaults to
 	// DefaultExecutionDriftStaleAfter.
 	StaleAfter time.Duration
-	// Batch bounds one sweep. Defaults to DefaultExecutionDriftBatch.
+	// Batch bounds one scan page. Defaults to DefaultExecutionDriftBatch;
+	// values above MaxExecutionDriftBatch are clamped, because a page is one
+	// SQL read plus an authoritative read per row. Skipped candidates count
+	// toward the page, so a page is a bound on rows examined, not rows
+	// rewritten.
 	Batch int
 	// DryRun classifies candidates (authority read + terminal decision) and
 	// reports them through the observer, but writes nothing: every row stays
@@ -117,26 +142,50 @@ type ExecutionDriftConfig struct {
 //
 // The worker never invents an outcome, never writes a status Redis did not
 // report, and never rewrites a row that already agrees with Redis.
+//
+// Each sweep walks pages of candidates in the scan's total order, carrying a
+// cursor between pages so an unrepairable row at the head of the order cannot
+// starve the rows behind it. The cursor is kept across sweeps (a sweep capped
+// by DefaultExecutionDriftMaxPages, or interrupted by a lost leadership,
+// resumes where it stopped) and reset to the beginning when a sweep reaches the
+// end of the candidate set, so the rows skipped on the way are retried next
+// time.
+//
+// The write itself is conditional (store.ExecutionDriftRepairer): the scan and
+// the repair are not atomic, and the ordinary projection path may advance a
+// candidate between them. A row that is no longer "running" is left alone.
 type ExecutionDriftWorker struct {
 	scanner    store.ExecutionDriftScanner
 	statuses   engine.ExecutionStatusReader
 	executions store.Executions
+	repairer   store.ExecutionDriftRepairer
 	elector    LeaderGate
 	observer   ExecutionDriftObserver
 	log        engine.Logger
 	period     time.Duration
 	staleAfter time.Duration
 	batch      int
+	maxPages   int
 	dryRun     bool
 	owned      []namespace.Namespace
-	clock      func() time.Time
-	sleepFunc  func(context.Context, time.Duration) error
+	// cursor is the position of the last candidate the current sweep
+	// classified. ReconcileOnce is driven by a single Run goroutine; it is not
+	// safe to call concurrently with itself or with Run.
+	cursor    store.ExecutionDriftCursor
+	clock     func() time.Time
+	sleepFunc func(context.Context, time.Duration) error
 }
 
 // NewExecutionDriftWorker builds a worker. scanner, statuses and executions
 // are required in production; when any is nil the worker is a no-op, which is
 // how a store that does not implement store.ExecutionDriftScanner (an
 // in-memory one) is handled without a second nil check at every call site.
+//
+// executions should also implement store.ExecutionDriftRepairer, the
+// conditional write. Without it the sweep still scans and classifies but skips
+// every write with ExecutionDriftSkipRepairUnsupported: repairing through the
+// unconditional Executions.UpdateExecutionStatus would erase an error_msg the
+// ordinary projection path recorded between the scan and the write.
 func NewExecutionDriftWorker(scanner store.ExecutionDriftScanner, statuses engine.ExecutionStatusReader, executions store.Executions, cfg ExecutionDriftConfig) *ExecutionDriftWorker {
 	if cfg.Period <= 0 {
 		cfg.Period = DefaultExecutionDriftPeriod
@@ -147,6 +196,13 @@ func NewExecutionDriftWorker(scanner store.ExecutionDriftScanner, statuses engin
 	if cfg.Batch <= 0 {
 		cfg.Batch = DefaultExecutionDriftBatch
 	}
+	if cfg.Batch > MaxExecutionDriftBatch {
+		if cfg.Logger != nil {
+			cfg.Logger.Warn("execution drift repair: batch clamped to the page ceiling",
+				"configured", cfg.Batch, "max", MaxExecutionDriftBatch)
+		}
+		cfg.Batch = MaxExecutionDriftBatch
+	}
 	// Empty entries are dropped, and a set with nothing usable left is the
 	// legacy unscoped scan — the same collapse namespace.NormalizeOwned applies
 	// and the audit reconcile worker performs for its own scope.
@@ -156,16 +212,26 @@ func NewExecutionDriftWorker(scanner store.ExecutionDriftScanner, statuses engin
 			owned = append(owned, ns)
 		}
 	}
+	// The conditional write is a separate optional capability from the
+	// Executions surface the worker is given. Resolving it once here keeps the
+	// per-candidate path free of repeated assertions; a store that has the scan
+	// but not the write still classifies, it just cannot repair.
+	var repairer store.ExecutionDriftRepairer
+	if executions != nil {
+		repairer, _ = executions.(store.ExecutionDriftRepairer)
+	}
 	return &ExecutionDriftWorker{
 		scanner:    scanner,
 		statuses:   statuses,
 		executions: executions,
+		repairer:   repairer,
 		elector:    cfg.Elector,
 		observer:   cfg.Observer,
 		log:        cfg.Logger,
 		period:     cfg.Period,
 		staleAfter: cfg.StaleAfter,
 		batch:      cfg.Batch,
+		maxPages:   DefaultExecutionDriftMaxPages,
 		dryRun:     cfg.DryRun,
 		owned:      owned,
 		clock:      func() time.Time { return time.Now().UTC() },
@@ -195,6 +261,14 @@ func (w *ExecutionDriftWorker) Run(ctx context.Context) error {
 // rows rewritten. In DryRun mode nothing is written, so the return is always 0
 // and the classifications arrive through the observer instead.
 //
+// A sweep walks pages of at most Batch candidates until a short page says the
+// candidate set is exhausted (then the cursor resets, so the next sweep retries
+// the rows skipped on the way), it has walked DefaultExecutionDriftMaxPages
+// pages (the cursor is kept, so the next sweep resumes), or leadership is lost.
+// Without that paging an unrepairable row at the head of the order (its Redis
+// status has expired) would be re-read forever and every row behind it would
+// never be examined.
+//
 // A per-candidate error does not abort the sweep: each row is independent, and
 // stopping at the first transient failure would let one bad row (or one
 // authority blip) starve every older row behind it. Failed rows stay stale and
@@ -208,33 +282,56 @@ func (w *ExecutionDriftWorker) ReconcileOnce(ctx context.Context) int {
 	}
 	before := w.clock().Add(-w.staleAfter)
 	started := time.Now()
-	candidates, err := w.scanner.ListStaleRunningExecutions(ctx, w.owned, before, w.batch)
-	w.observe(func(o ExecutionDriftObserver) {
-		o.OnExecutionDriftScan(ctx, len(candidates), time.Since(started), err)
-	})
-	if err != nil {
-		if w.log != nil {
-			w.log.Error("execution drift repair: list stale running executions", "err", err)
-		}
-		return 0
-	}
-	repaired := 0
-	for i, candidate := range candidates {
-		// Leadership can change while a bounded sweep is in flight; stop
-		// writing rather than keep repairing projections the new leader will
-		// scan again (the rewrite is idempotent, but the work is not ours).
-		if i > 0 && i%leaderRecheckInterval == 0 && leaderLost(w.elector) {
-			if w.log != nil {
-				w.log.Info("execution drift repair stopped early",
-					"repaired", repaired,
-					"inspected", i,
-					"candidates", len(candidates),
-				)
-			}
+	repaired, scanned := 0, 0
+	var scanErr error
+	for page := 0; page < w.maxPages; page++ {
+		candidates, err := w.scanner.ListStaleRunningExecutions(ctx, w.owned, before, w.cursor, w.batch)
+		if err != nil {
+			scanErr = err
 			break
 		}
-		if w.repair(ctx, candidate) {
-			repaired++
+		scanned += len(candidates)
+		stopped := false
+		for i, candidate := range candidates {
+			// Leadership can change while a bounded sweep is in flight; stop
+			// writing rather than keep repairing projections the new leader will
+			// scan again (the rewrite is idempotent, but the work is not ours).
+			if i > 0 && i%leaderRecheckInterval == 0 && leaderLost(w.elector) {
+				if w.log != nil {
+					w.log.Info("execution drift repair stopped early",
+						"repaired", repaired,
+						"inspected", scanned-len(candidates)+i,
+						"candidates", scanned,
+					)
+				}
+				stopped = true
+				break
+			}
+			// Advance before classifying: this candidate has been examined
+			// either way, and a failed authority read or write is retried on
+			// the next sweep that starts from the beginning, not by re-reading
+			// it inside this one.
+			w.cursor = store.ExecutionDriftCursor{UpdatedAt: candidate.UpdatedAt, RowID: candidate.RowID}
+			if w.repair(ctx, candidate) {
+				repaired++
+			}
+		}
+		if stopped {
+			break
+		}
+		if len(candidates) < w.batch {
+			// Short page: the candidate set is exhausted, so restart the next
+			// sweep from the oldest row to retry what this one skipped.
+			w.cursor = store.ExecutionDriftCursor{}
+			break
+		}
+	}
+	w.observe(func(o ExecutionDriftObserver) {
+		o.OnExecutionDriftScan(ctx, scanned, time.Since(started), scanErr)
+	})
+	if scanErr != nil {
+		if w.log != nil {
+			w.log.Error("execution drift repair: list stale running executions", "err", scanErr)
 		}
 	}
 	return repaired
@@ -295,13 +392,41 @@ func (w *ExecutionDriftWorker) repair(ctx context.Context, candidate store.Execu
 		})
 		return false
 	}
-	if err := w.executions.UpdateExecutionStatus(recCtx, candidate.ID, status, ""); err != nil {
+	if w.repairer == nil {
+		// The store can be scanned but not conditionally written. Classifying
+		// without repairing is still the honest thing to do: the alternative
+		// is an unconditional rewrite, which would erase a real transition.
+		w.observe(func(o ExecutionDriftObserver) {
+			o.OnExecutionDriftSkipped(recCtx, ExecutionDriftSkipRepairUnsupported)
+		})
+		if w.log != nil {
+			w.log.Debug("execution drift repair skipped; store does not support the conditional repair write",
+				"execution_id", string(candidate.ID))
+		}
+		return false
+	}
+	applied, err := w.repairer.RepairRunningExecutionStatus(recCtx, candidate.ID, status)
+	if err != nil {
 		w.observe(func(o ExecutionDriftObserver) {
 			o.OnExecutionDriftError(recCtx, candidate.ID, err)
 		})
 		if w.log != nil {
 			w.log.Error("execution drift repair: update durable projection",
 				"execution_id", string(candidate.ID), "status", string(status), "err", err)
+		}
+		return false
+	}
+	if !applied {
+		// The row stopped reading "running" between the scan and this write:
+		// the ordinary projection path won the race, possibly with the very
+		// terminal status (and error_msg) this repair would have written. The
+		// conditional write matched nothing, which is the desired outcome.
+		w.observe(func(o ExecutionDriftObserver) {
+			o.OnExecutionDriftSkipped(recCtx, ExecutionDriftSkipAlreadyAdvanced)
+		})
+		if w.log != nil {
+			w.log.Debug("execution drift repair skipped; durable row advanced before the write",
+				"execution_id", string(candidate.ID), "status", string(status))
 		}
 		return false
 	}

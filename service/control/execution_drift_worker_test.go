@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"errors"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -13,8 +14,10 @@ import (
 )
 
 // fakeDriftScanner is an in-memory store.ExecutionDriftScanner. It records the
-// arguments of every scan so a test can assert the staleness window, the batch
-// bound and the owned scope without a SQL backend.
+// arguments of every scan so a test can assert the staleness window, the page
+// bound, the owned scope and the cursor without a SQL backend, and it filters
+// its fixture the way the SQL query does (strictly before the staleness bound,
+// strictly after the cursor in (updated_at, id) order).
 type fakeDriftScanner struct {
 	mu         sync.Mutex
 	candidates []store.ExecutionDriftCandidate
@@ -23,27 +26,51 @@ type fakeDriftScanner struct {
 	owned      []namespace.Namespace
 	before     time.Time
 	limit      int
+	cursors    []store.ExecutionDriftCursor
 }
 
 var _ store.ExecutionDriftScanner = (*fakeDriftScanner)(nil)
 
-func (f *fakeDriftScanner) ListStaleRunningExecutions(_ context.Context, owned []namespace.Namespace, before time.Time, limit int) ([]store.ExecutionDriftCandidate, error) {
+func (f *fakeDriftScanner) ListStaleRunningExecutions(_ context.Context, owned []namespace.Namespace, before time.Time, after store.ExecutionDriftCursor, limit int) ([]store.ExecutionDriftCandidate, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
 	f.owned = append([]namespace.Namespace(nil), owned...)
 	f.before = before
 	f.limit = limit
+	f.cursors = append(f.cursors, after)
 	if f.err != nil {
 		return nil, f.err
 	}
-	return append([]store.ExecutionDriftCandidate(nil), f.candidates...), nil
+	out := make([]store.ExecutionDriftCandidate, 0, limit)
+	for _, c := range f.candidates {
+		if !c.UpdatedAt.Before(before) {
+			continue
+		}
+		if after.UpdatedAt.IsZero() && after.RowID == 0 {
+			// Start of the scan.
+		} else if !c.UpdatedAt.After(after.UpdatedAt) &&
+			!(c.UpdatedAt.Equal(after.UpdatedAt) && c.RowID > after.RowID) {
+			continue
+		}
+		out = append(out, c)
+		if len(out) == limit {
+			break
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeDriftScanner) scanCalls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls
+}
+
+func (f *fakeDriftScanner) scanCursors() []store.ExecutionDriftCursor {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]store.ExecutionDriftCursor(nil), f.cursors...)
 }
 
 // fakeDriftStatuses is the authoritative status reader. An id absent from
@@ -84,30 +111,40 @@ func (f *fakeDriftStatuses) readNamespace(id types.ExecutionID) namespace.Namesp
 	return f.namespaces[id]
 }
 
-// fakeDriftRecorder implements store.Executions by embedding the interface (the
-// unused methods are never reached) and records UpdateExecutionStatus calls.
+// fakeDriftRecorder implements the conditional repair write
+// (store.ExecutionDriftRepairer) and records what was written. It deliberately
+// does NOT implement the unconditional Executions.UpdateExecutionStatus: the
+// embedded store.Executions is nil, so a worker that fell back to the
+// unconditional write would panic rather than silently pass.
 type fakeDriftRecorder struct {
 	store.Executions
-	mu      sync.Mutex
-	updates []driftUpdate
-	errs    map[types.ExecutionID]error
+	mu       sync.Mutex
+	updates  []driftUpdate
+	errs     map[types.ExecutionID]error
+	advanced map[types.ExecutionID]bool
 }
 
 type driftUpdate struct {
 	id     types.ExecutionID
 	status types.ExecutionStatus
-	errMsg string
 	ns     namespace.Namespace
 }
 
-func (f *fakeDriftRecorder) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID, status types.ExecutionStatus, errMsg string) error {
+var _ store.ExecutionDriftRepairer = (*fakeDriftRecorder)(nil)
+
+func (f *fakeDriftRecorder) RepairRunningExecutionStatus(ctx context.Context, id types.ExecutionID, status types.ExecutionStatus) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.errs[id]; err != nil {
-		return err
+		return false, err
 	}
-	f.updates = append(f.updates, driftUpdate{id: id, status: status, errMsg: errMsg, ns: namespace.FromContext(ctx)})
-	return nil
+	if f.advanced[id] {
+		// The ordinary projection path advanced the row between the scan and
+		// this write, so the conditional update matches nothing.
+		return false, nil
+	}
+	f.updates = append(f.updates, driftUpdate{id: id, status: status, ns: namespace.FromContext(ctx)})
+	return true, nil
 }
 
 func (f *fakeDriftRecorder) recorded() []driftUpdate {
@@ -225,10 +262,9 @@ func TestExecutionDriftRepairWritesTerminalStatus(t *testing.T) {
 	if updates[0].id != "exec-1" || updates[0].status != types.ExecutionStatusSuccess {
 		t.Fatalf("update = %+v, want exec-1 -> success", updates[0])
 	}
-	if updates[0].errMsg != "" {
-		t.Fatalf("errMsg = %q, want empty: the authority reader reports a status, not an error message, "+
-			"and inventing one would write a reason the run never gave", updates[0].errMsg)
-	}
+	// The repair copies a status, never a message: there is no errMsg argument
+	// on the conditional write, and the SQL only clears error_msg on a row that
+	// still reads running (pinned in sqlstore's query-shape test).
 	// The authoritative read must address the candidate's own namespace: Redis
 	// keys are namespaced, and namespace.Default would miss every tenant row.
 	if got := statuses.readNamespace("exec-1"); got != "tenant-a" {
@@ -336,6 +372,168 @@ func TestExecutionDriftRepairLeavesExpiredAuthorityAlone(t *testing.T) {
 	}
 }
 
+// The scan and the conditional write are not atomic: the ordinary projection
+// path may advance the row between them, with the very terminal status (and
+// error_msg) the repair would have copied. The conditional write must match no
+// row, so that real transition and its message survive.
+func TestExecutionDriftRepairLeavesAdvancedProjectionAlone(t *testing.T) {
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	scanner := &fakeDriftScanner{candidates: []store.ExecutionDriftCandidate{
+		driftCandidate("exec-advanced", "default", now.Add(-time.Minute*10)),
+	}}
+	statuses := &fakeDriftStatuses{statuses: map[types.ExecutionID]types.ExecutionStatus{
+		"exec-advanced": types.ExecutionStatusFailed,
+	}}
+	// The simulated race: between the scan and the repair the row was
+	// projected as failed WITH an error_msg, so the conditional update matches
+	// nothing.
+	recorder := &fakeDriftRecorder{advanced: map[types.ExecutionID]bool{"exec-advanced": true}}
+	obs := &recordingDriftObserver{}
+	w := newDriftWorkerForTest(scanner, statuses, recorder, ExecutionDriftConfig{Observer: obs})
+
+	if repaired := w.ReconcileOnce(context.Background()); repaired != 0 {
+		t.Fatalf("ReconcileOnce repaired %d rows whose row had already advanced, want 0", repaired)
+	}
+	if updates := recorder.recorded(); len(updates) != 0 {
+		t.Fatalf("wrote %+v over a row the ordinary path already advanced; its error_msg belongs to the real transition", updates)
+	}
+	if got := obs.skipReasons(); len(got) != 1 || got[0] != ExecutionDriftSkipAlreadyAdvanced {
+		t.Fatalf("skip reasons = %v, want [%s]", got, ExecutionDriftSkipAlreadyAdvanced)
+	}
+	if got := obs.errorIDs(); len(got) != 0 {
+		t.Fatalf("a benign lost race was reported as an error: %v", got)
+	}
+}
+
+// An unrepairable row (its Redis status has expired) sits at the head of the
+// scan order forever. A fixed LIMIT would re-read the same batch every sweep
+// and never reach the repairable row behind it; the cursor pages past the
+// expired rows within one sweep, and reaching the end resets the cursor so
+// they are retried next time.
+func TestExecutionDriftRepairPagesPastUnrepairableCandidates(t *testing.T) {
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	expiredAt := now.Add(-3 * time.Hour)
+	secondAt := now.Add(-2 * time.Hour)
+	repairableAt := now.Add(-time.Hour)
+	scanner := &fakeDriftScanner{candidates: []store.ExecutionDriftCandidate{
+		{ID: "expired-1", Namespace: "default", UpdatedAt: expiredAt, RowID: 11},
+		{ID: "expired-2", Namespace: "default", UpdatedAt: secondAt, RowID: 12},
+		{ID: "repairable", Namespace: "default", UpdatedAt: repairableAt, RowID: 13},
+	}}
+	statuses := &fakeDriftStatuses{statuses: map[types.ExecutionID]types.ExecutionStatus{
+		"repairable": types.ExecutionStatusSuccess,
+	}}
+	recorder := &fakeDriftRecorder{}
+	obs := &recordingDriftObserver{}
+	w := newDriftWorkerForTest(scanner, statuses, recorder, ExecutionDriftConfig{Batch: 2, Observer: obs})
+
+	if repaired := w.ReconcileOnce(context.Background()); repaired != 1 {
+		t.Fatalf("ReconcileOnce repaired %d rows, want 1: the page after the expired head holds the repairable row", repaired)
+	}
+	updates := recorder.recorded()
+	if len(updates) != 1 || updates[0].id != "repairable" {
+		t.Fatalf("updates = %+v, want [repairable]", updates)
+	}
+	if got := obs.skipReasons(); len(got) != 2 ||
+		got[0] != ExecutionDriftSkipNotFound || got[1] != ExecutionDriftSkipNotFound {
+		t.Fatalf("skip reasons = %v, want two not_found: the expired rows still count as examined", got)
+	}
+	if calls := scanner.scanCalls(); calls != 2 {
+		t.Fatalf("scanner calls = %d, want 2 (a full page, then a short one)", calls)
+	}
+	cursors := scanner.scanCursors()
+	if len(cursors) != 2 {
+		t.Fatalf("recorded %d cursors, want 2", len(cursors))
+	}
+	if !cursors[0].UpdatedAt.IsZero() || cursors[0].RowID != 0 {
+		t.Fatalf("first page cursor = %+v, want the zero start", cursors[0])
+	}
+	if !cursors[1].UpdatedAt.Equal(secondAt) || cursors[1].RowID != 12 {
+		t.Fatalf("second page cursor = %+v, want (updated_at=%v, id=12)", cursors[1], secondAt)
+	}
+	if !w.cursor.UpdatedAt.IsZero() || w.cursor.RowID != 0 {
+		t.Fatalf("cursor after reaching the end = %+v, want the zero start", w.cursor)
+	}
+
+	// The next sweep starts from the head again, so the rows skipped this time
+	// are re-examined rather than abandoned.
+	_ = w.ReconcileOnce(context.Background())
+	cursors = scanner.scanCursors()
+	if len(cursors) != 4 {
+		t.Fatalf("recorded %d cursors after two sweeps, want 4", len(cursors))
+	}
+	if !cursors[2].UpdatedAt.IsZero() || cursors[2].RowID != 0 {
+		t.Fatalf("second sweep's first cursor = %+v, want the zero start", cursors[2])
+	}
+}
+
+// A sweep whose page budget runs out keeps its cursor, so the next sweep
+// resumes where it stopped instead of rescanning the head it just examined.
+func TestExecutionDriftRepairKeepsCursorWhenPageBudgetRunsOut(t *testing.T) {
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	secondAt := now.Add(-2 * time.Hour)
+	scanner := &fakeDriftScanner{candidates: []store.ExecutionDriftCandidate{
+		{ID: "expired-1", Namespace: "default", UpdatedAt: now.Add(-3 * time.Hour), RowID: 11},
+		{ID: "expired-2", Namespace: "default", UpdatedAt: secondAt, RowID: 12},
+		{ID: "repairable", Namespace: "default", UpdatedAt: now.Add(-time.Hour), RowID: 13},
+	}}
+	statuses := &fakeDriftStatuses{statuses: map[types.ExecutionID]types.ExecutionStatus{
+		"repairable": types.ExecutionStatusSuccess,
+	}}
+	recorder := &fakeDriftRecorder{}
+	w := newDriftWorkerForTest(scanner, statuses, recorder, ExecutionDriftConfig{Batch: 2})
+	w.maxPages = 1
+
+	if repaired := w.ReconcileOnce(context.Background()); repaired != 0 {
+		t.Fatalf("first sweep repaired %d rows, want 0: its one page is the expired head", repaired)
+	}
+	if !w.cursor.UpdatedAt.Equal(secondAt) || w.cursor.RowID != 12 {
+		t.Fatalf("cursor after an exhausted page budget = %+v, want (updated_at=%v, id=12)", w.cursor, secondAt)
+	}
+
+	// The next sweep resumes after the cursor and reaches the repairable row.
+	if repaired := w.ReconcileOnce(context.Background()); repaired != 1 {
+		t.Fatalf("resumed sweep repaired %d rows, want 1", repaired)
+	}
+	cursors := scanner.scanCursors()
+	if len(cursors) != 2 || !cursors[1].UpdatedAt.Equal(secondAt) || cursors[1].RowID != 12 {
+		t.Fatalf("resumed sweep cursor = %+v, want the saved (updated_at=%v, id=12)", cursors, secondAt)
+	}
+	if !w.cursor.UpdatedAt.IsZero() || w.cursor.RowID != 0 {
+		t.Fatalf("cursor after the resumed sweep reached the end = %+v, want the zero start", w.cursor)
+	}
+}
+
+// A store can advertise the scan without the conditional write. The sweep
+// still classifies candidates — that is observable and honest — but it must
+// write nothing, and it must not fall back to the unconditional update path
+// that would erase an error_msg.
+func TestExecutionDriftRepairWithoutConditionalWriteSkips(t *testing.T) {
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	scanner := &fakeDriftScanner{candidates: []store.ExecutionDriftCandidate{
+		driftCandidate("exec-1", "default", now.Add(-time.Hour)),
+	}}
+	statuses := &fakeDriftStatuses{statuses: map[types.ExecutionID]types.ExecutionStatus{
+		"exec-1": types.ExecutionStatusSuccess,
+	}}
+	obs := &recordingDriftObserver{}
+	// The embedded interface is nil, so any call to UpdateExecutionStatus
+	// panics: the worker's only allowed write path here is the conditional one,
+	// which this type does not implement.
+	w := NewExecutionDriftWorker(scanner, statuses, struct{ store.Executions }{}, ExecutionDriftConfig{Observer: obs})
+	w.clock = func() time.Time { return now }
+
+	if repaired := w.ReconcileOnce(context.Background()); repaired != 0 {
+		t.Fatalf("ReconcileOnce repaired %d rows without the conditional write, want 0", repaired)
+	}
+	if got := statuses.calls; got != 1 {
+		t.Fatalf("authority reads = %d, want 1: classification still happens", got)
+	}
+	if got := obs.skipReasons(); len(got) != 1 || got[0] != ExecutionDriftSkipRepairUnsupported {
+		t.Fatalf("skip reasons = %v, want [%s]", got, ExecutionDriftSkipRepairUnsupported)
+	}
+}
+
 // Only the leader may read authority and write projections; followers must not
 // even scan (that is the cost the gate exists to remove).
 func TestExecutionDriftRepairRequiresLeadership(t *testing.T) {
@@ -366,6 +564,48 @@ func TestExecutionDriftRepairRequiresLeadership(t *testing.T) {
 	}
 	if calls := scanner.scanCalls(); calls != 1 {
 		t.Fatalf("the leader scanned %d times, want 1", calls)
+	}
+}
+
+// Leadership is re-checked every leaderRecheckInterval candidates, not just at
+// entry: a replica demoted mid-sweep stops writing. The cursor it leaves behind
+// points at the last row it classified, so a later sweep resumes instead of
+// redoing that page.
+func TestExecutionDriftRepairStopsWhenLeadershipIsLostMidPass(t *testing.T) {
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	const total = 40
+	candidates := make([]store.ExecutionDriftCandidate, total)
+	statuses := &fakeDriftStatuses{statuses: make(map[types.ExecutionID]types.ExecutionStatus, total)}
+	for i := range candidates {
+		id := types.ExecutionID("exec-" + strconv.Itoa(i))
+		candidates[i] = store.ExecutionDriftCandidate{
+			ID:        id,
+			Namespace: "default",
+			UpdatedAt: now.Add(-time.Hour),
+			RowID:     uint64(i + 1),
+		}
+		statuses.statuses[id] = types.ExecutionStatusSuccess
+	}
+	scanner := &fakeDriftScanner{candidates: candidates}
+	recorder := &fakeDriftRecorder{}
+	// allow=1 passes the entry gate and fails the first mid-pass re-check.
+	gate := &flipAfterGate{allow: 1}
+	w := newDriftWorkerForTest(scanner, statuses, recorder, ExecutionDriftConfig{Elector: gate})
+
+	if repaired := w.ReconcileOnce(context.Background()); repaired != leaderRecheckInterval {
+		t.Fatalf("ReconcileOnce repaired %d rows, want %d before the mid-pass leadership re-check",
+			repaired, leaderRecheckInterval)
+	}
+	if got := len(recorder.recorded()); got != leaderRecheckInterval {
+		t.Fatalf("writes = %d, want %d: the remaining candidates must be left for the new leader",
+			got, leaderRecheckInterval)
+	}
+	if calls := scanner.scanCalls(); calls != 1 {
+		t.Fatalf("scanner calls = %d, want 1: a lost leader must not start another page", calls)
+	}
+	last := candidates[leaderRecheckInterval-1]
+	if !w.cursor.UpdatedAt.Equal(last.UpdatedAt) || w.cursor.RowID != last.RowID {
+		t.Fatalf("cursor after the mid-pass stop = %+v, want the last classified row (id=%d)", w.cursor, last.RowID)
 	}
 }
 
@@ -498,8 +738,23 @@ func TestNewExecutionDriftWorkerDefaults(t *testing.T) {
 	if w.batch != DefaultExecutionDriftBatch {
 		t.Fatalf("batch = %d, want %d", w.batch, DefaultExecutionDriftBatch)
 	}
+	if w.maxPages != DefaultExecutionDriftMaxPages {
+		t.Fatalf("maxPages = %d, want %d", w.maxPages, DefaultExecutionDriftMaxPages)
+	}
 	if w.owned != nil {
 		t.Fatalf("owned = %v, want nil (legacy unscoped scan)", w.owned)
+	}
+}
+
+// A mistyped batch is clamped rather than sent to the scanner: one page is one
+// SQL read plus one authoritative read per row, and a page budget that is not
+// bounded is the long-sweep problem the page cap exists to prevent.
+func TestNewExecutionDriftWorkerClampsBatch(t *testing.T) {
+	w := NewExecutionDriftWorker(&fakeDriftScanner{}, &fakeDriftStatuses{}, &fakeDriftRecorder{}, ExecutionDriftConfig{
+		Batch: MaxExecutionDriftBatch + 1,
+	})
+	if w.batch != MaxExecutionDriftBatch {
+		t.Fatalf("batch = %d, want the clamp to %d", w.batch, MaxExecutionDriftBatch)
 	}
 }
 

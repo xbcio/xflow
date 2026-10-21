@@ -83,13 +83,32 @@ type Executions interface {
 // ExecutionDriftCandidate is one durable execution row the drift scan
 // considers possibly stale: the SQL projection still says "running" and its
 // updated_at has not moved for the scan's staleness window. It carries only
-// what the repair needs to identify the row and re-read its authority — the
-// execution's id, its namespace (which the authoritative read needs to address
-// the right key) and the timestamp that made it a candidate.
+// what the repair needs to identify the row, re-read its authority and resume
+// the scan after it — the execution's id, its namespace (which the authoritative
+// read needs to address the right key), the timestamp that made it a candidate,
+// and the row's own primary key for the cursor tiebreak.
 type ExecutionDriftCandidate struct {
 	ID        types.ExecutionID
 	Namespace namespace.Namespace
 	UpdatedAt time.Time
+	// RowID is the durable row's auto-increment primary key. It is the
+	// tiebreak of the scan's documented total order and therefore half of the
+	// cursor: updated_at alone is not unique (the column is DATETIME(3), and
+	// rows written in the same millisecond share it).
+	RowID uint64
+}
+
+// ExecutionDriftCursor addresses the last durable row a scan page stopped at:
+// exactly its updated_at and primary-key values, in the scan's own order
+// (updated_at ASC, id ASC). The zero value is the start of the scan.
+//
+// A cursor the caller did not obtain from a previous page is not meaningful;
+// passing one is not an error but the resulting page starts wherever those
+// values point, which is how a resumed sweep continues without re-reading the
+// rows it already classified.
+type ExecutionDriftCursor struct {
+	UpdatedAt time.Time
+	RowID     uint64
 }
 
 // ExecutionDriftScanner is the optional durable-projection capability the
@@ -108,21 +127,52 @@ type ExecutionDriftCandidate struct {
 type ExecutionDriftScanner interface {
 	// ListStaleRunningExecutions returns at most limit executions whose
 	// durable row says "running" and whose updated_at is strictly before
-	// updatedBefore, oldest first (updated_at ASC, then the row id ASC, so the
-	// order is total and a fixed window advances as rows are repaired).
+	// updatedBefore, ordered by (updated_at ASC, id ASC) and strictly after
+	// the after cursor in that same total order.
+	//
+	// The cursor is what keeps a sweep that starts at unrepairable rows (their
+	// Redis status has expired) from starving every row behind them: the
+	// worker pages past them within one sweep instead of re-reading the same
+	// oldest batch forever. The zero cursor starts at the beginning.
 	//
 	// owned nil or empty is the legacy cross-namespace scan: every namespace
 	// (including rows stored with an empty namespace) is eligible. A non-empty
 	// set restricts the scan to those namespaces, matched by exact equality —
 	// same as the namespace column's own rule, an empty namespace is
 	// UNATTRIBUTED rather than the default namespace, so it is never widened
-	// into an owned scan. A malformed owned entry is refused with
+	// into an owned scan. A malformed owned entry is rejected with
 	// ErrInvalidNamespace rather than silently narrowed or widened.
 	//
 	// limit must be positive; a non-positive limit is refused rather than read
 	// as "unbounded", because this scan feeds writes back into the projection
 	// and an accidental whole-table sweep is not recoverable by retrying.
-	ListStaleRunningExecutions(ctx context.Context, owned []namespace.Namespace, updatedBefore time.Time, limit int) ([]ExecutionDriftCandidate, error)
+	ListStaleRunningExecutions(ctx context.Context, owned []namespace.Namespace, updatedBefore time.Time, after ExecutionDriftCursor, limit int) ([]ExecutionDriftCandidate, error)
+}
+
+// ExecutionDriftRepairer is the optional durable-projection write capability
+// the execution drift repair worker depends on. It is deliberately narrower
+// than Executions.UpdateExecutionStatus: the repair is a conditional write, and
+// making that conditional part of the global update path would change the
+// semantics every ordinary projection write depends on.
+//
+// The scan and the repair are not atomic. Between them the ordinary projection
+// path may have advanced the row to the very terminal status the repair was
+// about to copy (with its error_msg), and an unconditional rewrite at that
+// point would erase the message the real transition recorded. The conditional
+// write makes that race benign: the row is no longer "running", so there is
+// nothing to repair.
+//
+// This is optional like the scanner: a backend without a durable secondary has
+// nothing to implement. A worker whose store lacks it classifies candidates but
+// writes nothing, and reports the skips.
+type ExecutionDriftRepairer interface {
+	// RepairRunningExecutionStatus rewrites the durable row's status only while
+	// it still reads "running", clearing error_msg only as part of that same
+	// conditional write. It returns repaired=false (with a nil error) when no
+	// row matched — the row was advanced by the ordinary projection path or no
+	// longer exists — because that is a benign race, not a failure. A
+	// non-nil error means the write itself failed.
+	RepairRunningExecutionStatus(ctx context.Context, id types.ExecutionID, status types.ExecutionStatus) (repaired bool, err error)
 }
 
 // Nodes persists per-node execution state.
