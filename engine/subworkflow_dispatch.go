@@ -267,6 +267,14 @@ func (e *Engine) executeSubWorkflow(ctx context.Context, task *Task, g *graph.Gr
 // A nil lease with a nil error means the store refused the claim, which is
 // benign here: the node is running under a live lease, already parked, or
 // terminal, and every one of those is another dispatch's business.
+//
+// A store with the RouteCheckedLeaseAcquirer capability gets the same treatment
+// BuildTaskLease gives it: the execution-liveness and node-route decisions are
+// folded into the lease write instead of being made by separate reads, so an
+// execution or route that changes underneath the dispatch can no longer still
+// receive a lease. The graph is normally a cache hit on this path
+// (executeSubWorkflow already loaded it), and its AllowCycles is what the
+// acquire's route rules need — never a backend guess.
 func (e *Engine) acquireSubWorkflowLease(ctx context.Context, task *Task, meta graph.NodeMeta) (*TaskLease, error) {
 	leaseID, leaseToken := newLeaseCredentials()
 	lease := &TaskLease{
@@ -276,12 +284,50 @@ func (e *Engine) acquireSubWorkflowLease(ctx context.Context, task *Task, meta g
 		IssuedAt:   time.Now().UTC(),
 		TTL:        subWorkflowWaitLeaseTTL(e.resolveNodeTimeout(meta.Timeout)),
 	}
-	prev, acquired, err := e.state.AcquireTaskLease(ctx, lease)
-	if err != nil {
-		return nil, fmt.Errorf("acquire sub-workflow lease %q/%q: %w", task.ExecutionID, task.NodeName, err)
-	}
-	if !acquired {
-		return nil, nil
+	acquirer, routeChecked := e.state.(RouteCheckedLeaseAcquirer)
+	var prev *NodeSnapshot
+	if routeChecked {
+		g, err := e.loadGraph(ctx, task.ExecutionID)
+		if err != nil {
+			return nil, err
+		}
+		if g == nil {
+			// No cached and no persisted graph: the execution cannot be routed.
+			// The legacy call leaves this decision to the backend, whose acquire
+			// refuses an execution it no longer holds; that refusal is the benign
+			// no-op here. Falling back to it instead would write a lease with no
+			// route check at all — the very race this capability exists to close
+			// — so a store that still holds the execution but not its graph gets
+			// the same benign refusal rather than an acquire made blind.
+			return nil, nil
+		}
+		res, err := acquirer.AcquireTaskLeaseChecked(ctx, lease, LeaseAcquireOptions{AllowCycles: g.AllowCycles()})
+		if err != nil {
+			return nil, fmt.Errorf("acquire sub-workflow lease %q/%q: %w", task.ExecutionID, task.NodeName, err)
+		}
+		if !res.ExecutionFound || types.IsTerminalExecutionStatus(res.ExecutionStatus) {
+			// The acquire observed the execution as gone or finished. Evict any
+			// cached graph so a late dispatch cannot keep routing against it.
+			e.EvictExecution(task.ExecutionID)
+			return nil, nil
+		}
+		if !res.Acquired {
+			// A stale node route — another activation advanced, or a commit is
+			// in flight — exactly like a refused legacy claim: not this
+			// dispatch's business.
+			return nil, nil
+		}
+		prev = res.Previous
+	} else {
+		var acquired bool
+		var err error
+		prev, acquired, err = e.state.AcquireTaskLease(ctx, lease)
+		if err != nil {
+			return nil, fmt.Errorf("acquire sub-workflow lease %q/%q: %w", task.ExecutionID, task.NodeName, err)
+		}
+		if !acquired {
+			return nil, nil
+		}
 	}
 	lease.Attempt = 1
 	if prev != nil && prev.ActivationID == task.ActivationID {
