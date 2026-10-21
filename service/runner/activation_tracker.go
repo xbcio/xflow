@@ -422,13 +422,22 @@ func (t *ActivationTracker) ActiveCount() uint32 {
 	return live
 }
 
-// Shutdown stops all active subscriptions.
+// Shutdown stops all active subscriptions. Every subscription's context is
+// cancelled regardless of ctx — that is local and cannot block. The handler
+// Deactivate that follows may perform network I/O to close a consumer or
+// connection, so it is attempted only while ctx is live: once the caller's
+// shutdown budget is spent, further cleanup is pointless and only delays the
+// return. Deactivate itself takes no context, so a single hung call can only
+// be bounded by the caller.
 func (t *ActivationTracker) Shutdown(ctx context.Context) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	for id, sub := range t.active {
 		sub.cancel()
+		if ctx.Err() != nil {
+			continue
+		}
 		if err := t.handler.Deactivate(protocol.DeactivateDirective{
 			Namespace:       id.Namespace,
 			WorkflowID:      id.WorkflowID,

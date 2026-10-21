@@ -151,6 +151,19 @@ type RunnerConfig struct {
 	HeartbeatInterval time.Duration
 	PollWait          time.Duration
 
+	// ShutdownTimeout bounds how long a graceful stop — cancelling the context
+	// passed to Run — takes before Run returns. One budget covers both
+	// handler-owned phases: the wait for in-flight handlers to finish and
+	// report, and the activation-tracker cleanup that follows. Cancelling that
+	// context stops polling but does not cancel a running handler, so this is
+	// what ends the stop; work still running when it expires is abandoned by
+	// this process and replayed by the server (at-least-once). Zero keeps the
+	// runner service default (10s); negative values are treated the same as
+	// zero. Keep it below the orchestrator's terminationGracePeriodSeconds
+	// (commonly 30s): the goodbye deregister call and Runner.Close run after
+	// the budget and add their own small fixed caps.
+	ShutdownTimeout time.Duration
+
 	// SupplyPollInterval is how often this runner re-reads every supply it
 	// hosts, independently of the control plane's supply hints. Zero uses
 	// runnersvc.DefaultSupplyPollInterval (60s); a non-zero value below
@@ -861,6 +874,10 @@ func buildRunnerServiceConfig(cfg RunnerConfig, opts ...RunnerOption) (runnersvc
 		// which is what a restart already does.
 		DescriptorsJSON: runnerDescriptorsJSON(cfg.Capabilities, registeredNodeDescriptors(), o.logger),
 		PollWait:        cfg.PollWait,
+		// Passed through verbatim, zero included: the service resolves unset to
+		// its own default, so the default lives in one place rather than being
+		// frozen into every caller's config.
+		ShutdownTimeout: cfg.ShutdownTimeout,
 		Tracer:          o.tracer,
 		Namespaces:      cfg.Namespaces,
 		GroupRuntime:    groupRuntime,

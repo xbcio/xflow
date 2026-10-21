@@ -33,6 +33,9 @@ type runnerConfigFile struct {
 		Labels              map[string]string `yaml:"labels"`
 		Namespaces          *[]string         `yaml:"namespaces"`
 		AutoLabels          *bool             `yaml:"auto_labels"`
+		// ShutdownTimeout bounds how long a SIGTERM waits for in-flight
+		// handlers to finish. Unset keeps the runner service default.
+		ShutdownTimeout *string `yaml:"shutdown_timeout"`
 	} `yaml:"runner"`
 	Server struct {
 		URL        *string `yaml:"url"`
@@ -228,6 +231,9 @@ func loadRunnerConfigFromBytesForProfile(data []byte, profile Profile) (runnerCo
 	if file.Runner.AutoLabels != nil {
 		cfg.autoLabels = *file.Runner.AutoLabels
 	}
+	if file.Runner.ShutdownTimeout != nil {
+		cfg.shutdownTimeout = *file.Runner.ShutdownTimeout
+	}
 	if file.Poll.Wait != nil {
 		cfg.pollWait = *file.Poll.Wait
 	}
@@ -356,6 +362,7 @@ var runnerConfigIssueOrder = []string{
 	"namespace",
 	"heartbeat-interval",
 	"poll-wait",
+	"shutdown-timeout",
 	"seed-request-timeout",
 	"supply-poll-interval",
 	"block-private-ips",
@@ -454,6 +461,11 @@ func applyLookupEnvOverrides(cfg runnerConfig, lookupEnv func(string) (string, b
 	}
 	if v, ok := lookupEnv("XFLOW_RUNNER_POLL_WAIT"); ok {
 		cfg.pollWait = v
+	}
+	// Same unset-stays-unset rule as the seed timeout: the graceful-stop bound
+	// and its default belong to the runner service.
+	if v, ok := lookupEnv("XFLOW_RUNNER_SHUTDOWN_TIMEOUT"); ok {
+		cfg.shutdownTimeout = v
 	}
 	// No default, unlike heartbeat/poll: an unset value must stay unset so the
 	// SDK applies protocol.DefaultEntrySeedRequestTimeout. Materializing 15s
@@ -703,6 +715,15 @@ func validateRunnerConfig(cfg runnerConfig) error {
 	}
 	if err := validatePositiveDuration("poll wait", cfg.pollWait); err != nil {
 		return err
+	}
+	// Optional, so it is validated only when set. A malformed value fails closed
+	// rather than being dropped: an operator who wrote "30" (no unit) and got a
+	// runner still on the 10s default would see SIGTERM kill work with no
+	// indication that the setting did nothing.
+	if cfg.shutdownTimeout != "" {
+		if err := validatePositiveDuration("shutdown timeout", cfg.shutdownTimeout); err != nil {
+			return err
+		}
 	}
 	// Optional, so it is validated only when set. A malformed value still fails
 	// closed here rather than being dropped: a batch-sized admission whose
@@ -1031,6 +1052,10 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 		clearRunnerConfigIssue(&cfg, "poll-wait")
 		cfg.pollWait = base.pollWait
 	}
+	if base.changed["shutdown-timeout"] {
+		clearRunnerConfigIssue(&cfg, "shutdown-timeout")
+		cfg.shutdownTimeout = base.shutdownTimeout
+	}
 	if base.changed["seed-request-timeout"] {
 		clearRunnerConfigIssue(&cfg, "seed-request-timeout")
 		cfg.seedRequestTimeout = base.seedRequestTimeout
@@ -1162,6 +1187,13 @@ func genericSampleRunnerConfigYAML() string {
     # Browser CDP work requires the "xflow.browser.cdp" capability.
     - "xflow.function"
   # auto_labels: true   # adds xflow.io/os, /arch, /env, /hostname
+  # How long a SIGTERM waits for in-flight handlers to finish and report before
+  # the process exits. Cancelling the run context stops polling but does not
+  # cancel a handler already running, so this is what bounds a graceful stop.
+  # Omitted keeps the 10s default. Keep it below the orchestrator's
+  # terminationGracePeriodSeconds (commonly 30s): work still running at the
+  # deadline is abandoned here and replayed by the control plane.
+  # shutdown_timeout: "25s"
 
 server:
   # transport: "http" or "grpc" (default: grpc, see defaultRunnerConfig)

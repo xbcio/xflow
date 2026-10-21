@@ -526,3 +526,33 @@ func TestActivationTrackerActiveCountTracksSubscriptions(t *testing.T) {
 		t.Fatalf("active count after all deactivations = %d, want 0", got)
 	}
 }
+
+// A shutdown whose budget is already spent must still cancel the local
+// subscription contexts but skip handler cleanup: deactivation may open network
+// calls, and the caller has no time left to wait for them.
+func TestActivationTrackerShutdownSkipsCleanupWhenBudgetExpired(t *testing.T) {
+	handler := &mockActivationHandler{}
+	tracker := NewActivationTracker(handler, slog.Default())
+	if err := tracker.ProcessDirectives(context.Background(), &protocol.HeartbeatActivations{
+		Activate: []protocol.ActivateDirective{{WorkflowID: "wf-1", EntryUnitID: "grp-1", Generation: 1}},
+	}); err != nil {
+		t.Fatalf("activate subscription: %v", err)
+	}
+	handler.mu.Lock()
+	subCtx := handler.lastCtx
+	handler.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	tracker.Shutdown(ctx)
+
+	if got := handler.deactivateCount(); got != 0 {
+		t.Fatalf("handler deactivations after an expired budget = %d, want 0", got)
+	}
+	if subCtx.Err() == nil {
+		t.Fatal("subscription context was not cancelled: local cleanup must not depend on the budget")
+	}
+	if got := tracker.ActiveCount(); got != 0 {
+		t.Fatalf("active count after shutdown = %d, want 0", got)
+	}
+}
