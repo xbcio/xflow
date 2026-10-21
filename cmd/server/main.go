@@ -67,6 +67,12 @@ type serverConfig struct {
 	// discovery page (Redis keyspace keys examined per tick); 0 keeps the
 	// engine default. It is the CLI face of xflowsdk.WithServerOutboxDiscoveryPage.
 	outboxDiscoveryPage int
+	// queueMaxDepth bounds producer-side admission per asynq queue; 0 (the
+	// default) disables the bound. queueDepthSampleInterval is how often the
+	// sampled depth behind that bound is refreshed. They are the CLI face of
+	// xflowsdk.WithServerQueueBackpressure.
+	queueMaxDepth            int
+	queueDepthSampleInterval time.Duration
 	// redisMode selects the Redis deployment topology: single (default),
 	// sentinel, or cluster.
 	redisMode string
@@ -243,6 +249,10 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	fs.IntVar(&cfg.concurrency, "concurrency", cfg.concurrency, "Queue consumer concurrency")
 	fs.IntVar(&cfg.outboxDiscoveryPage, "outbox-discovery-page", 0,
 		"Outbox dispatcher discovery page: Redis keyspace keys examined per drain (0 = engine default)")
+	fs.IntVar(&cfg.queueMaxDepth, "queue-max-depth", 0,
+		"Producer-side queue backpressure: stop flushing the outbox into an asynq queue once it holds this many pending+active tasks (0 disables; env XFLOW_QUEUE_MAX_DEPTH)")
+	fs.DurationVar(&cfg.queueDepthSampleInterval, "queue-depth-sample-interval", time.Second,
+		"How often the queue depth behind --queue-max-depth is sampled (env XFLOW_QUEUE_DEPTH_SAMPLE_INTERVAL)")
 	fs.StringVar(&cfg.authPolicy, "auth-policy", "", "Path to runners.yaml (empty = auth disabled); SIGHUP re-reads this file without a restart")
 	fs.BoolVar(&cfg.authDryRun, "auth-dry-run", false, "Log auth violations but let requests through (rollout aid)")
 	fs.BoolVar(&cfg.enroll, "enroll", false, "Enable the runner enrollment endpoint (/v1/runners/enroll)")
@@ -305,6 +315,9 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	if err := applyAPILimitEnv(&cfg.apiLimits, os.LookupEnv); err != nil {
 		return serverConfig{}, err
 	}
+	if err := applyQueueEnv(&cfg, os.LookupEnv); err != nil {
+		return serverConfig{}, err
+	}
 	if err := validateAPILimitFlags(cfg.apiLimits); err != nil {
 		return serverConfig{}, err
 	}
@@ -348,6 +361,15 @@ func parseServerConfig(args []string) (serverConfig, error) {
 		// operator who meant something this binary cannot honour, so it fails
 		// loudly rather than silently disabling.
 		return serverConfig{}, fmt.Errorf("--runner-identity-cache-ttl must not be negative (use 0 to disable)")
+	}
+	if cfg.queueMaxDepth < 0 {
+		return serverConfig{}, fmt.Errorf("--queue-max-depth must not be negative (0 disables the bound)")
+	}
+	if cfg.queueDepthSampleInterval <= 0 {
+		// The flag default is already the transport's 1s. Zero or a negative
+		// value is an operator who meant something this binary cannot honour,
+		// so it fails loudly instead of silently sampling at a different rate.
+		return serverConfig{}, fmt.Errorf("--queue-depth-sample-interval must be positive")
 	}
 	cfg.paramValidation = xflowsdk.ParamValidationMode(paramValidation)
 	if cfg.paramValidation != "" && !cfg.paramValidation.Valid() {
@@ -401,6 +423,33 @@ func applyAPILimitEnv(l *apiserver.APILimits, lookup func(string) (string, bool)
 	}
 	if v, ok := lookup(envAPIRateLimitMode); ok && v != "" {
 		l.Mode = v
+	}
+	return nil
+}
+
+// Queue backpressure environment variables, following the same overlay rule
+// as the XFLOW_API_* set above: a non-empty value overrides the flag, and an
+// unparseable one fails startup rather than silently keeping the flag.
+const (
+	envQueueMaxDepth            = "XFLOW_QUEUE_MAX_DEPTH"
+	envQueueDepthSampleInterval = "XFLOW_QUEUE_DEPTH_SAMPLE_INTERVAL"
+)
+
+// applyQueueEnv overlays the XFLOW_QUEUE_* environment onto cfg.
+func applyQueueEnv(cfg *serverConfig, lookup func(string) (string, bool)) error {
+	if v, ok := lookup(envQueueMaxDepth); ok && v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("%s: %q is not an integer", envQueueMaxDepth, v)
+		}
+		cfg.queueMaxDepth = n
+	}
+	if v, ok := lookup(envQueueDepthSampleInterval); ok && v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("%s: %q is not a duration", envQueueDepthSampleInterval, v)
+		}
+		cfg.queueDepthSampleInterval = d
 	}
 	return nil
 }
@@ -610,6 +659,11 @@ func buildServerOptions(cfg serverConfig, deps serverDeps) []xflowsdk.ServerOpti
 		xflowsdk.WithServerTracer(deps.tracer),
 		xflowsdk.WithServerConcurrency(cfg.concurrency),
 		xflowsdk.WithServerOutboxDiscoveryPage(cfg.outboxDiscoveryPage),
+		// Unconditional: maxDepth 0 (the flag default) disables the bound and
+		// starts no sampler, so a deployment that never passes the flags keeps
+		// the pre-existing unbounded behaviour. The interval is validated to
+		// be positive and is ignored by the SDK unless maxDepth is set.
+		xflowsdk.WithServerQueueBackpressure(cfg.queueMaxDepth, cfg.queueDepthSampleInterval),
 		xflowsdk.WithServerWorkflowAuth(deps.workflowAuth, cfg.requireAPIAuth),
 		xflowsdk.WithServerPrincipalAuth(deps.principalAuth, apiserver.NamespaceAwareAuthorizer{}, deps.audit),
 		xflowsdk.WithServerArtifacts(deps.artifactStore),
