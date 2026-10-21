@@ -49,12 +49,18 @@ use the management API: it reads Redis (authoritative) and writes SQL
 (durable secondary) directly, like a maintenance job.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if opts.mysqlDSN == "" {
-				return errors.New("--mysql-dsn (or XFLOW_MYSQL_DSN) is required for reconcile")
-			}
+			opts.mysqlDSN = resolveEnvFlag(cmd, "mysql-dsn", "XFLOW_MYSQL_DSN", "")
+			// This subcommand's own --redis-addr shadows the parent's persistent
+			// flag of the same name, so an explicit value is already in redisAddr.
+			// Otherwise fall back to the environment, then the parent's literal
+			// default, which is never read from the environment at registration
+			// time (that would echo a password-bearing URL in --help).
 			addr := redisAddr
 			if addr == "" {
-				addr = opts.redisAddr
+				addr = resolveEnvFlag(cmd, "redis-addr", "XFLOW_REDIS_ADDR", opts.redisAddr)
+			}
+			if opts.mysqlDSN == "" {
+				return errors.New("--mysql-dsn (or XFLOW_MYSQL_DSN) is required for reconcile")
 			}
 			return runReconcile(opts, addr, dryRun)
 		},
