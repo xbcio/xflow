@@ -503,7 +503,21 @@ func (e *Engine) commitNode(ctx context.Context, req CommitNodeRequest) (CommitN
 // intents durable and un-attempted; the OutboxDispatcher's next tick and any
 // subsequent commit both re-enter here to finish the delivery.
 func (e *Engine) FlushOutbox(ctx context.Context, id types.ExecutionID) error {
-	ctx, span := engineTracer().Start(ctx, "xflow.outbox.flush", "execution_id", string(id))
+	// A context that carries no span of its own is re-anchored to the submission
+	// carrier here, once, before anything is opened. The outbox dispatcher
+	// starts from context.Background(), and without this the flush span AND
+	// every span the inline system-task consumption opens inside the delivery
+	// loop (notably xflow.engine.advance) would be detached roots in a trace
+	// unrelated to the execution's.
+	//
+	// The delivery loop runs on this anchored ctx, not on the flush span's ctx.
+	// The flush span measures the loop; per-entry work belongs directly to the
+	// execution, so it is a remote child of the submission span rather than a
+	// grandchild parented through an operational span. Inline from a commit the
+	// ctx already carries the commit span, so flush and advance both stay its
+	// local children exactly as before.
+	ctx = e.executionTraceContext(ctx, id)
+	_, span := engineTracer().Start(ctx, "xflow.outbox.flush", "execution_id", string(id))
 	defer span.End()
 	state, err := e.atomicState()
 	if err != nil {

@@ -2,8 +2,10 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -31,6 +33,36 @@ func (s *carrierFakeState) GetExecutionTraceCarrier(context.Context, types.Execu
 		return nil, false, nil
 	}
 	return s.carrier, true, nil
+}
+
+// errOutboxListDeferred is the injected store outage deferredFlushState reports
+// once, standing in for the transient list failure that leaves an appended
+// intent for the outbox dispatcher's next tick.
+var errOutboxListDeferred = errors.New("outbox list unavailable (deferred flush)")
+
+// deferredFlushState defers exactly one outbox flush: it fails the next
+// ListOutbox so the commit's inline FlushOutbox reports the delivery failure
+// without consuming the intent the commit appended. That is the transient
+// outage shape the OutboxDispatcher exists for — the terminal transition has
+// applied, the advance intent is durable, and the next flush is its only
+// consumer.
+//
+// It is deliberately a non-folding backend: a folding commit schedules
+// downstream work inside the terminal transition itself, so no advance intent
+// exists and the outbox-dispatcher path would not be reached at all.
+type deferredFlushState struct {
+	*carrierFakeState
+	deferNextFlush bool
+}
+
+func (s *deferredFlushState) FoldsArrivalsIntoCommit() bool { return false }
+
+func (s *deferredFlushState) ListOutbox(ctx context.Context, id types.ExecutionID, before time.Time, limit int) ([]OutboxEntry, error) {
+	if s.deferNextFlush {
+		s.deferNextFlush = false
+		return nil, errOutboxListDeferred
+	}
+	return s.carrierFakeState.ListOutbox(ctx, id, before, limit)
 }
 
 // installEngineSpanRecorder installs an in-memory OTel provider as the process
@@ -161,10 +193,13 @@ func advanceGraph() *graph.Graph {
 	return g
 }
 
-// TestEngineAdvanceSpanParentedToSubmissionTrace covers the outbox-dispatcher
-// path: the advance task is delivered on a context with no span of its own, so
-// the only way xflow.engine.advance can land in the workflow's trace is the
-// submission carrier persisted on the execution snapshot.
+// TestEngineAdvanceSpanParentedToSubmissionTrace covers the queue-consumer /
+// legacy direct-consume path: HandleSystemTask is called on a context with no
+// span of its own, so the only way xflow.engine.advance can land in the
+// workflow's trace is the submission carrier persisted on the execution
+// snapshot. It does NOT cover the outbox dispatcher: FlushOutbox opens spans of
+// its own around the inline consumption, and that composition is pinned
+// separately by TestEngineBackgroundFlushAdvanceSpanParentedToSubmissionTrace.
 func TestEngineAdvanceSpanParentedToSubmissionTrace(t *testing.T) {
 	rec, tracer := installEngineSpanRecorder(t)
 	state := &carrierFakeState{fakeState: newFakeState()}
@@ -210,6 +245,96 @@ func TestEngineAdvanceSpanParentedToSubmissionTrace(t *testing.T) {
 	}
 	if kv, ok := spanAttribute(span, "skipped"); !ok || kv.Value.AsInt64() != 0 {
 		t.Errorf("skipped attribute = %v, want 0", kv.Value.Emit())
+	}
+}
+
+// TestEngineBackgroundFlushAdvanceSpanParentedToSubmissionTrace covers the real
+// outbox-dispatcher composition end to end: Submit under a parent span, a
+// terminal commit appends an advance intent, the commit's own flush fails (a
+// transient list outage), and the next FlushOutbox — called on a bare
+// background context, exactly as the dispatcher calls it — is the only consumer
+// of that intent.
+//
+// Both spans the background flush opens must join the submission trace through
+// the persisted carrier. The advance in particular must be a remote child of
+// the submission span, not a descendant of an operational flush span: the flush
+// has its own lifecycle, and on a background context that is not re-anchored
+// first it becomes a detached root whose trace the advance inherits.
+func TestEngineBackgroundFlushAdvanceSpanParentedToSubmissionTrace(t *testing.T) {
+	rec, tracer := installEngineSpanRecorder(t)
+	state := &deferredFlushState{carrierFakeState: &carrierFakeState{fakeState: newFakeState()}}
+
+	parentCtx, parentSpan := tracer.Start(context.Background(), "xflow.workflow.execute")
+	parentSC := oteltrace.SpanContextFromContext(parentCtx)
+	carrier := tracing.InjectCarrier(parentCtx)
+	parentSpan.End()
+	// The carrier is what both BuildTaskLease and the engine's background
+	// re-anchoring read; stamp it before submission, as the snapshot write does.
+	state.carrier = carrier
+
+	ctx := context.Background()
+	queue := &fakeQueue{}
+	eng := New(state, queue)
+	id, err := eng.Submit(WithTraceCarrier(ctx, carrier), advanceGraph(), nil)
+	if err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+	tasks := queue.Drain()
+	if len(tasks) != 1 || tasks[0].NodeName != "start" {
+		t.Fatalf("initial delivery = %+v, want one task for start", tasks)
+	}
+	lease, err := eng.BuildTaskLease(ctx, tasks[0])
+	if err != nil || lease == nil {
+		t.Fatalf("BuildTaskLease() = %v, %v", lease, err)
+	}
+
+	// A transient outbox outage on the commit's own delivery attempt: the
+	// terminal transition applies, the advance intent stays durable, and the
+	// flush that would have consumed it reports the failure. This is the state
+	// the dispatcher is expected to recover from.
+	state.deferNextFlush = true
+	err = eng.CommitTaskResult(ctx, lease, TaskResult{Output: &types.Output{
+		Port: "default",
+		Data: map[string]any{"out": 1},
+	}})
+	if !errors.Is(err, errOutboxListDeferred) {
+		t.Fatalf("CommitTaskResult() error = %v, want the deferred outbox list failure", err)
+	}
+
+	before := len(rec.Ended())
+	if err := eng.FlushOutbox(context.Background(), id); err != nil {
+		t.Fatalf("FlushOutbox() error = %v", err)
+	}
+	delivered := queue.Drain()
+	if len(delivered) != 1 || delivered[0].NodeName != "end" || delivered[0].Type != TaskTypeNodeExec {
+		t.Fatalf("delivered after background flush = %+v, want one exec task for end; "+
+			"the flush must actually consume the deferred advance intent, not just open spans", delivered)
+	}
+
+	var flushSpan, advanceSpan sdktrace.ReadOnlySpan
+	for _, span := range rec.Ended()[before:] {
+		switch span.Name() {
+		case "xflow.outbox.flush":
+			flushSpan = span
+		case "xflow.engine.advance":
+			advanceSpan = span
+		}
+	}
+	if flushSpan == nil || advanceSpan == nil {
+		t.Fatalf("background flush ended %d spans without both xflow.outbox.flush and xflow.engine.advance", len(rec.Ended())-before)
+	}
+	// Delivery itself must re-join the workflow's trace: the flush span's parent
+	// is the submission span recovered from the carrier, remote because it came
+	// through a real W3C ExtractCarrier round-trip.
+	assertSpanParent(t, flushSpan, parentSC)
+	// The advance is execution work and hangs off the submission span, not off
+	// the operational flush span.
+	assertSpanParent(t, advanceSpan, parentSC)
+	if got := advanceSpan.Parent().SpanID(); got == flushSpan.SpanContext().SpanID() {
+		t.Fatalf("advance parent = flush span %s; the background path must not nest execution work under the delivery span", got)
+	}
+	if kv, ok := spanAttribute(advanceSpan, "applied"); !ok || !kv.Value.AsBool() {
+		t.Errorf("applied attribute = %v, want true (the background flush applied the deferred advance)", kv.Value.Emit())
 	}
 }
 
