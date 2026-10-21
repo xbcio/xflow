@@ -79,6 +79,117 @@ func TestParseServerConfigSupportsOutboxDiscoveryPage(t *testing.T) {
 	}
 }
 
+// The queue flags are the only surface a standalone xflow-server deployment
+// has for producer-side backpressure; the SDK option they feed is otherwise
+// reachable only by an embedded host. Defaults must stay disabled (maxDepth 0)
+// so an upgrade of the binary never starts throttling a deployment that never
+// asked for it.
+func TestParseServerConfigQueueBackpressure(t *testing.T) {
+	tests := []struct {
+		name         string
+		args         []string
+		wantMaxDepth int
+		wantInterval time.Duration
+		wantErr      bool
+	}{
+		{
+			name:         "defaults disable the bound",
+			args:         []string{"-memory"},
+			wantMaxDepth: 0,
+			wantInterval: time.Second,
+		},
+		{
+			name:         "flags are parsed",
+			args:         []string{"-memory", "-queue-max-depth", "4096", "-queue-depth-sample-interval", "250ms"},
+			wantMaxDepth: 4096,
+			wantInterval: 250 * time.Millisecond,
+		},
+		{
+			name:    "negative max depth is rejected",
+			args:    []string{"-memory", "-queue-max-depth", "-1"},
+			wantErr: true,
+		},
+		{
+			name:    "zero sample interval is rejected",
+			args:    []string{"-memory", "-queue-max-depth", "64", "-queue-depth-sample-interval", "0s"},
+			wantErr: true,
+		},
+		{
+			name:    "negative sample interval is rejected",
+			args:    []string{"-memory", "-queue-max-depth", "64", "-queue-depth-sample-interval", "-1s"},
+			wantErr: true,
+		},
+		{
+			name:    "non-integer max depth is rejected",
+			args:    []string{"-memory", "-queue-max-depth", "many"},
+			wantErr: true,
+		},
+		{
+			name:    "unparseable sample interval is rejected",
+			args:    []string{"-memory", "-queue-depth-sample-interval", "soon"},
+			wantErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := parseServerConfig(tc.args)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parseServerConfig(%v) error = nil, want rejection", tc.args)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseServerConfig(%v): %v", tc.args, err)
+			}
+			if cfg.queueMaxDepth != tc.wantMaxDepth {
+				t.Fatalf("queueMaxDepth = %d, want %d", cfg.queueMaxDepth, tc.wantMaxDepth)
+			}
+			if cfg.queueDepthSampleInterval != tc.wantInterval {
+				t.Fatalf("queueDepthSampleInterval = %v, want %v", cfg.queueDepthSampleInterval, tc.wantInterval)
+			}
+		})
+	}
+}
+
+// TestParseServerConfigQueueBackpressureEnv pins the XFLOW_QUEUE_* overlay
+// rule shared with the XFLOW_API_* set: a non-empty value wins over the flag,
+// an empty one leaves the flag alone, and an unparseable one fails startup.
+func TestParseServerConfigQueueBackpressureEnv(t *testing.T) {
+	t.Setenv(envQueueMaxDepth, "2048")
+	t.Setenv(envQueueDepthSampleInterval, "500ms")
+	cfg, err := parseServerConfig([]string{
+		"-memory", "-queue-max-depth", "64", "-queue-depth-sample-interval", "5s",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.queueMaxDepth != 2048 || cfg.queueDepthSampleInterval != 500*time.Millisecond {
+		t.Fatalf("queue backpressure = (%d, %v), want env (2048, 500ms)",
+			cfg.queueMaxDepth, cfg.queueDepthSampleInterval)
+	}
+
+	t.Setenv(envQueueMaxDepth, "")
+	t.Setenv(envQueueDepthSampleInterval, "")
+	cfg, err = parseServerConfig([]string{"-memory", "-queue-max-depth", "64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.queueMaxDepth != 64 || cfg.queueDepthSampleInterval != time.Second {
+		t.Fatalf("queue backpressure = (%d, %v), want flags/default (64, 1s)",
+			cfg.queueMaxDepth, cfg.queueDepthSampleInterval)
+	}
+
+	for env, val := range map[string]string{envQueueMaxDepth: "many", envQueueDepthSampleInterval: "soon"} {
+		t.Run(env, func(t *testing.T) {
+			t.Setenv(env, val)
+			if _, err := parseServerConfig([]string{"-memory"}); err == nil {
+				t.Fatalf("%s=%q accepted", env, val)
+			}
+		})
+	}
+}
+
 func TestParseServerConfigSupportsRunnerInstancePruning(t *testing.T) {
 	cfg, err := parseServerConfig([]string{
 		"-memory", "-runner-instance-idle-ttl", "2h", "-runner-instance-prune-interval", "3m",

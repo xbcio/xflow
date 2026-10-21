@@ -5,6 +5,7 @@
 package asynq
 
 import (
+	"sync"
 	"time"
 
 	asynqlib "github.com/hibiken/asynq"
@@ -164,6 +165,51 @@ func WithQueueSuffix(suffix string) Option {
 	return func(t *Transport) { t.queues = queueNames{suffix: suffix} }
 }
 
+// WithMaxQueueDepth bounds producer-side admission per queue: TryEnqueue
+// reports engine.ErrQueueFull once the task's own queue holds n or more
+// pending+active tasks. Zero (the default) disables the bound and starts no
+// sampler; negative values are treated as zero.
+//
+// The bound exists for FlushOutbox, the one caller that must not block (see
+// engine.NonBlockingTaskQueue). It is sampled, not exact — see queueFull — and
+// it does NOT apply to Enqueue, which keeps blocking on purpose: Submit and
+// lease-revoke redelivery have no durable intent behind them, so failing them
+// on a transient full queue would strand work no sweeper can recover.
+//
+// Enabling this starts one sampling goroutine and one asynq Inspector
+// connection; Close releases both.
+func WithMaxQueueDepth(n int) Option {
+	return func(t *Transport) {
+		if n < 0 {
+			n = 0
+		}
+		t.maxDepth = n
+	}
+}
+
+// WithDepthSampleInterval overrides how often the producer-side depth cache is
+// refreshed. Values <= 0 keep defaultDepthSampleInterval (1s). It has no
+// effect unless WithMaxQueueDepth enables the cache.
+func WithDepthSampleInterval(d time.Duration) Option {
+	return func(t *Transport) {
+		if d > 0 {
+			t.depthInterval = d
+		}
+	}
+}
+
+// withDepthFunc replaces the depth sampler. It exists only so tests can drive
+// the cache deterministically instead of waiting on a live sample; it is
+// applied at construction time, before the sampling goroutine starts, so the
+// function field is never written while that goroutine reads it.
+func withDepthFunc(fn depthFunc) Option {
+	return func(t *Transport) {
+		if fn != nil {
+			t.depthFunc = fn
+		}
+	}
+}
+
 // Transport is the Asynq-backed queue.Transport. The producer client is created
 // eagerly; the consumer server is created lazily in StartConsumer so API-only
 // instances pay no server cost.
@@ -173,6 +219,26 @@ type Transport struct {
 	client    *asynqlib.Client
 	observer  queue.Observer
 	queues    queueNames
+
+	// Producer-side depth cache, active only when maxDepth > 0. depths maps a
+	// queue name to its last measured pending+active count; a missing entry is
+	// unmeasured and admits (see queueFull).
+	maxDepth       int
+	depthInterval  time.Duration
+	depthInspector *asynqlib.Inspector
+	depthFunc      depthFunc
+	depthMu        sync.RWMutex
+	depths         map[string]int
+	depthDone      chan struct{}
+	depthExited    chan struct{}
+	depthStopOnce  sync.Once
+
+	// closeOnce makes Close idempotent. A second Close on the underlying asynq
+	// client reports "client is closed", which is not a condition any caller
+	// can act on; returning the first result keeps teardown paths harmless when
+	// one component closes explicitly and another defers Close.
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // New creates an Asynq transport connected to the given Redis address.
@@ -188,22 +254,35 @@ func NewWithConnOpt(connOpt asynqlib.RedisConnOpt, opts ...Option) *Transport {
 		connOpt = asynqlib.RedisClientOpt{}
 	}
 	t := &Transport{
-		connOpt:  connOpt,
-		client:   asynqlib.NewClient(connOpt),
-		observer: noopObserver{},
+		connOpt:       connOpt,
+		client:        asynqlib.NewClient(connOpt),
+		observer:      noopObserver{},
+		depthInterval: defaultDepthSampleInterval,
 	}
 	if opt, ok := connOpt.(asynqlib.RedisClientOpt); ok {
 		t.redisAddr = opt.Addr
 	}
+	t.depthFunc = t.readDepths
 	for _, o := range opts {
 		o(t)
 	}
+	// The sampler reads t.maxDepth, t.connOpt and t.depthFunc, so it must start
+	// after every option has been applied.
+	t.startDepthSampler()
 	return t
 }
 
-// Close closes the producer client. The consumer server (if any) is stopped via
-// the stop function returned by StartConsumer.
-func (t *Transport) Close() error { return t.client.Close() }
+// Close closes the producer client and stops the depth sampler (if one was
+// started). It is idempotent: the first call's result is returned by every
+// later call. The consumer server (if any) is stopped via the stop function
+// returned by StartConsumer.
+func (t *Transport) Close() error {
+	t.closeOnce.Do(func() {
+		t.stopDepthSampler()
+		t.closeErr = t.client.Close()
+	})
+	return t.closeErr
+}
 
 // noopObserver is the default enqueue observer; it performs no work.
 type noopObserver struct{}

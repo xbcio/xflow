@@ -121,9 +121,13 @@ type serverConfig struct {
 	// ownedNamespaces is the namespace set this deployment owns on shared
 	// infrastructure; nil keeps the legacy unscoped behavior. Set only by
 	// WithServerNamespaces.
-	ownedNamespaces          []namespace.Namespace
-	outboxDiscoveryPage      int
-	outputCompression        bool
+	ownedNamespaces     []namespace.Namespace
+	outboxDiscoveryPage int
+	outputCompression   bool
+	// queueMaxDepth / queueDepthInterval configure producer-side asynq queue
+	// backpressure; see WithServerQueueBackpressure.
+	queueMaxDepth            int
+	queueDepthInterval       time.Duration
 	enableRunnerMetricsProxy bool
 	runnerMetricsInterval    time.Duration
 	enableManagement         bool
@@ -552,6 +556,31 @@ func WithServerOutputCompression(enabled bool) ServerOption {
 	return func(c *serverConfig) { c.outputCompression = enabled }
 }
 
+// WithServerQueueBackpressure bounds how many tasks may sit in each asynq
+// queue before the server stops offering more work to it: once a task's own
+// queue holds maxDepth pending+active tasks, the outbox flush receives
+// engine.ErrQueueFull, keeps the remaining intent durable in the outbox, and
+// resumes on a later drain. maxDepth <= 0 (the default) disables the bound.
+//
+// The bound is sampled, not exact, and sampleInterval sets the cadence
+// (<= 0 means one second). Sampling fails open — an unreadable queue admits —
+// so a Redis problem degrades into no backpressure rather than a producer that
+// refuses to deliver. It applies to the outbox flush only; Submit's enqueue
+// still blocks by design, because it has no durable intent behind it.
+//
+// This is an availability guard, not a throughput knob: it exists so a fan-out
+// wider than the broker queue cannot park every queue worker inside a blocking
+// enqueue they alone could relieve. Set it above the queue depth the consumer
+// pool normally sustains, so ordinary bursts are not throttled; it only needs
+// to catch the unbounded fan-out case. Ignored by the in-memory backend, whose
+// lane buffer is already bounded.
+func WithServerQueueBackpressure(maxDepth int, sampleInterval time.Duration) ServerOption {
+	return func(c *serverConfig) {
+		c.queueMaxDepth = maxDepth
+		c.queueDepthInterval = sampleInterval
+	}
+}
+
 // WithServerRunnerMetricsProxy accepts metrics pushed by runners and merges
 // them into this server's /metrics.
 //
@@ -856,6 +885,9 @@ func buildServerAPIConfig(cfg ServerConfig, sc *serverConfig) apiserver.Config {
 		OutboxDiscoveryPage: sc.outboxDiscoveryPage,
 
 		OutputCompression: sc.outputCompression,
+
+		QueueMaxDepth:            sc.queueMaxDepth,
+		QueueDepthSampleInterval: sc.queueDepthInterval,
 
 		EnableRunnerMetricsProxy: sc.enableRunnerMetricsProxy,
 		RunnerMetricsInterval:    sc.runnerMetricsInterval,
