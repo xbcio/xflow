@@ -23,16 +23,29 @@ import (
 // ExecutionTraceCarrierReader capability, which is what makes BuildTaskLease
 // stamp the submission carrier onto a lease and what the engine's background
 // paths read to re-anchor their spans.
+//
+// The answer prefers the snapshot Submit persisted — exactly like a real reader
+// backend — with the carrier field as an override. Reading the store matters
+// because the engine consults this during Submit's own outbox flush: a fixture
+// that only answered from a late-set field would have a missing carrier
+// memoized before the test could install one.
 type carrierFakeState struct {
 	*fakeState
 	carrier map[string]string
 }
 
-func (s *carrierFakeState) GetExecutionTraceCarrier(context.Context, types.ExecutionID) (map[string]string, bool, error) {
-	if len(s.carrier) == 0 {
+func (s *carrierFakeState) GetExecutionTraceCarrier(ctx context.Context, id types.ExecutionID) (map[string]string, bool, error) {
+	if len(s.carrier) > 0 {
+		return s.carrier, true, nil
+	}
+	snap, err := s.fakeState.GetExecution(ctx, id)
+	if err != nil {
+		return nil, false, err
+	}
+	if snap == nil || len(snap.TraceCarrier) == 0 {
 		return nil, false, nil
 	}
-	return s.carrier, true, nil
+	return snap.TraceCarrier, true, nil
 }
 
 // errOutboxListDeferred is the injected store outage deferredFlushState reports
@@ -268,9 +281,6 @@ func TestEngineBackgroundFlushAdvanceSpanParentedToSubmissionTrace(t *testing.T)
 	parentSC := oteltrace.SpanContextFromContext(parentCtx)
 	carrier := tracing.InjectCarrier(parentCtx)
 	parentSpan.End()
-	// The carrier is what both BuildTaskLease and the engine's background
-	// re-anchoring read; stamp it before submission, as the snapshot write does.
-	state.carrier = carrier
 
 	ctx := context.Background()
 	queue := &fakeQueue{}
