@@ -45,6 +45,8 @@ func newExecutionCommand(out io.Writer) *cobra.Command {
 		Short: "Execution-state inspection commands",
 	}
 	cmd.AddCommand(newExecutionDiffCommand(out))
+	cmd.AddCommand(newExecutionCancelCommand(out))
+	cmd.AddCommand(newExecutionRerunCommand(out))
 	return cmd
 }
 
