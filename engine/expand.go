@@ -226,8 +226,9 @@ func (e *Engine) ExecuteBatch(ctx context.Context, t *Task) (err error) {
 	// items is N sub-executions, so a per-item span would multiply the span
 	// count by exactly the fan-out the batch exists to bound. item_count is
 	// this batch's width; batch_count is the expansion's total, recovered from
-	// the payload that stamped it (all_items/batch_size), so one batch span
-	// says where it sits in the whole map without reading an item.
+	// the payload that stamped it (all_items/batch_size); batch_index is this
+	// batch's position in that total. The three say where a batch sits in the
+	// whole map without reading an item.
 	//
 	// The span is opened on the task's ctx after the same carrier re-anchor as
 	// every other engine span: a batch is delivered by the outbox dispatcher on
@@ -238,10 +239,16 @@ func (e *Engine) ExecuteBatch(ctx context.Context, t *Task) (err error) {
 	if batchSize > 0 && len(allItems) > 0 {
 		batchCount = (len(allItems) + batchSize - 1) / batchSize
 	}
+	// batch_index is parsed before the span so the span can carry it: it is what
+	// pairs a batch span with the xflow.map.body span that ran the same batch. A
+	// malformed payload still opens the span (batch_index 0) and records the
+	// error through the deferred RecordError below.
+	batchIndex, batchIndexErr := batchIndexOf(t)
 	ctx, span := e.startExecutionSpan(ctx, lease.Task.ExecutionID, "xflow.map.batch",
 		"node_name", lease.Task.NodeName,
 		"item_count", len(items),
 		"batch_count", batchCount,
+		"batch_index", batchIndex,
 	)
 	defer span.End()
 	defer func() {
@@ -260,9 +267,8 @@ func (e *Engine) ExecuteBatch(ctx context.Context, t *Task) (err error) {
 	// the execution does not exist, failing the batch as ErrExecutionInactive
 	// and stranding the map node. The re-anchor happens only where the body
 	// runtime is entered, in runBatchBody.
-	batchIndex, err := batchIndexOf(t)
-	if err != nil {
-		return err
+	if batchIndexErr != nil {
+		return batchIndexErr
 	}
 
 	// The graph and the map node's own output are loaded BEFORE the body runs:

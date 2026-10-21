@@ -134,22 +134,56 @@ func TestLocalMapEmitsOneSpanPerBatchNeverPerItem(t *testing.T) {
 			t.Errorf("xflow.map.batch batch_count = %d, present=%t; want at least 1", n, ok)
 		}
 	}
-	batchSpanIDs := make(map[oteltrace.SpanID]struct{}, len(batches))
+	// Pair every body span with THE batch span that ran it, by batch_index. A
+	// set-membership check would also pass if a body were parented to some OTHER
+	// batch's span, which is the defect this pairing rules out.
+	batchSpanByIndex := make(map[int64]oteltrace.SpanID, len(batches))
 	for _, span := range batches {
-		batchSpanIDs[span.SpanContext().SpanID()] = struct{}{}
+		index, ok := spanIntValue(span, "batch_index")
+		if !ok {
+			t.Errorf("xflow.map.batch missing batch_index attribute")
+			continue
+		}
+		if _, dup := batchSpanByIndex[index]; dup {
+			t.Errorf("two xflow.map.batch spans share batch_index %d", index)
+			continue
+		}
+		batchSpanByIndex[index] = span.SpanContext().SpanID()
 	}
+	paired := make(map[int64]struct{}, len(bodies))
 	for _, span := range bodies {
 		if got := span.SpanContext().TraceID(); got != parentSC.TraceID() {
 			t.Errorf("xflow.map.body trace = %s, want submission trace %s", got, parentSC.TraceID())
 		}
+		index, ok := spanIntValue(span, "batch_index")
+		if !ok {
+			t.Errorf("xflow.map.body missing batch_index attribute")
+			continue
+		}
 		// The body runs inside the batch's ExecuteBatch, on the batch span's
-		// context: one body per batch must be that batch span's child, not a
-		// sibling root that merely shares the trace.
-		if _, ok := batchSpanIDs[span.Parent().SpanID()]; !ok {
-			t.Errorf("xflow.map.body parent = %s, want the xflow.map.batch span that ran it", span.Parent().SpanID())
+		// context: the body with batch_index i must be batch span i's child, not
+		// a sibling root that merely shares the trace, and not another batch's
+		// child.
+		want, ok := batchSpanByIndex[index]
+		if !ok {
+			t.Errorf("xflow.map.body batch_index %d has no matching xflow.map.batch span", index)
+			continue
+		}
+		if _, dup := paired[index]; dup {
+			t.Errorf("two xflow.map.body spans share batch_index %d", index)
+			continue
+		}
+		paired[index] = struct{}{}
+		if got := span.Parent().SpanID(); got != want {
+			t.Errorf("xflow.map.body batch_index %d parent = %s, want batch span %s", index, got, want)
 		}
 		if span.Parent().IsRemote() {
 			t.Errorf("xflow.map.body parent is remote; the enclosing batch span is local to this process")
+		}
+	}
+	for index := range batchSpanByIndex {
+		if _, ok := paired[index]; !ok {
+			t.Errorf("xflow.map.batch batch_index %d has no xflow.map.body span", index)
 		}
 	}
 	// The item executions go through subgraph.Executor.Execute; the body marks
