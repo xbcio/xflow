@@ -38,7 +38,7 @@ func (s *carrierFakeState) GetExecutionTraceCarrier(ctx context.Context, id type
 	if len(s.carrier) > 0 {
 		return s.carrier, true, nil
 	}
-	snap, err := s.fakeState.GetExecution(ctx, id)
+	snap, err := s.GetExecution(ctx, id)
 	if err != nil {
 		return nil, false, err
 	}
@@ -180,7 +180,7 @@ func assertNoSensitiveSpanAttributes(t *testing.T, span sdktrace.ReadOnlySpan, f
 			}
 		}
 		for _, value := range forbidden {
-			if value != "" && strings.Contains(kv.Value.Emit(), value) {
+			if value != "" && strings.Contains(kv.Value.String(), value) {
 				t.Errorf("%s span attribute %q leaks value %q", span.Name(), kv.Key, value)
 			}
 		}
@@ -248,16 +248,16 @@ func TestEngineAdvanceSpanParentedToSubmissionTrace(t *testing.T) {
 	span := findEndedSpan(t, rec, "xflow.engine.advance")
 	assertSpanParent(t, span, parentSC)
 	if kv, ok := spanAttribute(span, "execution_id"); !ok || kv.Value.AsString() != string(id) {
-		t.Errorf("execution_id attribute = %v, want %q", kv.Value.Emit(), id)
+		t.Errorf("execution_id attribute = %v, want %q", kv.Value.String(), id)
 	}
 	if kv, ok := spanAttribute(span, "node_name"); !ok || kv.Value.AsString() != "start" {
-		t.Errorf("node_name attribute = %v, want start", kv.Value.Emit())
+		t.Errorf("node_name attribute = %v, want start", kv.Value.String())
 	}
 	if kv, ok := spanAttribute(span, "applied"); !ok || !kv.Value.AsBool() {
-		t.Errorf("applied attribute = %v, want true", kv.Value.Emit())
+		t.Errorf("applied attribute = %v, want true", kv.Value.String())
 	}
 	if kv, ok := spanAttribute(span, "skipped"); !ok || kv.Value.AsInt64() != 0 {
-		t.Errorf("skipped attribute = %v, want 0", kv.Value.Emit())
+		t.Errorf("skipped attribute = %v, want 0", kv.Value.String())
 	}
 }
 
@@ -344,7 +344,7 @@ func TestEngineBackgroundFlushAdvanceSpanParentedToSubmissionTrace(t *testing.T)
 		t.Fatalf("advance parent = flush span %s; the background path must not nest execution work under the delivery span", got)
 	}
 	if kv, ok := spanAttribute(advanceSpan, "applied"); !ok || !kv.Value.AsBool() {
-		t.Errorf("applied attribute = %v, want true (the background flush applied the deferred advance)", kv.Value.Emit())
+		t.Errorf("applied attribute = %v, want true (the background flush applied the deferred advance)", kv.Value.String())
 	}
 }
 
@@ -378,16 +378,16 @@ func TestEngineRetrySpanParentedToSubmissionTrace(t *testing.T) {
 	span := findEndedSpan(t, rec, "xflow.engine.retry")
 	assertSpanParent(t, span, parentSC)
 	if kv, ok := spanAttribute(span, "execution_id"); !ok || kv.Value.AsString() != string(id) {
-		t.Errorf("execution_id attribute = %v, want %q", kv.Value.Emit(), id)
+		t.Errorf("execution_id attribute = %v, want %q", kv.Value.String(), id)
 	}
 	if kv, ok := spanAttribute(span, "node_name"); !ok || kv.Value.AsString() != "start" {
-		t.Errorf("node_name attribute = %v, want start", kv.Value.Emit())
+		t.Errorf("node_name attribute = %v, want start", kv.Value.String())
 	}
 	if kv, ok := spanAttribute(span, "attempt"); !ok || kv.Value.AsInt64() != 1 {
-		t.Errorf("attempt attribute = %v, want 1", kv.Value.Emit())
+		t.Errorf("attempt attribute = %v, want 1", kv.Value.String())
 	}
 	if kv, ok := spanAttribute(span, "delay_ms"); !ok || kv.Value.AsInt64() <= 0 {
-		t.Errorf("delay_ms attribute = %v, want a positive delay", kv.Value.Emit())
+		t.Errorf("delay_ms attribute = %v, want a positive delay", kv.Value.String())
 	}
 	// The retry settings themselves (intervals, strategy) are configuration, not
 	// payload; nothing else about the failing node may appear.
@@ -417,14 +417,14 @@ func TestEngineSignalSpanCarriesNoPayload(t *testing.T) {
 	span := findEndedSpan(t, rec, "xflow.signal.deliver")
 	assertSpanParent(t, span, parentSC)
 	if kv, ok := spanAttribute(span, "signal_name"); !ok || kv.Value.AsString() != "approve" {
-		t.Errorf("signal_name attribute = %v, want approve", kv.Value.Emit())
+		t.Errorf("signal_name attribute = %v, want approve", kv.Value.String())
 	}
 	if kv, ok := spanAttribute(span, "durable"); !ok || kv.Value.AsBool() {
 		// fakeState has no DurableSignalDeliverer: the legacy path is reported.
-		t.Errorf("durable attribute = %v, want false (legacy path)", kv.Value.Emit())
+		t.Errorf("durable attribute = %v, want false (legacy path)", kv.Value.String())
 	}
 	if kv, ok := spanAttribute(span, "resumed"); !ok || kv.Value.AsBool() {
-		t.Errorf("resumed attribute = %v, want false (nothing suspended)", kv.Value.Emit())
+		t.Errorf("resumed attribute = %v, want false (nothing suspended)", kv.Value.String())
 	}
 	assertNoSensitiveSpanAttributes(t, span, secret)
 }
@@ -473,6 +473,6 @@ func TestEngineReplaySpanParentedToSubmissionTrace(t *testing.T) {
 	span := findEndedSpan(t, rec, "xflow.outbox.replay")
 	assertSpanParent(t, span, parentSC)
 	if kv, ok := spanAttribute(span, "entry_id"); !ok || kv.Value.AsString() != "entry-1" {
-		t.Errorf("entry_id attribute = %v, want entry-1", kv.Value.Emit())
+		t.Errorf("entry_id attribute = %v, want entry-1", kv.Value.String())
 	}
 }
