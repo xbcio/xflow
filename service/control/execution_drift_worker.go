@@ -83,7 +83,9 @@ type ExecutionDriftObserver interface {
 	// ExecutionDriftSkipRepairUnsupported).
 	OnExecutionDriftSkipped(ctx context.Context, reason string)
 	// OnExecutionDriftError reports a per-candidate error (authority read or
-	// projection write). The row stays as it was and is retried next sweep.
+	// projection write). The row stays as it was and is retried by the next
+	// sweep that starts from the beginning; a sweep stopped by its page budget
+	// waits for the cursor to wrap back to the head.
 	OnExecutionDriftError(ctx context.Context, id types.ExecutionID, err error)
 }
 
@@ -272,7 +274,9 @@ func (w *ExecutionDriftWorker) Run(ctx context.Context) error {
 // A per-candidate error does not abort the sweep: each row is independent, and
 // stopping at the first transient failure would let one bad row (or one
 // authority blip) starve every older row behind it. Failed rows stay stale and
-// are retried next sweep.
+// are retried by the next sweep that starts from the beginning; when a sweep
+// stops on its page budget, that retry waits for the cursor to wrap back to the
+// head.
 func (w *ExecutionDriftWorker) ReconcileOnce(ctx context.Context) int {
 	if w == nil || w.scanner == nil || w.statuses == nil || w.executions == nil {
 		return 0

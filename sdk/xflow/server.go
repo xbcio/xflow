@@ -1022,6 +1022,11 @@ func (s *Server) Reconciler() *control.AuditReconcileWorker { return s.reconcile
 // assert its presence — an operator who passed the option and got nil has a
 // store that cannot be scanned and should know before drift accumulates — or
 // to drive a sweep explicitly via ReconcileOnce.
+//
+// Do not call ReconcileOnce by hand while Run is active: both advance the
+// worker's sweep cursor, which is documented as not concurrency-safe, so a
+// manual sweep alongside the background loop is a data race. Stop the Server
+// (or never Start it) before driving a sweep yourself.
 func (s *Server) ExecutionDriftRepair() *control.ExecutionDriftWorker { return s.drift }
 
 // Handler returns the HTTP Runner Protocol + workflow submission/query API.
