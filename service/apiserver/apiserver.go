@@ -82,6 +82,23 @@ type Config struct {
 	// rstate/output_codec.go for the measurements and the decoder's size bound.
 	// Ignored by the in-memory backend, which does not compress.
 	OutputCompression bool
+	// QueueMaxDepth bounds producer-side admission per asynq queue: once a
+	// task's own queue holds this many pending+active tasks, the transport's
+	// TryEnqueue reports engine.ErrQueueFull and the outbox flush stops
+	// offering further work, leaving the remaining intent durable in the
+	// outbox. Zero (the default) disables the bound and starts no sampler.
+	//
+	// The depth is sampled, not counted exactly: QueueDepthSampleInterval sets
+	// the cadence, and a failed sample fails open (an unreadable queue admits).
+	// The bound exists to stop a fan-out wider than the broker queue from
+	// deadlocking the flush, which runs on a queue worker; it does not apply to
+	// Submit, whose Enqueue keeps blocking by design. Ignored by the in-memory
+	// backend, whose per-lane buffer is the bound.
+	QueueMaxDepth int
+	// QueueDepthSampleInterval overrides how often the producer-side queue
+	// depth cache is refreshed. Zero keeps the transport default (one second).
+	// Ignored unless QueueMaxDepth is set.
+	QueueDepthSampleInterval time.Duration
 	// LeaseTTL is how long a dispatched task lease stays valid before the
 	// LeaseSweeper treats the runner holding it as crashed and re-queues the
 	// task. Zero (the default) leaves engine.DefaultLeaseTTL in place.
@@ -579,6 +596,11 @@ func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 			distributed.WithConsumer(true),
 			distributed.WithOutboxDiscoveryPage(cfg.OutboxDiscoveryPage),
 			distributed.WithOutputCompression(cfg.OutputCompression),
+			// Producer-side backpressure. Both option setters ignore
+			// non-positive values, so an unconfigured server stays on the
+			// disabled default and the transport starts no sampler.
+			distributed.WithQueueMaxDepth(cfg.QueueMaxDepth),
+			distributed.WithQueueDepthSampleInterval(cfg.QueueDepthSampleInterval),
 			// The backend derives the leader key, sweep scope and queue names
 			// from the same set the control plane filters its workers by.
 			distributed.WithOwnedNamespaces(cfg.OwnedNamespaces),
