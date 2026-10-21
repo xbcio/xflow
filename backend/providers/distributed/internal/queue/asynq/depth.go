@@ -28,11 +28,11 @@ type depthFunc func() (map[string]int, error)
 // reads, resolved from the broker through the same Inspector the consumer's
 // stats sampler uses.
 //
-// Depth is Pending + Active only. Retry and Scheduled tasks are excluded on
-// purpose: a retry is already counted once as pending when it is rescheduled,
-// and a delayed task is not competing for a consumer slot right now, so
-// counting either would make the bound reject producers for work the queue is
-// not about to hand to a worker.
+// Depth is Pending + Active only. Retry and Scheduled tasks are excluded by
+// contract: they are waiting on a timer, not on a consumer, so counting them
+// would make the bound reject producers for work the queue is not about to
+// hand to a worker. A retry returns to Pending when its backoff elapses, and
+// is counted from then on.
 func (t *Transport) readDepths() (map[string]int, error) {
 	existing, err := t.depthInspector.Queues()
 	if err != nil {

@@ -233,10 +233,10 @@ type Transport struct {
 	depthExited    chan struct{}
 	depthStopOnce  sync.Once
 
-	// closeOnce makes Close idempotent. Shutdown paths reach it more than once
-	// in practice (backend teardown, then a caller's deferred Close), and the
-	// underlying client reports "client is closed" on the second call, which is
-	// not a condition any caller can act on.
+	// closeOnce makes Close idempotent. A second Close on the underlying asynq
+	// client reports "client is closed", which is not a condition any caller
+	// can act on; returning the first result keeps teardown paths harmless when
+	// one component closes explicitly and another defers Close.
 	closeOnce sync.Once
 	closeErr  error
 }
