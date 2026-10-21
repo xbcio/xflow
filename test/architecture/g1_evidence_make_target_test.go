@@ -1004,13 +1004,13 @@ set -eu
 printf '%s\n' "$*" >> "$FAKE_GO_LOG"
 case "$*" in
   "list -m -f {{.GoVersion}}")
-    printf '%s\n' '1.26.9'
+    printf '%s\n' '1.26.10'
     ;;
   "env GOVERSION")
-    printf '%s\n' 'go1.26.9'
+    printf '%s\n' 'go1.26.10'
     ;;
   "env GOTOOLCHAIN")
-    printf '%s\n' 'go1.26.9'
+    printf '%s\n' 'go1.26.10'
     ;;
   "list -tags=integration ./test/integration")
     printf '%s\n' 'github.com/xbcio/xflow/test/integration'
@@ -1067,7 +1067,7 @@ document = {
     "schema_version": 1,
     "run_id": run_id,
     "generated_at": "2026-08-30T00:00:00Z",
-    "go_version": "go1.26.9",
+    "go_version": "go1.26.10",
     "os": "darwin/arm64",
     "commit_sha": candidate_sha,
     "full_worktree_clean": clean_text == "true",
