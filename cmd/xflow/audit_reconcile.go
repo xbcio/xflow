@@ -73,12 +73,14 @@ Output is one JSON line: {scanned, reconciled, failed, skipped_indeterminate,
 errors, pending_before, pending_after, dry_run}.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			opts.redisAddr = resolveEnvFlag(cmd, "redis-addr", "XFLOW_REDIS_ADDR", "")
+			opts.mysqlDSN = resolveEnvFlag(cmd, "mysql-dsn", "XFLOW_MYSQL_DSN", "")
 			return runAuditReconcile(cmd.Context(), opts)
 		},
 	}
-	cmd.Flags().StringVar(&opts.redisAddr, "redis-addr", envOr("XFLOW_REDIS_ADDR", ""),
+	cmd.Flags().StringVar(&opts.redisAddr, "redis-addr", "",
 		"Redis address holding the authoritative execution state (env: XFLOW_REDIS_ADDR)")
-	cmd.Flags().StringVar(&opts.mysqlDSN, "mysql-dsn", envOr("XFLOW_MYSQL_DSN", ""),
+	cmd.Flags().StringVar(&opts.mysqlDSN, "mysql-dsn", "",
 		"MySQL DSN holding the durable audit log (env: XFLOW_MYSQL_DSN)")
 	cmd.Flags().IntVar(&opts.batch, "batch", control.DefaultReconcileBatch,
 		"Admissions to scan per sweep")

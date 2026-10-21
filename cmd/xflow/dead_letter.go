@@ -81,15 +81,19 @@ credential in production; it emits a prominent stderr warning and records a
 "cli:breakglass:<user>" operator identity so the break-glass use is
 distinguishable in audit.`,
 	}
-	cmd.PersistentFlags().StringVar(&opts.server, "server", envOr("XFLOW_API_ADDR", ""),
+	// Every connection default here is literal, and the environment is read in
+	// the run path instead: pflag echoes a non-empty default in --help, and
+	// XFLOW_API_TOKEN is a secret while a DSN or Redis URL routinely carries a
+	// password. See resolveEnvFlag.
+	cmd.PersistentFlags().StringVar(&opts.server, "server", "",
 		"Management API base URL, e.g. http://127.0.0.1:8080 (env: XFLOW_API_ADDR). Default path; required unless --break-glass")
-	cmd.PersistentFlags().StringVar(&opts.token, "token", envOr("XFLOW_API_TOKEN", ""),
+	cmd.PersistentFlags().StringVar(&opts.token, "token", "",
 		"Bearer token for the management API (env: XFLOW_API_TOKEN). Sent only in the Authorization header; never logged")
 	cmd.PersistentFlags().BoolVar(&opts.breakGlass, "break-glass", false,
 		"Bypass the management API and connect directly to Redis (emergency maintenance only)")
-	cmd.PersistentFlags().StringVar(&opts.redisAddr, "redis-addr", envOr("XFLOW_REDIS_ADDR", "localhost:6379"),
+	cmd.PersistentFlags().StringVar(&opts.redisAddr, "redis-addr", "localhost:6379",
 		"Redis address (break-glass only; env: XFLOW_REDIS_ADDR)")
-	cmd.PersistentFlags().StringVar(&opts.mysqlDSN, "mysql-dsn", envOr("XFLOW_MYSQL_DSN", ""),
+	cmd.PersistentFlags().StringVar(&opts.mysqlDSN, "mysql-dsn", "",
 		"MySQL DSN for the reconcile subcommand's durable projection (env: XFLOW_MYSQL_DSN)")
 
 	cmd.AddCommand(newDeadLetterListCommand(opts))
@@ -117,18 +121,26 @@ type deadLetterClient interface {
 // newDeadLetterClient selects the API client by default and the break-glass
 // Redis-direct client when --break-glass is set. It emits a prominent stderr
 // warning for break-glass so an operator cannot use it silently.
-func newDeadLetterClient(opts *deadLetterOptions) (deadLetterClient, func(), error) {
+//
+// All connection settings are resolved here, after flag parsing: an explicit
+// flag wins, then the environment (XFLOW_API_ADDR / XFLOW_API_TOKEN /
+// XFLOW_REDIS_ADDR), then the literal default. Resolving here rather than in
+// the flag defaults keeps --help from printing the token or a password-bearing
+// Redis URL.
+func newDeadLetterClient(cmd *cobra.Command, opts *deadLetterOptions) (deadLetterClient, func(), error) {
 	if opts.breakGlass {
 		fmt.Fprintln(os.Stderr, "WARNING: --break-glass bypasses the management API and its authorization/metrics/audit outlet. Use only when the API is unavailable and record a break-glass operator credential.")
-		return openBreakGlassDeadLetterClient(opts.redisAddr)
+		return openBreakGlassDeadLetterClient(resolveEnvFlag(cmd, "redis-addr", "XFLOW_REDIS_ADDR", opts.redisAddr))
 	}
-	if opts.server == "" {
+	server := resolveEnvFlag(cmd, "server", "XFLOW_API_ADDR", "")
+	token := resolveEnvFlag(cmd, "token", "XFLOW_API_TOKEN", "")
+	if server == "" {
 		return nil, nil, errors.New("--server (or XFLOW_API_ADDR) is required; alternatively use --break-glass for the Redis-direct maintenance path")
 	}
-	if opts.token == "" {
+	if token == "" {
 		return nil, nil, errors.New("--token (or XFLOW_API_TOKEN) is required for the management API; alternatively use --break-glass")
 	}
-	return &apiDeadLetterClient{server: strings.TrimRight(opts.server, "/"), token: opts.token}, nil, nil
+	return &apiDeadLetterClient{server: strings.TrimRight(server, "/"), token: token}, nil, nil
 }
 
 func newDeadLetterListCommand(opts *deadLetterOptions) *cobra.Command {
@@ -149,7 +161,7 @@ func newDeadLetterListCommand(opts *deadLetterOptions) *cobra.Command {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			client, closeFn, err := newDeadLetterClient(opts)
+			client, closeFn, err := newDeadLetterClient(cmd, opts)
 			if err != nil {
 				return err
 			}
@@ -214,7 +226,7 @@ switches to the Redis-direct maintenance path.`,
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			client, closeFn, err := newDeadLetterClient(opts)
+			client, closeFn, err := newDeadLetterClient(cmd, opts)
 			if err != nil {
 				return err
 			}

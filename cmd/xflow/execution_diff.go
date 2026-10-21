@@ -45,6 +45,8 @@ func newExecutionCommand(out io.Writer) *cobra.Command {
 		Short: "Execution-state inspection commands",
 	}
 	cmd.AddCommand(newExecutionDiffCommand(out))
+	cmd.AddCommand(newExecutionCancelCommand(out))
+	cmd.AddCommand(newExecutionRerunCommand(out))
 	return cmd
 }
 
@@ -72,12 +74,14 @@ Exit code 0 means no difference was found; non-zero means a difference was
 found (or the scan itself failed), so a script can gate on exit status alone.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			opts.redisAddr = resolveEnvFlag(cmd, "redis-addr", "XFLOW_REDIS_ADDR", "")
+			opts.mysqlDSN = resolveEnvFlag(cmd, "mysql-dsn", "XFLOW_MYSQL_DSN", "")
 			return runExecutionDiff(cmd.Context(), opts)
 		},
 	}
-	cmd.Flags().StringVar(&opts.redisAddr, "redis-addr", envOr("XFLOW_REDIS_ADDR", ""),
+	cmd.Flags().StringVar(&opts.redisAddr, "redis-addr", "",
 		"Redis address holding the authoritative execution state (env: XFLOW_REDIS_ADDR)")
-	cmd.Flags().StringVar(&opts.mysqlDSN, "mysql-dsn", envOr("XFLOW_MYSQL_DSN", ""),
+	cmd.Flags().StringVar(&opts.mysqlDSN, "mysql-dsn", "",
 		"MySQL DSN holding the SQL execution projection (env: XFLOW_MYSQL_DSN)")
 	cmd.Flags().StringVar(&opts.namespace, "namespace", "",
 		"Namespace the execution was created in (required; Redis execution keys are namespace-scoped)")
