@@ -100,10 +100,17 @@ func (e *Engine) handlePinnedNode(ctx context.Context, task *Task, flush bool) (
 		return true, fmt.Errorf("commit pinned node %q/%q: %w", task.ExecutionID, task.NodeName, err)
 	}
 	// A folded commit IS the advance the separate AdvanceNode call used to
-	// perform, so the skips that transition resolved are reported from its
-	// result. A fallback commit reports nothing here: its advance task reports
-	// them when HandleSystemTask consumes it.
+	// perform, so its advance receipt and the skips that transition resolved are
+	// published from its result, under the same gate as the ordinary folded
+	// commit (atomic_commit.go): the transition applied, and it did not finalize
+	// the execution — a finalizing commit cannot schedule anything, so the
+	// backends suppress its advance intent and the legacy path has no AdvanceNode
+	// receipt to mirror. A fallback commit publishes nothing here: its advance
+	// task publishes both when HandleSystemTask consumes it.
 	if foldArrivals && result.Outcome == CommitOutcomeAccepted {
+		if result.Applied && !result.ExecutionDone {
+			e.publishAdvanceReceipt(ctx, task, AdvanceNodeResult{Applied: true, OutboxIDs: result.OutboxIDs})
+		}
 		e.notifySkip(ctx, flowAdvance, result.Skipped)
 	}
 	return true, e.afterAtomicCommitWithFlush(ctx, req, result, flush)

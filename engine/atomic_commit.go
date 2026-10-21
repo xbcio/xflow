@@ -312,18 +312,33 @@ func (e *Engine) commitAcyclicNodeWithReclaimEligibility(ctx context.Context, le
 	e.publishCommitReceipt(ctx, req, result, cls)
 	// When the downstream work rode the commit, this transition IS the advance
 	// the separate AdvanceNode call used to perform, so the advance receipt and
-	// the skip report are published from its result. The gate and shape mirror
-	// the cyclic path (engine/commit.go, publishCommitReceipt followed by a
-	// publishAdvanceReceipt when the transition applied and has outbox
-	// candidates); a fallback commit publishes neither here, because its advance
-	// task publishes them when HandleSystemTask consumes it.
+	// the skip report are published from its result. A fallback commit publishes
+	// neither here, because its advance task publishes them when
+	// HandleSystemTask consumes it.
+	//
+	// The advance receipt is gated on the transition APPLYING, not on the
+	// OutboxIDs hint. OutboxIDs is a candidate hint, not a write log, and it is
+	// legitimately empty for a commit with no outbox work — a leaf node with no
+	// out-edges is the common case (see CommitNodeResult.OutboxIDs). The legacy
+	// advance-task path publishes its receipt from AdvanceNode for exactly that
+	// leaf, so a len(OutboxIDs) > 0 gate withheld the receipt precisely where
+	// the folded and legacy paths were supposed to agree, and the folded path
+	// read as "no advance happened".
+	//
+	// !ExecutionDone is the other half of that parity, not extra caution. A
+	// commit that finalizes the execution cannot schedule anything, and the
+	// backends suppress its advance intent for that reason, so the legacy path
+	// has no AdvanceNode call to mirror — a receipt here would report an advance
+	// that could not and did not happen. The engine already relies on the same
+	// boundary in afterAtomicCommit's flush gate, which uses the outcome rather
+	// than the hint.
 	//
 	// Only the commit's own result is reported. Every skipped unit is reported
 	// exactly once, by the transition that resolved it: the skip intent this
 	// commit may write is consumed later through handleSystemTask, and that
 	// commit reports the NEXT layer from its own result.
 	if foldArrivals && result.Outcome == CommitOutcomeAccepted {
-		if result.Applied && len(result.OutboxIDs) > 0 {
+		if result.Applied && !result.ExecutionDone {
 			e.publishAdvanceReceipt(ctx, task, AdvanceNodeResult{Applied: true, OutboxIDs: result.OutboxIDs})
 		}
 		e.notifySkip(ctx, flowAdvance, result.Skipped)

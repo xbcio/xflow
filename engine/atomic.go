@@ -922,10 +922,14 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 		// The folded skip commit IS the advance this node used to emit, so the
 		// advance receipt and the skip report travel from its result instead of
 		// from a later AdvanceNode call. Same gate and same body as the folded
-		// node commit in atomic_commit.go; a fallback commit publishes nothing
-		// here because its advance task will.
+		// node commit in atomic_commit.go — including the reason the gate is
+		// Applied rather than a non-empty OutboxIDs (a skipped leaf has no
+		// downstream work, and the legacy advance task publishes its receipt for
+		// it) and the ExecutionDone boundary the backends use to suppress the
+		// advance intent of a finalizing commit. A fallback commit publishes
+		// nothing here because its advance task will.
 		if foldArrivals && result.Outcome == CommitOutcomeAccepted {
-			if result.Applied && len(result.OutboxIDs) > 0 {
+			if result.Applied && !result.ExecutionDone {
 				e.publishAdvanceReceipt(ctx, task, AdvanceNodeResult{Applied: true, OutboxIDs: result.OutboxIDs})
 			}
 			e.notifySkip(ctx, flowAdvance, result.Skipped)
