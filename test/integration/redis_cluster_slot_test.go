@@ -21,9 +21,9 @@ import (
 // TestRedisClusterSlotSafety exercises the cluster-sensitive transitions of the
 // distributed backend against a REAL Redis Cluster.
 //
-// The package's unit tests pin the hash-tag scheme statically (every execution
-// key carries {id}, every entry-activation script touches only workflow-digest
-// keys) and run against miniredis or a single-node Redis. Neither can fail with
+// The package's unit tests pin the hash-tag scheme statically (a representative
+// set of execution keys carries {id}, every entry-activation script touches
+// only workflow-digest keys) and run against miniredis or a single-node Redis. Neither can fail with
 // CROSSSLOT: a single-node server has no slots, and miniredis does not enforce
 // them. The failure mode they cannot see is a Lua script or multi-key command
 // whose KEYS span slots — the backend works in every other test and returns
