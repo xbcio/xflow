@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"errors"
 	"math/rand"
 	"sort"
 	"strings"
@@ -15,6 +16,12 @@ import (
 	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
 )
+
+// ErrReconcileSkippedNotLeader reports that a reconcile pass stopped early
+// because this replica lost leadership mid-pass. The activations it did not
+// reach are left untouched for the next leader's pass, so callers should treat
+// it as a clean skip rather than a failure.
+var ErrReconcileSkippedNotLeader = errors.New("entry activation reconcile: leadership lost mid-pass")
 
 // Default reconciler timings. These preserve the timing behavior of the
 // previous group-centric activation controller (since retired) across the
@@ -174,6 +181,11 @@ type EntryActivationReconcilerConfig struct {
 	// hosted-activation report from it to notice a directive that never
 	// arrived. nil preserves the original leader-local, drain-once behavior.
 	Delivery ActivationDeliveryDirectory
+	// Leader, when set, is re-checked during a pass so a replica that loses
+	// leadership mid-pass stops assigning and fencing. nil means "always the
+	// leader" (single-replica / dev). The ControlPlane also gates the loop on
+	// the same elector, but a pass can outlive the leadership it started under.
+	Leader LeaderGate
 }
 
 // entryRunnerDirectives holds pending activate/deactivate messages for a runner.
@@ -430,7 +442,14 @@ func (r *EntryActivationReconciler) leaseGrace() time.Duration {
 
 // Reconcile performs a single reconciliation pass over every desired activation
 // in the reconciler's namespaces, using now as the clock.
+//
+// When a Leader gate is configured the pass is leadership-gated at entry and
+// re-checks it periodically, returning ErrReconcileSkippedNotLeader if
+// leadership is lost mid-pass: the remainder is left for the next leader.
 func (r *EntryActivationReconciler) Reconcile(ctx context.Context, now time.Time) error {
+	if leaderLost(r.cfg.Leader) {
+		return ErrReconcileSkippedNotLeader
+	}
 	if err := r.recoverPendingDeactivationObligations(ctx); err != nil {
 		return err
 	}
@@ -458,6 +477,9 @@ func (r *EntryActivationReconciler) Reconcile(ctx context.Context, now time.Time
 	owners := make(map[logicalActivationKey]map[string]struct{})
 	failed := make(map[engine.EntryActivationKey]struct{})
 	for i := range activations {
+		if i > 0 && i%leaderRecheckInterval == 0 && leaderLost(r.cfg.Leader) {
+			return ErrReconcileSkippedNotLeader
+		}
 		act := &activations[i]
 		key := keyOf(act)
 		seen[key] = struct{}{}
@@ -471,6 +493,9 @@ func (r *EntryActivationReconciler) Reconcile(ctx context.Context, now time.Time
 	// excluding every sibling owner. A successful assignment is inserted into the
 	// set immediately, so two siblings can never be co-located in one pass.
 	for i := range activations {
+		if i > 0 && i%leaderRecheckInterval == 0 && leaderLost(r.cfg.Leader) {
+			return ErrReconcileSkippedNotLeader
+		}
 		act := &activations[i]
 		key := keyOf(act)
 		if _, skip := failed[key]; skip || !act.Desired || act.RunnerID != "" {

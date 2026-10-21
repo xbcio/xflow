@@ -709,6 +709,9 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 			Logger:           cfg.Logger,
 			WorkflowRegistry: workflowRegistry,
 			Namespaces:       cfg.EntryNamespaces,
+			// Also gate inside the pass: the loop's entry check cannot cover a
+			// pass that loses leadership while it is assigning.
+			Leader: elector,
 		}
 		if cfg.Metrics != nil {
 			recCfg.Metrics = metrics.NewGroupMetrics(cfg.Metrics)
@@ -1162,6 +1165,13 @@ func (cp *ControlPlane) runEntryReconciler(ctx context.Context) {
 				continue
 			}
 			if err := cp.entryReconciler.Reconcile(ctx, time.Now()); err != nil && ctx.Err() == nil {
+				if errors.Is(err, ErrReconcileSkippedNotLeader) {
+					if cp.logger != nil {
+						cp.logger.Info("entry activation reconcile stopped early",
+							"outcome", SweepPassOutcomeSkippedNotLeader)
+					}
+					continue
+				}
 				if cp.logger != nil {
 					cp.logger.Error("entry activation reconcile failed", "err", err)
 				}

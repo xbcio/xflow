@@ -780,7 +780,13 @@ func (s *LeaseSweeper) ReapStuckCancelingExecutionsOnce(ctx context.Context) int
 		return 0
 	}
 	result := ReapResult{Inspected: len(candidates)}
-	for _, candidate := range candidates {
+	for i, candidate := range candidates {
+		// A demoted replica must stop re-driving cluster-wide cancels; the
+		// new leader will pick the remainder up on its own pass.
+		if i > 0 && i%leaderRecheckInterval == 0 && leaderLost(s.elector) {
+			s.observePass(ctx, SweepPassCancelingExecution, SweepPassOutcomeSkippedNotLeader, result)
+			return result.Released
+		}
 		select {
 		case <-ctx.Done():
 			s.observePass(ctx, SweepPassCancelingExecution, SweepPassOutcomeRan, result)
@@ -1056,7 +1062,21 @@ func (s *LeaseSweeper) SweepOnce(ctx context.Context) int {
 		return 0
 	}
 	reclaimed := 0
-	for _, lease := range expired {
+	for i, lease := range expired {
+		// The entry gate only proves leadership when the pass started; a
+		// bounded scan can outlive it. Re-check periodically so a demoted
+		// replica stops reclaiming instead of racing the new leader.
+		if i > 0 && i%leaderRecheckInterval == 0 && leaderLost(s.elector) {
+			if s.log != nil {
+				s.log.Info("lease sweep stopped early",
+					"outcome", SweepPassOutcomeSkippedNotLeader,
+					"reclaimed", reclaimed,
+					"inspected", i,
+					"candidates", len(expired),
+				)
+			}
+			return reclaimed
+		}
 		select {
 		case <-ctx.Done():
 			return reclaimed
@@ -1270,4 +1290,18 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+// leaderRecheckInterval is how many candidates a long leader-gated maintenance
+// pass processes between leadership re-checks. IsLeader is a local atomic read
+// plus a deadline comparison, so re-checking costs no network round trip; 32
+// bounds how much work a replica that lost leadership can still apply without
+// re-checking on every item.
+const leaderRecheckInterval = 32
+
+// leaderLost reports whether a maintenance pass should stop because this
+// replica is no longer the leader. A nil gate means leadership is not
+// configured (single-replica / dev) and is never lost.
+func leaderLost(gate LeaderGate) bool {
+	return gate != nil && !gate.IsLeader()
 }
