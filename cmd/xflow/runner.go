@@ -39,9 +39,12 @@ from either confirms only that the server-side new-work admission gate changed;
 it does not mean the runner process stopped, a handler was interrupted, or
 every handoff settled.`,
 	}
-	cmd.PersistentFlags().StringVar(&opts.server, "server", envOr("XFLOW_API_ADDR", ""),
+	// The defaults stay empty so --help never prints an environment-supplied
+	// token; newManagementClient resolves XFLOW_API_ADDR / XFLOW_API_TOKEN after
+	// flag parsing.
+	cmd.PersistentFlags().StringVar(&opts.server, "server", "",
 		"Management API base URL, e.g. http://127.0.0.1:8080 (env: XFLOW_API_ADDR)")
-	cmd.PersistentFlags().StringVar(&opts.token, "token", envOr("XFLOW_API_TOKEN", ""),
+	cmd.PersistentFlags().StringVar(&opts.token, "token", "",
 		"Bearer token for the management API (env: XFLOW_API_TOKEN). Sent only in the Authorization header; never logged")
 	cmd.AddCommand(newRunnerListCommand(opts))
 	cmd.AddCommand(newRunnerGetCommand(opts))
@@ -286,12 +289,14 @@ func newRunnerControlCommand(opts *runnerOptions, action, desiredState, long str
 			if reason == "" {
 				return errors.New("--reason is required (record why the runner's scheduling state is changing)")
 			}
+			generatedRequestID := false
 			if requestID == "" {
 				generated, err := newManagementRequestID()
 				if err != nil {
 					return err
 				}
 				requestID = generated
+				generatedRequestID = true
 			}
 			client, err := newManagementClient(&opts.managementOptions)
 			if err != nil {
@@ -306,6 +311,12 @@ func newRunnerControlCommand(opts *runnerOptions, action, desiredState, long str
 				map[string]string{"X-Request-Id": requestID},
 				&snap)
 			if err != nil {
+				if generatedRequestID {
+					// The key traveled in a header the error cannot echo. Print it so
+					// an operator whose response was lost can retry with the same key
+					// instead of applying a second transition.
+					return fmt.Errorf("%w (generated request id %q; retry with --request-id %s)", err, requestID, requestID)
+				}
 				return err
 			}
 			return writeJSONLines(opts.out, runnerControlOutput{

@@ -81,9 +81,12 @@ credential in production; it emits a prominent stderr warning and records a
 "cli:breakglass:<user>" operator identity so the break-glass use is
 distinguishable in audit.`,
 	}
-	cmd.PersistentFlags().StringVar(&opts.server, "server", envOr("XFLOW_API_ADDR", ""),
+	// The API defaults are resolved in newDeadLetterClient, after flag parsing:
+	// a non-empty pflag default is echoed in --help, and XFLOW_API_TOKEN is a
+	// secret that must never be printed.
+	cmd.PersistentFlags().StringVar(&opts.server, "server", "",
 		"Management API base URL, e.g. http://127.0.0.1:8080 (env: XFLOW_API_ADDR). Default path; required unless --break-glass")
-	cmd.PersistentFlags().StringVar(&opts.token, "token", envOr("XFLOW_API_TOKEN", ""),
+	cmd.PersistentFlags().StringVar(&opts.token, "token", "",
 		"Bearer token for the management API (env: XFLOW_API_TOKEN). Sent only in the Authorization header; never logged")
 	cmd.PersistentFlags().BoolVar(&opts.breakGlass, "break-glass", false,
 		"Bypass the management API and connect directly to Redis (emergency maintenance only)")
@@ -117,18 +120,30 @@ type deadLetterClient interface {
 // newDeadLetterClient selects the API client by default and the break-glass
 // Redis-direct client when --break-glass is set. It emits a prominent stderr
 // warning for break-glass so an operator cannot use it silently.
+//
+// On the API path an explicit flag wins; otherwise XFLOW_API_ADDR /
+// XFLOW_API_TOKEN is read here rather than in the flag defaults, so --help
+// never prints the token.
 func newDeadLetterClient(opts *deadLetterOptions) (deadLetterClient, func(), error) {
 	if opts.breakGlass {
 		fmt.Fprintln(os.Stderr, "WARNING: --break-glass bypasses the management API and its authorization/metrics/audit outlet. Use only when the API is unavailable and record a break-glass operator credential.")
 		return openBreakGlassDeadLetterClient(opts.redisAddr)
 	}
-	if opts.server == "" {
+	server := opts.server
+	if server == "" {
+		server = envOr("XFLOW_API_ADDR", "")
+	}
+	token := opts.token
+	if token == "" {
+		token = envOr("XFLOW_API_TOKEN", "")
+	}
+	if server == "" {
 		return nil, nil, errors.New("--server (or XFLOW_API_ADDR) is required; alternatively use --break-glass for the Redis-direct maintenance path")
 	}
-	if opts.token == "" {
+	if token == "" {
 		return nil, nil, errors.New("--token (or XFLOW_API_TOKEN) is required for the management API; alternatively use --break-glass")
 	}
-	return &apiDeadLetterClient{server: strings.TrimRight(opts.server, "/"), token: opts.token}, nil, nil
+	return &apiDeadLetterClient{server: strings.TrimRight(server, "/"), token: token}, nil, nil
 }
 
 func newDeadLetterListCommand(opts *deadLetterOptions) *cobra.Command {

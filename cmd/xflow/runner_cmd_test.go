@@ -277,6 +277,51 @@ func TestRunnerDrainRequiresReason(t *testing.T) {
 	}
 }
 
+// TestRunnerControlReportsGeneratedRequestIDOnFailure pins the recovery path
+// for a lost response: the idempotency key travels in a header the error cannot
+// echo, so a transport failure after a generated key must name that key. The
+// operator can then retry with --request-id instead of applying a second
+// transition. An operator-supplied key needs no such report.
+func TestRunnerControlReportsGeneratedRequestIDOnFailure(t *testing.T) {
+	const token = "tok-request-id-secret"
+	// Stop the server before use: every call fails at the transport layer, which
+	// is the shape a timeout or a dropped connection takes.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv.Close()
+
+	t.Run("generated key is reported", func(t *testing.T) {
+		var out bytes.Buffer
+		err := executeRootWith(&out, "runner", "--server", srv.URL, "--token", token,
+			"drain", "r1", "--reason", "lost response")
+		if err == nil {
+			t.Fatal("runner drain against a closed server returned nil")
+		}
+		msg := err.Error()
+		match := regexp.MustCompile(`generated request id "(cli-[0-9a-f]+)"`).FindStringSubmatch(msg)
+		if match == nil {
+			t.Fatalf("error = %v, want it to carry the generated request id", err)
+		}
+		if !strings.Contains(msg, "--request-id "+match[1]) {
+			t.Fatalf("error = %v, want a retry hint naming --request-id %s", err, match[1])
+		}
+		if strings.Contains(msg, token) {
+			t.Fatalf("error leaked the bearer token: %v", err)
+		}
+	})
+
+	t.Run("explicit key is not reported as generated", func(t *testing.T) {
+		var out bytes.Buffer
+		err := executeRootWith(&out, "runner", "--server", srv.URL, "--token", token,
+			"resume", "r1", "--reason", "lost response", "--request-id", "cli-explicit-1")
+		if err == nil {
+			t.Fatal("runner resume against a closed server returned nil")
+		}
+		if msg := err.Error(); strings.Contains(msg, "generated request id") {
+			t.Fatalf("error = %v, want no generated-id report for an explicit --request-id", err)
+		}
+	})
+}
+
 func TestRunnerResumePostsActive(t *testing.T) {
 	var rec recordedRequest
 	srv := managementTestServer(t, map[string]any{"desired_state": "active", "generation": 4}, http.StatusOK, &rec)

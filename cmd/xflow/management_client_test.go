@@ -85,10 +85,16 @@ func TestManagementClientMapsStatusCodesToActionableErrors(t *testing.T) {
 			wants:  []string{"status 404", "not found", "runner_not_found"},
 		},
 		{
-			name:   "conflict explains request id reuse",
+			name:   "conflict is command-neutral",
 			status: http.StatusConflict,
 			code:   "idempotency_key_reused",
-			wants:  []string{"status 409", "--request-id", "idempotency_key_reused"},
+			wants:  []string{"status 409", "conflicts with the current state or an idempotency key", "idempotency_key_reused"},
+		},
+		{
+			name:   "rerun conflict uses the same neutral wording",
+			status: http.StatusConflict,
+			code:   "execution_not_rerunnable",
+			wants:  []string{"status 409", "conflicts with the current state or an idempotency key", "execution_not_rerunnable"},
 		},
 		{
 			name:   "not implemented",
@@ -124,6 +130,12 @@ func TestManagementClientMapsStatusCodesToActionableErrors(t *testing.T) {
 			}
 			if strings.Contains(msg, "tok-secret") {
 				t.Fatalf("error %q leaked the bearer token", msg)
+			}
+			// 409 covers both drain/resume request-id reuse and rerun's
+			// execution_not_rerunnable / idempotency_key_conflict, so the hint must
+			// not prescribe --request-id for every command that can reach it.
+			if tc.status == http.StatusConflict && strings.Contains(msg, "--request-id") {
+				t.Fatalf("409 hint %q still names only the drain/resume --request-id", msg)
 			}
 		})
 	}

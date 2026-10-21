@@ -25,29 +25,39 @@ type managementOptions struct {
 	out    io.Writer
 }
 
-// addManagementFlags registers the shared --server/--token pair with the same
-// environment fallbacks and wording as the dead-letter command.
+// addManagementFlags registers the shared --server/--token pair. Both defaults
+// are empty on purpose: pflag prints a non-empty default in --help, so reading
+// XFLOW_API_TOKEN at registration time would echo the bearer token to stdout.
+// The environment is consulted after parsing, in newManagementClient.
 func addManagementFlags(cmd *cobra.Command, opts *managementOptions) {
-	cmd.Flags().StringVar(&opts.server, "server", envOr("XFLOW_API_ADDR", ""),
+	cmd.Flags().StringVar(&opts.server, "server", "",
 		"Management API base URL, e.g. http://127.0.0.1:8080 (env: XFLOW_API_ADDR)")
-	cmd.Flags().StringVar(&opts.token, "token", envOr("XFLOW_API_TOKEN", ""),
+	cmd.Flags().StringVar(&opts.token, "token", "",
 		"Bearer token for the management API (env: XFLOW_API_TOKEN). Sent only in the Authorization header; never logged")
 }
 
-// newManagementClient validates the required connection flags and builds a
-// client. Both flags are required: unlike the dead-letter command there is no
-// break-glass path for these operations, so a missing value is a usage error
-// rather than a fallback.
+// newManagementClient validates the connection settings and builds a client.
+// An explicit flag wins; otherwise XFLOW_API_ADDR / XFLOW_API_TOKEN is used.
+// Both values are required: unlike the dead-letter command there is no
+// break-glass path for these operations, so a missing value is a usage error.
 func newManagementClient(opts *managementOptions) (*managementClient, error) {
-	if opts.server == "" {
+	server := opts.server
+	if server == "" {
+		server = envOr("XFLOW_API_ADDR", "")
+	}
+	token := opts.token
+	if token == "" {
+		token = envOr("XFLOW_API_TOKEN", "")
+	}
+	if server == "" {
 		return nil, errors.New("--server (or XFLOW_API_ADDR) is required for the management API")
 	}
-	if opts.token == "" {
+	if token == "" {
 		return nil, errors.New("--token (or XFLOW_API_TOKEN) is required for the management API")
 	}
 	return &managementClient{
-		server:     strings.TrimRight(opts.server, "/"),
-		token:      opts.token,
+		server:     strings.TrimRight(server, "/"),
+		token:      token,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}, nil
 }
@@ -167,7 +177,10 @@ func (e managementAPIError) Error() string {
 	case http.StatusNotFound:
 		hint = "the resource was not found; check the id and that the token's namespace owns it"
 	case http.StatusConflict:
-		hint = "the request conflicts with the current state; a drain/resume retry must reuse its original --request-id"
+		// 409 serves both drain/resume request-id reuse and rerun's
+		// execution_not_rerunnable / idempotency_key_conflict, so the hint stays
+		// command-neutral rather than naming only --request-id.
+		hint = "the request conflicts with the current state or an idempotency key; check the command's retry semantics"
 	case http.StatusNotImplemented:
 		if e.code == "runner_listing_unsupported" {
 			hint = "this backend cannot enumerate runners; use 'runner get <id>' for a known runner"
@@ -196,6 +209,9 @@ func newManagementRequestID() (string, error) {
 }
 
 // validateOutputFormat bounds -o to the two formats the commands implement.
+// Only the read commands (runner list/get) expose -o: the mutation commands
+// print one JSON line of their own, so a second table projection would add an
+// output shape with no consumer.
 func validateOutputFormat(format string) error {
 	switch format {
 	case "table", "json":
