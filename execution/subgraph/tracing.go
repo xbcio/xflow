@@ -18,6 +18,11 @@ const subgraphInstrumentationName = "github.com/xbcio/xflow"
 // tracing is disabled — the same pattern engine/tracing.go uses, chosen because
 // a sub-graph execution can be started by the engine, by a runner, or by the
 // SDK's in-process map body, and none of those constructors carries a tracer.
+//
+// Because the provider is looked up globally, these spans exist only when the
+// HOST program has installed one (observability/tracing.NewTracerProvider). An
+// embedder that never installs a provider gets no-op spans and no error: that
+// is the supported way to run without tracing, not a defect of this package.
 func subgraphTracer() tracing.Tracer {
 	return tracing.NewOTelTracer(otel.Tracer(subgraphInstrumentationName))
 }
