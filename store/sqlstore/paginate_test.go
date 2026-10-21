@@ -54,7 +54,7 @@ func newSQLCapture(t *testing.T) *sqlCapture {
 	// is the entire distinction under test.
 	err = db.Callback().Query().After("gorm:query").Register("xflow_test:capture",
 		func(tx *gorm.DB) {
-			c.last = tx.Dialector.Explain(tx.Statement.SQL.String(), tx.Statement.Vars...)
+			c.last = tx.Explain(tx.Statement.SQL.String(), tx.Statement.Vars...)
 		})
 	if err != nil {
 		t.Fatalf("register capture callback: %v", err)
@@ -65,7 +65,7 @@ func newSQLCapture(t *testing.T) *sqlCapture {
 	// match, and that is only visible with the bind values interpolated.
 	err = db.Callback().Update().After("gorm:update").Register("xflow_test:capture_update",
 		func(tx *gorm.DB) {
-			c.last = tx.Dialector.Explain(tx.Statement.SQL.String(), tx.Statement.Vars...)
+			c.last = tx.Explain(tx.Statement.SQL.String(), tx.Statement.Vars...)
 		})
 	if err != nil {
 		t.Fatalf("register update capture callback: %v", err)
