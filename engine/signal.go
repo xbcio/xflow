@@ -13,28 +13,55 @@ import (
 // DurableSignalDeliverer, the signal consumption and resume-task persistence
 // happen in one atomic transition so a crash between them cannot lose the
 // signal; otherwise the legacy two-step path is used.
-func (e *Engine) DeliverSignal(ctx context.Context, id types.ExecutionID, name string, data map[string]any) error {
+func (e *Engine) DeliverSignal(ctx context.Context, id types.ExecutionID, name string, data map[string]any) (err error) {
+	// The signal NAME is an attribute; the payload never is. A signal carries
+	// caller business data (and, on some paths, credentials or tokens in it),
+	// and spans are exported to a backend with a far broader audience than one
+	// execution. durable/resumed say what happened to the signal without
+	// describing what it contained.
+	ctx, span := e.startExecutionSpan(ctx, id, "xflow.signal.deliver",
+		"execution_id", string(id),
+		"signal_name", name,
+		"durable", false,
+		"resumed", false,
+	)
+	defer span.End()
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+		}
+	}()
+
 	if durable, ok := e.state.(DurableSignalDeliverer); ok {
-		return e.deliverSignalDurable(ctx, id, name, data, durable)
+		span.Set("durable", true)
+		resumed, err := e.deliverSignalDurable(ctx, id, name, data, durable)
+		span.Set("resumed", resumed)
+		return err
 	}
-	return e.deliverSignalLegacy(ctx, id, name, data)
+	resumed, err := e.deliverSignalLegacy(ctx, id, name, data)
+	span.Set("resumed", resumed)
+	return err
 }
 
 // deliverSignalDurable peeks the resume target, resolves graph metadata, then
 // atomically consumes the signal and persists the resume task in one outbox
 // transition. A crash after consumption but before FlushOutbox leaves the
 // resume intent durable; the outbox dispatcher redelivers it.
-func (e *Engine) deliverSignalDurable(ctx context.Context, id types.ExecutionID, name string, data map[string]any, durable DurableSignalDeliverer) error {
+//
+// resumed reports that a resume intent was persisted (and, on the successful
+// path, delivered); false means the signal was stored only, the execution was
+// inactive, or a quorum has not been reached yet.
+func (e *Engine) deliverSignalDurable(ctx context.Context, id types.ExecutionID, name string, data map[string]any, durable DurableSignalDeliverer) (bool, error) {
 	resumeNode, err := durable.PeekResumeTarget(ctx, id, name)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	var intent ResumeIntent
 	if resumeNode != "" {
 		g, active, err := e.loadActiveGraph(ctx, id)
 		if err != nil {
-			return fmt.Errorf("load graph for signal %q on %q: %w", name, id, err)
+			return false, fmt.Errorf("load graph for signal %q on %q: %w", name, id, err)
 		}
 		if !active {
 			// The execution completed, was canceled, or was cleaned up while
@@ -43,15 +70,15 @@ func (e *Engine) deliverSignalDurable(ctx context.Context, id types.ExecutionID,
 			// target is a benign no-op — the signal simply has nowhere to resume.
 			// Returning ErrExecutionInactive here would surface as an HTTP 500 on
 			// the control plane's signal endpoint for an already-finished workflow.
-			return nil
+			return false, nil
 		}
 		nodeIdx, ok := g.NodeIndex(resumeNode)
 		if !ok {
-			return fmt.Errorf("signal %q targeted unknown node %q", name, resumeNode)
+			return false, fmt.Errorf("signal %q targeted unknown node %q", name, resumeNode)
 		}
 		unitIdx := g.UnitIndexForNode(nodeIdx)
 		if unitIdx < 0 {
-			return fmt.Errorf("cannot resume at %q: supply node has no schedulable unit", resumeNode)
+			return false, fmt.Errorf("cannot resume at %q: supply node has no schedulable unit", resumeNode)
 		}
 		// ActivationID is intentionally left zero: the durable backend reads the
 		// live activation_id from node meta inside the atomic Lua transaction,
@@ -62,7 +89,7 @@ func (e *Engine) deliverSignalDurable(ctx context.Context, id types.ExecutionID,
 
 	node, _, committed, err := durable.DeliverSignalWithOutbox(ctx, id, name, data, intent)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	if e.hooks != nil {
@@ -73,20 +100,24 @@ func (e *Engine) deliverSignalDurable(ctx context.Context, id types.ExecutionID,
 
 	if !committed || node == "" {
 		// Signal stored or multi-signal quorum not yet reached; no resume to deliver.
-		return nil
+		return false, nil
 	}
 	// Resume task is durably persisted in the outbox; flush delivers it now.
-	return e.FlushOutbox(ctx, id)
+	// The intent survives a failed flush, so the resume is scheduled either way.
+	return true, e.FlushOutbox(ctx, id)
 }
 
 // deliverSignalLegacy is the non-atomic two-step path used by backends that do
 // not implement DurableSignalDeliverer (e.g. transient). A crash between signal
 // consumption and enqueue can lose the resume — acceptable for non-durable
 // backends whose state is already lost on crash.
-func (e *Engine) deliverSignalLegacy(ctx context.Context, id types.ExecutionID, name string, data map[string]any) error {
+//
+// resumed reports that a resume task was actually enqueued; false covers the
+// "signal stored, target not yet suspended" and terminal-target cases.
+func (e *Engine) deliverSignalLegacy(ctx context.Context, id types.ExecutionID, name string, data map[string]any) (bool, error) {
 	resumeNode, payload, err := e.state.DeliverSignal(ctx, id, name, data)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	if e.hooks != nil {
@@ -97,39 +128,39 @@ func (e *Engine) deliverSignalLegacy(ctx context.Context, id types.ExecutionID, 
 
 	if resumeNode == "" {
 		// Signal stored; node not yet suspended.
-		return nil
+		return false, nil
 	}
 
 	g, active, err := e.loadActiveGraph(ctx, id)
 	if err != nil {
-		return fmt.Errorf("load graph for signal %q on %q: %w", name, id, err)
+		return false, fmt.Errorf("load graph for signal %q on %q: %w", name, id, err)
 	}
 	if !active {
 		// Terminal/cleaned-up target: benign no-op for the control/user-facing
 		// signal path (see deliverSignalDurable for rationale). The signal was
 		// already consumed above; the node is terminal so there is no resume to
 		// enqueue.
-		return nil
+		return false, nil
 	}
 	nodeIdx, ok := g.NodeIndex(resumeNode)
 	if !ok {
-		return fmt.Errorf("signal %q targeted unknown node %q", name, resumeNode)
+		return false, fmt.Errorf("signal %q targeted unknown node %q", name, resumeNode)
 	}
 	activationID, err := e.currentActivationID(ctx, id, resumeNode)
 	if err != nil {
-		return fmt.Errorf("read signal target %q/%q: %w", id, resumeNode, err)
+		return false, fmt.Errorf("read signal target %q/%q: %w", id, resumeNode, err)
 	}
 
 	acquired, err := e.state.AcquireResumeLock(ctx, id, resumeNode)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !acquired {
 		// The lock is held by a concurrent resume (another signal or timer).
 		// The signal was already consumed above; that holder will enqueue the
 		// resume task. Return a retryable error so upper layers can surface the
 		// contention rather than silently succeeding with no resume enqueued.
-		return fmt.Errorf("resume lock contended for %q/%q: signal consumed but resume delegated to lock holder", id, resumeNode)
+		return false, fmt.Errorf("resume lock contended for %q/%q: signal consumed but resume delegated to lock holder", id, resumeNode)
 	}
 
 	if payload == nil {
@@ -139,7 +170,7 @@ func (e *Engine) deliverSignalLegacy(ctx context.Context, id types.ExecutionID, 
 			Data:      data,
 		}
 	}
-	return e.queue.Enqueue(ctx, &Task{
+	if err := e.queue.Enqueue(ctx, &Task{
 		ExecutionID:  id,
 		NodeName:     resumeNode,
 		NodeIdx:      nodeIdx,
@@ -148,7 +179,10 @@ func (e *Engine) deliverSignalLegacy(ctx context.Context, id types.ExecutionID, 
 		Payload:      payload,
 		ActivationID: activationID,
 		AutoDepth:    0,
-	})
+	}); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // TimeoutNode directly enqueues a resume task with TimeoutFired trigger for a

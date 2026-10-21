@@ -8,6 +8,7 @@ import (
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -21,6 +22,7 @@ type config struct {
 	artifactCode  func(ctx context.Context, digest string) ([]byte, error)
 	registry      *execution.Registry
 	logger        engine.Logger
+	tracer        tracing.Tracer
 }
 
 // WithConcurrency sets the number of in-memory queue consumer goroutines. Default is 4.
@@ -78,6 +80,19 @@ func WithArtifactCodeResolver(fn func(ctx context.Context, digest string) ([]byt
 	return func(c *config) { c.artifactCode = fn }
 }
 
+// WithTracer installs the tracer the embedded execution dispatcher uses for
+// xflow.local.task spans. Nil (the default) records nothing. This is the
+// embedded-engine counterpart of service/runner's Config.Tracer: an in-process
+// backend has no runner process, so without it a local execution is invisible
+// to a trace backend even when the host installed a provider.
+func WithTracer(t tracing.Tracer) Option {
+	return func(c *config) {
+		if t != nil {
+			c.tracer = t
+		}
+	}
+}
+
 // WithRegistry injects an external handler registry. Use this when the inner
 // engine must resolve handlers registered outside its own backend (e.g. group
 // runtime injecting the outer runner's member handlers).
@@ -96,6 +111,7 @@ type Backend struct {
 	resourcePool     types.ResourcePool
 	artifactCode     func(ctx context.Context, digest string) ([]byte, error)
 	logger           engine.Logger
+	tracer           tracing.Tracer
 }
 
 // New creates a memory backend with its components but does NOT start the queue.
@@ -125,6 +141,7 @@ func New(opts ...Option) *Backend {
 		resourcePool:     cfg.resourcePool,
 		artifactCode:     cfg.artifactCode,
 		logger:           cfg.logger,
+		tracer:           cfg.tracer,
 	}
 }
 
@@ -153,6 +170,9 @@ func (b *Backend) Bind(eng *engine.Engine) func() {
 	}
 	if b.artifactCode != nil {
 		opts = append(opts, execution.WithArtifactCodeResolver(b.artifactCode))
+	}
+	if b.tracer != nil {
+		opts = append(opts, execution.WithTracer(b.tracer))
 	}
 	dispatcher := execution.NewEmbeddedDispatcher(eng, b.registry, opts...)
 	// The queue worker's ctx starts from context.Background() and is NOT

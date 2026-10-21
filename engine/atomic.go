@@ -503,7 +503,22 @@ func (e *Engine) commitNode(ctx context.Context, req CommitNodeRequest) (CommitN
 // intents durable and un-attempted; the OutboxDispatcher's next tick and any
 // subsequent commit both re-enter here to finish the delivery.
 func (e *Engine) FlushOutbox(ctx context.Context, id types.ExecutionID) error {
-	ctx, span := outboxTracer().Start(ctx, "xflow.outbox.flush", "execution_id", string(id))
+	// A context that carries no span of its own is re-anchored to the submission
+	// carrier here, once, before anything is opened. The outbox dispatcher
+	// starts from context.Background(), and without this the flush span AND
+	// every span the inline system-task consumption opens inside the delivery
+	// loop (notably xflow.engine.advance) would be detached roots in a trace
+	// unrelated to the execution's.
+	//
+	// The delivery loop runs on this anchored ctx, not on the flush span's ctx.
+	// The flush span measures the loop; per-entry work belongs directly to the
+	// execution, so it is a remote child of the submission span rather than a
+	// grandchild parented through an operational span. Inline from a commit the
+	// ctx already carries the commit span, so both stay under the commit span;
+	// advance is now a direct child of the commit span rather than of the flush
+	// span.
+	ctx = e.executionTraceContext(ctx, id)
+	_, span := engineTracer().Start(ctx, "xflow.outbox.flush", "execution_id", string(id))
 	defer span.End()
 	state, err := e.atomicState()
 	if err != nil {
@@ -743,6 +758,93 @@ func (e *Engine) warnStaleAdvance(task *Task, nodeActivation int) {
 		"node_activation", nodeActivation)
 }
 
+// handleAdvanceTask applies one downstream-advance intent. It is a method
+// rather than the inline case body of handleSystemTask so the
+// xflow.engine.advance span can be opened once, with a defer, around every
+// return path — including the "duplicate delivery applied nothing" and
+// "execution is gone" ones.
+//
+// The span is parented through startExecutionSpan: on the outbox-dispatcher
+// path the delivery context is a bare background one, and without the
+// submission carrier this engine-owned half of the execution would be a
+// detached root. When the advance is flushed inline from the commit that
+// caused it, ctx already carries that commit's span and is left untouched.
+func (e *Engine) handleAdvanceTask(ctx context.Context, task *Task, flush bool) (handled bool, err error) {
+	ctx, span := e.startExecutionSpan(ctx, task.ExecutionID, "xflow.engine.advance",
+		"execution_id", string(task.ExecutionID),
+		"node_name", task.NodeName,
+		"applied", false,
+		"skipped", 0,
+	)
+	defer span.End()
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+		}
+	}()
+
+	g, active, err := e.loadActiveGraph(ctx, task.ExecutionID)
+	if err != nil {
+		return true, err
+	}
+	if !active {
+		// An advance intent for an execution that no longer exists is a
+		// dropped delivery, not a handled one: it is the intent that would
+		// have enqueued the downstream node-exec task, so its loss must be
+		// classified like any other. The error carries the classification
+		// (gone / terminal / unattributed) for the delivery sink; the
+		// handled=true return keeps the task from being routed to a runner.
+		return true, e.inactiveExecutionError(ctx, task.ExecutionID, task.provabilityAnchor())
+	}
+	var port string
+	if task.Port != nil {
+		port = *task.Port
+	} else {
+		// Legacy path: an advance entry written to a durable outbox before
+		// Task.Port existed, or a backend whose queue does not carry it.
+		// Read the node for the port; the terminal and activation checks
+		// come along for free on this path.
+		node, err := e.state.GetNode(ctx, task.ExecutionID, task.NodeName)
+		if err != nil {
+			return true, fmt.Errorf("read advance source %q/%q: %w", task.ExecutionID, task.NodeName, err)
+		}
+		if node == nil || !types.IsTerminalNodeStatus(node.Status) {
+			return true, nil
+		}
+		if node.ActivationID != task.ActivationID {
+			e.warnStaleAdvance(task, node.ActivationID)
+			return true, nil
+		}
+		port = node.Port
+	}
+	arrivals := downstreamArrivals(g, task.NodeIdx, port)
+	state, err := e.atomicState()
+	if err != nil {
+		return true, err
+	}
+	result, err := state.AdvanceNode(ctx, AdvanceNodeRequest{
+		ExecutionID:  task.ExecutionID,
+		NodeName:     task.NodeName,
+		NodeIdx:      task.NodeIdx,
+		ActivationID: task.ActivationID,
+		AutoDepth:    task.AutoDepth,
+		Arrivals:     arrivals,
+	})
+	if err != nil {
+		return true, fmt.Errorf("advance node %q/%q: %w", task.ExecutionID, task.NodeName, err)
+	}
+	span.Set("applied", result.Applied, "skipped", len(result.Skipped))
+	if !result.Applied {
+		e.explainUnappliedAdvance(ctx, task)
+	}
+	e.publishAdvanceReceipt(ctx, task, result)
+	e.notifySkip(ctx, flowAdvance, result.Skipped)
+	if !flush {
+		return true, nil
+	}
+	return true, e.FlushOutbox(ctx, task.ExecutionID)
+}
+
 // explainUnappliedAdvance recovers the stale-advance diagnostic on the path
 // that no longer reads the source node up front.
 //
@@ -777,65 +879,7 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 	}
 	switch task.Type {
 	case TaskTypeNodeAdvance:
-		g, active, err := e.loadActiveGraph(ctx, task.ExecutionID)
-		if err != nil {
-			return true, err
-		}
-		if !active {
-			// An advance intent for an execution that no longer exists is a
-			// dropped delivery, not a handled one: it is the intent that would
-			// have enqueued the downstream node-exec task, so its loss must be
-			// classified like any other. The error carries the classification
-			// (gone / terminal / unattributed) for the delivery sink; the
-			// handled=true return keeps the task from being routed to a runner.
-			return true, e.inactiveExecutionError(ctx, task.ExecutionID, task.provabilityAnchor())
-		}
-		var port string
-		if task.Port != nil {
-			port = *task.Port
-		} else {
-			// Legacy path: an advance entry written to a durable outbox before
-			// Task.Port existed, or a backend whose queue does not carry it.
-			// Read the node for the port; the terminal and activation checks
-			// come along for free on this path.
-			node, err := e.state.GetNode(ctx, task.ExecutionID, task.NodeName)
-			if err != nil {
-				return true, fmt.Errorf("read advance source %q/%q: %w", task.ExecutionID, task.NodeName, err)
-			}
-			if node == nil || !types.IsTerminalNodeStatus(node.Status) {
-				return true, nil
-			}
-			if node.ActivationID != task.ActivationID {
-				e.warnStaleAdvance(task, node.ActivationID)
-				return true, nil
-			}
-			port = node.Port
-		}
-		arrivals := downstreamArrivals(g, task.NodeIdx, port)
-		state, err := e.atomicState()
-		if err != nil {
-			return true, err
-		}
-		result, err := state.AdvanceNode(ctx, AdvanceNodeRequest{
-			ExecutionID:  task.ExecutionID,
-			NodeName:     task.NodeName,
-			NodeIdx:      task.NodeIdx,
-			ActivationID: task.ActivationID,
-			AutoDepth:    task.AutoDepth,
-			Arrivals:     arrivals,
-		})
-		if err != nil {
-			return true, fmt.Errorf("advance node %q/%q: %w", task.ExecutionID, task.NodeName, err)
-		}
-		if !result.Applied {
-			e.explainUnappliedAdvance(ctx, task)
-		}
-		e.publishAdvanceReceipt(ctx, task, result)
-		e.notifySkip(ctx, flowAdvance, result.Skipped)
-		if !flush {
-			return true, nil
-		}
-		return true, e.FlushOutbox(ctx, task.ExecutionID)
+		return e.handleAdvanceTask(ctx, task, flush)
 
 	case TaskTypeNodeBatch:
 		if e.remoteBatchExecution {

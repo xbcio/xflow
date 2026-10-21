@@ -8,6 +8,7 @@ import (
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -66,10 +67,37 @@ type Runner struct {
 	credentialResolver func(namespace namespace.Namespace, name string) map[string]any
 	artifactCode       func(ctx context.Context, digest string) ([]byte, error)
 	timeoutObserver    TimeoutObserver
+	// tracer instruments in-process task attempts with xflow.local.task. Nil
+	// (the default) means no local span: the embedded dispatcher and the
+	// standalone runner each already open their own attempt span, and a runner
+	// used elsewhere should not grow one implicitly. See WithTracer.
+	tracer tracing.Tracer
 }
+
+// taskTracer reports the runner's tracer so the Dispatcher sharing this
+// executor (NewEmbeddedDispatcher) opens its local task span with the same
+// tracer, without a second option the two constructors could disagree on.
+func (r *Runner) taskTracer() tracing.Tracer { return r.tracer }
 
 // RunnerOption customizes a Runner.
 type RunnerOption func(*Runner)
+
+// WithTracer installs the tracer used for the xflow.local.task span opened
+// around one in-process task attempt. Nil (the default) records nothing.
+//
+// It exists because an embedded (local) engine has no runner process and no
+// control-plane dispatch span: without it, every local execution is invisible
+// to a trace backend even when the process installed a provider. A ctx that
+// already carries a span is left alone (see startLocalTaskSpan), so passing the
+// tracer to both the dispatcher's executor and a standalone runner cannot
+// produce two spans for one attempt.
+func WithTracer(t tracing.Tracer) RunnerOption {
+	return func(r *Runner) {
+		if t != nil {
+			r.tracer = t
+		}
+	}
+}
 
 // WithResourcePool installs a ResourcePool. The Runner attaches it to the
 // per-call context so resource-aware nodes (DatabaseNode, GRPCNode) can pool
@@ -119,7 +147,23 @@ func NewRunner(registry engine.HandlerRegistry, opts ...RunnerOption) *Runner {
 
 // Execute runs a task lease. The returned handled flag is false when the task
 // requires engine-managed compatibility behavior.
-func (r *Runner) Execute(ctx context.Context, lease *engine.TaskLease) (engine.TaskResult, error) {
+//
+// When a tracer is installed (WithTracer) and the caller has not already opened
+// an attempt span, the handler runs under xflow.local.task, parented to the
+// lease's W3C carrier. See startLocalTaskSpan.
+func (r *Runner) Execute(ctx context.Context, lease *engine.TaskLease) (result engine.TaskResult, err error) {
+	ctx, span := startLocalTaskSpan(ctx, r.tracer, lease)
+	defer span.End()
+	result, err = r.execute(ctx, lease)
+	if err != nil {
+		span.RecordError(err)
+	}
+	return result, err
+}
+
+// execute is Execute's body, split out so the local task span wraps every
+// return path without threading a span through it.
+func (r *Runner) execute(ctx context.Context, lease *engine.TaskLease) (engine.TaskResult, error) {
 	handler, err := r.registry.Get(
 		types.ExecutionID(lease.Task.ExecutionID),
 		lease.Task.NodeName,

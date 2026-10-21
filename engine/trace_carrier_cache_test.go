@@ -107,8 +107,10 @@ func TestExecutionTraceCarrier_CachesMissing(t *testing.T) {
 }
 
 // TestExecutionTraceCarrier_FallsBackToSnapshot pins the capability-absent path:
-// with only GetExecution available the method keeps its old behavior, reading
-// the snapshot per call.
+// with only GetExecution available the first ask reads the snapshot, and the
+// answer is memoized exactly like the narrow read — a backend without the
+// capability must not pay a full snapshot read per background span. The same
+// copy and eviction rules apply.
 func TestExecutionTraceCarrier_FallsBackToSnapshot(t *testing.T) {
 	ctx := context.Background()
 	id := types.ExecutionID("exec-carrier-fallback")
@@ -120,17 +122,36 @@ func TestExecutionTraceCarrier_FallsBackToSnapshot(t *testing.T) {
 	}
 	eng := New(state, &fakeQueue{})
 
-	for i := 0; i < 2; i++ {
-		got, err := eng.ExecutionTraceCarrier(ctx, id)
-		if err != nil {
-			t.Fatalf("ExecutionTraceCarrier() call %d error = %v", i+1, err)
-		}
-		if !sameCarrier(got, testCarrier) {
-			t.Fatalf("ExecutionTraceCarrier() call %d = %#v, want %#v", i+1, got, testCarrier)
-		}
+	first, err := eng.ExecutionTraceCarrier(ctx, id)
+	if err != nil {
+		t.Fatalf("ExecutionTraceCarrier() error = %v", err)
+	}
+	if !sameCarrier(first, testCarrier) {
+		t.Fatalf("ExecutionTraceCarrier() = %#v, want %#v", first, testCarrier)
+	}
+	if reads := state.reads(); reads != 1 {
+		t.Fatalf("snapshot reads after first call = %d, want 1", reads)
+	}
+
+	first["traceparent"] = "mutated"
+	second, err := eng.ExecutionTraceCarrier(ctx, id)
+	if err != nil {
+		t.Fatalf("ExecutionTraceCarrier() second call error = %v", err)
+	}
+	if second["traceparent"] != testCarrier["traceparent"] {
+		t.Fatalf("second call returned %q, want the cached original %q: the cached map must not be handed out for mutation",
+			second["traceparent"], testCarrier["traceparent"])
+	}
+	if reads := state.reads(); reads != 1 {
+		t.Fatalf("snapshot reads after second call = %d, want 1 (cached)", reads)
+	}
+
+	eng.EvictExecution(id)
+	if _, err := eng.ExecutionTraceCarrier(ctx, id); err != nil {
+		t.Fatalf("ExecutionTraceCarrier() after EvictExecution error = %v", err)
 	}
 	if reads := state.reads(); reads != 2 {
-		t.Fatalf("snapshot reads = %d across two calls, want 2: without the capability there is no narrow read to cache", reads)
+		t.Fatalf("snapshot reads after EvictExecution = %d, want 2 (memo cleared)", reads)
 	}
 }
 

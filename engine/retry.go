@@ -98,8 +98,25 @@ func retryFor(meta graph.NodeMeta) *types.RetrySettings {
 // scheduleRetry resets a current attempt and records the next task. Atomic
 // StateStores make the reset and durable delayed intent one transition; legacy
 // stores retain the historical direct queue fallback.
-func (e *Engine) scheduleRetry(ctx context.Context, task *Task, attempt int, settings *types.RetrySettings, token LeaseToken) (bool, error) {
+func (e *Engine) scheduleRetry(ctx context.Context, task *Task, attempt int, settings *types.RetrySettings, token LeaseToken) (scheduled bool, err error) {
+	// One span per retry decision rather than per attempt: the delay, the
+	// fence, and the durability of the redelivery intent are what an operator
+	// diagnosing "why did this node retry" needs, and they are all decided
+	// here. The attempt number is the current (failed) one; attempt+1 is the
+	// run this call schedules, which the next task/execute span carries.
+	ctx, span := e.startExecutionSpan(ctx, task.ExecutionID, "xflow.engine.retry",
+		"execution_id", string(task.ExecutionID),
+		"node_name", task.NodeName,
+		"attempt", attempt,
+	)
+	defer span.End()
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+		}
+	}()
 	delay := retryBackoff(attempt, settings, task.ExecutionID, task.NodeName)
+	span.Set("delay_ms", int64(delay/time.Millisecond))
 	// A retry re-enters the same node, so an engine-owned node keeps its task
 	// type: a sub-workflow retry scheduled as TaskTypeNodeExec would be routed
 	// to a runner that cannot run it, and would come back as a no-handler

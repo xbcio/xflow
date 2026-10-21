@@ -2280,7 +2280,25 @@ func (m *workflowControlModule) handleExecuteWorkflowByID(w http.ResponseWriter,
 		stamped.ID = string(id)
 		subDef = &stamped
 	}
-	ctx := engine.WithWorkflowDef(r.Context(), subDef)
+	// xflow.workflow.execute starts the inbound trace for a by-id execution,
+	// exactly as the inline route does — same span name, same carrier hand-off
+	// below — so both entry points are one span name in a trace backend. The
+	// workflow_id attribute is the difference: this route's identity is the
+	// registry id, not a definition supplied in the body (see `entry` for the
+	// Submit/Invoke distinction the inline route documents).
+	tracer := m.tracer
+	if tracer == nil {
+		tracer = tracing.NoopTracer{}
+	}
+	ctx, span := tracer.Start(r.Context(), "xflow.workflow.execute",
+		"entry", req.Entry,
+		"workflow_id", string(id),
+	)
+	defer span.End()
+	// The span's SpanContext is persisted on the execution snapshot so the
+	// asynchronous dispatch span inherits it as a real W3C remote parent,
+	// closing the submit→dispatch causality gap for this route too.
+	ctx = engine.WithWorkflowDef(ctx, subDef)
 	ctx = engine.WithTraceCarrier(ctx, tracing.InjectCarrier(ctx))
 	ctx = engine.WithTestRun(ctx, req.Test)
 	// A keyed request is scoped to the registered workflow, so one key means one
@@ -2299,6 +2317,7 @@ func (m *workflowControlModule) handleExecuteWorkflowByID(w http.ResponseWriter,
 	if req.Entry != "" {
 		execID, err = m.eng.Invoke(ctx, rec.Graph, req.Entry, req.Input)
 		if err != nil {
+			span.RecordError(err)
 			if !writeSubmitFailure(w, r, err) {
 				writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 			}
@@ -2307,6 +2326,7 @@ func (m *workflowControlModule) handleExecuteWorkflowByID(w http.ResponseWriter,
 	} else {
 		execID, err = m.eng.Submit(ctx, rec.Graph, req.Params)
 		if err != nil {
+			span.RecordError(err)
 			if !writeSubmitFailure(w, r, err) {
 				writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 			}

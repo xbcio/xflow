@@ -7,6 +7,7 @@ import (
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
 )
@@ -73,6 +74,11 @@ type engineConfig struct {
 	// local-only: NewCluster always leaves this false; direct handlers are
 	// rejected regardless (see node_registration.go registerDirectHandlers).
 	allowDirectHandlers bool
+	// tracer instruments in-process task attempts (xflow.local.task) and FAF
+	// executions. Local-only: a cluster engine's runner is a separate process
+	// with its own Config.Tracer, and the control plane already traces its
+	// dispatch. Nil = no local spans. See WithTracer.
+	tracer tracing.Tracer
 }
 
 // WithConcurrency sets the task consumer concurrency.
@@ -113,6 +119,25 @@ func WithHooks(h engine.Hooks) Option {
 // each lease per claim, and one engine-wide value would collapse them.
 func WithNamespace(ns namespace.Namespace) Option {
 	return func(c *engineConfig) { c.namespace = ns }
+}
+
+// WithTracer installs the tracer used for in-process execution spans.
+//
+// NewLocal uses it in two places: xflow.local.task around each embedded task
+// attempt (so a local workflow execution joins the trace of the request that
+// started it), and the xflow.local.task span a FireAndForget call runs under.
+// Nil (the default) records nothing.
+//
+// It is local-only. NewCluster ignores it: a cluster runner is a separate
+// process configured with its own tracer (xflow.RunnerConfig.Tracer), and the
+// control plane's dispatch/report spans are already traced through
+// Config.Tracer on the server side.
+func WithTracer(t tracing.Tracer) Option {
+	return func(c *engineConfig) {
+		if t != nil {
+			c.tracer = t
+		}
+	}
 }
 
 // WithSubgraphHooks sets the lifecycle hook receiver for the inner engine that

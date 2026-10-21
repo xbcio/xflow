@@ -13,6 +13,7 @@ import (
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
 )
@@ -79,6 +80,9 @@ type Engine struct {
 	// FAF reuses it so resource-aware actions retain local execution parity
 	// without introducing any execution persistence.
 	resourcePool types.ResourcePool
+	// tracer is the local-execution tracer (WithTracer). Nil means no
+	// xflow.local.task spans for embedded tasks or FAF.
+	tracer tracing.Tracer
 }
 
 // validateNamespaceConfig rejects a namespace that the key schema cannot
@@ -185,6 +189,7 @@ func newFromConfig(cfg *engineConfig, provider backend.Provider) (*Engine, error
 		artifactStore:       cfg.artifactStore,
 		scheduleOverrides:   cfg.scheduleOverrides,
 		resourcePool:        cfg.resourcePool,
+		tracer:              cfg.tracer,
 	}
 	e.triggerRuntime = newTriggerRuntime(e, provider.TriggerPrimitives())
 
