@@ -67,6 +67,11 @@ type runnerConfig struct {
 	namespaces          []namespace.Namespace
 	heartbeatInterval   string
 	pollWait            string
+	// shutdownTimeout bounds how long a graceful stop (SIGTERM) waits for
+	// in-flight handlers to finish and report before the process exits. Empty
+	// means "unset": the runner service applies its own default (10s), so this
+	// layer never materializes one.
+	shutdownTimeout string
 	// seedRequestTimeout bounds one entry-seed admission round trip (one trigger
 	// batch), which is the POST that admits a whole batch's results. Empty means
 	// "unset": the SDK keeps protocol.DefaultEntrySeedRequestTimeout (15s). Kept
@@ -197,6 +202,8 @@ func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
 	cmd.Flags().BoolVar(&cfg.autoLabels, "auto-labels", cfg.autoLabels, "Add environment-derived xflow.io/* labels (os, arch, env, hostname)")
 	cmd.Flags().StringVar(&cfg.heartbeatInterval, "heartbeat-interval", cfg.heartbeatInterval, "Heartbeat interval")
 	cmd.Flags().StringVar(&cfg.pollWait, "poll-wait", cfg.pollWait, "Poll wait duration when no task is available")
+	cmd.Flags().StringVar(&cfg.shutdownTimeout, "shutdown-timeout", cfg.shutdownTimeout,
+		"How long a SIGTERM waits for in-flight handlers to finish; empty uses the 10s default, and it should stay below the orchestrator's terminationGracePeriodSeconds (commonly 30s)")
 	cmd.Flags().StringVar(&cfg.seedRequestTimeout, "seed-request-timeout", cfg.seedRequestTimeout,
 		"Deadline for one entry-seed admission (one Kafka batch); raise it when a large batch exceeds the 15s default")
 	cmd.Flags().StringVar(&cfg.supplyPollInterval, "supply-poll-interval", cfg.supplyPollInterval,
@@ -595,6 +602,15 @@ func toSDKRunnerConfig(cfg runnerConfig) (xflowsdk.RunnerConfig, error) {
 			return xflowsdk.RunnerConfig{}, err
 		}
 	}
+	// Empty stays empty here too, for the same reason: the service owns the
+	// graceful-stop default, so an unset CLI value must reach it as zero.
+	shutdownTimeout := time.Duration(0)
+	if cfg.shutdownTimeout != "" {
+		shutdownTimeout, err = parsePositiveDuration("shutdown timeout", cfg.shutdownTimeout)
+		if err != nil {
+			return xflowsdk.RunnerConfig{}, err
+		}
+	}
 	// The allowlist travels to the SDK exactly as the other host-rule fields
 	// do — copied with surrounding whitespace trimmed — because the SDK
 	// compiles it into the pull fetcher's destination policy, where a padded
@@ -619,6 +635,7 @@ func toSDKRunnerConfig(cfg runnerConfig) (xflowsdk.RunnerConfig, error) {
 		TLSClientKey:           cfg.tlsClientKey,
 		HeartbeatInterval:      heartbeat,
 		PollWait:               pollWait,
+		ShutdownTimeout:        shutdownTimeout,
 		SeedRequestTimeout:     seedRequestTimeout,
 		SupplyPollInterval:     supplyPollInterval,
 		SupplyPullAllowedHosts: copyTrimmedHosts(cfg.supplyPullAllowedHosts),
