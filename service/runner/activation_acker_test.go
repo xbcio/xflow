@@ -352,6 +352,12 @@ func TestDeactivationReceiptRetriesAfterTransportFailure(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for failed receipt attempt")
 	}
+	// The client signals before returning the transport error, so the acker
+	// clears deactivationInFlight only afterwards. Wait for that release or the
+	// retry below is deduped by the still-in-flight reservation.
+	waitForDeactivationAckState(t, acker, func(a *activationAcker) bool {
+		return len(a.deactivationInFlight) == 0
+	}, "deactivation in-flight reservation released after a failed send")
 	acker.ackDeactivated("session-1", directive)
 	select {
 	case <-client.attempted:
@@ -514,6 +520,26 @@ func (c *scriptedActivationAckClient) releaseCall(t *testing.T, call int, err er
 func waitForActivationAckState(t *testing.T, acker *activationAcker, d protocol.ActivateDirective, cond func(*activationAcker) bool, what string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
+	for {
+		acker.mu.Lock()
+		ok := cond(acker)
+		acker.mu.Unlock()
+		if ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for: %s", what)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// waitForDeactivationAckState polls the acker's deactivation bookkeeping under
+// its own mutex until cond holds. The states observed here are reached in
+// bounded time once the receipt send returns, so the poll only confirms them.
+func waitForDeactivationAckState(t *testing.T, acker *activationAcker, cond func(*activationAcker) bool, what string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
 	for {
 		acker.mu.Lock()
 		ok := cond(acker)
