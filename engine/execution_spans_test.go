@@ -428,3 +428,51 @@ func TestEngineSignalSpanCarriesNoPayload(t *testing.T) {
 	}
 	assertNoSensitiveSpanAttributes(t, span, secret)
 }
+
+// replayFakeState adds the DeadLetterStore capability to the carrier fake so
+// ReplayDeadLetter reaches a store instead of returning ErrDeadLetterUnsupported.
+type replayFakeState struct {
+	*carrierFakeState
+	replays []ReplayDeadLetterRequest
+}
+
+func (s *replayFakeState) ListDeadLetters(context.Context, types.ExecutionID, DeadLetterPage) (DeadLetterList, error) {
+	return DeadLetterList{}, nil
+}
+
+func (s *replayFakeState) ReplayDeadLetter(_ context.Context, req ReplayDeadLetterRequest) (ReplayDeadLetterResult, error) {
+	s.replays = append(s.replays, req)
+	return ReplayDeadLetterResult{Outcome: ReplayReplayed, AuditID: "audit-1", ExecutionID: req.ExecutionID}, nil
+}
+
+// TestEngineReplaySpanParentedToSubmissionTrace covers the programmatic replay
+// entry point: CLI and background callers have no request span of their own, so
+// the only way xflow.outbox.replay lands in the workflow's trace is the
+// submission carrier persisted on the execution snapshot.
+func TestEngineReplaySpanParentedToSubmissionTrace(t *testing.T) {
+	rec, tracer := installEngineSpanRecorder(t)
+	state := &replayFakeState{carrierFakeState: &carrierFakeState{fakeState: newFakeState()}}
+	eng := New(state, &fakeQueue{})
+	id, parentSC, carrier := submitUnderParentSpan(t, eng, advanceGraph(), tracer)
+	state.carrier = carrier
+
+	res, err := eng.ReplayDeadLetter(context.Background(), ReplayDeadLetterRequest{
+		ExecutionID: id,
+		EntryID:     "entry-1",
+		RequestID:   "request-1",
+		Operator:    "operator",
+		Reason:      "transient outage cleared",
+	})
+	if err != nil {
+		t.Fatalf("ReplayDeadLetter() error = %v", err)
+	}
+	if res.Outcome != ReplayReplayed || len(state.replays) != 1 {
+		t.Fatalf("ReplayDeadLetter() = %+v with %d store calls; want one successful replay", res, len(state.replays))
+	}
+
+	span := findEndedSpan(t, rec, "xflow.outbox.replay")
+	assertSpanParent(t, span, parentSC)
+	if kv, ok := spanAttribute(span, "entry_id"); !ok || kv.Value.AsString() != "entry-1" {
+		t.Errorf("entry_id attribute = %v, want entry-1", kv.Value.Emit())
+	}
+}
