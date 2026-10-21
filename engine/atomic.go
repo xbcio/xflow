@@ -514,8 +514,9 @@ func (e *Engine) FlushOutbox(ctx context.Context, id types.ExecutionID) error {
 	// The flush span measures the loop; per-entry work belongs directly to the
 	// execution, so it is a remote child of the submission span rather than a
 	// grandchild parented through an operational span. Inline from a commit the
-	// ctx already carries the commit span, so flush and advance both stay its
-	// local children exactly as before.
+	// ctx already carries the commit span, so both stay under the commit span;
+	// advance is now a direct child of the commit span rather than of the flush
+	// span.
 	ctx = e.executionTraceContext(ctx, id)
 	_, span := engineTracer().Start(ctx, "xflow.outbox.flush", "execution_id", string(id))
 	defer span.End()
