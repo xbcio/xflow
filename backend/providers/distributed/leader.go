@@ -36,12 +36,23 @@ end
 return 0
 `)
 
+// defaultLeaderRenewFailureTolerance is how many consecutive transient renewal
+// errors (Redis unreachable, timeout) are tolerated before the elector steps
+// down. A token mismatch is never tolerated, because it means the lease already
+// belongs to another instance.
+const defaultLeaderRenewFailureTolerance = 3
+
 // RedisLeaderElector coordinates leadership across replicas sharing the same
 // Redis instance using a SETNX-based lease with periodic renewal.
 type RedisLeaderElector struct {
 	rdb redis.UniversalClient
 	key string
 	ttl time.Duration
+
+	// renewFailureTolerance bounds consecutive transient renewal errors before
+	// leadership is dropped. Zero or negative restores the historical
+	// first-error downgrade. Set before renewal starts.
+	renewFailureTolerance int
 
 	isLeader              atomic.Bool
 	leaseDeadlineUnixNano atomic.Int64
@@ -57,11 +68,26 @@ type RedisLeaderElector struct {
 // TTL. Renewal runs at ttl/3 while leadership is held.
 func NewRedisLeaderElector(rdb redis.UniversalClient, key string, ttl time.Duration) *RedisLeaderElector {
 	return &RedisLeaderElector{
-		rdb:  rdb,
-		key:  key,
-		ttl:  normalizeLeaderTTL(ttl),
-		subs: make(map[chan bool]struct{}),
+		rdb:                   rdb,
+		key:                   key,
+		ttl:                   normalizeLeaderTTL(ttl),
+		renewFailureTolerance: defaultLeaderRenewFailureTolerance,
+		subs:                  make(map[chan bool]struct{}),
 	}
+}
+
+// WithLeaderRenewFailureTolerance sets how many consecutive transient renewal
+// errors are tolerated before leadership is dropped. Zero or negative restores
+// the historical behavior of dropping leadership on the first error.
+//
+// The tolerance converts a Redis blip into a local retry storm instead of an
+// immediate leader change: renewal is retried at ttl/9 (clamped to [10ms, 1s])
+// but never past the local lease deadline, so a failure that outlives the lease
+// still steps down before another replica can claim the key. A zero renewal
+// result is a lost lease rather than a transient error and is never retried.
+func (e *RedisLeaderElector) WithLeaderRenewFailureTolerance(n int) *RedisLeaderElector {
+	e.renewFailureTolerance = n
+	return e
 }
 
 func normalizeLeaderTTL(ttl time.Duration) time.Duration {
@@ -161,6 +187,7 @@ func (e *RedisLeaderElector) startRenewal() {
 	if interval <= 0 {
 		interval = time.Millisecond
 	}
+	retryInterval := leaderRenewRetryInterval(e.ttl)
 
 	go func() {
 		ticker := time.NewTicker(interval)
@@ -170,28 +197,104 @@ func (e *RedisLeaderElector) startRenewal() {
 			case <-renewCtx.Done():
 				return
 			case <-ticker.C:
-				renewed, err := leaderRenewScript.Run(renewCtx, e.rdb, []string{e.key}, myToken, ttlMillis).Result()
-				if renewCtx.Err() != nil {
-					return
-				}
-				if err != nil || renewed == int64(0) {
-					lost := false
-					e.mu.Lock()
-					if e.renewGen == myGen {
-						e.stopRenew = nil
-						lost = true
+				if !e.renewLease(renewCtx, myToken, ttlMillis, retryInterval) {
+					// A stopped renewal (Resign or a newer Campaign) must not
+					// be reported as a leadership loss; the caller that stopped
+					// it already owns the resulting state.
+					if renewCtx.Err() != nil {
+						return
 					}
-					e.mu.Unlock()
-					if lost {
-						e.clearLocalDeadline()
-						e.setLeader(false)
-					}
+					e.finishRenewal(myGen)
 					return
 				}
 				e.extendLocalDeadline()
 			}
 		}
 	}()
+}
+
+// renewLease keeps trying to extend the Redis lease until one attempt
+// succeeds, the local deadline passes, the failure tolerance is exhausted, or
+// ctx is canceled. It reports true only on a successful renewal.
+//
+// A zero renewal result is not a retryable error: the script only returns zero
+// when the key no longer holds this instance's token, so another replica
+// already owns the lease and retrying would only delay the downgrade.
+func (e *RedisLeaderElector) renewLease(ctx context.Context, token string, ttlMillis int64, retryInterval time.Duration) bool {
+	failures := 0
+	for {
+		renewed, err := leaderRenewScript.Run(ctx, e.rdb, []string{e.key}, token, ttlMillis).Result()
+		if ctx.Err() != nil {
+			return false
+		}
+		if err == nil {
+			n, _ := renewed.(int64)
+			return n > 0
+		}
+		failures++
+		if e.renewFailuresExhausted(failures) {
+			return false
+		}
+		if !e.waitRenewRetry(ctx, retryInterval) {
+			return false
+		}
+	}
+}
+
+// renewFailuresExhausted reports whether consecutive transient renewal errors
+// have used up the configured tolerance. A non-positive tolerance keeps the
+// historical immediate downgrade.
+func (e *RedisLeaderElector) renewFailuresExhausted(failures int) bool {
+	tolerance := e.renewFailureTolerance
+	if tolerance <= 0 {
+		tolerance = 1
+	}
+	return failures >= tolerance
+}
+
+// waitRenewRetry waits one retry interval without crossing the local leadership
+// deadline, which only a successful renewal may extend. It returns false when
+// the wait was interrupted (ctx canceled) or the deadline was reached: either
+// way the caller must stop renewing.
+func (e *RedisLeaderElector) waitRenewRetry(ctx context.Context, interval time.Duration) bool {
+	deadline := e.leaseDeadline()
+	if deadline.IsZero() {
+		return false
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return false
+	}
+	if interval >= remaining {
+		// Wake when the local lease runs out: another attempt cannot land in
+		// time to keep it.
+		interval = remaining
+	}
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return time.Now().Before(deadline)
+	}
+}
+
+// finishRenewal clears this generation's renewal state after leadership loss
+// and emits the false notification. The generation guard keeps a superseded
+// goroutine from clearing the cancel func installed by a newer Campaign.
+func (e *RedisLeaderElector) finishRenewal(myGen uint64) {
+	lost := false
+	e.mu.Lock()
+	if e.renewGen == myGen {
+		e.stopRenew = nil
+		lost = true
+	}
+	e.mu.Unlock()
+	if lost {
+		e.clearLocalDeadline()
+		e.setLeader(false)
+	}
 }
 
 // IsLeader reports current leadership without a network round-trip. On local
@@ -291,6 +394,24 @@ func (e *RedisLeaderElector) currentToken() string {
 	return e.token
 }
 
+// leaderRenewRetryInterval is the pause between renewal attempts after a
+// transient error: ttl/9, clamped so a tiny lease does not busy-loop and a long
+// one still retries within its local deadline.
+func leaderRenewRetryInterval(ttl time.Duration) time.Duration {
+	const (
+		minInterval = 10 * time.Millisecond
+		maxInterval = time.Second
+	)
+	interval := ttl / 9
+	if interval < minInterval {
+		return minInterval
+	}
+	if interval > maxInterval {
+		return maxInterval
+	}
+	return interval
+}
+
 // extendLocalDeadline refreshes the local leadership deadline. A safety margin
 // of ttl/3 is subtracted so the local view expires before the Redis key's real
 // TTL, reducing the split-brain window where this instance believes it is still
@@ -298,6 +419,16 @@ func (e *RedisLeaderElector) currentToken() string {
 func (e *RedisLeaderElector) extendLocalDeadline() {
 	safetyMargin := e.ttl / 3
 	e.leaseDeadlineUnixNano.Store(time.Now().Add(e.ttl - safetyMargin).UnixNano())
+}
+
+// leaseDeadline returns the current local leadership deadline, or the zero
+// time when no deadline is set.
+func (e *RedisLeaderElector) leaseDeadline() time.Time {
+	ns := e.leaseDeadlineUnixNano.Load()
+	if ns <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns)
 }
 
 func (e *RedisLeaderElector) clearLocalDeadline() {
