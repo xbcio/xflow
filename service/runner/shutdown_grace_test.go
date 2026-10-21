@@ -202,6 +202,10 @@ func TestWorkerLoopReleasesALeaseReceivedAfterShutdown(t *testing.T) {
 
 	leaseCh := make(chan *engine.TaskLease, 1)
 	leaseCh <- gatedLease("queued-1")
+	// pollLoop closes the queue before Run's drain wait; closing it here too
+	// means a worker that (wrongly) executes the lease still returns, so the
+	// regression shows up as a failed assertion instead of a parked goroutine.
+	close(leaseCh)
 	r.inFlight.Add(1)
 	r.active.add("queued-1")
 
