@@ -111,7 +111,7 @@ func assertNoPayloadSpanAttributes(t *testing.T, span sdktrace.ReadOnlySpan, for
 			}
 		}
 		for _, value := range forbidden {
-			if value != "" && strings.Contains(kv.Value.Emit(), value) {
+			if value != "" && strings.Contains(kv.Value.String(), value) {
 				t.Errorf("%s span attribute %q leaks value %q", span.Name(), kv.Key, value)
 			}
 		}
