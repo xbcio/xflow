@@ -275,6 +275,18 @@ type runnerOptions struct {
 	// (tests calling buildRunnerServiceConfig directly, RunnerTransportInProc)
 	// builds those clients statically from RunnerConfig.
 	credReloader *CredentialReloader
+	// supplyRegistry overrides the process-wide supply.Default for both the
+	// activation gate and the registry the heartbeat reports Observed() from.
+	// Nil (every production path) means supply.Default.
+	//
+	// Deliberately not a public option: $supplies expression evaluation reads
+	// supply.Default unconditionally (exprx.ExprEnv), so pointing a real
+	// runner's gate at any other registry would publish content nothing in the
+	// process can read. It exists for in-package tests that need a registry of
+	// their own, because the process-wide one keeps content for the life of the
+	// process: a second round of the same test otherwise hits the gate's
+	// IsReady fast path and never exercises the fetch it asserts on.
+	supplyRegistry *supply.Registry
 }
 
 // RunnerOption configures a Runner.
@@ -964,14 +976,19 @@ func wireRunnerTriggerHosting(svcCfg *runnersvc.Config, cfg RunnerConfig, o *run
 		return err
 	}
 	// The supply fetch client shares the seed origin: both talk to the control
-	// plane's HTTP API. The gate publishes into supply.Default, the same
-	// registry node handlers read through $supplies.
+	// plane's HTTP API. The gate publishes into the process-wide supply.Default
+	// (the registry node handlers read through $supplies), unless an in-package
+	// test installed a registry of its own.
+	supplyReg := o.supplyRegistry
+	if supplyReg == nil {
+		supplyReg = supply.Default
+	}
 	gate := runnersvc.NewSupplyGate(&runnersvc.HTTPSupplyFetcher{
 		BaseURL:  seedBaseURL,
 		Token:    seedToken,
 		RunnerID: cfg.RunnerID,
 		Client:   seedClient,
-	}, supply.Default, o.logger)
+	}, supplyReg, o.logger)
 	// Pull mode: a requirement declared as xflow.supply.http is fetched by THIS
 	// runner from the declared source, using this process's network position and
 	// credentials; the content goes into the local registry and is never written
@@ -1009,7 +1026,7 @@ func wireRunnerTriggerHosting(svcCfg *runnersvc.Config, cfg RunnerConfig, o *run
 	// The same gate/registry pair feeds the heartbeat's two supply channels:
 	// the registry is what Observed() reads out to report applied hashes, and
 	// the gate is what ApplyHints fetches into on a piggybacked hint.
-	svcCfg.SupplyRegistry = supply.Default
+	svcCfg.SupplyRegistry = supplyReg
 	svcCfg.SupplyGate = gate
 	return nil
 }
