@@ -50,7 +50,7 @@ func (f *fakeDriftScanner) ListStaleRunningExecutions(_ context.Context, owned [
 		if after.UpdatedAt.IsZero() && after.RowID == 0 {
 			// Start of the scan.
 		} else if !c.UpdatedAt.After(after.UpdatedAt) &&
-			!(c.UpdatedAt.Equal(after.UpdatedAt) && c.RowID > after.RowID) {
+			(!c.UpdatedAt.Equal(after.UpdatedAt) || c.RowID <= after.RowID) {
 			continue
 		}
 		out = append(out, c)
