@@ -62,13 +62,20 @@ use the management API: it reads Redis (authoritative) and writes SQL
 			if opts.mysqlDSN == "" {
 				return errors.New("--mysql-dsn (or XFLOW_MYSQL_DSN) is required for reconcile")
 			}
-			return runReconcile(opts, addr, dryRun)
+			return runDeadLetterReconcile(opts, addr, dryRun)
 		},
 	}
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Report the diff without writing SQL rows")
 	cmd.Flags().StringVar(&redisAddr, "redis-addr", "", "Override Redis address for the receipt scan (defaults to --redis-addr)")
 	return cmd
 }
+
+// runDeadLetterReconcile is the execution half of the reconcile command. It is
+// a variable only so the CLI tests can observe the connection arguments the
+// RunE resolved: runReconcile opens MySQL before it dials Redis, so an
+// executed case cannot report which Redis address won the precedence without a
+// live database. Production never reassigns it.
+var runDeadLetterReconcile = runReconcile
 
 // reconcileStats summarizes one reconcile run.
 type reconcileStats struct {

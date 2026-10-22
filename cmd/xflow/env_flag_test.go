@@ -258,6 +258,67 @@ func TestDeadLetterBreakGlassRedisPrecedence(t *testing.T) {
 	}
 }
 
+// TestDeadLetterReconcileRedisAddrPrecedence pins the same order on the
+// reconcile subcommand's own --redis-addr. It reaches resolveEnvFlag through an
+// `if addr == ""` pre-check rather than calling it directly (the break-glass
+// path above calls it directly), so the explicit-empty row is the one that
+// proves the two paths agree: a value-based fallback in the pre-check would
+// hand XFLOW_REDIS_ADDR priority over an operator who typed the empty value.
+//
+// runReconcile is a recorder here. The real body opens MySQL before it dials
+// Redis, so an executed case cannot name the Redis address it resolved without
+// a live database; the environment therefore points at a closed loopback port
+// and nothing is contacted.
+func TestDeadLetterReconcileRedisAddrPrecedence(t *testing.T) {
+	const envAddr = "127.0.0.1:6390"
+	t.Setenv("XFLOW_REDIS_ADDR", envAddr)
+	t.Setenv("XFLOW_MYSQL_DSN", "root:pw@tcp(127.0.0.1:1)/xflow?parseTime=true&timeout=1s")
+
+	orig := runDeadLetterReconcile
+	t.Cleanup(func() { runDeadLetterReconcile = orig })
+
+	cases := []struct {
+		name     string
+		args     []string
+		wantAddr string
+	}{
+		{
+			name:     "an explicitly empty flag suppresses the environment",
+			args:     []string{"dead-letter", "reconcile", "--redis-addr", ""},
+			wantAddr: "",
+		},
+		{
+			name:     "the environment is used when the flag is absent",
+			args:     []string{"dead-letter", "reconcile"},
+			wantAddr: envAddr,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotAddr string
+			var called bool
+			runDeadLetterReconcile = func(_ *deadLetterOptions, addr string, _ bool) error {
+				called = true
+				gotAddr = addr
+				return nil
+			}
+
+			var out bytes.Buffer
+			if err := executeRootWith(&out, tc.args...); err != nil {
+				t.Fatalf("dead-letter reconcile with %v: %v", tc.args, err)
+			}
+			if !called {
+				t.Fatal("the run path never reached runReconcile; this case proves nothing")
+			}
+			if gotAddr != tc.wantAddr {
+				t.Fatalf("resolved redis address = %q, want %q (XFLOW_REDIS_ADDR=%q): "+
+					"the environment must not override a flag the operator set to empty, "+
+					"and must be used when the flag is absent", gotAddr, tc.wantAddr, envAddr)
+			}
+		})
+	}
+}
+
 // TestConnectionCommandsResolveTheEnvironmentAtRunTime proves the post-parse
 // lookup actually reaches each command's run path. Every case sets both
 // connection variables and then triggers a validation failure that sits behind
