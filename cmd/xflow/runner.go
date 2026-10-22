@@ -131,7 +131,7 @@ runner on such a deployment.`,
 			if err := validateOutputFormat(output); err != nil {
 				return err
 			}
-			client, err := newManagementClient(&opts.managementOptions)
+			client, err := newManagementClient(cmd, &opts.managementOptions)
 			if err != nil {
 				return err
 			}
@@ -188,7 +188,7 @@ process exited.`,
 			if err := validateOutputFormat(output); err != nil {
 				return err
 			}
-			client, err := newManagementClient(&opts.managementOptions)
+			client, err := newManagementClient(cmd, &opts.managementOptions)
 			if err != nil {
 				return err
 			}
@@ -298,7 +298,7 @@ func newRunnerControlCommand(opts *runnerOptions, action, desiredState, long str
 				requestID = generated
 				generatedRequestID = true
 			}
-			client, err := newManagementClient(&opts.managementOptions)
+			client, err := newManagementClient(cmd, &opts.managementOptions)
 			if err != nil {
 				return err
 			}
@@ -348,7 +348,7 @@ operation requiring management.runner.revoke_identity; it is not confined to a
 namespace.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, err := newManagementClient(&opts.managementOptions)
+			client, err := newManagementClient(cmd, &opts.managementOptions)
 			if err != nil {
 				return err
 			}

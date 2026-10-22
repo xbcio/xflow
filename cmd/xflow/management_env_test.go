@@ -58,6 +58,53 @@ func TestManagementHelpNeverPrintsTheAPIToken(t *testing.T) {
 	}
 }
 
+// TestManagementExplicitEmptyFlagsDoNotFallBackToTheEnvironment pins the
+// Changed-aware resolution of the shared connection flags. pflag cannot tell
+// "the flag was absent" from "the flag was set to the empty string" by value,
+// so an operator who passes --token "" to suppress an exported
+// XFLOW_API_TOKEN must not have the environment silently reinstated. Every
+// command that calls newManagementClient is driven here: a site that resolves
+// the option struct instead of the parsed flag set turns the first case green
+// by contacting the server with the env token.
+func TestManagementExplicitEmptyFlagsDoNotFallBackToTheEnvironment(t *testing.T) {
+	var rec recordedRequest
+	srv := managementTestServer(t, map[string]any{"accepted": true}, http.StatusOK, &rec)
+	t.Setenv("XFLOW_API_ADDR", srv.URL)
+	t.Setenv("XFLOW_API_TOKEN", "env-token-must-not-be-used")
+
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"runner list", []string{"runner", "list", "--token", ""}, "--token (or XFLOW_API_TOKEN) is required"},
+		{"runner get", []string{"runner", "get", "r1", "--token", ""}, "--token (or XFLOW_API_TOKEN) is required"},
+		{"runner drain", []string{"runner", "drain", "r1", "--reason", "maintenance", "--token", ""}, "--token (or XFLOW_API_TOKEN) is required"},
+		{"runner resume", []string{"runner", "resume", "r1", "--reason", "maintenance", "--token", ""}, "--token (or XFLOW_API_TOKEN) is required"},
+		{"runner revoke-identity", []string{"runner", "revoke-identity", "r1", "--token", ""}, "--token (or XFLOW_API_TOKEN) is required"},
+		{"execution cancel", []string{"execution", "cancel", "exec-1", "--token", ""}, "--token (or XFLOW_API_TOKEN) is required"},
+		{"execution rerun", []string{"execution", "rerun", "exec-1", "--from-node", "n1", "--token", ""}, "--token (or XFLOW_API_TOKEN) is required"},
+		{"empty server", []string{"runner", "list", "--server", ""}, "--server (or XFLOW_API_ADDR) is required"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			err := executeRootWith(&out, tc.args...)
+			if err == nil {
+				t.Fatalf("executeRootWith(%v) succeeded; an explicitly empty flag must not "+
+					"fall back to the environment", tc.args)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want it to contain %q", err, tc.want)
+			}
+			if rec.path != "" || rec.auth != "" {
+				t.Fatalf("the management API was contacted (%s %q) although the explicit "+
+					"empty flag should have failed validation first", rec.path, rec.auth)
+			}
+		})
+	}
+}
+
 // TestRunnerAndExecutionResolveConfigFromTheEnvironment proves the post-parse
 // fallback actually reaches the wire, not just the required-flag check: the
 // commands are invoked with no --server/--token at all.

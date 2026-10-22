@@ -44,7 +44,7 @@ Requires the execution.cancel scope. The token's namespace is authoritative:
 an execution in another namespace is indistinguishable from a missing one.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, err := newManagementClient(opts)
+			client, err := newManagementClient(cmd, opts)
 			if err != nil {
 				return err
 			}
@@ -97,7 +97,7 @@ second execution.`,
 			if fromNode == "" {
 				return errors.New("--from-node is required (the node the new execution starts at)")
 			}
-			client, err := newManagementClient(opts)
+			client, err := newManagementClient(cmd, opts)
 			if err != nil {
 				return err
 			}

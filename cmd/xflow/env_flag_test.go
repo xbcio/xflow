@@ -107,6 +107,14 @@ func TestResolveEnvFlagPrecedence(t *testing.T) {
 		}
 	})
 
+	t.Run("an explicit empty flag suppresses the environment", func(t *testing.T) {
+		t.Setenv(envKey, "from-env")
+		if got := resolve(t, literalDefault, "--probe-flag", ""); got != "" {
+			t.Fatalf("resolved %q, want the explicit empty value: the environment must not "+
+				"override a flag the operator set to empty", got)
+		}
+	})
+
 	t.Run("the environment wins over the literal default", func(t *testing.T) {
 		t.Setenv(envKey, "from-env")
 		if got := resolve(t, literalDefault); got != "from-env" {
