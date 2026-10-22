@@ -367,7 +367,7 @@ func TestDispatcherRecordsAttemptErrorOnLocalTaskSpan(t *testing.T) {
 			continue
 		}
 		for _, kv := range event.Attributes {
-			if string(kv.Key) == "exception.message" && strings.Contains(kv.Value.Emit(), want.Error()) {
+			if string(kv.Key) == "exception.message" && strings.Contains(kv.Value.String(), want.Error()) {
 				return
 			}
 		}
