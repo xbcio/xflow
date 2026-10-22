@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/store"
 )
 
@@ -116,17 +117,27 @@ func TestRunnerServiceConfigSupplyGateHonoursPrivateCA(t *testing.T) {
 
 	// A trigger capability is required for the gate to be built at all (see
 	// runnerHostsTriggers); xflow.trigger.kafka is the SAS-shaped one.
+	//
+	// An isolated registry, not the process-wide supply.Default: that one keeps
+	// content for the life of the process, so under -count>1 a later round finds
+	// the supply already cached and ready and the gate's IsReady fast path skips
+	// the very fetch this test counts.
+	reg := supply.NewRegistry()
 	svcCfg, err := buildRunnerServiceConfig(RunnerConfig{
 		RunnerID:     "tls-probe",
 		ServerURL:    srv.URL,
 		TLSServerCA:  caPath,
 		Capabilities: []string{"xflow.trigger.kafka"},
-	})
+	}, func(o *runnerOptions) { o.supplyRegistry = reg })
 	if err != nil {
 		t.Fatalf("buildRunnerServiceConfig: %v", err)
 	}
 	if svcCfg.SupplyGate == nil {
 		t.Fatal("SupplyGate is nil; the trigger-hosting branch did not run, so this test proves nothing")
+	}
+	if svcCfg.SupplyRegistry != reg {
+		t.Fatal("the heartbeat's SupplyRegistry is not the injected registry; " +
+			"the gate and the heartbeat would report different supply state")
 	}
 
 	err = svcCfg.SupplyGate.Admit(context.Background(), "wf-tls-probe", []engine.SupplyRequirement{

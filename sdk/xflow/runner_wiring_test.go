@@ -7,6 +7,7 @@ import (
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/node/supply"
 	crontrigger "github.com/xbcio/xflow/node/trigger/cron"
 	kafkatrigger "github.com/xbcio/xflow/node/trigger/kafka"
 	timertrigger "github.com/xbcio/xflow/node/trigger/timer"
@@ -161,6 +162,12 @@ func TestNewRunnerObservesTheSupplyGate(t *testing.T) {
 	}
 	if cfg.SupplyGate == nil {
 		t.Fatal("cfg.SupplyGate is nil — a trigger capability should have wired it")
+	}
+	// With no registry override the assembly must keep publishing into the
+	// process-wide registry node handlers and $supplies read from.
+	if cfg.SupplyRegistry != supply.Default {
+		t.Error("cfg.SupplyRegistry is not supply.Default; a runner with no override " +
+			"would publish supply content nothing in the process reads")
 	}
 
 	// require_ready with an unreachable fetcher: Admit declines and the observer
