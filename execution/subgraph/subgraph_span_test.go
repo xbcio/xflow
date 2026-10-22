@@ -51,7 +51,7 @@ func subgraphSpans(rec *tracetest.SpanRecorder) []sdktrace.ReadOnlySpan {
 func subgraphSpanAttr(span sdktrace.ReadOnlySpan, key string) (string, bool) {
 	for _, kv := range span.Attributes() {
 		if string(kv.Key) == key {
-			return kv.Value.Emit(), true
+			return kv.Value.String(), true
 		}
 	}
 	return "", false
@@ -109,7 +109,7 @@ func TestExecutorExecuteOpensOneSubgraphSpan(t *testing.T) {
 		if key := string(kv.Key); key == "payload" || key == "params" || key == "token" {
 			t.Fatalf("subgraph span carries sensitive attribute %q", key)
 		}
-		if kv.Value.Emit() == "sensitive-subgraph-payload-must-not-export" {
+		if kv.Value.String() == "sensitive-subgraph-payload-must-not-export" {
 			t.Fatalf("subgraph span leaks the input payload in attribute %q", kv.Key)
 		}
 	}
