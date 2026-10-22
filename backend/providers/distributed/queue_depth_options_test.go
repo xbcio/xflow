@@ -3,6 +3,7 @@ package distributed
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,6 +35,48 @@ func TestQueueDepthOptions(t *testing.T) {
 	if c.queueDepthInterval != 250*time.Millisecond {
 		t.Fatalf("queueDepthInterval = %v after a zero call, want 250ms to survive", c.queueDepthInterval)
 	}
+}
+
+// TestNewRejectsQueueDepthBoundWithInjectedTransport pins the cross-option
+// contract. The bound is enforced inside the Asynq transport's sampler; the
+// backend cannot apply it to an opaque queue.Transport, so the combination is a
+// configuration error. Silently ignoring the bound would leave an operator
+// admitting unbounded work under exactly the fan-out the bound exists for.
+//
+// Mutation note: deleting the validation lets New proceed to the ping, so the
+// error becomes "redis ping" and this test fails on the message assertion. The
+// unreachable address keeps "rejected before connecting" observable.
+func TestNewRejectsQueueDepthBoundWithInjectedTransport(t *testing.T) {
+	// Nothing listens here; reaching the ping would mean validation ran too late.
+	const unreachable = "127.0.0.1:1"
+	for _, opts := range [][]Option{
+		{WithTransport(&stubTransport{}), WithQueueMaxDepth(1)},
+		{WithQueueMaxDepth(1), WithTransport(&stubTransport{})},
+	} {
+		_, err := New(unreachable, nil, opts...)
+		if err == nil {
+			t.Fatal("New() = nil error, want the incompatible-options rejection")
+		}
+		if !strings.Contains(err.Error(), "WithQueueMaxDepth") || !strings.Contains(err.Error(), "WithTransport") {
+			t.Fatalf("New() error = %q, want it to name both options", err)
+		}
+		if strings.Contains(err.Error(), "redis ping") {
+			t.Fatalf("New() connected before rejecting the incompatible options: %v", err)
+		}
+	}
+
+	// The sample interval alone is inert, not an error: service startup passes
+	// it unconditionally even when no bound is configured.
+	rdb := newRedisStateTestClient(t)
+	b, err := New(rdb.Options().Addr, nil,
+		WithTransport(&stubTransport{}),
+		WithQueueDepthSampleInterval(time.Second),
+	)
+	if err != nil {
+		t.Fatalf("New() with an interval but no bound = %v, want nil", err)
+	}
+	_ = b.transport.Close()
+	_ = b.rdb.Close()
 }
 
 // TestNewWiresQueueDepthBoundIntoDefaultTransport is the wiring assertion for

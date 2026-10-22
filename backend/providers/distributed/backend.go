@@ -325,8 +325,12 @@ func WithQueueStatsInterval(d time.Duration) Option {
 // fan-out safety this provides is still real: the flush stops once the sampled
 // backlog reaches the bound and leaves the rest of the intent in the outbox.
 //
-// It is ignored when a custom transport is injected via WithTransport; that
-// transport owns its own admission policy.
+// It is a construction error to combine it with WithTransport. The bound lives
+// in the Asynq transport's depth sampler, and an injected transport is opaque
+// to the backend: queue.Transport exposes neither a depth read nor an admission
+// knob, so the bound cannot be applied to it. Rejecting the combination keeps a
+// misconfiguration from silently running unbounded; a custom transport owns its
+// own admission policy.
 func WithQueueMaxDepth(n int) Option {
 	return func(c *config) {
 		if n > 0 {
@@ -488,6 +492,14 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 	cfg := &config{concurrency: 10, execTTL: rstate.DefaultExecTTL, consumer: true, outboxReadyIndex: true}
 	for _, o := range opts {
 		o(cfg)
+	}
+
+	// The depth bound is enforced by the Asynq transport's sampler, and an
+	// injected transport is opaque here (queue.Transport exposes no depth read
+	// or admission knob). Reject the combination before opening any connection
+	// rather than silently running without the bound the caller configured.
+	if cfg.transport != nil && cfg.queueMaxDepth > 0 {
+		return nil, fmt.Errorf("queue max depth %d: WithQueueMaxDepth cannot be applied to a transport injected via WithTransport; configure the bound on that transport", cfg.queueMaxDepth)
 	}
 
 	// The owned set fixes this process's deployment identity, and every derived

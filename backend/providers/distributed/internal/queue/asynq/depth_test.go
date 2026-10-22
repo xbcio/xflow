@@ -3,6 +3,7 @@ package asynq
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -272,5 +273,101 @@ func TestCloseStopsDepthSampler(t *testing.T) {
 	// done-channel close that stops the sampler must not panic the second time.
 	if err := tr.Close(); err != nil {
 		t.Fatalf("second Close() error = %v", err)
+	}
+}
+
+// TestDepthSamplerRefreshesAtConfiguredInterval pins the loop's cadence with a
+// real ticker: the first sample is immediate (the constructor's guarantee), the
+// cache is reused between samples, and the next refresh lands on the configured
+// interval rather than the 1s default. All waits are bounded on a condition;
+// none of them sleeps for a fixed interval.
+func TestDepthSamplerRefreshesAtConfiguredInterval(t *testing.T) {
+	const interval = 50 * time.Millisecond
+	var mu sync.Mutex
+	value := 1
+	var samples []time.Time
+	tr := newDepthTransport(t,
+		WithMaxQueueDepth(1),
+		WithDepthSampleInterval(interval),
+		withDepthFunc(func() (map[string]int, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			samples = append(samples, time.Now())
+			return map[string]int{defaultQueueName: value}, nil
+		}),
+	)
+
+	// The immediate first sample: the bound is meaningful right after
+	// construction, not only after one interval.
+	waitForSampledDepth(t, tr, defaultQueueName, 1)
+
+	// Cache reuse between samples: holding the sampler's lock while draining a
+	// new answer proves queueFull does not consult the sampler — it reads the
+	// cached snapshot, so the fresh "0" cannot be observed before the next tick.
+	mu.Lock()
+	value = 0
+	full := tr.queueFull(defaultQueueName)
+	mu.Unlock()
+	if !full {
+		t.Fatal("queueFull = false immediately after the sampler's answer changed; the cache was bypassed")
+	}
+
+	// The next observation lands at the configured interval, well before the
+	// 1s default that an ignored option would fall back to.
+	waitForSampledDepth(t, tr, defaultQueueName, 0)
+
+	mu.Lock()
+	if len(samples) < 2 {
+		mu.Unlock()
+		t.Fatalf("sampler recorded %d samples, want at least 2", len(samples))
+	}
+	gap := samples[1].Sub(samples[0])
+	mu.Unlock()
+	if gap < interval {
+		t.Fatalf("second sample arrived %v after the first, faster than the configured %v", gap, interval)
+	}
+	if gap >= defaultDepthSampleInterval {
+		t.Fatalf("second sample arrived %v after the first; the configured %v was not applied", gap, interval)
+	}
+}
+
+// TestDepthSamplerLoopClearsSnapshotOnFailure pins the loop-driven half of the
+// fail-open contract: when a scheduled sample fails (not a manual refresh), the
+// loop clears the snapshot, so the bound stops refusing producers for the rest
+// of the outage. The control leg first shows the bound really applies.
+func TestDepthSamplerLoopClearsSnapshotOnFailure(t *testing.T) {
+	var failing atomic.Bool
+	tr := newDepthTransport(t,
+		WithMaxQueueDepth(1),
+		WithDepthSampleInterval(10*time.Millisecond),
+		withDepthFunc(func() (map[string]int, error) {
+			if failing.Load() {
+				return nil, errors.New("simulated sample failure")
+			}
+			return map[string]int{defaultQueueName: 1}, nil
+		}),
+	)
+	waitForSampledDepth(t, tr, defaultQueueName, 1)
+
+	failing.Store(true)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		tr.depthMu.RLock()
+		_, measured := tr.depths[defaultQueueName]
+		tr.depthMu.RUnlock()
+		if !measured {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a failed loop sample did not clear the cached snapshot")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	if tr.queueFull(defaultQueueName) {
+		t.Fatal("queueFull = true after the loop failed to sample; fail-open was not applied")
+	}
+	if err := tr.TryEnqueue(context.Background(), newDepthTask("exec-loop-fail-open", engine.TaskTypeNodeExec)); err != nil {
+		t.Fatalf("TryEnqueue after a failed loop sample = %v, want nil (fail open)", err)
 	}
 }
