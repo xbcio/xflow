@@ -375,3 +375,86 @@ func TestDispatcherRecordsAttemptErrorOnLocalTaskSpan(t *testing.T) {
 	t.Fatalf("%q span carries no exception event mentioning %q; the failed attempt must record its error (events: %v)",
 		localTaskSpanName, want, attempt.Events())
 }
+
+// TestDispatcherRecordsPermanentAndDispatchErrorsOnLocalTaskSpan covers the two
+// failure branches that return no error to the caller: a permanent
+// configuration failure is committed and a dispatch failure is requeued. The
+// span is the only remaining record of either attempt, so both must carry the
+// executor's error.
+func TestDispatcherRecordsPermanentAndDispatchErrorsOnLocalTaskSpan(t *testing.T) {
+	want := errors.New("runner unavailable before delivery")
+	tests := []struct {
+		name      string
+		err       error
+		committed bool
+		released  bool
+	}{
+		{
+			name:      "permanent configuration",
+			err:       PermanentConfigurationFailure(want),
+			committed: true,
+		},
+		{
+			name:     "dispatch released",
+			err:      DispatchFailure(want),
+			released: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := tracetest.NewSpanRecorder()
+			tp := sdktrace.NewTracerProvider(
+				sdktrace.WithSpanProcessor(rec),
+				sdktrace.WithSampler(sdktrace.AlwaysSample()),
+			)
+			t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+
+			task := &engine.Task{
+				ExecutionID: types.ExecutionID("exec-span-error"),
+				NodeName:    "action",
+				NodeIdx:     0,
+				Type:        engine.TaskTypeNodeExec,
+			}
+			eng := &fakeLeaseEngine{lease: &engine.TaskLease{
+				Task:     *task,
+				Input:    &types.Input{NodeName: "action"},
+				NodeType: "test.action",
+			}}
+			dispatcher := NewDispatcher(eng, tracedFailingExecutor{
+				tracer: tracing.NewOTelTracer(tp.Tracer("dispatcher-test")),
+				err:    tt.err,
+			})
+			if err := dispatcher.HandleTask(context.Background(), task); err != nil {
+				t.Fatalf("HandleTask() error = %v, want nil (the failure is committed or requeued)", err)
+			}
+			if eng.committed != tt.committed {
+				t.Fatalf("committed = %v, want %v", eng.committed, tt.committed)
+			}
+			if eng.released != tt.released {
+				t.Fatalf("released = %v, want %v", eng.released, tt.released)
+			}
+
+			var attempt sdktrace.ReadOnlySpan
+			for _, span := range rec.Ended() {
+				if span.Name() == localTaskSpanName {
+					attempt = span
+				}
+			}
+			if attempt == nil {
+				t.Fatalf("no %q span ended; ended spans: %d", localTaskSpanName, len(rec.Ended()))
+			}
+			for _, event := range attempt.Events() {
+				if event.Name != "exception" {
+					continue
+				}
+				for _, kv := range event.Attributes {
+					if string(kv.Key) == "exception.message" && strings.Contains(kv.Value.String(), want.Error()) {
+						return
+					}
+				}
+			}
+			t.Fatalf("%q span carries no exception event mentioning %q (events: %v)",
+				localTaskSpanName, want, attempt.Events())
+		})
+	}
+}
