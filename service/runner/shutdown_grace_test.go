@@ -153,7 +153,10 @@ func TestShutdownTimeoutBoundsAnUnresponsiveHandler(t *testing.T) {
 	cancel()
 	startedShutdown := time.Now()
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run = %v after the shutdown grace expired, want nil", err)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatalf("Run did not return within the test window after its %s shutdown timeout: "+
 			"a handler that ignores cancellation pins the process forever", timeout)
@@ -287,7 +290,10 @@ func TestShutdownTimeoutLogsTheAbandonedWork(t *testing.T) {
 	cancel()
 	startedShutdown := time.Now()
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run = %v after the shutdown grace expired, want nil", err)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatalf("Run did not return within the test window after its %s shutdown timeout", timeout)
 	}
