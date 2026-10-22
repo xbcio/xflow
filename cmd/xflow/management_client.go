@@ -37,27 +37,22 @@ func addManagementFlags(cmd *cobra.Command, opts *managementOptions) {
 }
 
 // newManagementClient validates the connection settings and builds a client.
-// An explicit flag wins; otherwise XFLOW_API_ADDR / XFLOW_API_TOKEN is used.
-// Both values are required: unlike the dead-letter command there is no
-// break-glass path for these operations, so a missing value is a usage error.
-func newManagementClient(opts *managementOptions) (*managementClient, error) {
-	server := opts.server
-	if server == "" {
-		server = envOr("XFLOW_API_ADDR", "")
-	}
-	token := opts.token
-	if token == "" {
-		token = envOr("XFLOW_API_TOKEN", "")
-	}
-	if server == "" {
+// An explicit flag wins, even when it is empty; otherwise XFLOW_API_ADDR /
+// XFLOW_API_TOKEN is used. Both values are required: unlike the dead-letter
+// command there is no break-glass path for these operations, so a missing
+// value is a usage error.
+func newManagementClient(cmd *cobra.Command, opts *managementOptions) (*managementClient, error) {
+	opts.server = resolveEnvFlag(cmd, "server", "XFLOW_API_ADDR", "")
+	opts.token = resolveEnvFlag(cmd, "token", "XFLOW_API_TOKEN", "")
+	if opts.server == "" {
 		return nil, errors.New("--server (or XFLOW_API_ADDR) is required for the management API")
 	}
-	if token == "" {
+	if opts.token == "" {
 		return nil, errors.New("--token (or XFLOW_API_TOKEN) is required for the management API")
 	}
 	return &managementClient{
-		server:     strings.TrimRight(server, "/"),
-		token:      token,
+		server:     strings.TrimRight(opts.server, "/"),
+		token:      opts.token,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}, nil
 }
