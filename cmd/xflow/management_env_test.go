@@ -105,6 +105,106 @@ func TestManagementExplicitEmptyFlagsDoNotFallBackToTheEnvironment(t *testing.T)
 	}
 }
 
+// TestManagementConnectionFlagPrecedence pins the three-source order on the
+// commands that build a management client: an explicit flag, then the
+// environment, then the literal empty default. Each row varies one source, so
+// a swap of two branches changes the observed path or the Authorization header
+// rather than passing on whichever source happened to be set.
+func TestManagementConnectionFlagPrecedence(t *testing.T) {
+	cases := []struct {
+		name      string
+		args      []string
+		envAddr   string
+		envToken  string
+		wantPath  string
+		wantAuth  string
+		wantError string
+	}{
+		{
+			name:     "explicit flags beat the environment",
+			args:     []string{"runner", "list", "-o", "json", "--server", "%ADDR%", "--token", "flag-token"},
+			envAddr:  "http://127.0.0.1:1",
+			envToken: "env-token",
+			wantPath: "/v1/management/runners",
+			wantAuth: "Bearer flag-token",
+		},
+		{
+			name:     "the environment supplies both flags when absent",
+			args:     []string{"runner", "list", "-o", "json"},
+			envAddr:  "%ADDR%",
+			envToken: "env-token",
+			wantPath: "/v1/management/runners",
+			wantAuth: "Bearer env-token",
+		},
+		{
+			name:     "execution commands share the same precedence",
+			args:     []string{"execution", "cancel", "exec-1", "--server", "%ADDR%", "--token", "flag-token"},
+			envAddr:  "http://127.0.0.1:1",
+			envToken: "env-token",
+			wantPath: "/v1/executions/exec-1/cancel",
+			wantAuth: "Bearer flag-token",
+		},
+		{
+			name:      "an explicitly empty token suppresses the environment",
+			args:      []string{"runner", "list", "--token", ""},
+			envAddr:   "%ADDR%",
+			envToken:  "env-token",
+			wantError: "--token (or XFLOW_API_TOKEN) is required",
+		},
+		{
+			name:      "an explicitly empty server suppresses the environment",
+			args:      []string{"runner", "list", "--server", ""},
+			envAddr:   "%ADDR%",
+			envToken:  "env-token",
+			wantError: "--server (or XFLOW_API_ADDR) is required",
+		},
+		{
+			name:      "the literal empty default is used when neither source is set",
+			args:      []string{"runner", "list"},
+			envAddr:   "",
+			envToken:  "",
+			wantError: "--server (or XFLOW_API_ADDR) is required",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var rec recordedRequest
+			srv := managementTestServer(t, map[string]any{"accepted": true}, http.StatusOK, &rec)
+			t.Setenv("XFLOW_API_ADDR", strings.ReplaceAll(tc.envAddr, "%ADDR%", srv.URL))
+			t.Setenv("XFLOW_API_TOKEN", tc.envToken)
+			args := make([]string, len(tc.args))
+			for i, arg := range tc.args {
+				args[i] = strings.ReplaceAll(arg, "%ADDR%", srv.URL)
+			}
+
+			var out bytes.Buffer
+			err := executeRootWith(&out, args...)
+			if tc.wantError != "" {
+				if err == nil {
+					t.Fatalf("executeRootWith(%v) succeeded, want %q", args, tc.wantError)
+				}
+				if !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("error = %v, want it to contain %q", err, tc.wantError)
+				}
+				if rec.path != "" {
+					t.Fatalf("the management API was contacted at %q although the command "+
+						"should have failed validation first", rec.path)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("executeRootWith(%v): %v", args, err)
+			}
+			if rec.path != tc.wantPath {
+				t.Fatalf("path = %q, want %q", rec.path, tc.wantPath)
+			}
+			if rec.auth != tc.wantAuth {
+				t.Fatalf("Authorization = %q, want %q", rec.auth, tc.wantAuth)
+			}
+		})
+	}
+}
+
 // TestRunnerAndExecutionResolveConfigFromTheEnvironment proves the post-parse
 // fallback actually reaches the wire, not just the required-flag check: the
 // commands are invoked with no --server/--token at all.

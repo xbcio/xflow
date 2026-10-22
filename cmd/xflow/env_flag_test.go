@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/spf13/cobra"
 )
 
@@ -135,6 +136,126 @@ func TestResolveEnvFlagPrecedence(t *testing.T) {
 			t.Fatalf("resolved %q, want from-env", got)
 		}
 	})
+}
+
+// TestDeadLetterDSNPrecedence pins the three-source order on the command that
+// resolves --mysql-dsn. The cases stay hermetic by pointing at closed loopback
+// ports: the dial error names the address that was actually used, so a
+// precedence inversion is visible without a database. The empty-flag row is the
+// one a plain "if the value is empty, read the environment" lookup fails.
+func TestDeadLetterDSNPrecedence(t *testing.T) {
+	const (
+		flagDSN = "root:pw@tcp(127.0.0.1:1)/xflow?parseTime=true&timeout=1s"
+		envDSN  = "root:pw@tcp(127.0.0.1:2)/xflow?parseTime=true&timeout=1s"
+	)
+	cases := []struct {
+		name      string
+		envDSN    string
+		args      []string
+		wantError string
+		wantNot   string
+	}{
+		{
+			name:      "a flag DSN beats the environment",
+			envDSN:    envDSN,
+			args:      []string{"dead-letter", "reconcile", "--mysql-dsn", flagDSN},
+			wantError: "127.0.0.1:1",
+			wantNot:   "127.0.0.1:2",
+		},
+		{
+			name:      "the environment DSN is used when the flag is absent",
+			envDSN:    envDSN,
+			args:      []string{"dead-letter", "reconcile"},
+			wantError: "127.0.0.1:2",
+			wantNot:   "127.0.0.1:1",
+		},
+		{
+			name:      "an explicitly empty DSN suppresses the environment",
+			envDSN:    envDSN,
+			args:      []string{"dead-letter", "reconcile", "--mysql-dsn", ""},
+			wantError: "--mysql-dsn (or XFLOW_MYSQL_DSN) is required for reconcile",
+			wantNot:   "127.0.0.1:2",
+		},
+		{
+			name:      "the literal empty default is used when neither source is set",
+			envDSN:    "",
+			args:      []string{"dead-letter", "reconcile"},
+			wantError: "--mysql-dsn (or XFLOW_MYSQL_DSN) is required for reconcile",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XFLOW_MYSQL_DSN", tc.envDSN)
+			// The SQL open fails before Redis is touched, but the environment is
+			// cleared so an ambient address cannot influence the case.
+			t.Setenv("XFLOW_REDIS_ADDR", "")
+
+			var out bytes.Buffer
+			err := executeRootWith(&out, tc.args...)
+			if err == nil {
+				t.Fatalf("executeRootWith(%v) succeeded, want the connection failure "+
+					"that names the resolved DSN host", tc.args)
+			}
+			if !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("error = %v, want it to contain %q", err, tc.wantError)
+			}
+			if tc.wantNot != "" && strings.Contains(err.Error(), tc.wantNot) {
+				t.Fatalf("error = %v also contains %q: the wrong source supplied the DSN",
+					err, tc.wantNot)
+			}
+		})
+	}
+}
+
+// TestDeadLetterBreakGlassRedisPrecedence pins the same order for --redis-addr
+// on the break-glass path. Two miniredis instances hold different dead-letter
+// entries, so the listed entry ID names the source that actually won. The
+// literal localhost:6379 default is covered by the --help test only: dialing it
+// here would depend on whatever the developer's machine happens to run.
+func TestDeadLetterBreakGlassRedisPrecedence(t *testing.T) {
+	const (
+		execID    = "exec-precedence"
+		flagEntry = "execute/exec-precedence/flag/1"
+		envEntry  = "execute/exec-precedence/env/1"
+	)
+	cases := []struct {
+		name        string
+		includeFlag bool
+		wantEntry   string
+	}{
+		{"a flag address beats the environment", true, flagEntry},
+		{"the environment address is used when the flag is absent", false, envEntry},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			flagRedis, err := miniredis.Run()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer flagRedis.Close()
+			seedDeadLetterRedis(t, flagRedis.Addr(), "default", execID, flagEntry)
+
+			envRedis, err := miniredis.Run()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer envRedis.Close()
+			seedDeadLetterRedis(t, envRedis.Addr(), "default", execID, envEntry)
+
+			t.Setenv("XFLOW_REDIS_ADDR", envRedis.Addr())
+			args := []string{"dead-letter", "--break-glass"}
+			if tc.includeFlag {
+				args = append(args, "--redis-addr", flagRedis.Addr())
+			}
+			args = append(args, "list", "--execution", execID)
+
+			var out bytes.Buffer
+			if err := executeRootWith(&out, args...); err != nil {
+				t.Fatalf("break-glass list with %v: %v", args, err)
+			}
+			assertListedID(t, out.String(), tc.wantEntry)
+		})
+	}
 }
 
 // TestConnectionCommandsResolveTheEnvironmentAtRunTime proves the post-parse
