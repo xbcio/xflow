@@ -122,6 +122,7 @@ context:
 settings:
   concurrency: int | object # 工作流级并发上限；裸 int 等价 {limit: N, mode: queue}，详见下方注释
   timezone: string        # 时区
+  timeout: int            # 整个执行的时限预算（可选，整数纳秒，0 或缺省 = 不限；详见下方「settings.timeout 语义」）
   on_error: string        # 全局默认错误策略（可选，stop|error_output|main_output|continue，默认 stop）
   pin_data_mode: string   # pin_data 生效策略（可选，test_only|always|disabled，默认 test_only）
   retry:                  # 全局默认重试策略（可选；节点级 retry 可覆盖）
@@ -153,6 +154,19 @@ settings:
 #            503 workflow_concurrency_unavailable（不静默降级为立即执行）。
 # 释放与晋升：执行进入终态（success/failed/canceled/timeout）时释放槽位并原子晋升队首；
 # 调低 limit 不抢占在跑的执行，调高会触发晋升；崩溃窗口由对账器兜底。
+
+# settings.timeout 语义（工作流级执行时限，区别于节点级 nodes[].timeout）
+# 整个执行的时间预算，从提交（admission）时刻起算：排队等待（settings.concurrency 的
+# queue 模式）与挂起等待（suspend/wait/approval）都计入预算。到期时执行以 timeout 终态
+# 结束；与 cancel 一样不参与 on_error，始终 fatal（见下方 on_error 段落末尾）。
+#   0 / 缺省：不设预算（"未设置"与"无限"是同一个写法）。
+#   <0：编译期报错（settings.timeout must be >= 0）。
+#   FAF 工作流（options.faf）声明非零值：编译期报错，FAF 不持久化执行，没有可到期的记录。
+# 线格式与 queue_timeout 相同：time.Duration 的 JSON 表示，即整数纳秒（30 分钟 =
+# 1800000000000）。JSON 解码不接受 "30m" 这样的时长字符串，写字符串会在注册时被拒绝。
+# 它与节点级 timeout 互相独立：节点 timeout 约束单次 handler 调用，本字段约束整个执行。
+# 状态：当前版本落地了字段、编译期校验、快照与定义哈希；运行时的到期处理尚待实现，
+# 因此声明了该字段的工作流暂时不会因它而超时。
 
 # 高级执行选项
 options:
@@ -349,7 +363,8 @@ groups:
 # error 字段，组失败前没有提交任何东西，没有单个成员输出能代表"组的主输出"，造不出
 # 有意义的 payload。
 # 取消（cancel）/超时（timeout）结果不受 on_error 影响，始终 fatal，不会路由到
-# error_outputs——这不是 OnError 要容忍或路由的失败类型。
+# error_outputs——这不是 OnError 要容忍或路由的失败类型。workflow 级 settings.timeout
+# 到期同样属于这一类：以 timeout 终态结束整个执行，不参与 on_error。
 
 # 依赖边（可选，supply 节点消费声明；详见 §6.3 Supply 节点）
 # 不与 connections 合并：dependency_edges 不携带数据，不参与 unit 层拓扑
@@ -413,7 +428,8 @@ context:
 
 # 全局配置
 settings:
-  # 没有 workflow 级 timeout 字段：时限是节点级 timeout（NodeDef.timeout）
+  # workflow 级执行时限 settings.timeout（整数纳秒，此处 30 分钟）；节点级时限仍是 NodeDef.timeout
+  timeout: 1800000000000
   concurrency: 10
   timezone: "Asia/Shanghai"
 
