@@ -147,7 +147,7 @@ func (e *Engine) CommitTaskTimeout(ctx context.Context, lease *TaskLease, cause 
 		return ErrGroupLeaseNotSupported
 	}
 	if cause == nil {
-		cause = types.NewPermanentError("node.timeout", "node execution exceeded its deadline")
+		cause = types.NewPermanentError(types.NodeTimeoutErrorCode, "node execution exceeded its deadline")
 	}
 	t := &lease.Task
 	g, active, err := e.loadActiveGraph(ctx, t.ExecutionID)
