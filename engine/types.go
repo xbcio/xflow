@@ -304,7 +304,17 @@ type ExecutionSnapshot struct {
 	// substitute a client-observed instant.
 	CreatedAt time.Time `json:"created_at,omitempty"`
 	UpdatedAt time.Time `json:"updated_at,omitempty"`
-	Runtime   *types.Runtime
+	// Deadline is the absolute instant the whole execution must be over by:
+	// CreatedAt (admission) plus Graph.Timeout(). It therefore counts queue
+	// waiting and suspend/wait/approval time, and it is stamped only when the
+	// graph declares settings.timeout > 0. The zero value means no
+	// execution-level deadline.
+	//
+	// omitzero, not omitempty: encoding/json never treats a struct (time.Time)
+	// as empty, so omitempty would still write "0001-01-01T00:00:00Z" for an
+	// execution without a deadline.
+	Deadline time.Time `json:"deadline,omitzero"`
+	Runtime  *types.Runtime
 	// Scope holds expression roots that belong to the EXECUTION rather than to
 	// any one node: every node of this execution sees them, whatever its
 	// position in the graph. Today its only producer is a map body, which puts

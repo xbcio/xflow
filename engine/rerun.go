@@ -202,6 +202,9 @@ func (e *Engine) seedRerun(ctx context.Context, seeder ExecutionSeeder, req Reru
 		RerunFrom: req.FromNode,
 	}
 	attachSubmissionMetadata(ctx, snap)
+	// A rerun is a new execution with a new clock: the snapshot above copies
+	// nothing of the parent's CreatedAt or Deadline, so the budget restarts.
+	stampExecutionDeadline(snap)
 	// A rerun resolves its graph from the parent's stored definition, so the
 	// definition is not on the ctx and the submission metadata cannot supply the
 	// registration namespace. The parent is the source for what a rerun inherits
