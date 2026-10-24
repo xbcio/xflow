@@ -111,6 +111,72 @@ func TestSubmitStampsExecutionDeadline(t *testing.T) {
 	}
 }
 
+// queueingState is a *fakeState whose concurrency admission can park an
+// execution: the first limit admissions take a slot, later ones are stored as
+// queued with their intents withheld, which is what a queue-mode backend does.
+// fakeState itself refuses queue mode, so it cannot reach this path.
+type queueingState struct {
+	*fakeState
+	held int
+}
+
+func (q *queueingState) CreateExecutionWithConcurrency(_ context.Context, execution *ExecutionSnapshot, entries []OutboxEntry, admission ConcurrencyAdmission) (ConcurrencyAdmissionResult, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.held >= admission.Limit {
+		execution.Status = types.ExecutionStatusQueued
+		q.createExecutionLocked(execution)
+		return ConcurrencyAdmissionResult{Queued: true, QueuePosition: 1}, nil
+	}
+	q.held++
+	q.createExecutionLocked(execution)
+	for _, entry := range entries {
+		q.putAtomicOutboxLocked(execution.ID, entry.ID, entry.Task, entry.AvailableAt)
+	}
+	return ConcurrencyAdmissionResult{}, nil
+}
+
+// TestSubmitStampsExecutionDeadlineOnQueuedExecutions pins that the budget
+// clock starts at admission: an execution parked behind a full concurrency
+// limit already carries its deadline, so the time it waits counts against it.
+func TestSubmitStampsExecutionDeadlineOnQueuedExecutions(t *testing.T) {
+	ctx := context.Background()
+	const timeout = 30 * time.Minute
+	g, err := graph.Compile(&types.WorkflowDef{
+		Name: "queued-deadline",
+		Settings: &types.WorkflowSettings{
+			Timezone:    "UTC",
+			Timeout:     timeout,
+			Concurrency: &types.ConcurrencySettings{Limit: 1, Mode: types.ConcurrencyModeQueue},
+		},
+		Nodes: []types.NodeDef{{Name: "start", Type: "test.echo"}},
+	})
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	state := &queueingState{fakeState: newFakeState()}
+	eng := New(state, &fakeQueue{})
+
+	if _, err := eng.Submit(ctx, g, nil); err != nil {
+		t.Fatalf("Submit (takes the only slot): %v", err)
+	}
+	queued, err := eng.Submit(ctx, g, nil)
+	if err != nil {
+		t.Fatalf("Submit (queued): %v", err)
+	}
+
+	snap := submittedSnapshot(t, state.fakeState, queued)
+	if snap.Status != types.ExecutionStatusQueued {
+		t.Fatalf("Status = %q, want %q: the second submission must have been parked", snap.Status, types.ExecutionStatusQueued)
+	}
+	if snap.CreatedAt.IsZero() || snap.Deadline.IsZero() {
+		t.Fatalf("queued snapshot has CreatedAt %s, Deadline %s, want both stamped", snap.CreatedAt, snap.Deadline)
+	}
+	if want := snap.CreatedAt.Add(timeout); !snap.Deadline.Equal(want) {
+		t.Fatalf("Deadline = %s, want CreatedAt + %s = %s", snap.Deadline, timeout, want)
+	}
+}
+
 func TestInvokeStampsExecutionDeadline(t *testing.T) {
 	ctx := context.Background()
 	state := newFakeState()
