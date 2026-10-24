@@ -303,6 +303,18 @@ describe("node search and workflow settings", () => {
     expect(lastWorkflow(handleChange).settings?.timeout).toBeUndefined();
   });
 
+  it("rejects a Go duration string in 执行超时 instead of writing it", () => {
+    const handleChange = vi.fn();
+    render(<XFlowEditor value={workflow} onChange={handleChange} />);
+    const inspector = () => screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    // The server decodes settings.timeout as integer nanoseconds and rejects "30s".
+    fireEvent.change(within(inspector()).getByLabelText("执行超时"), { target: { value: "30s" } });
+    expect(handleChange).not.toHaveBeenCalled();
+    expect(within(inspector()).getByRole("alert")).toBeTruthy();
+  });
+
   it("round-trips the 执行设置 source view and blocks save on a broken draft", () => {
     const handleChange = vi.fn();
     const onSave = vi.fn();
