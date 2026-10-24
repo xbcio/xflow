@@ -22,6 +22,9 @@ func TestCancelSuspendedNodesCancelsNodesAndLeavesTheExecutionStatus(t *testing.
 	if err != nil || before == nil {
 		t.Fatalf("GetExecution() before = (%v, %v)", before, err)
 	}
+	// Copy the status out now: fakeState hands back the stored pointer and
+	// mutates it in place, so reading before.Status later would see the write.
+	statusBefore := before.Status
 	g, active, err := eng.loadActiveGraph(ctx, id)
 	if err != nil || !active {
 		t.Fatalf("loadActiveGraph() = (active=%v, err=%v)", active, err)
@@ -42,8 +45,8 @@ func TestCancelSuspendedNodesCancelsNodesAndLeavesTheExecutionStatus(t *testing.
 	if err != nil || after == nil {
 		t.Fatalf("GetExecution() after = (%v, %v)", after, err)
 	}
-	if after.Status != before.Status {
-		t.Fatalf("execution status = %q, want %q unchanged: the cascade must not drive execution status", after.Status, before.Status)
+	if after.Status != statusBefore {
+		t.Fatalf("execution status = %q, want %q unchanged: the cascade must not drive execution status", after.Status, statusBefore)
 	}
 
 	// Idempotent: the node is no longer suspended, so a second pass is a no-op.
@@ -95,9 +98,17 @@ func TestCancelSuspendedNodesWithNothingSuspendedHasNoSideEffects(t *testing.T) 
 	if err != nil || before == nil {
 		t.Fatalf("GetExecution() before = (%v, %v)", before, err)
 	}
+	// Copy the values out now: fakeState hands back stored pointers, so reading
+	// them after the call would compare an object with itself.
+	statusBefore := before.Status
 	nodeBefore, err := state.GetNode(ctx, id, "wait")
 	if err != nil {
 		t.Fatalf("GetNode() before error = %v", err)
+	}
+	nodePresentBefore := nodeBefore != nil
+	var nodeStatusBefore types.NodeStatus
+	if nodePresentBefore {
+		nodeStatusBefore = nodeBefore.Status
 	}
 
 	if err := eng.cancelSuspendedNodes(ctx, id, g); err != nil {
@@ -108,18 +119,18 @@ func TestCancelSuspendedNodesWithNothingSuspendedHasNoSideEffects(t *testing.T) 
 	if err != nil || after == nil {
 		t.Fatalf("GetExecution() after = (%v, %v)", after, err)
 	}
-	if after.Status != before.Status {
-		t.Fatalf("execution status = %q, want %q unchanged", after.Status, before.Status)
+	if after.Status != statusBefore {
+		t.Fatalf("execution status = %q, want %q unchanged", after.Status, statusBefore)
 	}
 	nodeAfter, err := state.GetNode(ctx, id, "wait")
 	if err != nil {
 		t.Fatalf("GetNode() after error = %v", err)
 	}
-	if (nodeBefore == nil) != (nodeAfter == nil) {
-		t.Fatalf("node presence changed: before=%v after=%v", nodeBefore, nodeAfter)
+	if nodePresentBefore != (nodeAfter != nil) {
+		t.Fatalf("node presence changed: before=%v after=%v", nodePresentBefore, nodeAfter != nil)
 	}
-	if nodeBefore != nil && nodeAfter.Status != nodeBefore.Status {
-		t.Fatalf("node status = %q, want %q unchanged", nodeAfter.Status, nodeBefore.Status)
+	if nodePresentBefore && nodeAfter.Status != nodeStatusBefore {
+		t.Fatalf("node status = %q, want %q unchanged", nodeAfter.Status, nodeStatusBefore)
 	}
 }
 
