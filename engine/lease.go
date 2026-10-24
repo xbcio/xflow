@@ -144,6 +144,13 @@ func (e *Engine) BuildTaskLease(ctx context.Context, t *Task) (*TaskLease, error
 		}
 	}
 
+	// Read before the lease is written: a read failure here must not leave a
+	// lease behind for the release path below to clean up.
+	execDeadline, err := e.executionDeadline(ctx, t.ExecutionID, g)
+	if err != nil {
+		return nil, err
+	}
+
 	leaseID, leaseToken := newLeaseCredentials()
 	issuedAt := time.Now().UTC()
 	ttl := e.defaultLeaseTTL
@@ -251,6 +258,9 @@ func (e *Engine) BuildTaskLease(ctx context.Context, t *Task) (*TaskLease, error
 			lease.ExecutionDeadline = e.outerDeadline
 		}
 	}
+	// And to the execution's own deadline (settings.timeout), which also bounds
+	// a node that declares no timeout of its own.
+	lease.ExecutionDeadline = clampToExecutionDeadline(execDeadline, lease.ExecutionDeadline)
 	lease.ArtifactUses = e.artifactUses
 	// Same reasoning as the deadline above, plus: the local queue's worker
 	// goroutine also drops the submitting request's namespace, and a local
@@ -321,6 +331,10 @@ func (e *Engine) RecoverTaskLease(ctx context.Context, task *Task) (*TaskLease, 
 	if err != nil {
 		return nil, fmt.Errorf("recover task lease %q/%q: build input: %w", task.ExecutionID, task.NodeName, err)
 	}
+	execDeadline, err := e.executionDeadline(ctx, task.ExecutionID, g)
+	if err != nil {
+		return nil, fmt.Errorf("recover task lease %q/%q: %w", task.ExecutionID, task.NodeName, err)
+	}
 	meta := g.NodeAt(task.NodeIdx)
 	// ExecutionDeadline is derived from the ORIGINAL LeaseIssuedAt, not
 	// time.Now(): recovery replays the same lease rather than issuing a fresh
@@ -347,6 +361,8 @@ func (e *Engine) RecoverTaskLease(ctx context.Context, task *Task) (*TaskLease, 
 			recovered.ExecutionDeadline = e.outerDeadline
 		}
 	}
+	// And to the execution's own deadline, same as BuildTaskLease.
+	recovered.ExecutionDeadline = clampToExecutionDeadline(execDeadline, recovered.ExecutionDeadline)
 	recovered.ArtifactUses = e.artifactUses
 	// Same as BuildTaskLease. The distributed control plane overwrites this
 	// with the claim's namespace after recovery (its engine carries no
@@ -704,6 +720,27 @@ func (e *Engine) RenewTaskLease(ctx context.Context, lease *TaskLease, extend ti
 			lease.Task.ExecutionID, name)
 	}
 	deadline := time.Now().UTC().Add(extend)
+	// A renewal must not push the lease past the execution's own deadline. Only
+	// that deadline is applied here, not lease.ExecutionDeadline: that field
+	// already folds in the node timeout, and renewal exists precisely to let a
+	// lease outlive the default TTL up to it, so capping on it would change
+	// every graph that has no execution deadline.
+	//
+	// An execution deadline that is already past is not refused here: the store
+	// is handed that past instant, which makes the lease immediately reclaimable,
+	// and the control plane's renew backstop commits the timeout once the lease's
+	// ExecutionDeadline has passed.
+	if g, err := e.loadGraph(ctx, lease.Task.ExecutionID); err != nil {
+		return false, fmt.Errorf("renew node lease %q/%q: %w", lease.Task.ExecutionID, name, err)
+	} else if g != nil {
+		execDeadline, err := e.executionDeadline(ctx, lease.Task.ExecutionID, g)
+		if err != nil {
+			return false, fmt.Errorf("renew node lease %q/%q: %w", lease.Task.ExecutionID, name, err)
+		}
+		if !execDeadline.IsZero() && execDeadline.Before(deadline) {
+			deadline = execDeadline
+		}
+	}
 	renewed, err := renewer.RenewTaskLease(ctx, lease.Task.ExecutionID, name, lease.LeaseToken, deadline)
 	if err != nil {
 		return false, fmt.Errorf("renew node lease %q/%q: %w", lease.Task.ExecutionID, name, err)

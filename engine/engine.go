@@ -266,6 +266,11 @@ type Engine struct {
 	// execution without tracing from re-reading on every dispatch. Evicted
 	// together with the graph cache by EvictExecution.
 	traceCarriers map[types.ExecutionID]*traceCarrierCacheEntry
+	// executionDeadlines memoizes executionDeadline's answer per execution of a
+	// graph that declares settings.timeout. The deadline is written once at
+	// creation, so the memo cannot go stale. Evicted together with the graph
+	// cache, like traceCarriers.
+	executionDeadlines map[types.ExecutionID]time.Time
 
 	evidenceBuffer *RuntimeEvidenceBuffer
 }
@@ -302,6 +307,7 @@ func New(state StateStore, queue TaskQueue, opts ...Option) *Engine {
 		OnEvict: func(id types.ExecutionID) {
 			e.mu.Lock()
 			delete(e.traceCarriers, id)
+			delete(e.executionDeadlines, id)
 			e.mu.Unlock()
 		},
 		// One line per idle sweep (at most once a minute) is the cache's only
@@ -338,6 +344,7 @@ func (e *Engine) EvictExecution(id types.ExecutionID) {
 	e.graphs.Delete(id)
 	e.mu.Lock()
 	delete(e.traceCarriers, id)
+	delete(e.executionDeadlines, id)
 	e.mu.Unlock()
 }
 
