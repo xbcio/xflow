@@ -120,6 +120,11 @@ func (e *Engine) handleSubWorkflowNode(ctx context.Context, task *Task, flush bo
 // id is found rather than re-created, and the park is re-written under the new
 // lease generation.
 func (e *Engine) executeSubWorkflow(ctx context.Context, task *Task, g *graph.Graph, meta graph.NodeMeta) error {
+	// Read before the claim: a read failure here leaves no lease behind.
+	execDeadline, err := e.executionDeadline(ctx, task.ExecutionID, g)
+	if err != nil {
+		return err
+	}
 	lease, err := e.acquireSubWorkflowLease(ctx, task, meta)
 	if err != nil {
 		return err
@@ -200,6 +205,10 @@ func (e *Engine) executeSubWorkflow(ctx context.Context, task *Task, g *graph.Gr
 			waitEnd = prev.WaitDeadline
 		}
 	}
+	// The wait also ends with the execution: a parent cannot wait past its own
+	// deadline, whatever the node timeout says, and an unbounded node still
+	// ends with its execution. Re-clamping a resumed wait is idempotent.
+	waitEnd = clampToExecutionDeadline(execDeadline, waitEnd)
 	// Park first, conclude second — the order is the invariant every
 	// conclusion below depends on: the park is what writes the link and the
 	// node's ChildExecutionID, and a commit preserves the claimed node's id, so

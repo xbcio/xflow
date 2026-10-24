@@ -29,7 +29,7 @@ func TestBatchDeadline(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := batchDeadline(tc.issued, tc.timeout, tc.outer); !got.Equal(tc.want) {
+			if got := batchDeadline(tc.issued, tc.timeout, tc.outer, time.Time{}); !got.Equal(tc.want) {
 				t.Errorf("batchDeadline = %v, want %v", got, tc.want)
 			}
 		})

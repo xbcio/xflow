@@ -377,6 +377,10 @@ func (e *Engine) runBatchBody(ctx context.Context, g *graph.Graph, lease *TaskLe
 	if err != nil {
 		return nil, batchBodyError(lease.Task.NodeName, batchIndex, err)
 	}
+	execDeadline, err := e.executionDeadline(ctx, lease.Task.ExecutionID, g)
+	if err != nil {
+		return nil, batchBodyError(lease.Task.NodeName, batchIndex, err)
+	}
 	// Snapshotted here, at scheduling time, for the reason in the method's doc.
 	outerNodes, err := e.bodyOuterNodesSnapshot(ctx, lease.Task.ExecutionID, g, lease.Task.NodeIdx)
 	if err != nil {
@@ -420,7 +424,7 @@ func (e *Engine) runBatchBody(ctx context.Context, g *graph.Graph, lease *TaskLe
 		SpanID:          submission.SpanID,
 		// The same bound BuildSubgraphLease ships to a runner, so an in-process
 		// body cannot outlive the map node either.
-		Deadline: batchDeadline(batchParentIssuedAt(t), e.resolveNodeTimeout(meta.Timeout), e.outerDeadline),
+		Deadline: batchDeadline(batchParentIssuedAt(t), e.resolveNodeTimeout(meta.Timeout), e.outerDeadline, execDeadline),
 	})
 	if err != nil {
 		// The body could not be RUN — compile failure, missing handler, backend
@@ -572,13 +576,14 @@ func batchParentIssuedAt(t *Task) time.Time {
 
 // batchDeadline is the absolute instant past which a batch's body must stop:
 // the parent map node's timeout measured from the parent lease's ORIGINAL issue
-// time, tightened by the engine's outer deadline. Zero means unbounded.
+// time, tightened by the engine's outer deadline and by the execution's own
+// deadline (settings.timeout; zero when it has none). Zero means unbounded.
 //
 // Without it a map node's timeout bounded only the node's own handler run; the
 // expansion that follows had no bound at all, so a body could outlive the node
 // that spawned it. It mirrors BuildTaskLease's ExecutionDeadline arithmetic so
 // the batch inherits exactly the budget the parent lease was issued with.
-func batchDeadline(parentIssuedAt time.Time, timeout time.Duration, outer time.Time) time.Time {
+func batchDeadline(parentIssuedAt time.Time, timeout time.Duration, outer, execDeadline time.Time) time.Time {
 	var deadline time.Time
 	if !parentIssuedAt.IsZero() && timeout > 0 {
 		deadline = parentIssuedAt.Add(timeout)
@@ -586,7 +591,7 @@ func batchDeadline(parentIssuedAt time.Time, timeout time.Duration, outer time.T
 	if !outer.IsZero() && (deadline.IsZero() || outer.Before(deadline)) {
 		deadline = outer
 	}
-	return deadline
+	return clampToExecutionDeadline(execDeadline, deadline)
 }
 
 func expansionBatchLease(t *Task) (*TaskLease, types.ExecutionID, []any, error) {
