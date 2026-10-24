@@ -306,7 +306,7 @@ export function WorkflowSettings({
         ) : (
           <>
             <p className="xflow-editor-variable-hint">
-              超时、时区、错误策略等执行级设置。执行超时是整个执行的预算（整数纳秒，含排队与挂起等待），0 或留空为不限。
+              超时、时区、错误策略等执行级设置。执行超时是整个执行的预算（整数纳秒，含排队与挂起等待），0 或留空为不限；运行时到期处理尚未实现，目前只校验与保存，不会因它超时。
             </p>
             {brokenSettings ? (
               <p className="xflow-editor-variable-notice" role="status">
