@@ -170,9 +170,7 @@ func (e *Engine) startLimitedExecution(ctx context.Context, snap *ExecutionSnaps
 }
 
 func (e *Engine) cacheExecutionGraph(id types.ExecutionID, g *graph.Graph) {
-	e.mu.Lock()
-	e.graphs[id] = g
-	e.mu.Unlock()
+	e.graphs.Put(id, g, g.EstimatedHeapBytes())
 }
 
 // flushInitialOutbox is intentionally best-effort. State and the initial

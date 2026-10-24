@@ -152,7 +152,7 @@ func TestDeliverSignalLegacy_ResumeLockContendedReturnsError(t *testing.T) {
 	if err := state.CreateExecution(ctx, &ExecutionSnapshot{ID: id, Graph: g, Status: types.ExecutionStatusRunning}); err != nil {
 		t.Fatal(err)
 	}
-	eng.graphs[id] = g
+	eng.graphs.Put(id, g, 0)
 
 	// Set up the node as suspended waiting for signal "go".
 	state.mu.Lock()
@@ -221,7 +221,7 @@ func TestReclaimLease_EnqueueFailureReturnsError(t *testing.T) {
 	// the legacy path. Let's use a wrapper.
 	legacyState := &nonAtomicState{fakeState: state}
 	eng2 := New(legacyState, failQueue)
-	eng2.graphs[id] = g
+	eng2.graphs.Put(id, g, 0)
 
 	reclaimed, err := eng2.ReclaimLease(ctx, ExpiredLease{
 		ExecutionID:  id,

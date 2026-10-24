@@ -29,10 +29,12 @@ func (s *Store) DecrementInDegree(ctx context.Context, id types.ExecutionID, uni
 }
 
 func (s *Store) CheckCompletion(ctx context.Context, id types.ExecutionID, totalNodes int) (bool, bool, error) {
-	s.mu.RLock()
-	g := s.graphs[id]
-	s.mu.RUnlock()
-	if g == nil {
+	g, ok := s.graphs.Get(id)
+	if !ok {
+		// Cold entry: this replica never loaded the graph, or the idle sweep
+		// dropped it. Answering "nothing to finalize here" matches what a
+		// freshly started process has always answered, and the caller's own
+		// fenced transition remains the authority on completion.
 		return false, false, nil
 	}
 

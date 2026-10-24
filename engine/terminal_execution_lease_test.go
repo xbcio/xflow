@@ -152,7 +152,7 @@ func TestBuildTaskLeaseRefusesTerminalExecution(t *testing.T) {
 					// it is the state loadActiveGraph's cache-hit branch exists
 					// to distrust.
 					eng.mu.RLock()
-					_, stillCached := eng.graphs[id]
+					_, stillCached := eng.graphs.Get(id)
 					eng.mu.RUnlock()
 					if stillCached {
 						t.Errorf("graph for %q is in e.graphs after a refused lease on a %q execution "+

@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/internal/graphcache"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
@@ -74,6 +75,23 @@ func WithHooks(h Hooks) Option {
 // WithLogger sets the logger.
 func WithLogger(l Logger) Option {
 	return func(e *Engine) { e.logger = l }
+}
+
+// WithGraphCache bounds the engine's process-local decoded-graph cache.
+//
+// Every replica that executes any node of an execution caches that execution's
+// graph, but only the replica applying its terminal transition evicts it; the
+// others would pin it until restart. maxBytes caps the estimated heap footprint
+// and idleTTL drops entries no task has touched for that long — a miss simply
+// re-loads the graph from the state store.
+//
+// maxBytes <= 0 and idleTTL <= 0 disable the respective bound. Omitting the
+// option keeps graphcache.DefaultMaxBytes / DefaultIdleTTL.
+func WithGraphCache(maxBytes int64, idleTTL time.Duration) Option {
+	return func(e *Engine) {
+		e.graphCacheMaxBytes = maxBytes
+		e.graphCacheIdleTTL = idleTTL
+	}
 }
 
 // WithDefaultLeaseTTL overrides the default deadline applied to every issued
@@ -233,8 +251,15 @@ type Engine struct {
 	artifactUses             *types.ArtifactUseCollector
 	namespace                namespace.Namespace
 
-	mu     sync.RWMutex
-	graphs map[types.ExecutionID]*graph.Graph
+	mu sync.RWMutex
+	// graphs bounds the decoded-graph cache. Every replica that executes a
+	// single node of an execution populates it, but only the replica that
+	// applies the execution's terminal transition evicts it, so without a bound
+	// each non-finalizing replica pins that graph until it restarts. See
+	// internal/graphcache for the measurements behind the defaults.
+	graphs             *graphcache.Cache
+	graphCacheMaxBytes int64
+	graphCacheIdleTTL  time.Duration
 	// traceCarriers memoizes ExecutionTraceCarrier's answer per execution. The
 	// carrier is written once at creation and never updated, so the memo cannot
 	// go stale; one entry with a nil carrier is the sentinel that keeps an
@@ -250,7 +275,8 @@ func New(state StateStore, queue TaskQueue, opts ...Option) *Engine {
 	e := &Engine{
 		state:                    state,
 		queue:                    queue,
-		graphs:                   make(map[types.ExecutionID]*graph.Graph),
+		graphCacheMaxBytes:       graphcache.DefaultMaxBytes,
+		graphCacheIdleTTL:        graphcache.DefaultIdleTTL,
 		traceCarriers:            make(map[types.ExecutionID]*traceCarrierCacheEntry),
 		outboxMaxDeliveryAttempt: DefaultOutboxMaxDeliveryAttempts,
 		defaultLeaseTTL:          DefaultLeaseTTL,
@@ -262,6 +288,37 @@ func New(state StateStore, queue TaskQueue, opts ...Option) *Engine {
 	for _, opt := range opts {
 		opt(e)
 	}
+	e.graphs = graphcache.New(graphcache.Options{
+		// The entry cap is a fixed secondary guard; the byte budget is the
+		// configurable one.
+		MaxEntries: graphcache.DefaultMaxEntries,
+		MaxBytes:   e.graphCacheMaxBytes,
+		IdleTTL:    e.graphCacheIdleTTL,
+		// The trace-carrier memo shares the graph cache's lifetime. Dropping it
+		// here keeps the two maps from drifting apart when a graph leaves for
+		// idleness rather than through a terminal transition. Called without the
+		// cache lock held, so taking e.mu is safe (and EvictExecution, which
+		// holds e.mu, uses Delete, which never fires this).
+		OnEvict: func(id types.ExecutionID) {
+			e.mu.Lock()
+			delete(e.traceCarriers, id)
+			e.mu.Unlock()
+		},
+		// One line per idle sweep (at most once a minute) is the cache's only
+		// externally visible number. The leak it bounds showed up as a heap that
+		// grew while the process was idle; these are the counters that make the
+		// cure visible the same way.
+		OnSweep: func(st graphcache.Stats) {
+			if e.logger == nil {
+				return
+			}
+			e.logger.Info("graph_cache_stats", "scope", "engine",
+				"entries", st.Entries, "bytes", st.Bytes,
+				"evicted_idle", st.EvictedIdle,
+				"evicted_capacity", st.EvictedCapacity,
+				"evicted_explicit", st.EvictedExplicit)
+		},
+	})
 	return e
 }
 
@@ -278,8 +335,8 @@ func (e *Engine) State() StateStore { return e.state }
 // so late runner callbacks observe the execution as inactive instead of using
 // stale cached graph data.
 func (e *Engine) EvictExecution(id types.ExecutionID) {
+	e.graphs.Delete(id)
 	e.mu.Lock()
-	delete(e.graphs, id)
 	delete(e.traceCarriers, id)
 	e.mu.Unlock()
 }
@@ -428,10 +485,7 @@ func (e *Engine) failInitialExecution(ctx context.Context, id types.ExecutionID,
 // Callers must evict on an inactive verdict themselves; that is the side effect
 // loadActiveGraph performs here and this function deliberately cannot.
 func (e *Engine) loadGraph(ctx context.Context, id types.ExecutionID) (*graph.Graph, error) {
-	e.mu.RLock()
-	g, ok := e.graphs[id]
-	e.mu.RUnlock()
-	if ok {
+	if g, ok := e.graphs.Get(id); ok {
 		return g, nil
 	}
 	g, err := e.state.LoadGraph(ctx, id)
@@ -441,17 +495,12 @@ func (e *Engine) loadGraph(ctx context.Context, id types.ExecutionID) (*graph.Gr
 	if g == nil {
 		return nil, nil
 	}
-	e.mu.Lock()
-	e.graphs[id] = g
-	e.mu.Unlock()
+	e.graphs.Put(id, g, g.EstimatedHeapBytes())
 	return g, nil
 }
 
 func (e *Engine) loadActiveGraph(ctx context.Context, id types.ExecutionID) (*graph.Graph, bool, error) {
-	e.mu.RLock()
-	g, ok := e.graphs[id]
-	e.mu.RUnlock()
-	if ok {
+	if g, ok := e.graphs.Get(id); ok {
 		// A cache hit is not sufficient to treat the execution as active: a
 		// concurrent Cancel or a delayed EvictExecution can leave a terminal
 		// execution's graph in the cache. Confirm the execution is still
@@ -482,9 +531,7 @@ func (e *Engine) loadActiveGraph(ctx context.Context, id types.ExecutionID) (*gr
 		return nil, false, err
 	}
 
-	e.mu.Lock()
-	e.graphs[id] = g
-	e.mu.Unlock()
+	e.graphs.Put(id, g, g.EstimatedHeapBytes())
 	return g, true, nil
 }
 

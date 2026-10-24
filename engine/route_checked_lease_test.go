@@ -258,7 +258,7 @@ func TestBuildTaskLeaseRouteCheckedRefusesTerminalExecution(t *testing.T) {
 		t.Fatalf("GetExecutionStatus calls = %d, want 0", state.statusReads)
 	}
 	eng.mu.RLock()
-	_, cached := eng.graphs[id]
+	_, cached := eng.graphs.Get(id)
 	eng.mu.RUnlock()
 	if cached {
 		t.Fatalf("graph for %q is still cached after the acquire reported a terminal execution", id)
@@ -299,7 +299,7 @@ func TestBuildTaskLeaseRouteCheckedRefusesMissingExecution(t *testing.T) {
 		t.Fatalf("AcquireTaskLeaseChecked calls = %d, want 1", state.checkedAcquires)
 	}
 	eng.mu.RLock()
-	_, cached := eng.graphs[id]
+	_, cached := eng.graphs.Get(id)
 	eng.mu.RUnlock()
 	if cached {
 		t.Fatalf("graph for %q is still cached after the acquire reported the execution missing", id)

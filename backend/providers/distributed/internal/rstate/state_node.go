@@ -14,12 +14,15 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
+// graphWireToHeapFactor converts the persisted graph's JSON length into a heap
+// estimate for the decoded structures. Decoding a JSON object into
+// map[string]any/slices costs a small multiple of the wire bytes; measuring the
+// wire form is the only per-graph size the load path has.
+const graphWireToHeapFactor = 3
+
 func (s *Store) LoadGraph(ctx context.Context, id types.ExecutionID) (*graph.Graph, error) {
 	// Check in-memory cache first.
-	s.mu.RLock()
-	g := s.graphs[id]
-	s.mu.RUnlock()
-	if g != nil {
+	if g, ok := s.graphs.Get(id); ok {
 		return g, nil
 	}
 
@@ -33,15 +36,13 @@ func (s *Store) LoadGraph(ctx context.Context, id types.ExecutionID) (*graph.Gra
 		return nil, fmt.Errorf("load graph %q: %w", id, err)
 	}
 
-	g = &graph.Graph{}
+	g := &graph.Graph{}
 	if err := json.Unmarshal([]byte(raw), g); err != nil {
 		return nil, fmt.Errorf("unmarshal graph %q: %w", id, err)
 	}
 
 	// Re-populate the in-memory cache.
-	s.mu.Lock()
-	s.graphs[id] = g
-	s.mu.Unlock()
+	s.graphs.Put(id, g, graphWireToHeapFactor*int64(len(raw)))
 
 	return g, nil
 }
