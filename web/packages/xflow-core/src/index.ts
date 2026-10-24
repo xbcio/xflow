@@ -44,7 +44,12 @@ export interface RetryPolicy {
 }
 
 export interface WorkflowSettings {
-  timeout?: string | number;
+  /**
+   * Whole-execution budget in integer nanoseconds (Go time.Duration wire form,
+   * like `concurrency.queue_timeout`); 0 or unset means no budget. A Go duration
+   * string such as "30s" is rejected by the server.
+   */
+  timeout?: number;
   concurrency?: number;
   timezone?: string;
   on_error?: ErrorPolicy;
