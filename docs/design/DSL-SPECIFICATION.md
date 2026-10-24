@@ -2697,7 +2697,7 @@ name: "order-processing"
 version: "1.0.0"
 
 settings:
-  timeout: 3600s
+  timeout: 3600000000000    # 整数纳秒，1 小时
   pin_data_mode: test_only
 
 params:
