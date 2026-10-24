@@ -66,6 +66,10 @@ type Graph struct {
 	// namespace+workflow NAME rather than version (see ConcurrencyKey), so a
 	// version bump does not orphan the slots its predecessor's executions hold.
 	concurrency *types.ConcurrencySettings
+	// timeout is the validated settings.timeout: the whole-execution budget
+	// counted from admission. Zero means no budget, which keeps it out of the
+	// hash payload and the snapshot of every graph that sets none.
+	timeout time.Duration
 
 	// hasDisabled reports whether any node carries NodeMeta.Disabled. It is a
 	// derived cache -- true iff at least one node has the flag -- and is
@@ -239,6 +243,10 @@ func (g *Graph) PinDataMode() string { return g.pinDataMode }
 
 // Timezone returns the workflow-level settings.timezone, or "" when unset.
 func (g *Graph) Timezone() string { return g.timezone }
+
+// Timeout returns the workflow-level settings.timeout, or 0 when unset (no
+// execution budget).
+func (g *Graph) Timeout() time.Duration { return g.timeout }
 
 // Concurrency returns a copy of the graph's normalized settings.concurrency
 // block, or nil when the graph declares no limit. A copy rather than the

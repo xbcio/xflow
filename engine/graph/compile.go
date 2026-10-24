@@ -262,6 +262,12 @@ func compile(ctx context.Context, def *types.WorkflowDef, resolver SubWorkflowRe
 		}
 		g.timezone = def.Settings.Timezone
 	}
+	if def.Settings != nil && def.Settings.Timeout != 0 {
+		if def.Settings.Timeout < 0 {
+			return nil, fmt.Errorf("settings.timeout must be >= 0, got %v", def.Settings.Timeout)
+		}
+		g.timeout = def.Settings.Timeout
+	}
 
 	// Reject reserved "xflow.group_*" types in user-authored workflows. These
 	// types are only valid inside projected packages compiled via
@@ -456,6 +462,12 @@ func validateFAF(def *types.WorkflowDef) error {
 		// and no way to make the admission atomic with the dispatch. Fail closed
 		// rather than silently running unlimited.
 		return errors.New("faf workflow cannot define settings.concurrency with a non-zero limit")
+	}
+	if def.Settings != nil && def.Settings.Timeout > 0 {
+		// A FAF execution persists nothing, so there is no record whose deadline
+		// could be stamped or expired. Fail closed rather than silently running
+		// without the budget the author asked for.
+		return errors.New("faf workflow cannot define settings.timeout")
 	}
 	if len(def.Nodes) != 1 {
 		return fmt.Errorf("faf workflow must contain exactly one node, got %d", len(def.Nodes))
