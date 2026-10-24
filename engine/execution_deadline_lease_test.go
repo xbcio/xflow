@@ -274,3 +274,29 @@ func TestRenewTaskLeaseClampsToExecutionDeadline(t *testing.T) {
 		}
 	})
 }
+
+// deadlineMemoLen reads the size of the engine's execution-deadline memo.
+func deadlineMemoLen(e *Engine) int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return len(e.executionDeadlines)
+}
+
+// TestEvictExecutionDropsTheDeadlineMemo pins that the memo does not outlive
+// the execution: a terminal transition evicts the graph, and an entry left in
+// executionDeadlines would be a per-execution leak that only a restart ends.
+func TestEvictExecutionDropsTheDeadlineMemo(t *testing.T) {
+	eng, _, task := clampRig(t, 45*time.Second, time.Now().UTC().Add(time.Hour))
+	if _, err := eng.BuildTaskLease(context.Background(), task); err != nil {
+		t.Fatalf("BuildTaskLease: %v", err)
+	}
+	if got := deadlineMemoLen(eng); got != 1 {
+		t.Fatalf("memo entries after a lease = %d, want 1: the lease path must memoize the deadline", got)
+	}
+
+	eng.EvictExecution(task.ExecutionID)
+
+	if got := deadlineMemoLen(eng); got != 0 {
+		t.Fatalf("memo entries after EvictExecution = %d, want 0", got)
+	}
+}
