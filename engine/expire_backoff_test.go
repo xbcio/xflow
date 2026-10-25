@@ -75,6 +75,32 @@ func TestExpireBackoffSuccessClearsTheRecord(t *testing.T) {
 	b.Success("never-failed")
 }
 
+func TestExpireBackoffWaitingCountsOnlyOpenWindows(t *testing.T) {
+	b := NewExpireBackoff()
+	b.Failure("a", backoffEpoch)                     // window ends at +1s
+	b.Failure("b", backoffEpoch)                     // +1s
+	b.Failure("b", backoffEpoch)                     // +2s
+	b.Failure("c", backoffEpoch.Add(10*time.Second)) // +11s
+	cases := []struct {
+		at   time.Duration
+		want int
+	}{
+		{0, 3},
+		{time.Second, 2},
+		{2 * time.Second, 1},
+		{10 * time.Second, 1},
+		{11 * time.Second, 0},
+	}
+	for _, c := range cases {
+		if got := b.Waiting(backoffEpoch.Add(c.at)); got != c.want {
+			t.Fatalf("Waiting() at +%v = %d, want %d", c.at, got, c.want)
+		}
+	}
+	if got := b.Len(); got != 3 {
+		t.Fatalf("Len() = %d, want the elapsed records still on file", got)
+	}
+}
+
 func TestExpireBackoffZeroValueIsUsable(t *testing.T) {
 	var b ExpireBackoff
 	if !b.Allow("exec-1", backoffEpoch) {

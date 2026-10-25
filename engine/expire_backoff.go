@@ -90,6 +90,22 @@ func (b *ExpireBackoff) Len() int {
 	return len(b.entries)
 }
 
+// Waiting returns how many keys are still inside their backoff window at now,
+// that is how many Allow would refuse. Unlike Len it does not count a record
+// whose window has elapsed, such as one for an execution that was settled
+// elsewhere and so will never see Success.
+func (b *ExpireBackoff) Waiting(now time.Time) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	waiting := 0
+	for _, e := range b.entries {
+		if now.Before(e.retryAt) {
+			waiting++
+		}
+	}
+	return waiting
+}
+
 // Failures returns key's consecutive failure count, or zero for a key with no
 // record.
 func (b *ExpireBackoff) Failures(key string) int {
