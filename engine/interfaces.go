@@ -587,6 +587,17 @@ type DeadlineExpiredExecution struct {
 // AckDeadlineExpired removes the entry of an execution ExpireExecution has
 // fully handled. It is idempotent: acknowledging an execution that has no entry,
 // or no longer exists, succeeds.
+//
+// Every path that writes the timeout terminal status (ExecutionStatusTimeout),
+// in a backend or in the engine, must write a non-empty reason that differs from
+// ExecutionDeadlineExceededError with it. A queue timeout writes
+// ConcurrencyQueueTimeoutError, for example. ExpireExecution tells the timeout
+// this mechanism wrote from any other timeout by that reason alone: an execution
+// already in timeout with exactly ExecutionDeadlineExceededError is treated as
+// this mechanism's own unfinished work and has its cascade replayed (and its
+// parent notified), while any other reason is left as another mechanism's
+// conclusion. A timeout written with an empty or deadline-matching reason by
+// anything else would be cascaded here as if this mechanism had written it.
 type ExecutionDeadlineExpirer interface {
 	ListDeadlineExceededExecutions(ctx context.Context, before time.Time, limit int) ([]DeadlineExpiredExecution, error)
 	AckDeadlineExpired(ctx context.Context, id types.ExecutionID) error
