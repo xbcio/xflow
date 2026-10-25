@@ -811,7 +811,7 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		}
 		var self prometheus.Gatherer
 		if cfg.Metrics != nil {
-			self = cfg.Metrics.Registry()
+			self = cfg.Metrics.Gatherer()
 		}
 		metricsInbox = NewMetricsInbox(MetricsInboxConfig{
 			Store:   store,
