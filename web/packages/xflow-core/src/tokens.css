@@ -8,12 +8,47 @@
     --xflow-font-md: 13px;
     --xflow-font-lg: 14px;
     --xflow-font-xl: 16px;
+    --xflow-font-weight-regular: 400;
+    --xflow-font-weight-medium: 500;
+    --xflow-font-weight-semibold: 600;
+    --xflow-line-height-xs: 16px;
+    --xflow-line-height-sm: 18px;
+    --xflow-line-height-md: 20px;
+    --xflow-line-height-lg: 22px;
+    --xflow-line-height-xl: 24px;
     --xflow-line-height: 20px;
+    --xflow-text-caption: 400 11px/16px Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    --xflow-text-body: 400 13px/20px Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    --xflow-text-label: 500 12px/18px Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    --xflow-text-title: 600 14px/22px Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    --xflow-text-heading: 600 16px/24px Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    --xflow-text-mono: 400 11px/16px "JetBrains Mono", "SF Mono", Menlo, monospace;
     --xflow-radius-xs: 4px;
     --xflow-radius-sm: 6px;
     --xflow-radius-md: 8px;
     --xflow-radius-lg: 12px;
-    --xflow-radius-pill: 999px;
+    --xflow-radius-full: 9999px;
+    --xflow-radius-pill: 9999px;
+    --xflow-space-0: 0px;
+    --xflow-space-0-5: 2px;
+    --xflow-space-1: 4px;
+    --xflow-space-1-5: 6px;
+    --xflow-space-2: 8px;
+    --xflow-space-2-5: 10px;
+    --xflow-space-3: 12px;
+    --xflow-space-4: 16px;
+    --xflow-space-5: 20px;
+    --xflow-space-6: 24px;
+    --xflow-space-8: 32px;
+    --xflow-space-10: 40px;
+    --xflow-space-12: 48px;
+    --xflow-motion-duration-instant: 80ms;
+    --xflow-motion-duration-fast: 120ms;
+    --xflow-motion-duration-base: 180ms;
+    --xflow-motion-duration-slow: 260ms;
+    --xflow-motion-ease-standard: cubic-bezier(.2, 0, 0, 1);
+    --xflow-motion-ease-emphasized: cubic-bezier(.3, 0, 0, 1);
+    --xflow-motion-ease-exit: cubic-bezier(.4, 0, 1, 1);
     --xflow-control-height: 32px;
     --xflow-control-height-sm: 24px;
     --xflow-float-height: 34px;
@@ -23,20 +58,30 @@
 
   :where(.xflow-editor, .xflow-preview-root, .xflow-admin)[data-theme="light"] {
     color-scheme: light;
+    --xflow-surface-sunken: #eef0f3;
+    --xflow-surface-app: #f4f5f7;
+    --xflow-surface-panel: #ffffff;
+    --xflow-surface-raised: #ffffff;
+    --xflow-surface-overlay: #ffffff;
     --xflow-app: #f4f5f7;
     --xflow-panel: #ffffff;
-    --xflow-panel-raised: #f8f9fb;
+    --xflow-panel-raised: #eef0f3;
     --xflow-field: #ffffff;
     --xflow-canvas: #f7f8fa;
     --xflow-canvas-dot: #d4d8df;
+    --xflow-border-subtle: #eceef1;
     --xflow-border: #e2e5ea;
     --xflow-border-strong: #c9ced6;
-    --xflow-hover: #f0f2f5;
+    --xflow-hover: rgba(22, 25, 29, .06);
     --xflow-text: #16191d;
     --xflow-text-secondary: #4a5260;
-    --xflow-text-tertiary: #667085;
+    --xflow-text-tertiary: #616b79;
     --xflow-primary: #2f7cff;
     --xflow-on-primary: #ffffff;
+    --xflow-primary-solid: #1f69e0;
+    --xflow-primary-solid-hover: #1a5fcf;
+    --xflow-primary-solid-active: #164fb0;
+    --xflow-focus-ring: #1f69e0;
     --xflow-info: #2f7cff;
     --xflow-success: #12855a;
     --xflow-warning: #b26b00;
@@ -50,9 +95,11 @@
     --xflow-hover-subtle: rgba(47, 124, 255, .06);
     --xflow-inset-shadow: rgba(22, 25, 29, .08);
     --xflow-shadow: rgba(22, 25, 29, .10);
+    --xflow-elev-0: none;
     --xflow-elev-1: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.08);
     --xflow-elev-2: 0 4px 12px rgba(16,24,40,.10), 0 1px 3px rgba(16,24,40,.06);
-    --xflow-elev-3: 0 16px 40px rgba(16,24,40,.18);
+    --xflow-elev-3: 0 12px 28px rgba(16,24,40,.14), 0 2px 6px rgba(16,24,40,.06);
+    --xflow-elev-4: 0 24px 56px rgba(16,24,40,.20), 0 4px 12px rgba(16,24,40,.08);
     --xflow-primary-fg: color-mix(in srgb, var(--xflow-primary) 70%, var(--xflow-text));
     --xflow-primary-bg-subtle: color-mix(in srgb, var(--xflow-primary) 12%, transparent);
     --xflow-primary-border: color-mix(in srgb, var(--xflow-primary) 40%, transparent);
@@ -87,6 +134,8 @@
     --xflow-primary-ring: color-mix(in srgb, var(--xflow-primary) 25%, transparent);
     --xflow-overlay: color-mix(in srgb, var(--xflow-panel) 92%, transparent);
     --xflow-overlay-subtle: color-mix(in srgb, var(--xflow-panel) 84%, transparent);
+    --xflow-surface-hover: color-mix(in srgb, var(--xflow-text) 6%, transparent);
+    --xflow-surface-active: color-mix(in srgb, var(--xflow-text) 10%, transparent);
     --xflow-minimap-mask: color-mix(in srgb, var(--xflow-app) 88%, transparent);
     --xflow-grid-minor: color-mix(in srgb, var(--xflow-text) 5%, transparent);
     --xflow-grid-major: color-mix(in srgb, var(--xflow-text) 13%, transparent);
@@ -95,20 +144,30 @@
 
   :where(.xflow-editor, .xflow-preview-root, .xflow-admin)[data-theme="dark"] {
     color-scheme: dark;
+    --xflow-surface-sunken: #0e0f10;
+    --xflow-surface-app: #111213;
+    --xflow-surface-panel: #1b1c1f;
+    --xflow-surface-raised: #222428;
+    --xflow-surface-overlay: #2a2d32;
     --xflow-app: #111213;
     --xflow-panel: #1b1c1f;
     --xflow-panel-raised: #222428;
     --xflow-field: #16171a;
     --xflow-canvas: #151617;
     --xflow-canvas-dot: #2c2f34;
+    --xflow-border-subtle: #26292d;
     --xflow-border: #2e3136;
     --xflow-border-strong: #41454c;
-    --xflow-hover: #26292e;
+    --xflow-hover: rgba(238, 240, 243, .06);
     --xflow-text: #eef0f3;
     --xflow-text-secondary: #b9bfc8;
     --xflow-text-tertiary: #8f97a3;
     --xflow-primary: #4c8dff;
     --xflow-on-primary: #ffffff;
+    --xflow-primary-solid: #2d6fdd;
+    --xflow-primary-solid-hover: #2a66cc;
+    --xflow-primary-solid-active: #255fb8;
+    --xflow-focus-ring: #8ab4ff;
     --xflow-info: #5b9bff;
     --xflow-success: #35c98b;
     --xflow-warning: #f2b44c;
@@ -122,9 +181,11 @@
     --xflow-hover-subtle: rgba(255, 255, 255, .03);
     --xflow-inset-shadow: rgba(0, 0, 0, .18);
     --xflow-shadow: rgba(0, 0, 0, .18);
-    --xflow-elev-1: 0 1px 2px rgba(0,0,0,.4);
-    --xflow-elev-2: 0 6px 16px rgba(0,0,0,.45);
-    --xflow-elev-3: 0 18px 48px rgba(0,0,0,.55);
+    --xflow-elev-0: none;
+    --xflow-elev-1: 0 1px 2px rgba(0,0,0,.40);
+    --xflow-elev-2: 0 6px 16px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.04);
+    --xflow-elev-3: 0 12px 32px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.05);
+    --xflow-elev-4: 0 24px 64px rgba(0,0,0,.65), inset 0 1px 0 rgba(255,255,255,.06);
     --xflow-primary-fg: color-mix(in srgb, var(--xflow-primary) 70%, var(--xflow-text));
     --xflow-primary-bg-subtle: color-mix(in srgb, var(--xflow-primary) 12%, transparent);
     --xflow-primary-border: color-mix(in srgb, var(--xflow-primary) 40%, transparent);
@@ -159,9 +220,20 @@
     --xflow-primary-ring: color-mix(in srgb, var(--xflow-primary) 25%, transparent);
     --xflow-overlay: color-mix(in srgb, var(--xflow-panel) 92%, transparent);
     --xflow-overlay-subtle: color-mix(in srgb, var(--xflow-panel) 84%, transparent);
+    --xflow-surface-hover: color-mix(in srgb, var(--xflow-text) 6%, transparent);
+    --xflow-surface-active: color-mix(in srgb, var(--xflow-text) 10%, transparent);
     --xflow-minimap-mask: color-mix(in srgb, var(--xflow-app) 88%, transparent);
     --xflow-grid-minor: color-mix(in srgb, var(--xflow-text) 5%, transparent);
     --xflow-grid-major: color-mix(in srgb, var(--xflow-text) 13%, transparent);
     --xflow-grid-dot: color-mix(in srgb, var(--xflow-text) 12%, transparent);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    :where(.xflow-editor, .xflow-preview-root, .xflow-admin) {
+      --xflow-motion-duration-instant: 0ms;
+      --xflow-motion-duration-fast: 0ms;
+      --xflow-motion-duration-base: 0ms;
+      --xflow-motion-duration-slow: 0ms;
+    }
   }
 }
