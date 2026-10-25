@@ -4,10 +4,13 @@ import { request } from '@umijs/max';
 /**
  * One row of `GET /v1/executions` (OpenAPI `ExecutionListItem`). Only the
  * fields the recent-run card draws are named. `workflow_name` is a display
- * string recorded at submit time; the list endpoint has no workflow id.
+ * string recorded at submit time; `workflow_id` is the identity the recent-run
+ * row uses to open that execution in its workflow's run record.
  */
 export interface RecentExecution {
   executionId: string;
+  /** Empty for an unattributed row (predates the column or inline definition). */
+  workflowId: string;
   workflowName: string;
   status: ExecutionStatusKey;
   createdAt: string;
@@ -28,6 +31,7 @@ interface ExecutionListPayload {
 
 interface ExecutionListRowWire {
   execution_id: string;
+  workflow_id?: string;
   workflow_name: string;
   status: string;
   created_at: string;
@@ -65,6 +69,7 @@ export async function fetchRecentExecutions(pageSize: number): Promise<RecentExe
     }
     return {
       executionId: row.execution_id,
+      workflowId: typeof row.workflow_id === 'string' ? row.workflow_id : '',
       workflowName: row.workflow_name,
       status: row.status,
       createdAt: row.created_at,

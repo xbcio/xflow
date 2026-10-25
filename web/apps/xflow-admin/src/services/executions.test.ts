@@ -9,6 +9,7 @@ vi.mock('@umijs/max', () => ({ request }));
 const row = (overrides: Record<string, unknown> = {}) => ({
   execution_id: 'exec-9',
   namespace: 'ns-a',
+  workflow_id: 'wf-1',
   workflow_name: '客户同步',
   status: 'success',
   error: '',
@@ -39,18 +40,33 @@ describe('fetchRecentExecutions', () => {
     await expect(fetchRecentExecutions(3)).resolves.toEqual([
       {
         executionId: 'exec-9',
+        workflowId: 'wf-1',
         workflowName: '客户同步',
         status: 'success',
         createdAt: '2026-10-19T14:02:23Z',
       },
       {
         executionId: 'exec-8',
+        workflowId: 'wf-1',
         workflowName: '告警归因',
         status: 'paused',
         createdAt: '2026-10-19T14:02:23Z',
       },
     ]);
     expect(request).toHaveBeenCalledWith('/v1/executions?page_size=3', { method: 'GET' });
+  });
+
+  it('maps a missing workflow_id to an empty unattributed id', async () => {
+    request.mockResolvedValue({
+      success: true,
+      code: 'ok',
+      message: '',
+      data: { list: [row({ workflow_id: undefined })], total: 1 },
+    });
+
+    await expect(fetchRecentExecutions(1)).resolves.toEqual([
+      expect.objectContaining({ executionId: 'exec-9', workflowId: '' }),
+    ]);
   });
 
   it('rejects a failure envelope and a payload without a list', async () => {
