@@ -68,7 +68,13 @@ func (e *Engine) Cancel(ctx context.Context, id types.ExecutionID) error {
 	// canceled: each child's own cancellation notifies this execution's node,
 	// and the canceling status set above is what keeps that notification from
 	// concluding the node with a failure this cancel already supersedes.
-	e.cancelSubWorkflowChildren(ctx, id, g)
+	//
+	// A child that could not be stopped costs that child's cancellation, not this
+	// cancel: the parent is still marked canceled and the child's own wait/lease
+	// machinery stays in charge of it. cancelSubWorkflowChildren returns that
+	// failure for the callers that need it (ExpireExecution); Cancel stays
+	// best-effort, so it keeps only the log line the helper already wrote.
+	_ = e.cancelSubWorkflowChildren(ctx, id, g)
 
 	// With the children stopping, the nodes they were parked under have no
 	// completion left to wait for: the completion path refuses them while this

@@ -166,7 +166,9 @@ func (e *Engine) ExpireExecution(ctx context.Context, id types.ExecutionID) (out
 	if err := e.cancelSuspendedNodes(ctx, id, g); err != nil {
 		return "", fmt.Errorf("expire execution %q: %w", id, err)
 	}
-	e.cancelSubWorkflowChildren(ctx, id, g)
+	if err := e.cancelSubWorkflowChildren(ctx, id, g); err != nil {
+		return "", fmt.Errorf("expire execution %q: %w", id, err)
+	}
 	if err := e.finalizeParkedSubWorkflowNodes(ctx, id, g); err != nil {
 		return "", fmt.Errorf("expire execution %q: %w", id, err)
 	}

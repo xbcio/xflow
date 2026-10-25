@@ -116,7 +116,10 @@ type expireState struct {
 
 	faultMu            sync.Mutex
 	listSuspendedErr   error
+	listSuspendedErrBy map[types.ExecutionID]error
+	linkReadErr        error
 	upsertNodeErr      error
+	ackErr             error
 	beforeTimeoutWrite func()
 }
 
@@ -185,6 +188,10 @@ func (s *expireState) ListSuspendedNodes(ctx context.Context, id types.Execution
 	s.faultMu.Lock()
 	err := s.listSuspendedErr
 	s.listSuspendedErr = nil
+	if byID, ok := s.listSuspendedErrBy[id]; ok {
+		err = byID
+		delete(s.listSuspendedErrBy, id)
+	}
 	s.faultMu.Unlock()
 	if err != nil {
 		return nil, err
@@ -229,9 +236,41 @@ func (s *expireState) CancelSuspendedNode(_ context.Context, id types.ExecutionI
 	return true, nil
 }
 
+// GetSubWorkflowLink answers a one-shot injected error before reading the link,
+// which is how a test breaks the first step of the child cascade.
+func (s *expireState) GetSubWorkflowLink(ctx context.Context, id types.ExecutionID, nodeName string) (SubWorkflowLink, bool, error) {
+	s.faultMu.Lock()
+	err := s.linkReadErr
+	s.linkReadErr = nil
+	s.faultMu.Unlock()
+	if err != nil {
+		return SubWorkflowLink{}, false, err
+	}
+	return s.subWorkflowLinkState.GetSubWorkflowLink(ctx, id, nodeName)
+}
+
+func (s *expireState) failLinkRead(err error) {
+	s.faultMu.Lock()
+	s.linkReadErr = err
+	s.faultMu.Unlock()
+}
+
 func (s *expireState) failListSuspended(err error) {
 	s.faultMu.Lock()
 	s.listSuspendedErr = err
+	s.faultMu.Unlock()
+}
+
+// failListSuspendedFor fails the first ListSuspendedNodes of one execution,
+// whichever execution makes it. The one-shot fault above is consumed by the
+// first execution to list, which is the parent in a sub-workflow cascade; this
+// one reaches a child's own cancel.
+func (s *expireState) failListSuspendedFor(id types.ExecutionID, err error) {
+	s.faultMu.Lock()
+	if s.listSuspendedErrBy == nil {
+		s.listSuspendedErrBy = make(map[types.ExecutionID]error)
+	}
+	s.listSuspendedErrBy[id] = err
 	s.faultMu.Unlock()
 }
 
@@ -261,7 +300,17 @@ func (s *expireAckState) ListDeadlineExceededExecutions(context.Context, time.Ti
 
 func (s *expireAckState) AckDeadlineExpired(_ context.Context, id types.ExecutionID) error {
 	s.log.add(id, "ack")
-	return nil
+	s.faultMu.Lock()
+	err := s.ackErr
+	s.faultMu.Unlock()
+	return err
+}
+
+// failAck makes every AckDeadlineExpired answer err until it is called with nil.
+func (s *expireState) failAck(err error) {
+	s.faultMu.Lock()
+	s.ackErr = err
+	s.faultMu.Unlock()
 }
 
 // expireHooks records the lifecycle hooks an expiry may or may not fire.
@@ -999,6 +1048,10 @@ func TestExpireExecutionAlreadyTerminalLeavesNoMemo(t *testing.T) {
 // on a real child (the dispatch ran), driven through an engine whose store and
 // hooks feed one expireLog. The log tracks the parent; a test that expires the
 // child points log.track at the child's id.
+//
+// A graph with several sub-workflow nodes parks each on its own child: nodes
+// lists them in graph order and links holds every link by node name, while link
+// is the one of the node named "sub".
 type expireSubWorkflowRig struct {
 	eng      *Engine
 	state    *expireState
@@ -1006,12 +1059,18 @@ type expireSubWorkflowRig struct {
 	hooks    *expireHooks
 	parentID types.ExecutionID
 	link     SubWorkflowLink
+	nodes    []string
+	links    map[string]SubWorkflowLink
 }
 
 func newExpireSubWorkflowRig(t *testing.T) *expireSubWorkflowRig {
 	t.Helper()
+	return newExpireSubWorkflowRigOf(t, resolvedSubWorkflowParent(t))
+}
+
+func newExpireSubWorkflowRigOf(t *testing.T, g *graph.Graph) *expireSubWorkflowRig {
+	t.Helper()
 	ctx := context.Background()
-	g := resolvedSubWorkflowParent(t)
 	parentID := types.ExecutionID("exec-parent")
 	log := &expireLog{track: parentID}
 	hooks := &expireHooks{log: log}
@@ -1026,27 +1085,36 @@ func newExpireSubWorkflowRig(t *testing.T) *expireSubWorkflowRig {
 	}
 	eng := New(&expireAckState{expireState: state}, &fakeQueue{},
 		WithHooks(hooks), WithSubWorkflowResolver(subWorkflowStubResolver(t)))
-	idx, ok := g.NodeIndex("sub")
-	if !ok {
-		t.Fatal(`the graph has no node named "sub"`)
+	rig := &expireSubWorkflowRig{
+		eng: eng, state: state, log: log, hooks: hooks, parentID: parentID,
+		links: make(map[string]SubWorkflowLink),
 	}
-	handled, err := eng.handleSystemTask(ctx, &Task{
-		ExecutionID:  parentID,
-		NodeName:     "sub",
-		NodeIdx:      idx,
-		UnitIdx:      g.UnitIndexForNode(idx),
-		Type:         TaskTypeSubWorkflow,
-		ActivationID: 1,
-	}, true)
-	if err != nil || !handled {
-		t.Fatalf("dispatch the sub-workflow node: handled=%v err=%v", handled, err)
+	for _, idx := range g.SubWorkflowNodeIndexes() {
+		name := g.NodeName(idx)
+		handled, err := eng.handleSystemTask(ctx, &Task{
+			ExecutionID:  parentID,
+			NodeName:     name,
+			NodeIdx:      idx,
+			UnitIdx:      g.UnitIndexForNode(idx),
+			Type:         TaskTypeSubWorkflow,
+			ActivationID: 1,
+		}, true)
+		if err != nil || !handled {
+			t.Fatalf("dispatch the sub-workflow node %q: handled=%v err=%v", name, handled, err)
+		}
+		link, found, err := state.GetSubWorkflowLink(ctx, parentID, name)
+		if err != nil || !found {
+			t.Fatalf("read the sub-workflow link of %q: found=%v err=%v", name, found, err)
+		}
+		rig.nodes = append(rig.nodes, name)
+		rig.links[name] = link
 	}
-	link, found, err := state.GetSubWorkflowLink(ctx, parentID, "sub")
-	if err != nil || !found {
-		t.Fatalf("read the sub-workflow link: found=%v err=%v", found, err)
+	if len(rig.nodes) == 0 {
+		t.Fatal("the graph has no sub-workflow node")
 	}
+	rig.link = rig.links["sub"]
 	log.clear()
-	return &expireSubWorkflowRig{eng: eng, state: state, log: log, hooks: hooks, parentID: parentID, link: link}
+	return rig
 }
 
 func (r *expireSubWorkflowRig) nodeStatus(t *testing.T) types.NodeStatus {
@@ -1212,4 +1280,587 @@ func TestExpireExecutionEarlyReturnsLeaveNoMemo(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestExpireExecutionChildCancelFailureIsResumable pins that a child execution
+// that could not be stopped fails the expiry like any other cascade step. The
+// child's own cancel fails after it marked itself canceling; swallowing that
+// would acknowledge the deadline entry with a child still running, and nothing
+// would ever list the parent again. The error comes back, the entry stays
+// listed, and the completion hook is not repeated. After the fault clears the
+// next call is Resumed and finishes the child.
+func TestExpireExecutionChildCancelFailureIsResumable(t *testing.T) {
+	ctx := context.Background()
+	rig := newExpireSubWorkflowRig(t)
+	childID := rig.link.ChildExecutionID
+	injected := errors.New("injected: child list suspended nodes failed")
+	rig.state.failListSuspendedFor(childID, injected)
+
+	got, err := rig.eng.ExpireExecution(ctx, rig.parentID)
+	if !errors.Is(err, injected) {
+		t.Fatalf("ExpireExecution() = (%q, %v), want an error wrapping %v", got, err, injected)
+	}
+	parent, err := rig.state.GetExecution(ctx, rig.parentID)
+	if err != nil || parent == nil || parent.Status != types.ExecutionStatusTimeout || parent.Error != ExecutionDeadlineExceededError {
+		t.Fatalf("parent = %+v (err %v), want timeout with the deadline reason kept", parent, err)
+	}
+	child, err := rig.state.GetExecution(ctx, childID)
+	if err != nil || child == nil || child.Status != types.ExecutionStatusCanceling {
+		t.Fatalf("child = %+v (err %v), want canceling: its cancel failed half way", child, err)
+	}
+	if n := rig.log.count("ack"); n != 0 {
+		t.Fatalf("acked %d times after a failed child cancel, want 0: the entry must stay listed", n)
+	}
+	if got := rig.nodeStatus(t); got != types.NodeStatusWaiting {
+		t.Fatalf("parked node = %q, want waiting: the failed cascade did not reach it", got)
+	}
+	if got := rig.hooks.completions(); len(got) != 1 {
+		t.Fatalf("completion hooks after the failed call = %v, want exactly one", got)
+	}
+
+	rig.expire(t, rig.parentID, ExpireOutcomeResumed)
+
+	child, err = rig.state.GetExecution(ctx, childID)
+	if err != nil || child == nil || child.Status != types.ExecutionStatusCanceled {
+		t.Fatalf("child = %+v (err %v), want canceled by the resumed cascade", child, err)
+	}
+	if got := rig.nodeStatus(t); got != types.NodeStatusCanceled {
+		t.Fatalf("parked node = %q, want canceled after the resumed cascade", got)
+	}
+	if n := rig.log.count("ack"); n != 1 {
+		t.Fatalf("acked %d times after the resume, want 1", n)
+	}
+	if got := rig.hooks.completions(); len(got) != 1 || got[0] != types.ExecutionStatusTimeout {
+		t.Fatalf("completion hooks after the resume = %v, want still exactly [timeout]", got)
+	}
+	if n := rig.log.count("write:timeout"); n != 1 {
+		t.Fatalf("timeout was written %d times, want once: the resume must not rewrite it", n)
+	}
+	rig.log.requireLast(t, "ack")
+}
+
+// TestExpireExecutionChildAlreadyConcludedStillAcknowledges is the other side
+// of the contract above: a child that is already finished, already being
+// canceled, or gone is the state the cascade wants, not a failure. Returning an
+// error for it would keep the entry listed forever, because the next call finds
+// the same child in the same state.
+func TestExpireExecutionChildAlreadyConcludedStillAcknowledges(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name      string
+		prepare   func(t *testing.T, rig *expireSubWorkflowRig, childID types.ExecutionID)
+		wantChild types.ExecutionStatus // empty: the child no longer exists
+	}{
+		{
+			name: "child already succeeded",
+			prepare: func(t *testing.T, rig *expireSubWorkflowRig, childID types.ExecutionID) {
+				if err := rig.state.UpdateExecutionStatus(ctx, childID, types.ExecutionStatusSuccess, ""); err != nil {
+					t.Fatalf("conclude the child: %v", err)
+				}
+			},
+			wantChild: types.ExecutionStatusSuccess,
+		},
+		{
+			name: "child already canceled",
+			prepare: func(t *testing.T, rig *expireSubWorkflowRig, childID types.ExecutionID) {
+				if err := rig.state.UpdateExecutionStatus(ctx, childID, types.ExecutionStatusCanceled, ""); err != nil {
+					t.Fatalf("cancel the child: %v", err)
+				}
+			},
+			wantChild: types.ExecutionStatusCanceled,
+		},
+		{
+			name: "child already canceling",
+			prepare: func(t *testing.T, rig *expireSubWorkflowRig, childID types.ExecutionID) {
+				if err := rig.state.UpdateExecutionStatus(ctx, childID, types.ExecutionStatusCanceling, ""); err != nil {
+					t.Fatalf("start the child's cancel: %v", err)
+				}
+			},
+			wantChild: types.ExecutionStatusCanceled,
+		},
+		{
+			name: "child gone",
+			prepare: func(t *testing.T, rig *expireSubWorkflowRig, childID types.ExecutionID) {
+				rig.state.fakeState.mu.Lock()
+				delete(rig.state.fakeState.executions, childID)
+				rig.state.fakeState.mu.Unlock()
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newExpireSubWorkflowRig(t)
+			childID := rig.link.ChildExecutionID
+			tc.prepare(t, rig, childID)
+
+			rig.expire(t, rig.parentID, ExpireOutcomeExpired)
+
+			if n := rig.log.count("ack"); n != 1 {
+				t.Fatalf("acked %d times, want 1: a concluded child must not hold the entry", n)
+			}
+			if got := rig.nodeStatus(t); got != types.NodeStatusCanceled {
+				t.Fatalf("parked node = %q, want canceled", got)
+			}
+			if got := rig.hooks.completions(); len(got) != 1 || got[0] != types.ExecutionStatusTimeout {
+				t.Fatalf("completion hooks = %v, want exactly [timeout]", got)
+			}
+			child, err := rig.state.GetExecution(ctx, childID)
+			if err != nil {
+				t.Fatalf("read the child: %v", err)
+			}
+			switch {
+			case tc.wantChild == "" && child != nil:
+				t.Fatalf("child = %+v, want it gone", child)
+			case tc.wantChild != "" && (child == nil || child.Status != tc.wantChild):
+				t.Fatalf("child = %+v, want status %q", child, tc.wantChild)
+			}
+			rig.log.requireLast(t, "ack")
+		})
+	}
+}
+
+// TestExpireExecutionAckFailureIsReturned pins that a failed acknowledgement
+// reaches the caller on every path that acknowledges. Swallowing it would report
+// success for an entry that is still listed, and the sweeper's only signal that
+// the call must be repeated is the error. After the fault clears, the replay
+// acknowledges and, for an execution this mechanism timed out, does not repeat
+// the completion hook.
+func TestExpireExecutionAckFailureIsReturned(t *testing.T) {
+	cases := []struct {
+		name       string
+		prepare    func(rig *expireRig)
+		replay     ExpireOutcome
+		wantHooks  int
+		wantStatus types.ExecutionStatus
+	}{
+		{
+			name:       "expired",
+			prepare:    func(*expireRig) {},
+			replay:     ExpireOutcomeResumed,
+			wantHooks:  1,
+			wantStatus: types.ExecutionStatusTimeout,
+		},
+		{
+			name: "resumed",
+			prepare: func(rig *expireRig) {
+				rig.force(types.ExecutionStatusTimeout, ExecutionDeadlineExceededError)
+			},
+			replay:     ExpireOutcomeResumed,
+			wantStatus: types.ExecutionStatusTimeout,
+		},
+		{
+			name:       "already terminal",
+			prepare:    func(rig *expireRig) { rig.force(types.ExecutionStatusSuccess, "") },
+			replay:     ExpireOutcomeAlreadyTerminal,
+			wantStatus: types.ExecutionStatusSuccess,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newExpireRig(t, true)
+			rig.start(t)
+			rig.setDeadline(pastDeadline)
+			tc.prepare(rig)
+			injected := errors.New("injected: acknowledge failed")
+			rig.state.failAck(injected)
+
+			got, err := rig.eng.ExpireExecution(context.Background(), rig.id)
+			if !errors.Is(err, injected) {
+				t.Fatalf("ExpireExecution() = (%q, %v), want an error wrapping %v", got, err, injected)
+			}
+			if got != "" {
+				t.Fatalf("outcome = %q on error, want empty", got)
+			}
+			if n := rig.log.count("ack"); n != 1 {
+				t.Fatalf("ack attempted %d times, want 1", n)
+			}
+
+			rig.state.failAck(nil)
+			rig.expire(t, tc.replay)
+
+			if n := rig.log.count("ack"); n != 2 {
+				t.Fatalf("ack attempted %d times after the replay, want 2", n)
+			}
+			if got := rig.snapshot(t).Status; got != tc.wantStatus {
+				t.Fatalf("status = %q, want %q", got, tc.wantStatus)
+			}
+			if got := rig.hooks.completions(); len(got) != tc.wantHooks {
+				t.Fatalf("completion hooks = %v, want %d: a replay must not announce again", got, tc.wantHooks)
+			}
+			rig.log.requireLast(t, "ack")
+		})
+	}
+}
+
+// TestExpireExecutionEvictsOnlyAfterTheCascadeSucceeds pins the eviction timing.
+// A cascade that failed leaves the execution to be replayed, so its graph must
+// still be cached: evicting before or despite the failure costs the replay a
+// reload at best and, with the eviction ahead of the cascade, drops the entry
+// the cascade is about to use. The replay that succeeds then drops both the
+// graph and the trace memo.
+func TestExpireExecutionEvictsOnlyAfterTheCascadeSucceeds(t *testing.T) {
+	rig := newExpireRig(t, true)
+	rig.start(t)
+	rig.setDeadline(pastDeadline)
+	primeEvictProbe(t, rig)
+	injected := errors.New("injected: list suspended nodes failed")
+	rig.state.failListSuspended(injected)
+
+	if got, err := rig.eng.ExpireExecution(context.Background(), rig.id); !errors.Is(err, injected) {
+		t.Fatalf("ExpireExecution() = (%q, %v), want an error wrapping %v", got, err, injected)
+	}
+	if !graphCached(rig.eng, rig.id) {
+		t.Fatal("the graph cache entry was dropped by a failed cascade, want it kept for the replay")
+	}
+
+	rig.expire(t, ExpireOutcomeResumed)
+
+	if graphCached(rig.eng, rig.id) {
+		t.Fatal("the graph cache entry survived the resumed expiry, want it evicted")
+	}
+	if traceMemoized(rig.eng, rig.id) {
+		t.Fatal("the trace carrier memo survived the resumed expiry, want it evicted")
+	}
+}
+
+// TestExpireExecutionEvictsAfterASuccessfulCascade pins that both outcomes that
+// ran the cascade drop the graph and the trace memo: an engine that does not own
+// the execution (a sweeper's) would otherwise keep them for good.
+func TestExpireExecutionEvictsAfterASuccessfulCascade(t *testing.T) {
+	cases := []struct {
+		name    string
+		prepare func(rig *expireRig)
+		want    ExpireOutcome
+	}{
+		{"expired", func(*expireRig) {}, ExpireOutcomeExpired},
+		{
+			name: "resumed",
+			prepare: func(rig *expireRig) {
+				rig.force(types.ExecutionStatusTimeout, ExecutionDeadlineExceededError)
+			},
+			want: ExpireOutcomeResumed,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newExpireRig(t, true)
+			rig.start(t)
+			rig.setDeadline(pastDeadline)
+			tc.prepare(rig)
+			primeEvictProbe(t, rig)
+
+			rig.expire(t, tc.want)
+
+			if graphCached(rig.eng, rig.id) {
+				t.Fatalf("the graph cache entry survived a %q result, want it evicted", tc.want)
+			}
+			if traceMemoized(rig.eng, rig.id) {
+				t.Fatalf("the trace carrier memo survived a %q result, want it evicted", tc.want)
+			}
+			if got := rig.nodeStatus(t); got != types.NodeStatusCanceled {
+				t.Fatalf("node status = %q, want canceled: the cascade must have run", got)
+			}
+		})
+	}
+}
+
+// TestExpireExecutionTimeoutWithoutAReasonIsNotThisMechanisms pins the other
+// edge of the reason check. A timeout carrying no reason at all is not the
+// deadline's own write (that one always carries ExecutionDeadlineExceededError),
+// so it is neither cascaded nor announced; only the entry is acknowledged.
+func TestExpireExecutionTimeoutWithoutAReasonIsNotThisMechanisms(t *testing.T) {
+	rig := newExpireRig(t, true)
+	rig.start(t)
+	rig.setDeadline(pastDeadline)
+	rig.force(types.ExecutionStatusTimeout, "")
+
+	rig.expire(t, ExpireOutcomeAlreadyTerminal)
+
+	if got := rig.snapshot(t); got.Status != types.ExecutionStatusTimeout || got.Error != "" {
+		t.Fatalf("snapshot = (%q, %q), want the reasonless timeout kept", got.Status, got.Error)
+	}
+	rig.log.requireExactly(t, "ack")
+	if got := rig.hooks.completions(); len(got) != 0 {
+		t.Fatalf("completion hooks = %v, want none", got)
+	}
+	if got := rig.nodeStatus(t); got != types.NodeStatusSuspended {
+		t.Fatalf("node status = %q, want suspended: nothing may cascade", got)
+	}
+}
+
+// TestExpireExecutionExpiredNotifiesTheParent pins that the call that writes a
+// sub-workflow child's timeout tells the parent, so the parked node concludes
+// at once instead of waiting for its wait lease to expire. The Resumed variant
+// is TestExpireExecutionResumedNotifiesTheParent.
+func TestExpireExecutionExpiredNotifiesTheParent(t *testing.T) {
+	ctx := context.Background()
+	rig := newExpireSubWorkflowRig(t)
+	childID := rig.link.ChildExecutionID
+	rig.state.fakeState.mu.Lock()
+	rig.state.fakeState.executions[childID].Deadline = pastDeadline
+	rig.state.fakeState.mu.Unlock()
+	if got := rig.nodeStatus(t); got != types.NodeStatusWaiting {
+		t.Fatalf("precondition: parked node = %q, want waiting", got)
+	}
+	rig.log.track = childID
+	rig.log.clear()
+
+	rig.expire(t, childID, ExpireOutcomeExpired)
+
+	node, err := rig.state.GetNode(ctx, rig.parentID, "sub")
+	if err != nil || node == nil || node.Status != types.NodeStatusFailed {
+		t.Fatalf("parked node = %+v (err %v), want failed: the expiry must tell the parent its child timed out", node, err)
+	}
+	if !strings.Contains(node.Error, "timed out") || !strings.Contains(node.Error, string(childID)) {
+		t.Fatalf("parked node error = %q, want the child's timeout and identity", node.Error)
+	}
+	if got := rig.hooks.completions(); len(got) != 1 || got[0] != types.ExecutionStatusTimeout {
+		t.Fatalf("completion hooks = %v, want exactly [timeout]", got)
+	}
+	rig.log.requireLast(t, "ack")
+}
+
+// TestExpireExecutionLinkReadFailureIsResumable pins that a sub-workflow link
+// that cannot be read fails the expiry too: the child it names cannot be found,
+// let alone stopped, so acknowledging would strand it. The replay reads the link,
+// stops the child and acknowledges once.
+func TestExpireExecutionLinkReadFailureIsResumable(t *testing.T) {
+	ctx := context.Background()
+	rig := newExpireSubWorkflowRig(t)
+	childID := rig.link.ChildExecutionID
+	injected := errors.New("injected: read sub-workflow link failed")
+	rig.state.failLinkRead(injected)
+
+	got, err := rig.eng.ExpireExecution(ctx, rig.parentID)
+	if !errors.Is(err, injected) {
+		t.Fatalf("ExpireExecution() = (%q, %v), want an error wrapping %v", got, err, injected)
+	}
+	if n := rig.log.count("ack"); n != 0 {
+		t.Fatalf("acked %d times after an unreadable link, want 0: the entry must stay listed", n)
+	}
+	child, err := rig.state.GetExecution(ctx, childID)
+	if err != nil || child == nil || types.IsTerminalExecutionStatus(child.Status) {
+		t.Fatalf("child = %+v (err %v), want it still running: its link could not be read", child, err)
+	}
+
+	rig.expire(t, rig.parentID, ExpireOutcomeResumed)
+
+	child, err = rig.state.GetExecution(ctx, childID)
+	if err != nil || child == nil || child.Status != types.ExecutionStatusCanceled {
+		t.Fatalf("child = %+v (err %v), want canceled by the resumed cascade", child, err)
+	}
+	if n := rig.log.count("ack"); n != 1 {
+		t.Fatalf("acked %d times after the resume, want 1", n)
+	}
+	if got := rig.hooks.completions(); len(got) != 1 {
+		t.Fatalf("completion hooks = %v, want exactly one", got)
+	}
+}
+
+// TestExpireExecutionLinkReadFailureDoesNotStopTheOtherChildren pins that a link
+// that cannot be read costs only its own child: the cascade records the failure
+// and goes on to the next sub-workflow node, so a child further down the walk is
+// still stopped by the call that failed. Returning at the first unreadable link
+// would leave that child running with the entry still listed only because of the
+// other one. The one-shot fault fails the first link read, which is the first
+// sub-workflow node in graph order (rig.nodes lists them in that order), so the
+// test follows rig.nodes rather than naming a node. The replay finds the
+// remaining child, acknowledges once, and does not repeat the completion hook.
+func TestExpireExecutionLinkReadFailureDoesNotStopTheOtherChildren(t *testing.T) {
+	ctx := context.Background()
+	def := subWorkflowParentDef()
+	def.Nodes = append(def.Nodes, types.NodeDef{
+		Name:       "sub2",
+		Type:       types.SubWorkflowNodeType,
+		Parameters: map[string]any{"workflow": "child"},
+	})
+	g, err := graph.CompileWithResolver(ctx, def, subWorkflowStubResolver(t))
+	if err != nil {
+		t.Fatalf("CompileWithResolver: %v", err)
+	}
+	rig := newExpireSubWorkflowRigOf(t, g)
+	if len(rig.nodes) != 2 {
+		t.Fatalf("parked nodes = %v, want two", rig.nodes)
+	}
+	unread, other := rig.nodes[0], rig.nodes[1]
+	unreadChild := rig.links[unread].ChildExecutionID
+	otherChild := rig.links[other].ChildExecutionID
+	injected := errors.New("injected: read sub-workflow link failed")
+	rig.state.failLinkRead(injected)
+
+	got, err := rig.eng.ExpireExecution(ctx, rig.parentID)
+	if !errors.Is(err, injected) {
+		t.Fatalf("ExpireExecution() = (%q, %v), want an error wrapping %v", got, err, injected)
+	}
+	child, err := rig.state.GetExecution(ctx, otherChild)
+	if err != nil || child == nil || child.Status != types.ExecutionStatusCanceled {
+		t.Fatalf("child of %q = %+v (err %v), want canceled: an unreadable link must not stop the others", other, child, err)
+	}
+	child, err = rig.state.GetExecution(ctx, unreadChild)
+	if err != nil || child == nil || child.Status != types.ExecutionStatusRunning {
+		t.Fatalf("child of %q = %+v (err %v), want it still running: its link could not be read", unread, child, err)
+	}
+	if n := rig.log.count("ack"); n != 0 {
+		t.Fatalf("acked %d times after an unreadable link, want 0: the entry must stay listed", n)
+	}
+	if got := rig.hooks.completions(); len(got) != 1 {
+		t.Fatalf("completion hooks after the failed call = %v, want exactly one", got)
+	}
+
+	rig.expire(t, rig.parentID, ExpireOutcomeResumed)
+
+	for _, name := range rig.nodes {
+		child, err := rig.state.GetExecution(ctx, rig.links[name].ChildExecutionID)
+		if err != nil || child == nil || child.Status != types.ExecutionStatusCanceled {
+			t.Fatalf("child of %q = %+v (err %v), want canceled after the replay", name, child, err)
+		}
+	}
+	if n := rig.log.count("ack"); n != 1 {
+		t.Fatalf("acked %d times after the replay, want 1", n)
+	}
+	if got := rig.hooks.completions(); len(got) != 1 || got[0] != types.ExecutionStatusTimeout {
+		t.Fatalf("completion hooks after the replay = %v, want still exactly [timeout]", got)
+	}
+	if n := rig.log.count("write:timeout"); n != 1 {
+		t.Fatalf("timeout was written %d times, want once: the replay must not rewrite it", n)
+	}
+	rig.log.requireLast(t, "ack")
+}
+
+// TestExpireExecutionOneFailingChildDoesNotStopTheOthers pins the cascade's
+// join: the children of a parent's sub-workflow nodes are each cancelled even
+// when an earlier one could not be, and the error that comes back names every
+// failure. Stopping at the first failure would leave the later children running
+// with nothing left to list the parent again for them once the entry were
+// acknowledged, and would hide the second failure behind the first. The replay
+// after the faults clear finishes both children, acknowledges once, and does not
+// repeat the completion hook.
+func TestExpireExecutionOneFailingChildDoesNotStopTheOthers(t *testing.T) {
+	cases := []struct {
+		name string
+		fail []string // parent node names whose child's own cancel fails
+	}{
+		{name: "the first child fails", fail: []string{"sub"}},
+		{name: "the second child fails", fail: []string{"sub2"}},
+		{name: "both children fail", fail: []string{"sub", "sub2"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			def := subWorkflowParentDef()
+			def.Nodes = append(def.Nodes, types.NodeDef{
+				Name:       "sub2",
+				Type:       types.SubWorkflowNodeType,
+				Parameters: map[string]any{"workflow": "child"},
+			})
+			g, err := graph.CompileWithResolver(ctx, def, subWorkflowStubResolver(t))
+			if err != nil {
+				t.Fatalf("CompileWithResolver: %v", err)
+			}
+			rig := newExpireSubWorkflowRigOf(t, g)
+			if got := rig.nodes; len(got) != 2 || got[0] != "sub" || got[1] != "sub2" {
+				t.Fatalf("parked nodes = %v, want [sub sub2]", got)
+			}
+			injected := make(map[string]error, len(tc.fail))
+			for _, name := range tc.fail {
+				injected[name] = errors.New("injected: child list suspended nodes failed for " + name)
+				rig.state.failListSuspendedFor(rig.links[name].ChildExecutionID, injected[name])
+			}
+
+			got, err := rig.eng.ExpireExecution(ctx, rig.parentID)
+			if err == nil {
+				t.Fatalf("ExpireExecution() = (%q, nil), want the child cancel failures", got)
+			}
+			for name, want := range injected {
+				if !errors.Is(err, want) {
+					t.Fatalf("ExpireExecution() error = %v, want it to wrap the failure of %q (%v)", err, name, want)
+				}
+			}
+			for _, name := range rig.nodes {
+				child, err := rig.state.GetExecution(ctx, rig.links[name].ChildExecutionID)
+				if err != nil || child == nil {
+					t.Fatalf("read the child of %q: %+v, %v", name, child, err)
+				}
+				want := types.ExecutionStatusCanceled
+				if injected[name] != nil {
+					want = types.ExecutionStatusCanceling
+				}
+				if child.Status != want {
+					t.Fatalf("child of %q = %q after the failed call, want %q: one failing child must not stop the others", name, child.Status, want)
+				}
+			}
+			if n := rig.log.count("ack"); n != 0 {
+				t.Fatalf("acked %d times after a failed child cancel, want 0: the entry must stay listed", n)
+			}
+			if got := rig.hooks.completions(); len(got) != 1 {
+				t.Fatalf("completion hooks after the failed call = %v, want exactly one", got)
+			}
+
+			rig.expire(t, rig.parentID, ExpireOutcomeResumed)
+
+			for _, name := range rig.nodes {
+				child, err := rig.state.GetExecution(ctx, rig.links[name].ChildExecutionID)
+				if err != nil || child == nil || child.Status != types.ExecutionStatusCanceled {
+					t.Fatalf("child of %q = %+v (err %v), want canceled after the replay", name, child, err)
+				}
+				node, err := rig.state.GetNode(ctx, rig.parentID, name)
+				if err != nil || node == nil || node.Status != types.NodeStatusCanceled {
+					t.Fatalf("parked node %q = %+v (err %v), want canceled after the replay", name, node, err)
+				}
+			}
+			if n := rig.log.count("ack"); n != 1 {
+				t.Fatalf("acked %d times after the replay, want 1", n)
+			}
+			if got := rig.hooks.completions(); len(got) != 1 || got[0] != types.ExecutionStatusTimeout {
+				t.Fatalf("completion hooks after the replay = %v, want still exactly [timeout]", got)
+			}
+			if n := rig.log.count("write:timeout"); n != 1 {
+				t.Fatalf("timeout was written %d times, want once: the replay must not rewrite it", n)
+			}
+			rig.log.requireLast(t, "ack")
+		})
+	}
+}
+
+// TestExpireExecutionKeepsTheGraphWhenAChildCancelFails pins the eviction
+// timing for the one cascade step that has its own error path: a child that
+// could not be stopped. The call fails, the entry stays listed and the replay
+// will run the cascade again, so the graph it needs must still be cached; the
+// replay that stops the child is the call that evicts it and acknowledges.
+func TestExpireExecutionKeepsTheGraphWhenAChildCancelFails(t *testing.T) {
+	ctx := context.Background()
+	rig := newExpireSubWorkflowRig(t)
+	childID := rig.link.ChildExecutionID
+	// The dispatch left the graph cached; drop it and load it again so the
+	// entry under test is the one this probe put there.
+	rig.eng.EvictExecution(rig.parentID)
+	if _, err := rig.eng.loadGraph(ctx, rig.parentID); err != nil {
+		t.Fatalf("loadGraph() error = %v", err)
+	}
+	if !graphCached(rig.eng, rig.parentID) {
+		t.Fatal("precondition: want the graph cached before the call")
+	}
+	injected := errors.New("injected: child list suspended nodes failed")
+	rig.state.failListSuspendedFor(childID, injected)
+
+	got, err := rig.eng.ExpireExecution(ctx, rig.parentID)
+	if !errors.Is(err, injected) {
+		t.Fatalf("ExpireExecution() = (%q, %v), want an error wrapping %v", got, err, injected)
+	}
+	if !graphCached(rig.eng, rig.parentID) {
+		t.Fatal("the graph cache entry was dropped by a failed child cancel, want it kept for the replay")
+	}
+	if n := rig.log.count("ack"); n != 0 {
+		t.Fatalf("acked %d times after a failed child cancel, want 0", n)
+	}
+
+	rig.expire(t, rig.parentID, ExpireOutcomeResumed)
+
+	if graphCached(rig.eng, rig.parentID) {
+		t.Fatal("the graph cache entry survived the resumed expiry, want it evicted")
+	}
+	if n := rig.log.count("ack"); n != 1 {
+		t.Fatalf("acked %d times after the replay, want 1", n)
+	}
+	rig.log.requireLast(t, "ack")
 }

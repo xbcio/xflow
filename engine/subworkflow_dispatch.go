@@ -180,7 +180,7 @@ func (e *Engine) executeSubWorkflow(ctx context.Context, task *Task, g *graph.Gr
 		// generation started (if any) and releases its claim — leaving the node
 		// Running would hand the sweeper a lease it can only reclaim into the
 		// same abandoned path, once per TTL, until the execution expires.
-		e.cancelSubWorkflowChild(ctx, child.ID)
+		_ = e.cancelSubWorkflowChild(ctx, child.ID)
 		if _, err := e.state.RevokeLease(ctx, lease.Task.ExecutionID, lease.Task.NodeName, lease.LeaseToken); err != nil && e.logger != nil {
 			e.logger.Error("release sub-workflow claim for a canceling parent failed",
 				"execution_id", string(lease.Task.ExecutionID), "node_name", lease.Task.NodeName, "err", err)
@@ -263,7 +263,7 @@ func (e *Engine) executeSubWorkflow(ctx context.Context, task *Task, g *graph.Gr
 		err := e.failSubWorkflowStart(ctx, lease, g, meta, fmt.Errorf(
 			"node %q: the wait on child execution %q exceeded the node timeout %s",
 			task.NodeName, child.ID, nodeTimeout))
-		e.cancelSubWorkflowChild(ctx, child.ID)
+		_ = e.cancelSubWorkflowChild(ctx, child.ID)
 		return err
 	}
 	return nil
