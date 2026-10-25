@@ -1,0 +1,460 @@
+/* Overview dashboard (A-A). Page-local rules only: every colour, radius,
+   elevation and duration comes from the shared `--xflow-*` tokens, so light and
+   dark stay aligned without a second palette. */
+
+.xflow-ov {
+  display: flex;
+  flex-direction: column;
+  gap: var(--xflow-space-4);
+  min-width: 0;
+}
+
+/* KPI grid: 2 / 3 / 6 columns at 1024 / 1280 / 1440. The six cards fill both
+   rows at every step; the 1440 step used to be four columns and left the second
+   row two-thirds empty. Six columns fit there because the content box is
+   1172px, so each card keeps ~185px (the label needs at least 180px). */
+.xflow-ov-kpis {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--xflow-space-3);
+  min-width: 0;
+}
+
+@media (min-width: 1280px) {
+  .xflow-ov-kpis {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1440px) {
+  .xflow-ov-kpis {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+}
+
+/* Fixed minimum height keeps the row from jumping when a skeleton hands over
+   to real values (the AL skeleton rule). */
+.xflow-ov-kpi {
+  display: flex;
+  flex-direction: column;
+  gap: var(--xflow-space-1-5);
+  min-width: 0;
+  min-height: 104px;
+  padding: var(--xflow-space-4) var(--xflow-space-4);
+  box-sizing: border-box;
+}
+
+.xflow-ov-kpi-label {
+  color: var(--xflow-text-secondary);
+  font-size: var(--xflow-font-sm);
+  line-height: var(--xflow-line-height-sm);
+}
+
+.xflow-ov-kpi-main {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--xflow-space-2);
+  min-width: 0;
+}
+
+.xflow-ov-kpi-value {
+  color: var(--xflow-text);
+  font-size: calc(var(--xflow-font-xl) * 1.5);
+  line-height: calc(var(--xflow-line-height-xl) * 1.2);
+  font-weight: var(--xflow-font-weight-semibold);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.xflow-ov-kpi-value[data-tone='danger'] {
+  color: var(--xflow-danger);
+}
+
+.xflow-ov-kpi-main .xflow-ov-spark {
+  margin-left: auto;
+}
+
+.xflow-ov-kpi-hint {
+  margin-top: auto;
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-xs);
+  line-height: var(--xflow-line-height-xs);
+}
+
+/* Movement colour follows meaning, not the arrow: `bad` is red whether the
+   number rose or fell (a rising failure count is the canonical case). */
+.xflow-ov-delta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--xflow-space-0-5);
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-xs);
+  font-weight: var(--xflow-font-weight-medium);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.xflow-ov-delta[data-semantics='good'] {
+  color: var(--xflow-success-fg);
+}
+
+.xflow-ov-delta[data-semantics='bad'] {
+  color: var(--xflow-danger-fg);
+}
+
+/* Inline sparkline: 24 points, stroke kept at 1.5px by non-scaling-stroke. */
+.xflow-ov-spark {
+  display: block;
+  width: 88px;
+  height: 28px;
+  flex: none;
+  color: var(--xflow-primary);
+}
+
+.xflow-ov-spark[data-tone='success'] {
+  color: var(--xflow-success);
+}
+
+.xflow-ov-spark[data-tone='danger'] {
+  color: var(--xflow-danger);
+}
+
+.xflow-ov-spark-line {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.xflow-ov-spark-dot {
+  fill: currentColor;
+}
+
+/* Chart (2/3) + failing list (1/3); they stack below 1280. */
+.xflow-ov-middle {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--xflow-space-3);
+  min-width: 0;
+}
+
+/* The failing list sizes to its rows; the chart card defines the row height, so
+   a two-row list does not become a mostly-empty bordered panel. */
+.xflow-ov-top {
+  align-self: start;
+}
+
+@media (min-width: 1280px) {
+  .xflow-ov-middle {
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  }
+}
+
+.xflow-ov-chart-body,
+.xflow-ov-skel-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--xflow-space-3);
+  min-width: 0;
+  padding: var(--xflow-space-4);
+  box-sizing: border-box;
+}
+
+/* The SVG scales to its container; the axis and legend are HTML so they never
+   inherit the horizontal stretch preserveAspectRatio="none" applies to bars. */
+.xflow-ov-histogram {
+  display: block;
+  width: 100%;
+  height: 200px;
+}
+
+.xflow-ov-grid {
+  stroke: var(--xflow-border-subtle);
+  stroke-width: 1;
+}
+
+.xflow-ov-baseline {
+  stroke: var(--xflow-border);
+}
+
+.xflow-ov-bucket {
+  outline: none;
+  cursor: default;
+}
+
+.xflow-ov-bucket-hit {
+  fill: transparent;
+}
+
+.xflow-ov-bucket:focus-visible .xflow-ov-bucket-hit {
+  fill: var(--xflow-hover-subtle);
+  stroke: var(--xflow-focus-ring);
+  stroke-width: 2;
+}
+
+/* An empty hour: a low-contrast tick on the baseline. Bars only appear where
+   the server reported executions, so the chart stops reading as sparse. */
+.xflow-ov-tick {
+  fill: var(--xflow-border);
+}
+
+.xflow-ov-seg {
+  fill: var(--xflow-neutral);
+}
+
+.xflow-ov-seg[data-tone='info'] {
+  fill: var(--xflow-info);
+}
+
+.xflow-ov-seg[data-tone='success'] {
+  fill: var(--xflow-success);
+}
+
+.xflow-ov-seg[data-tone='warning'] {
+  fill: var(--xflow-warning);
+}
+
+.xflow-ov-seg[data-tone='danger'] {
+  fill: var(--xflow-danger);
+}
+
+.xflow-ov-seg[data-tone='suspend'] {
+  fill: var(--xflow-suspend);
+}
+
+/* `failed` and `timeout` share the danger tone; the lighter timeout slice keeps
+   the boundary readable without inventing a second colour. The neutral live
+   states step down in opacity for the same reason. */
+.xflow-ov-seg[data-status='timeout'] {
+  fill: color-mix(in srgb, var(--xflow-danger) 60%, transparent);
+}
+
+.xflow-ov-seg[data-status='canceling'] {
+  fill: color-mix(in srgb, var(--xflow-neutral) 55%, transparent);
+}
+
+.xflow-ov-seg[data-status='queued'] {
+  fill: color-mix(in srgb, var(--xflow-neutral) 70%, transparent);
+}
+
+.xflow-ov-seg[data-status='pending'] {
+  fill: color-mix(in srgb, var(--xflow-neutral) 40%, transparent);
+}
+
+.xflow-ov-axis {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--xflow-space-2);
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.xflow-ov-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--xflow-space-1) var(--xflow-space-3);
+  color: var(--xflow-text-secondary);
+  font-size: var(--xflow-font-xs);
+}
+
+.xflow-ov-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--xflow-space-1);
+}
+
+.xflow-ov-legend-count {
+  color: var(--xflow-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.xflow-ov-legend-swatch {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: var(--xflow-radius-full);
+  background: var(--xflow-neutral);
+}
+
+.xflow-ov-legend-swatch[data-tone='info'] {
+  background: var(--xflow-info);
+}
+
+.xflow-ov-legend-swatch[data-tone='success'] {
+  background: var(--xflow-success);
+}
+
+.xflow-ov-legend-swatch[data-tone='warning'] {
+  background: var(--xflow-warning);
+}
+
+.xflow-ov-legend-swatch[data-tone='danger'] {
+  background: var(--xflow-danger);
+}
+
+.xflow-ov-legend-swatch[data-tone='suspend'] {
+  background: var(--xflow-suspend);
+}
+
+.xflow-ov-legend-swatch[data-status='timeout'] {
+  background: color-mix(in srgb, var(--xflow-danger) 60%, transparent);
+}
+
+.xflow-ov-legend-swatch[data-status='canceling'] {
+  background: color-mix(in srgb, var(--xflow-neutral) 55%, transparent);
+}
+
+.xflow-ov-legend-swatch[data-status='queued'] {
+  background: color-mix(in srgb, var(--xflow-neutral) 70%, transparent);
+}
+
+.xflow-ov-legend-swatch[data-status='pending'] {
+  background: color-mix(in srgb, var(--xflow-neutral) 40%, transparent);
+}
+
+/* Failure top-5: whole row is the control, so hover/focus feedback belongs to
+   it rather than an inner link. */
+.xflow-ov-fails {
+  display: flex;
+  flex-direction: column;
+  padding: var(--xflow-space-1) 0;
+}
+
+.xflow-ov-fail {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--xflow-space-2);
+  min-height: 44px;
+  padding: var(--xflow-space-1-5) var(--xflow-space-4);
+  border: 0;
+  background: none;
+  color: inherit;
+  font: var(--xflow-text-body);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard);
+}
+
+.xflow-ov-fail:hover {
+  background: var(--xflow-hover);
+}
+
+.xflow-ov-fail:focus-visible {
+  outline: 2px solid var(--xflow-focus-ring);
+  outline-offset: -2px;
+}
+
+.xflow-ov-fail-rank {
+  color: var(--xflow-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.xflow-ov-fail-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--xflow-text);
+  font-weight: var(--xflow-font-weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xflow-ov-fail-count {
+  color: var(--xflow-danger);
+  font-size: var(--xflow-font-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.xflow-ov-fail-time {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-xs);
+  white-space: nowrap;
+}
+
+.xflow-ov-empty {
+  margin: 0;
+  padding: var(--xflow-space-6) var(--xflow-space-4);
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-sm);
+}
+
+.xflow-ov-cluster-body {
+  padding: var(--xflow-space-4);
+  min-width: 0;
+}
+
+.xflow-ov-cluster-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--xflow-space-3);
+}
+
+.xflow-ov-cluster-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--xflow-space-0-5);
+  min-width: 0;
+}
+
+.xflow-ov-cluster-label {
+  color: var(--xflow-text-secondary);
+  font-size: var(--xflow-font-xs);
+}
+
+.xflow-ov-cluster-value {
+  color: var(--xflow-text);
+  font-size: var(--xflow-font-xl);
+  font-weight: var(--xflow-font-weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
+.xflow-ov-meter {
+  height: 6px;
+  margin-top: var(--xflow-space-3);
+  overflow: hidden;
+  border-radius: var(--xflow-radius-full);
+  background: var(--xflow-surface-sunken);
+}
+
+.xflow-ov-meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: var(--xflow-radius-full);
+  background: var(--xflow-primary);
+  transition: width var(--xflow-motion-duration-base) var(--xflow-motion-ease-standard);
+}
+
+.xflow-ov-meter-label {
+  margin: var(--xflow-space-1-5) 0 0;
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.xflow-ov-note {
+  display: flex;
+  align-items: center;
+  gap: var(--xflow-space-1-5);
+  margin: 0;
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-sm);
+}
+
+/* The cluster segment is optional; its absence is a footnote, not a card. */
+.xflow-ov-cluster-missing {
+  padding: 0 var(--xflow-space-1);
+}
+
+.xflow-ov-foot {
+  margin: 0;
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-xs);
+}
+
+/* Skeleton cards reuse the real min-height; only their body changes. */
+.xflow-ov-skeleton .xflow-ov-kpi {
+  justify-content: center;
+}
