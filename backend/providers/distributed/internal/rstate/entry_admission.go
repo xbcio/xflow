@@ -400,6 +400,26 @@ func (s *Store) seedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 		return engine.SeedExecutionFromEntryResponse{}, fmt.Errorf("persist namespace for %q: %w", execID, err)
 	}
 
+	// The instant this admission creates the execution. It is read once and
+	// serves both as the created_at the Lua stamps and as the base of the
+	// deadline below, so the deadline is exactly created_at plus the graph's time
+	// budget rather than a second clock reading a few writes later.
+	nowMs := time.Now().UTC().UnixMilli()
+
+	// The time budget's deadline, derived here because the entry-seed request
+	// carries the graph but no stamped snapshot. It is written outside the Lua so
+	// the script's key and argument positions do not move, before the Lua for the
+	// reason the namespace above is: from the instant the execution exists another
+	// replica reads it back. SetNX for the same reason as the namespace: a
+	// duplicate admission must keep the deadline of the original, not push it out.
+	// A graph with no budget writes nothing, which reads back as "no budget".
+	if req.Graph != nil && req.Graph.Timeout() > 0 {
+		deadlineMs := nowMs + req.Graph.Timeout().Milliseconds()
+		if err := s.rdb.SetNX(ctx, execKey(t, execID, "deadline_ms"), deadlineMs, ttl).Err(); err != nil {
+			return engine.SeedExecutionFromEntryResponse{}, fmt.Errorf("persist deadline for %q: %w", execID, err)
+		}
+	}
+
 	// Persist the retention record for the same reason createExecution does:
 	// GetExecutionRetention treats its absence as "window unknown", so a
 	// creation path that skips the record would degrade every later no-evidence
@@ -432,6 +452,16 @@ func (s *Store) seedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 	// must not be primed as durable either.
 	if !s.transient && (req.Graph == nil || !req.Graph.Transient()) {
 		s.rememberTransient(execID, transientMark{durableConfirmed: true})
+	}
+
+	// Register the namespace in the discovery registry before the execution
+	// exists, as createExecution and SeedExecution do. The maintenance loops (the
+	// deadline sweep among them) SCAN or list only registered namespaces, so a
+	// non-default namespace whose executions are created solely by this path
+	// would otherwise be invisible to them. Non-fatal for the same reason as
+	// there: the next durable write retries it.
+	if !s.isTransient(ctx, execID) {
+		_ = s.registerNamespace(ctx, t)
 	}
 
 	// Phase 1: Pre-seed structural keys (idempotent SET NX patterns won't
@@ -567,7 +597,7 @@ func (s *Store) seedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 	// The execution's own clock, appended last: the script reads both keys and
 	// the instant off the tail, so every positional slot above stays stable.
 	keys = append(keys, execKey(t, execID, "created_at_ms"), execKey(t, execID, "updated_at_ms"))
-	args = append(args, time.Now().UTC().UnixMilli())
+	args = append(args, nowMs)
 
 	// Run Lua.
 	res, err := seedExecutionFromEntryLua.Run(ctx, s.rdb, keys, args...).Slice()
