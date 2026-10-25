@@ -7,10 +7,13 @@ import {
   XFlowApiError,
   type ExecuteWorkflowResult,
   type ExecutionDetail,
+  type ExecutionStats,
   type ExecutionStatus,
+  type OverviewResponse,
   type RegisterWorkflowResult,
   type RollbackWorkflowResult,
   type WaitExecutionTimeout,
+  type WorkflowExecutionStats,
   type WorkflowListPage,
   type WorkflowSummary,
   type WorkflowVersionPage
@@ -168,7 +171,8 @@ describe("createXFlowApiClient", () => {
         name: "Payment flow",
         version: "v2",
         definitionHash: "sha256:abc",
-        registryRevision: 42
+        registryRevision: 42,
+        triggers: []
       }
     ] satisfies WorkflowSummary[]);
   });
@@ -203,7 +207,8 @@ describe("createXFlowApiClient", () => {
               name: "Second flow",
               version: "v1",
               definition_hash: "sha256:def",
-              registry_revision: 7
+              registry_revision: 7,
+              triggers: ["cron", "webhook"]
             }
           ],
           total: 8
@@ -221,7 +226,8 @@ describe("createXFlowApiClient", () => {
           name: "Second flow",
           version: "v1",
           definitionHash: "sha256:def",
-          registryRevision: 7
+          registryRevision: 7,
+          triggers: ["cron", "webhook"]
         }
       ],
       total: 8
@@ -506,6 +512,84 @@ describe("createXFlowApiClient", () => {
         }
       }
     ]);
+  });
+
+  it("round-trips editor_metadata.sections from a load back into a save", async () => {
+    const requests: Array<{ method?: string; body?: unknown }> = [];
+    const storedMetadata = {
+      positions: { "n-start": { x: 1, y: 2 } },
+      viewport: { x: 10, y: 20, zoom: 1.5 },
+      sections: [
+        {
+          id: "s-approval",
+          title: "VIP approval",
+          node_keys: ["n-start", "n-gate"],
+          x: 40,
+          y: 80,
+          width: 360,
+          height: 200
+        }
+      ]
+    };
+    const client = createXFlowApiClient({
+      baseUrl: "/api",
+      fetcher: async (_input, init) => {
+        const method = init?.method ?? "GET";
+        requests.push({ method, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+        if (method === "PUT") return success({ workflow_id: "wf-1" });
+        return success({
+          id: "wf-1",
+          name: "Demo",
+          nodes: [
+            { id: "n-start", name: "start" },
+            { id: "n-gate", name: "gate" }
+          ],
+          editor_metadata: storedMetadata
+        });
+      }
+    });
+
+    const loaded = await client.getWorkflow("wf-1");
+    // Sections are workflow-level, so they ride alongside the merged def
+    // exactly like the viewport -- never inside it.
+    expect(loaded.sections).toEqual(storedMetadata.sections);
+    expect(loaded.workflow).not.toHaveProperty("editor_metadata");
+    expect(loaded.workflow).not.toHaveProperty("sections");
+
+    await client.saveWorkflow(loaded.workflow, { viewport: loaded.viewport, sections: loaded.sections });
+
+    const put = requests.find((request) => request.method === "PUT");
+    // The wire names survive the round trip untouched (`node_keys`, not
+    // `nodeKeys`), so the server re-validates the same keys it sent.
+    expect((put?.body as { editor_metadata?: unknown } | undefined)?.editor_metadata).toEqual(storedMetadata);
+  });
+
+  it("normalizes an empty sections array to absent and omits it from a save", async () => {
+    const requests: Array<{ body?: unknown }> = [];
+    const client = createXFlowApiClient({
+      baseUrl: "/api",
+      fetcher: async (_input, init) => {
+        if (init?.method === "PUT") {
+          requests.push({ body: init?.body ? JSON.parse(String(init.body)) : undefined });
+          return success({ workflow_id: "wf-1" });
+        }
+        return success({
+          id: "wf-1",
+          name: "Demo",
+          nodes: [{ id: "n-start", name: "start" }],
+          editor_metadata: { sections: [] }
+        });
+      }
+    });
+
+    const loaded = await client.getWorkflow("wf-1");
+    // Go's `omitempty` means the server never sends an empty array; if a mock
+    // does, callers see the same single "no sections" representation.
+    expect(loaded.sections).toBeUndefined();
+
+    await client.saveWorkflow(loaded.workflow, { sections: [] });
+    // An empty array is omitted, matching the Go encoding of the same value.
+    expect(requests).toEqual([{ body: { id: "wf-1", name: "Demo", nodes: [{ id: "n-start", name: "start" }] } }]);
   });
 
   it("splits position/ui/notes off nodes into editor_metadata when creating a workflow", async () => {
@@ -871,6 +955,457 @@ describe("createXFlowApiClient", () => {
   });
 });
 
+describe("workflow list summaries", () => {
+  const row = (overrides: Record<string, unknown> = {}) => ({
+    id: "wf-1",
+    name: "客户同步",
+    version: "v2",
+    definition_hash: "sha256:abc",
+    registry_revision: 7,
+    triggers: ["cron"],
+    ...overrides
+  });
+
+  it("maps the trigger kinds and the latest execution summary", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () =>
+        success({
+          list: [
+            row({
+              triggers: ["cron", "webhook"],
+              description: "Nightly customer sync",
+              cron_expressions: ["0 2 * * *"],
+              updated_at: "2026-10-19T13:00:00Z",
+              latest_execution: {
+                execution_id: "exec-42",
+                status: "running",
+                created_at: "2026-10-19T14:02:23Z",
+                updated_at: "2026-10-19T14:02:29Z"
+              }
+            })
+          ],
+          total: 1
+        })
+    });
+
+    const page = await client.listWorkflows({ page: 1, pageSize: 20 });
+
+    expect(page.list[0]).toEqual({
+      id: "wf-1",
+      name: "客户同步",
+      version: "v2",
+      definitionHash: "sha256:abc",
+      registryRevision: 7,
+      description: "Nightly customer sync",
+      cronExpressions: ["0 2 * * *"],
+      triggers: ["cron", "webhook"],
+      updatedAt: "2026-10-19T13:00:00Z",
+      latestExecution: {
+        executionId: "exec-42",
+        status: "running",
+        createdAt: "2026-10-19T14:02:23Z",
+        updatedAt: "2026-10-19T14:02:29Z"
+      }
+    } satisfies WorkflowSummary);
+  });
+
+  it("normalizes empty metadata to absent", async () => {
+    // Go's omitempty means a server normally omits these keys, but a mock or a
+    // future server may send the empty value. Callers should see one
+    // representation for "no description / no cron trigger".
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () =>
+        success({ list: [row({ description: "", cron_expressions: [] })], total: 1 })
+    });
+
+    const page = await client.listWorkflows({ page: 1 });
+
+    expect(page.list[0]).not.toHaveProperty("description");
+    expect(page.list[0]).not.toHaveProperty("cronExpressions");
+    // A record written before the registry stamped updated_at reports UNKNOWN
+    // by omitting the field, not by claiming the zero instant.
+    expect(page.list[0]).not.toHaveProperty("updatedAt");
+  });
+
+  it("rejects metadata of the wrong type", async () => {
+    const malformed = [{ description: 4 }, { cron_expressions: "0 2 * * *" }, { cron_expressions: [1] }];
+    for (const overrides of malformed) {
+      const client = createXFlowApiClient({
+        baseUrl: "/v1",
+        fetcher: async () => success({ list: [row(overrides)], total: 1 })
+      });
+
+      await expect(client.listWorkflows({ page: 1 })).rejects.toMatchObject({
+        name: "XFlowApiError",
+        message: "invalid API response"
+      });
+    }
+  });
+
+  it("keeps an absent latest_execution absent instead of inventing a run", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () => success({ list: [row()], total: 1 })
+    });
+
+    const page = await client.listWorkflows({ page: 1 });
+
+    expect(page.list[0].triggers).toEqual(["cron"]);
+    expect(page.list[0]).not.toHaveProperty("latestExecution");
+  });
+
+  it("tolerates a missing triggers field as an empty list", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () => success({ list: [row({ triggers: undefined })], total: 1 })
+    });
+
+    const page = await client.listWorkflows({ page: 1 });
+
+    expect(page.list[0].triggers).toEqual([]);
+    expect(page.list[0]).not.toHaveProperty("latestExecution");
+  });
+
+  it("rejects a triggers field that is not an array of strings", async () => {
+    for (const triggers of ["timer", ["timer", 1], [null]]) {
+      const client = createXFlowApiClient({
+        baseUrl: "/v1",
+        fetcher: async () => success({ list: [row({ triggers })], total: 1 })
+      });
+
+      await expect(client.listWorkflows({ page: 1 })).rejects.toMatchObject({
+        name: "XFlowApiError",
+        status: 200,
+        message: "invalid API response"
+      });
+    }
+  });
+
+  it("rejects a present latest_execution that is malformed", async () => {
+    const malformed = [
+      { execution_id: "exec-1", status: "running", created_at: "2026-10-19T14:02:23Z" },
+      { execution_id: "exec-1", status: "not-a-status", created_at: "2026-10-19T14:02:23Z", updated_at: "2026-10-19T14:02:29Z" },
+      { execution_id: 1, status: "running", created_at: "2026-10-19T14:02:23Z", updated_at: "2026-10-19T14:02:29Z" },
+      "exec-1"
+    ];
+    for (const latest_execution of malformed) {
+      const client = createXFlowApiClient({
+        baseUrl: "/v1",
+        fetcher: async () => success({ list: [row({ latest_execution })], total: 1 })
+      });
+
+      await expect(client.listWorkflows({ page: 1 })).rejects.toMatchObject({
+        name: "XFlowApiError",
+        message: "invalid API response"
+      });
+    }
+  });
+
+  it("sends q only when non-empty and percent-encodes it", async () => {
+    const requests: string[] = [];
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async (input) => {
+        requests.push(String(input));
+        return success({ list: [], total: 0 });
+      }
+    });
+
+    await client.listWorkflows({ page: 1, pageSize: 20, q: " 客户 同步 " });
+    await client.listWorkflows({ page: 1, pageSize: 20, q: "" });
+    await client.listWorkflows({ page: 1, pageSize: 20, q: "   " });
+    await client.listWorkflows({ page: 1, pageSize: 20 });
+
+    expect(requests).toEqual([
+      "/v1/workflows?page=1&page_size=20&q=%E5%AE%A2%E6%88%B7%20%E5%90%8C%E6%AD%A5",
+      "/v1/workflows?page=1&page_size=20",
+      "/v1/workflows?page=1&page_size=20",
+      "/v1/workflows?page=1&page_size=20"
+    ]);
+  });
+
+  it("sends q alone when no pagination options are given", async () => {
+    const fetcher = vi.fn().mockResolvedValue(success({ list: [], total: 0 }));
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    await client.listWorkflows({ q: "customer sync" });
+
+    expect(fetcher).toHaveBeenCalledWith("/v1/workflows?q=customer%20sync", undefined);
+  });
+
+  it("maps the per-workflow stats and recent executions", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () =>
+        success({
+          list: [
+            row({
+              stats: {
+                window: "24h",
+                runs: 8,
+                succeeded: 3,
+                failed: 3,
+                success_rate: 0.5,
+                p50_ms: 1200,
+                p95_ms: 4800,
+                sample_size: 6
+              },
+              recent_executions: [
+                { execution_id: "exec-2", status: "success", created_at: "2026-05-04T10:00:00Z", duration_ms: 1500 },
+                { execution_id: "exec-1", status: "running", created_at: "2026-05-04T09:59:00Z" }
+              ]
+            })
+          ],
+          total: 1
+        })
+    });
+
+    const page = await client.listWorkflows({ page: 1, include: ["stats", "recent"], window: "24h" });
+    const summary = page.list[0];
+
+    expect(summary.stats).toEqual({
+      window: "24h",
+      runs: 8,
+      succeeded: 3,
+      failed: 3,
+      successRate: 0.5,
+      p50Ms: 1200,
+      p95Ms: 4800,
+      sampleSize: 6
+    } satisfies WorkflowExecutionStats);
+    expect(summary.recentExecutions).toEqual([
+      { executionId: "exec-2", status: "success", createdAt: "2026-05-04T10:00:00Z", durationMs: 1500 },
+      // A non-terminal run has NO duration: absence, not zero.
+      { executionId: "exec-1", status: "running", createdAt: "2026-05-04T09:59:00Z" }
+    ]);
+    expect(summary.recentExecutions?.[1]).not.toHaveProperty("durationMs");
+  });
+
+  it("keeps absent stats and recent executions absent", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () =>
+        success({ list: [row({ stats: undefined, recent_executions: undefined })], total: 1 })
+    });
+
+    const page = await client.listWorkflows({ page: 1, include: ["stats", "recent"] });
+
+    // The server OMITS the fields when the caller lacks execution.read or the
+    // deployment cannot aggregate; absence must stay absence.
+    expect(page.list[0]).not.toHaveProperty("stats");
+    expect(page.list[0]).not.toHaveProperty("recentExecutions");
+  });
+
+  it("maps a null success rate as null rather than zero", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () =>
+        success({
+          list: [
+            row({
+              stats: { window: "7d", runs: 0, succeeded: 0, failed: 0, success_rate: null, sample_size: 0 }
+            })
+          ],
+          total: 1
+        })
+    });
+
+    const page = await client.listWorkflows({ page: 1, include: ["stats"] });
+
+    expect(page.list[0].stats?.successRate).toBeNull();
+    expect(page.list[0].stats).not.toHaveProperty("p50Ms");
+  });
+
+  it("rejects malformed stats and recent executions", async () => {
+    const malformedStats = [
+      { window: "1y", runs: 0, succeeded: 0, failed: 0, success_rate: null, sample_size: 0 },
+      { window: "7d", succeeded: 0, failed: 0, success_rate: null, sample_size: 0 },
+      { window: "7d", runs: 0, succeeded: 0, failed: 0, success_rate: "0.5", sample_size: 0 },
+      { window: "7d", runs: 0, succeeded: 0, failed: 0, success_rate: null, sample_size: -1 },
+      { window: "7d", runs: 0, succeeded: 0, failed: 0, success_rate: null, p50_ms: 1.5, sample_size: 0 },
+      "stats"
+    ];
+    for (const stats of malformedStats) {
+      const client = createXFlowApiClient({
+        baseUrl: "/v1",
+        fetcher: async () => success({ list: [row({ stats })], total: 1 })
+      });
+
+      await expect(client.listWorkflows({ page: 1 })).rejects.toMatchObject({
+        name: "XFlowApiError",
+        message: "invalid API response"
+      });
+    }
+
+    const malformedRecent = [
+      "exec-1",
+      [{ execution_id: "exec-1", status: "running" }],
+      [{ execution_id: "exec-1", status: "running", created_at: "2026-05-04T10:00:00Z", duration_ms: -5 }],
+      [{ execution_id: "exec-1", status: "nope", created_at: "2026-05-04T10:00:00Z" }]
+    ];
+    for (const recent_executions of malformedRecent) {
+      const client = createXFlowApiClient({
+        baseUrl: "/v1",
+        fetcher: async () => success({ list: [row({ recent_executions })], total: 1 })
+      });
+
+      await expect(client.listWorkflows({ page: 1 })).rejects.toMatchObject({
+        name: "XFlowApiError",
+        message: "invalid API response"
+      });
+    }
+  });
+
+  it("sends include and window only when requested", async () => {
+    const requests: string[] = [];
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async (input) => {
+        requests.push(String(input));
+        return success({ list: [], total: 0 });
+      }
+    });
+
+    await client.listWorkflows({ page: 1, include: ["stats", "recent"], window: "24h" });
+    await client.listWorkflows({ page: 1, include: [] });
+    await client.listWorkflows({ page: 1 });
+
+    expect(requests).toEqual([
+      "/v1/workflows?page=1&include=stats%2Crecent&window=24h",
+      "/v1/workflows?page=1",
+      "/v1/workflows?page=1"
+    ]);
+  });
+});
+
+describe("execution stats", () => {
+  const counts = {
+    pending: 0,
+    queued: 1,
+    paused: 0,
+    running: 2,
+    success: 6,
+    failed: 2,
+    canceling: 0,
+    canceled: 1,
+    timeout: 1
+  };
+  const zeroCounts = {
+    pending: 0,
+    queued: 0,
+    paused: 0,
+    running: 0,
+    success: 0,
+    failed: 0,
+    canceling: 0,
+    canceled: 0,
+    timeout: 0
+  };
+
+  it("maps the status counts and histogram, and sends the window", async () => {
+    const requests: string[] = [];
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async (input) => {
+        requests.push(String(input));
+        return success({
+          window_start: "2026-05-04T10:00:00Z",
+          window_end: "2026-05-04T12:00:00Z",
+          total: 13,
+          counts_by_status: counts,
+          histogram: [
+            { start: "2026-05-04T10:00:00Z", counts },
+            { start: "2026-05-04T11:00:00Z", counts: zeroCounts }
+          ]
+        });
+      }
+    });
+
+    const stats = await client.getExecutionStats({
+      createdAfter: "2026-05-04T10:00:00Z",
+      createdBefore: "2026-05-04T12:00:00Z",
+      bucket: "1h"
+    });
+
+    expect(requests).toEqual([
+      "/v1/executions/stats?created_after=2026-05-04T10%3A00%3A00Z&created_before=2026-05-04T12%3A00%3A00Z&bucket=1h"
+    ]);
+    expect(stats).toEqual({
+      windowStart: "2026-05-04T10:00:00Z",
+      windowEnd: "2026-05-04T12:00:00Z",
+      total: 13,
+      countsByStatus: counts,
+      histogram: [
+        { start: "2026-05-04T10:00:00Z", counts },
+        { start: "2026-05-04T11:00:00Z", counts: zeroCounts }
+      ]
+    } satisfies ExecutionStats);
+  });
+
+  it("sends the workflow filter and omits an absent histogram", async () => {
+    const requests: string[] = [];
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async (input) => {
+        requests.push(String(input));
+        return success({
+          window_start: "2026-05-04T10:00:00Z",
+          window_end: "2026-05-04T12:00:00Z",
+          total: 0,
+          counts_by_status: zeroCounts
+        });
+      }
+    });
+
+    const stats = await client.getExecutionStats({
+      createdAfter: "2026-05-04T10:00:00Z",
+      createdBefore: "2026-05-04T12:00:00Z",
+      workflowId: "wf-1"
+    });
+
+    expect(requests).toEqual([
+      "/v1/executions/stats?created_after=2026-05-04T10%3A00%3A00Z&created_before=2026-05-04T12%3A00%3A00Z&workflow_id=wf-1"
+    ]);
+    expect(stats).not.toHaveProperty("histogram");
+    expect(stats.countsByStatus).toEqual(zeroCounts);
+  });
+
+  it("rejects a response that is missing a status key or malformed", async () => {
+    const base = {
+      window_start: "2026-05-04T10:00:00Z",
+      window_end: "2026-05-04T12:00:00Z",
+      total: 13
+    };
+    const missingTimeout: Record<string, unknown> = { ...counts };
+    delete missingTimeout.timeout;
+    const malformed = [
+      { ...base, counts_by_status: missingTimeout },
+      { ...base, counts_by_status: { ...counts, failed: -1 } },
+      { ...base, counts_by_status: counts, histogram: "1h" },
+      { ...base, counts_by_status: counts, histogram: [{ start: "2026-05-04T10:00:00Z" }] },
+      { ...base, total: -1, counts_by_status: counts }
+    ];
+    for (const data of malformed) {
+      const client = createXFlowApiClient({
+        baseUrl: "/v1",
+        fetcher: async () => success(data)
+      });
+
+      await expect(
+        client.getExecutionStats({
+          createdAfter: "2026-05-04T10:00:00Z",
+          createdBefore: "2026-05-04T12:00:00Z"
+        })
+      ).rejects.toMatchObject({
+        name: "XFlowApiError",
+        message: "invalid API response"
+      });
+    }
+  });
+});
+
 describe("execution list", () => {
   const row = (overrides: Record<string, unknown> = {}) => ({
     execution_id: "exec-9",
@@ -931,6 +1466,72 @@ describe("execution list", () => {
         fetcher: async () => success({ list: [row({ queue_position: bad })], total: 1 })
       });
       await expect(malformed.listExecutions()).rejects.toMatchObject({
+        name: "XFlowApiError",
+        message: "invalid API response"
+      });
+    }
+  });
+
+  it("sends repeated statuses and the execution-id prefix", async () => {
+    const fetcher = vi.fn().mockResolvedValue(success({ list: [], total: 0 }));
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    await client.listExecutions({ statuses: ["failed", "timeout"], q: "exec-01H8" });
+
+    // One parameter per value: the server ORs them, and `q` is the literal
+    // prefix search (no LIKE escaping happens client-side; validation and
+    // escaping are the server's).
+    expect(fetcher).toHaveBeenCalledWith("/v1/executions?status=failed&status=timeout&q=exec-01H8", undefined);
+  });
+
+  it("maps the statistics-era row fields and keeps unknown ones absent", async () => {
+    const mapped = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () =>
+        success({
+          list: [
+            row({
+              duration_ms: 1500,
+              finished_at: "2026-10-19T14:02:24Z",
+              trigger_kind: "cron",
+              retries: 2,
+              node_progress: { done: 3, total: 4 }
+            })
+          ],
+          total: 1
+        })
+    });
+    const page = await mapped.listExecutions();
+    expect(page.list[0].durationMs).toBe(1500);
+    expect(page.list[0].finishedAt).toBe("2026-10-19T14:02:24Z");
+    expect(page.list[0].triggerKind).toBe("cron");
+    expect(page.list[0].retries).toBe(2);
+    expect(page.list[0].nodeProgress).toEqual({ done: 3, total: 4 });
+
+    // A live row / a store without the capability omits all of them; absence
+    // must not become 0, "" or a zeroed object.
+    const plain = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () => success({ list: [row()], total: 1 })
+    });
+    const absent = await plain.listExecutions();
+    for (const key of ["durationMs", "finishedAt", "triggerKind", "retries", "nodeProgress"]) {
+      expect(absent.list[0]).not.toHaveProperty(key);
+    }
+  });
+
+  it("refuses a malformed node_progress or duration", async () => {
+    for (const overrides of [
+      { node_progress: { done: 1 } },
+      { node_progress: { done: "1", total: 2 } },
+      { duration_ms: 1.5 },
+      { retries: "2" }
+    ]) {
+      const client = createXFlowApiClient({
+        baseUrl: "/v1",
+        fetcher: async () => success({ list: [row(overrides)], total: 1 })
+      });
+      await expect(client.listExecutions()).rejects.toMatchObject({
         name: "XFlowApiError",
         message: "invalid API response"
       });
@@ -998,6 +1599,127 @@ describe("execution list", () => {
     });
 
     await expect(client.listExecutions()).rejects.toMatchObject({ name: "XFlowApiError" });
+  });
+});
+
+describe("overview", () => {
+  const zeroCounts = () => ({
+    pending: 0,
+    queued: 0,
+    paused: 0,
+    running: 0,
+    success: 0,
+    failed: 0,
+    canceling: 0,
+    canceled: 0,
+    timeout: 0
+  });
+  const kpis = (overrides: Record<string, unknown> = {}) => ({
+    runs: 41,
+    runs_previous: 37,
+    failed_previous: 12,
+    success_rate: 0.75,
+    p50_ms: 1200,
+    p95_ms: 4800,
+    active_workflows: 6,
+    sparkline: { runs: [1, 2], success_rate: [0.5, null] },
+    ...overrides
+  });
+  const payload = (overrides: Record<string, unknown> = {}) => ({
+    window: "24h",
+    generated_at: "2026-10-19T14:02:23Z",
+    kpis: kpis(),
+    histogram: [{ start: "2026-10-19T13:00:00Z", counts: zeroCounts() }],
+    top_failing: [
+      {
+        workflow_id: "wf-1",
+        workflow_name: "客户同步",
+        failed: 3,
+        last_error: "node \"Fetch\" timed out",
+        last_failed_at: "2026-10-19T13:30:00Z"
+      }
+    ],
+    cluster: { is_leader: true, runners: { online: 3, total: 4, capacity: 12, in_flight: 5 } },
+    ...overrides
+  });
+
+  it("maps the dashboard payload, including the cluster segment", async () => {
+    const fetcher = vi.fn().mockResolvedValue(success(payload()));
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    const result = await client.getOverview({ window: "24h" });
+
+    expect(fetcher).toHaveBeenCalledWith("/v1/overview?window=24h", undefined);
+    expect(result).toEqual({
+      window: "24h",
+      generatedAt: "2026-10-19T14:02:23Z",
+      kpis: {
+        runs: 41,
+        runsPrevious: 37,
+        failedPrevious: 12,
+        successRate: 0.75,
+        p50Ms: 1200,
+        p95Ms: 4800,
+        activeWorkflows: 6,
+        sparkline: { runs: [1, 2], successRate: [0.5, null] }
+      },
+      histogram: [{ start: "2026-10-19T13:00:00Z", counts: zeroCounts() }],
+      topFailing: [
+        {
+          workflowId: "wf-1",
+          workflowName: "客户同步",
+          failed: 3,
+          lastError: "node \"Fetch\" timed out",
+          lastFailedAt: "2026-10-19T13:30:00Z"
+        }
+      ],
+      cluster: { isLeader: true, runners: { online: 3, total: 4, capacity: 12, inFlight: 5 } }
+    } satisfies OverviewResponse);
+  });
+
+  it("keeps null KPIs null and omits an absent cluster segment", async () => {
+    const fetcher = vi.fn().mockResolvedValue(
+      success(
+        payload({
+          window: "7d",
+          kpis: kpis({ success_rate: null, p50_ms: null, p95_ms: null }),
+          cluster: undefined,
+          top_failing: []
+        })
+      )
+    );
+    const client = createXFlowApiClient({ baseUrl: "/v1", fetcher });
+
+    // No window option: the server default applies and no query is sent.
+    const result = await client.getOverview();
+
+    expect(fetcher).toHaveBeenCalledWith("/v1/overview", undefined);
+    expect(result.kpis.successRate).toBeNull();
+    expect(result.kpis.p50Ms).toBeNull();
+    expect(result.kpis.p95Ms).toBeNull();
+    expect(result.topFailing).toEqual([]);
+    expect(result).not.toHaveProperty("cluster");
+  });
+
+  it("refuses a malformed dashboard payload", async () => {
+    for (const bad of [
+      payload({ window: "30d" }),
+      payload({ kpis: kpis({ p50_ms: undefined }) }),
+      payload({ kpis: kpis({ success_rate: 2 }) }),
+      payload({ histogram: "nope" }),
+      payload({ top_failing: {} }),
+      payload({ cluster: { is_leader: "yes", runners: { online: 3, total: 4, capacity: 12, in_flight: 5 } } }),
+      payload({ cluster: { is_leader: true, runners: { online: 3 } } })
+    ]) {
+      const client = createXFlowApiClient({
+        baseUrl: "/v1",
+        fetcher: async () => success(bad)
+      });
+      await expect(client.getOverview()).rejects.toMatchObject({
+        name: "XFlowApiError",
+        message: "invalid API response"
+      });
+    }
   });
 });
 
@@ -1377,6 +2099,50 @@ describe("executionDetailToRuntimeSnapshot", () => {
         output: { approved: false }
       },
       child: { status: "success", childExecutionId: "exec-sw-1" }
+    });
+  });
+
+  it("carries the submission trace id into the runtime projection and omits it when absent", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () =>
+        success({
+          execution_id: "exec-trace",
+          status: "running",
+          trace_id: "0123456789abcdef0123456789abcdef"
+        })
+    });
+
+    const detail = await client.getExecution("exec-trace");
+
+    expect(detail.traceId).toBe("0123456789abcdef0123456789abcdef");
+    expect(executionDetailToRuntimeSnapshot(detail)).toEqual({
+      status: "running",
+      traceId: "0123456789abcdef0123456789abcdef"
+    });
+
+    const legacy = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () => success({ execution_id: "exec-legacy", status: "running" })
+    });
+    const untraced = await legacy.getExecution("exec-legacy");
+
+    // Absence stays absence: the drawer must not offer a copy or a trace link
+    // for a value the server never recorded.
+    expect(untraced.traceId).toBeUndefined();
+    expect(executionDetailToRuntimeSnapshot(untraced)).toEqual({ status: "running" });
+  });
+
+  it("rejects a present trace id that is not a string", async () => {
+    const client = createXFlowApiClient({
+      baseUrl: "/v1",
+      fetcher: async () => success({ execution_id: "exec-trace", status: "running", trace_id: 42 })
+    });
+
+    await expect(client.getExecution("exec-trace")).rejects.toMatchObject({
+      name: "XFlowApiError",
+      status: 200,
+      message: "invalid API response"
     });
   });
 

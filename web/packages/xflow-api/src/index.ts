@@ -9,6 +9,7 @@ import type {
   Viewport,
   WorkflowDef,
   WorkflowEditorMetadata,
+  WorkflowEditorSection,
   WorkflowStatus as RuntimeWorkflowStatus,
   WireWorkflowDef
 } from "@xflow/core";
@@ -26,6 +27,21 @@ export interface CurrentIdentity {
   scopes: string[];
 }
 
+/**
+ * Summary of a workflow's most recent execution (OpenAPI
+ * `WorkflowLatestExecution`). It is a projection of the execution record:
+ * status and timestamps only, no definition, params, output or error.
+ */
+export interface WorkflowLatestExecution {
+  /** Server-assigned execution id (the `{id}` of GET /v1/executions/{id}). */
+  executionId: string;
+  status: ExecutionStatus;
+  /** RFC3339 timestamp of when the execution was recorded. */
+  createdAt: string;
+  /** RFC3339 timestamp of the execution's latest accepted transition. */
+  updatedAt: string;
+}
+
 /** One summary row returned by GET /v1/workflows. */
 export interface WorkflowSummary {
   id: string;
@@ -34,6 +50,102 @@ export interface WorkflowSummary {
   definitionHash: string;
   /** Opaque registry revision supplied by the server for workflow replacement. */
   registryRevision: number;
+  /**
+   * The stored definition's one-line description. Absent when the definition
+   * has none (or an older server does not publish it). Metadata only: it is
+   * excluded from `definitionHash`.
+   */
+  description?: string;
+  /**
+   * The distinct `expression` parameters of the definition's
+   * `xflow.trigger.cron` nodes, deduplicated, trimmed and sorted by the
+   * server. Absent when the workflow has no cron trigger; no other trigger
+   * parameter is exposed here.
+   */
+  cronExpressions?: string[];
+  /**
+   * The distinct trigger kinds in the stored definition (`timer`, `cron`,
+   * `webhook`, `kafka`, `redis`, or a future `xflow.trigger.*` suffix),
+   * deduplicated and sorted by the server. An `xflow.start` entry node is not
+   * a trigger. Always present as an array; `[]` means the workflow has no
+   * trigger node. Older servers/mocks that omit the field map to `[]`.
+   */
+  triggers: string[];
+  /**
+   * RFC3339 timestamp of when the registry last registered or REPLACED this
+   * workflow. Absent for a record written before the registry stamped it —
+   * absence means UNKNOWN, not the zero instant. It is excluded from
+   * `definitionHash`.
+   */
+  updatedAt?: string;
+  /**
+   * The most recent execution recorded for this workflow. Absent means the
+   * server could not answer the lookup (no execution store, degraded read, or
+   * no execution yet) — never "this workflow never ran". A caller that must
+   * tell those apart reads GET /v1/executions with `workflow_id`.
+   */
+  latestExecution?: WorkflowLatestExecution;
+  /**
+   * Execution statistics over the requested window (OpenAPI
+   * `WorkflowExecutionStats`). Present only when the list request asked for
+   * `include=stats` AND the server could answer — a caller without
+   * `execution.read`, or a deployment without an execution store, gets the
+   * page WITHOUT this field rather than a 403. Absent therefore means UNKNOWN;
+   * `runs: 0` means a known zero.
+   */
+  stats?: WorkflowExecutionStats;
+  /**
+   * The workflow's newest executions, newest first (at most 10). Present only
+   * with `include=recent` and the same availability rules as {@link stats};
+   * absent also when the workflow has no execution in the caller's namespace.
+   */
+  recentExecutions?: WorkflowRecentExecution[];
+}
+
+/** Windows accepted by `include=stats` (OpenAPI `window`). */
+export type WorkflowStatsWindow = "24h" | "7d" | "30d";
+
+/** The execution-derived workflow-list fields a caller can request. */
+export type WorkflowListInclude = "stats" | "recent";
+
+/**
+ * Per-workflow execution statistics (OpenAPI `WorkflowExecutionStats`).
+ *
+ * `failed` counts both `failed` and `timeout`. Every terminal status is in the
+ * success-rate denominator (`succeeded / (succeeded + failed + canceled)`), so
+ * a canceled run cannot inflate the rate. `successRate: null` means the window
+ * has NO terminal run — null means "no data", never zero.
+ *
+ * `p50Ms`/`p95Ms` are nearest-rank percentiles of the durations of the most
+ * recent `sampleSize` terminal runs (≤ 100). When `sampleSize` is smaller than
+ * the terminal run count, they describe a sample rather than the whole window.
+ * Durations are currently approximated as `updated_at − created_at`.
+ */
+export interface WorkflowExecutionStats {
+  window: WorkflowStatsWindow;
+  runs: number;
+  succeeded: number;
+  failed: number;
+  successRate: number | null;
+  p50Ms?: number | null;
+  p95Ms?: number | null;
+  sampleSize: number;
+}
+
+/**
+ * One element of a workflow's `recentExecutions` (OpenAPI
+ * `WorkflowRecentExecution`): a minimal projection, not a full execution.
+ */
+export interface WorkflowRecentExecution {
+  executionId: string;
+  status: ExecutionStatus;
+  /** RFC3339 timestamp of when the execution was recorded. */
+  createdAt: string;
+  /**
+   * Approximate wall-clock duration in milliseconds. Present only for a
+   * TERMINAL execution (absent, never 0, for a non-terminal one).
+   */
+  durationMs?: number | null;
 }
 
 /** Offset-pagination options for GET /v1/workflows. */
@@ -42,6 +154,25 @@ export interface ListWorkflowsOptions {
   page?: number;
   /** Number of rows per page. Sent to the server as `page_size`. */
   pageSize?: number;
+  /**
+   * Case-insensitive substring filter on the workflow name, sent as `q`.
+   * Trimmed first; an absent, empty or whitespace-only value is not sent. The
+   * server applies it before pagination, so `page` and `total` both describe
+   * the filtered collection.
+   */
+  q?: string;
+  /**
+   * Execution-derived fields to attach to each row, sent comma-separated as
+   * `include`. An empty or absent list is not sent. The server omits the
+   * fields when the caller lacks `execution.read` or the deployment cannot
+   * answer; it never fails the page.
+   */
+  include?: WorkflowListInclude[];
+  /**
+   * The window `include: ["stats"]` aggregates over (default `"7d"`).
+   * Sent as `window`; the server validates it even when `include` is absent.
+   */
+  window?: WorkflowStatsWindow;
 }
 
 /** Options for GET /v1/node-types. */
@@ -151,6 +282,13 @@ export interface ExecutionDetail {
    * the run's definition snapshot with `GET /v1/workflows/{id}/versions/{version}`.
    */
   workflowVersion?: string;
+  /**
+   * The external tracing system's correlation id captured at submission
+   * (`trace_id`): a handle for opening the run's trace in a tracing UI, not
+   * business data. Absent when the submission carried no trace context —
+   * absence means unknown, never a value to reconstruct.
+   */
+  traceId?: string;
   status: ExecutionStatus;
   /** When the backend recorded the execution (B2b). Absent on older rows. */
   createdAt?: string;
@@ -201,6 +339,19 @@ export interface ListExecutionsOptions {
    */
   status?: ExecutionStatus;
   /**
+   * Narrow the page to ANY of several lifecycle statuses (wire: the `status`
+   * parameter repeated). Combined with {@link status}, every listed value is
+   * ORed — a caller should normally use one of the two forms, not both.
+   */
+  statuses?: ExecutionStatus[];
+  /**
+   * Execution-id prefix search (`q` on the wire). Restricted server-side to at
+   * most 64 characters drawn from letters, digits, `_` and `-`; anything else
+   * is a 400 `execution_query_invalid`. Matched as a literal prefix — LIKE
+   * metacharacters are escaped, not interpreted.
+   */
+  q?: string;
+  /**
    * Narrow to one workflow identity (B1). The comparison is exact and a row
    * recorded without a definition id (`workflow_id: ""`) matches no value, so
    * an unattributed execution is never guessed into a workflow.
@@ -239,6 +390,44 @@ export interface ExecutionListItem {
    * {@link ExecutionDetail.queuePosition}.
    */
   queuePosition?: number;
+  /**
+   * Wall-clock duration of a TERMINAL execution in whole milliseconds. Exact
+   * when {@link finishedAt} is present; for rows written before that column
+   * existed it is the documented estimate `updated_at − created_at`. Absent
+   * for a live row: absence means "not finished", not zero.
+   */
+  durationMs?: number;
+  /**
+   * RFC3339 completion instant, write-once on the first terminal transition.
+   * Absent for a live row and for rows written before the column existed — in
+   * that case the completion time is UNKNOWN, never the zero instant.
+   */
+  finishedAt?: string;
+  /**
+   * The server-derived path that started the run (`api`, `rerun`,
+   * `subworkflow`, `timer`, `cron`, `webhook`, `kafka`, `redis`). Absent when
+   * the row predates the column, so absence means UNKNOWN.
+   */
+  triggerKind?: string;
+  /**
+   * Extra node attempts the execution consumed (the sum of `attempt − 1` over
+   * its node rows). Absent when the configured store cannot answer the batch
+   * node read — absence means UNKNOWN, not zero.
+   */
+  retries?: number;
+  /**
+   * How many of the execution's nodes reached a terminal status. Absent when
+   * the store cannot answer the batch read or the graph size is unknown.
+   */
+  nodeProgress?: ExecutionNodeProgress;
+}
+
+/** Node-progress aggregate of one execution list row (OpenAPI `ExecutionNodeProgress`). */
+export interface ExecutionNodeProgress {
+  /** Node rows that reached a terminal status. */
+  done: number;
+  /** The graph's node count recorded when the execution was created. */
+  total: number;
 }
 
 /**
@@ -284,6 +473,149 @@ export interface ExecutionListPage {
 }
 
 /**
+ * A count per lifecycle status (OpenAPI `ExecutionStatusCounts`). Every one of
+ * the nine statuses is present; a status with no execution in the window is
+ * `0`, never omitted, and the server rejects nothing here — the map is
+ * zero-filled server-side.
+ */
+export type ExecutionStatusCounts = Record<ExecutionStatus, number>;
+
+/** One histogram bucket of GET /v1/executions/stats (OpenAPI `ExecutionStatsBucket`). */
+export interface ExecutionStatsBucket {
+  /** Inclusive UTC-aligned start; the bucket covers `[start, start + width)`. */
+  start: string;
+  counts: ExecutionStatusCounts;
+}
+
+/**
+ * The `data` payload of GET /v1/executions/stats (OpenAPI `ExecutionStats`):
+ * status counts for one `[createdAfter, createdBefore)` window in the caller's
+ * namespace. `total` equals the sum of `countsByStatus` (and of every bucket's
+ * counts). `histogram` is absent unless the request named a `bucket`.
+ */
+export interface ExecutionStats {
+  /** The request's `created_after` — inclusive lower bound. */
+  windowStart: string;
+  /** The request's `created_before` — EXCLUSIVE upper bound. */
+  windowEnd: string;
+  total: number;
+  countsByStatus: ExecutionStatusCounts;
+  histogram?: ExecutionStatsBucket[];
+}
+
+/** Bucket widths accepted by GET /v1/executions/stats (OpenAPI `bucket`). */
+export type ExecutionStatsBucketWidth = "5m" | "1h" | "1d";
+
+/**
+ * Options for GET /v1/executions/stats. Both bounds are required and
+ * exclusive; their span may not exceed 30 days. `bucket` is optional — omit it
+ * for counts without a histogram.
+ */
+export interface GetExecutionStatsOptions {
+  /** Inclusive lower bound on `created_at`, RFC3339 (wire `created_after`). */
+  createdAfter: string;
+  /** Exclusive upper bound on `created_at`, RFC3339 (wire `created_before`). */
+  createdBefore: string;
+  /** Exact-match workflow id filter (max 64 characters). */
+  workflowId?: string;
+  /** Bucket width; adds `histogram` to the response. Max 168 buckets. */
+  bucket?: ExecutionStatsBucketWidth;
+}
+
+/** Windows accepted by GET /v1/overview (OpenAPI `window`). */
+export type OverviewWindow = "24h" | "7d";
+
+/** Options for GET /v1/overview. */
+export interface GetOverviewOptions {
+  /**
+   * Aggregation window; defaults to the server's `24h`. The histogram and the
+   * sparkline always have 24 buckets (1h or 7h wide respectively).
+   */
+  window?: OverviewWindow;
+}
+
+/** The 24-point series behind the overview charts (OpenAPI `OverviewSparkline`). */
+export interface OverviewSparkline {
+  /** Executions per bucket, aligned with `histogram`. */
+  runs: number[];
+  /** Success rate per bucket; `null` when the bucket has no terminal run. */
+  successRate: Array<number | null>;
+}
+
+/**
+ * The overview's KPI block (OpenAPI `OverviewKPIs`). `successRate`, `p50Ms` and
+ * `p95Ms` are `null` when there was no terminal run to compute them from —
+ * `null` means "no data", never zero (an all-failed window is a real `0`).
+ */
+export interface OverviewKPIs {
+  /** Executions created in the window, terminal or not. */
+  runs: number;
+  /** Executions created in the immediately preceding, equally sized window. */
+  runsPrevious: number;
+  /** Failed plus timeout executions in that same preceding window. */
+  failedPrevious: number;
+  successRate: number | null;
+  /** Nearest-rank P50 duration of terminal runs, in milliseconds. */
+  p50Ms: number | null;
+  /** Nearest-rank P95 duration of terminal runs, in milliseconds. */
+  p95Ms: number | null;
+  /** DISTINCT workflow ids with at least one execution in the window. */
+  activeWorkflows: number;
+  sparkline: OverviewSparkline;
+}
+
+/** One entry of the overview's failing-workflow list (OpenAPI `OverviewFailingWorkflow`). */
+export interface OverviewFailingWorkflow {
+  workflowId: string;
+  /** Best-effort registry name; absent when the registry cannot name the id. */
+  workflowName?: string;
+  /** Failed plus timeout executions of this workflow in the window. */
+  failed: number;
+  /** The newest failure's message, truncated to 200 characters server-side. */
+  lastError?: string;
+  /** RFC3339 creation time of the newest failed/timeout execution. */
+  lastFailedAt?: string;
+}
+
+/** Capacity aggregate over the live runners (OpenAPI `OverviewRunnerSummary`). */
+export interface OverviewRunnerSummary {
+  online: number;
+  /** Directory members, online or not. */
+  total: number;
+  /** Summed task capacity of the online runners. */
+  capacity: number;
+  /** Summed tasks currently in flight on the online runners. */
+  inFlight: number;
+}
+
+/**
+ * The cluster segment of the overview (OpenAPI `OverviewCluster`). The whole
+ * segment is absent unless the caller ALSO holds `management.runner.list`; the
+ * runner roster is cluster-wide and must not leak to a namespace-scoped
+ * principal. It is also absent when the deployment has no runner directory.
+ */
+export interface OverviewCluster {
+  isLeader: boolean;
+  runners: OverviewRunnerSummary;
+}
+
+/**
+ * The `data` payload of GET /v1/overview (OpenAPI `OverviewResponse`): one
+ * dashboard over the caller's own namespace. The histogram and the sparkline
+ * are derived from the same buckets, so they cannot disagree. `generatedAt` is
+ * when the payload was BUILT; the response is cached for up to 30 seconds per
+ * (namespace, window, cluster permission).
+ */
+export interface OverviewResponse {
+  window: OverviewWindow;
+  generatedAt: string;
+  kpis: OverviewKPIs;
+  histogram: ExecutionStatsBucket[];
+  topFailing: OverviewFailingWorkflow[];
+  cluster?: OverviewCluster;
+}
+
+/**
  * Options for POST /v1/executions/{id}/rerun (OpenAPI
  * `RerunExecutionRequest`). Everything upstream of `fromNode` is copied from
  * the source execution; that node and everything downstream run again.
@@ -320,13 +652,20 @@ export interface RerunExecutionResult {
  * Result of reading a workflow definition (GET /v1/workflows/{id}).
  * `workflow` is the editor's internal (merged) model: `editor_metadata`'s
  * `positions`/`ui`/`notes` are already folded onto their nodes
- * (`mergeEditorMetadata`, ADR-D4 §2.5). `viewport` is carried alongside
- * because it has no field on `WorkflowDef` to merge onto; absent when the
- * stored `editor_metadata` had none.
+ * (`mergeEditorMetadata`, ADR-D4 §2.5). `viewport` and `sections` are carried
+ * alongside because they are workflow-level and have no field on
+ * `WorkflowDef` to merge onto; each is absent when the stored
+ * `editor_metadata` had none.
  */
 export interface GetWorkflowResult {
   workflow: WorkflowDef;
   viewport?: Viewport;
+  /**
+   * Visual canvas sections, in author order. Grouping boxes only -- not the
+   * scheduling `groups[]` (see `WorkflowEditorSection` in `@xflow/core`).
+   * Absent when the stored `editor_metadata` carried none.
+   */
+  sections?: WorkflowEditorSection[];
 }
 
 /**
@@ -386,11 +725,19 @@ export interface RollbackWorkflowResult {
 /**
  * Options for `createWorkflow`/`saveWorkflow` carrying editor-only state that
  * has no field on `WorkflowDef`: the canvas pan/zoom to persist in
- * `editor_metadata.viewport` alongside the per-node `positions`/`ui`/`notes`
+ * `editor_metadata.viewport` and the visual canvas sections to persist in
+ * `editor_metadata.sections`, alongside the per-node `positions`/`ui`/`notes`
  * `splitEditorMetadata` already derives from the definition's nodes.
  */
 export interface SaveWorkflowOptions {
   viewport?: Viewport;
+  /**
+   * Visual canvas sections to persist. An empty array is omitted from the
+   * request (Go's `omitempty` encodes it exactly like an absent value), so a
+   * caller can round-trip `GetWorkflowResult.sections` without special-casing
+   * the empty case.
+   */
+  sections?: WorkflowEditorSection[];
 }
 
 /**
@@ -474,6 +821,26 @@ export interface XFlowApiClient {
   rollbackWorkflow(id: string, version: string): Promise<RollbackWorkflowResult>;
   runWorkflow(workflowId: string): Promise<ExecuteWorkflowResult>;
   getExecution(id: string): Promise<ExecutionDetail>;
+  /**
+   * GET /v1/executions/stats: status counts for one bounded window in the
+   * caller's own namespace, optionally with a UTC-aligned histogram. Both
+   * bounds are required and exclusive; the span may not exceed 30 days. The
+   * server answers 501 `execution_stats_unsupported` when the deployment has
+   * no execution store (or its store cannot aggregate).
+   */
+  getExecutionStats(options: GetExecutionStatsOptions): Promise<ExecutionStats>;
+  /**
+   * GET /v1/overview: one dashboard over the caller's own namespace — KPIs
+   * (runs and the previous window's runs, success rate, P50/P95, active
+   * workflows, a 24-point sparkline), the 24-bucket status histogram, the top
+   * failing workflows, and — only when the caller ALSO holds
+   * `management.runner.list` — a cluster segment. The server caches the
+   * payload for up to 30 seconds per (namespace, window, cluster permission);
+   * `generatedAt` is the build instant, so it can lag the response by that
+   * much. A deployment without an execution store answers 501
+   * `overview_unsupported`.
+   */
+  getOverview(options?: GetOverviewOptions): Promise<OverviewResponse>;
   waitExecution(id: string, options?: WaitExecutionOptions): Promise<WaitExecutionResult>;
   /**
    * POST /v1/executions/{id}/pause: suspends dispatch and answers with the
@@ -510,9 +877,10 @@ export interface XFlowApiClient {
   revokeSignal(id: string, name: string): Promise<RevokeSignalResult>;
   /**
    * GET /v1/executions: one offset-paginated page of the caller's namespace,
-   * newest first. Wraps `page`, `page_size`, one lifecycle `status`, the
-   * `workflow_id` identity filter and the exclusive `created_after` /
-   * `created_before` RFC3339 bounds.
+   * newest first. Wraps `page`, `page_size`, one or more lifecycle statuses
+   * (`status` / `statuses`), the execution-id prefix `q`, the `workflow_id`
+   * identity filter and the exclusive `created_after` / `created_before`
+   * RFC3339 bounds.
    */
   listExecutions(options?: ListExecutionsOptions): Promise<ExecutionListPage>;
   /**
@@ -589,6 +957,24 @@ const executionStatuses = new Set<string>([
   "timeout"
 ]);
 
+/**
+ * The nine statuses a count map carries. Listed once so the mapper can require
+ * every key: a missing status is a broken response, never "0".
+ */
+const executionStatusCountKeys: readonly ExecutionStatus[] = [
+  "pending",
+  "queued",
+  "paused",
+  "running",
+  "success",
+  "failed",
+  "canceling",
+  "canceled",
+  "timeout"
+];
+
+const workflowStatsWindows = new Set<string>(["24h", "7d", "30d"]);
+
 const executionNodeStatuses = new Set<string>([
   "pending",
   "running",
@@ -612,12 +998,19 @@ function pathSegment(value: string): string {
   return encodeURIComponent(value);
 }
 
-function withQuery(path: string, values: Record<string, string | undefined>): string {
+function withQuery(path: string, values: Record<string, string | string[] | undefined>): string {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(values)) {
-    if (value !== undefined) {
-      query.set(key, value);
+    if (value === undefined) {
+      continue;
     }
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        query.append(key, entry);
+      }
+      continue;
+    }
+    query.set(key, value);
   }
   const serialized = query.toString();
   return serialized ? `${path}?${serialized}` : path;
@@ -671,12 +1064,24 @@ interface ExecuteWorkflowWire {
   execution_id: string;
 }
 
+interface WorkflowLatestExecutionWire {
+  execution_id: string;
+  status: ExecutionStatus;
+  created_at: string;
+  updated_at: string;
+}
+
 interface WorkflowListItemWire {
   id: string;
   name: string;
   version: string;
   definition_hash: string;
   registry_revision: number;
+  description?: string;
+  cron_expressions?: string[];
+  triggers?: string[];
+  updated_at?: string;
+  latest_execution?: WorkflowLatestExecutionWire;
 }
 
 interface WorkflowListWire {
@@ -729,6 +1134,8 @@ interface ExecutionDetailWire {
   /** `engine.ExecutionDetail` JSON; `omitempty` on the server. */
   workflow_id?: string;
   workflow_version?: string;
+  /** External tracing correlation id; `omitempty` on the server. */
+  trace_id?: string;
   status: ExecutionStatus;
   created_at?: string;
   updated_at?: string;
@@ -756,11 +1163,44 @@ interface ExecutionListItemWire {
   created_at: string;
   updated_at: string;
   queue_position?: number;
+  duration_ms?: number;
+  finished_at?: string;
+  trigger_kind?: string;
+  retries?: number;
+  node_progress?: { done: number; total: number };
 }
 
 interface ExecutionListWire {
   list: ExecutionListItemWire[];
   total: number;
+}
+
+interface OverviewKPIsWire {
+  runs: number;
+  runs_previous: number;
+  failed_previous: number;
+  success_rate: number | null;
+  p50_ms: number | null;
+  p95_ms: number | null;
+  active_workflows: number;
+  sparkline: { runs: number[]; success_rate: Array<number | null> };
+}
+
+interface OverviewFailingWorkflowWire {
+  workflow_id: string;
+  workflow_name?: string;
+  failed: number;
+  last_error?: string;
+  last_failed_at?: string;
+}
+
+interface OverviewWire {
+  window: OverviewWindow;
+  generated_at: string;
+  kpis: OverviewKPIsWire;
+  histogram: Array<{ start: string; counts: unknown }>;
+  top_failing: OverviewFailingWorkflowWire[];
+  cluster?: { is_leader: boolean; runners: { online: number; total: number; capacity: number; in_flight: number } };
 }
 
 interface RerunExecutionWire {
@@ -844,6 +1284,15 @@ function requireInteger(record: Record<string, unknown>, key: string, response: 
   return value;
 }
 
+/** Reads a non-negative, safe integer count. */
+function requireCount(record: Record<string, unknown>, key: string, response: ApiResponse<unknown>): number {
+  const value = requireInteger(record, key, response);
+  if (value < 0) {
+    invalidResponse(response);
+  }
+  return value;
+}
+
 function requireBoolean(record: Record<string, unknown>, key: string, response: ApiResponse<unknown>): boolean {
   const value = record[key];
   if (typeof value !== "boolean") {
@@ -858,6 +1307,39 @@ function optionalInteger(record: Record<string, unknown>, key: string, response:
     return undefined;
   }
   if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    invalidResponse(response);
+  }
+  return value;
+}
+
+/**
+ * Reads a non-negative integer that the server may render as `null`
+ * (`nullable: true`) and may omit (`omitempty`). The three states stay
+ * distinct: `undefined` = absent, `null` = explicitly no value, a number =
+ * the value. Negative or fractional numbers are a broken response.
+ */
+function optionalNullableCount(
+  record: Record<string, unknown>,
+  key: string,
+  response: ApiResponse<unknown>
+): number | null | undefined {
+  const value = record[key];
+  if (value === undefined || value === null) {
+    return value;
+  }
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    invalidResponse(response);
+  }
+  return value;
+}
+
+/** Reads a finite number in [0, 1] — a rate, not a count. */
+function nullableRate(record: Record<string, unknown>, key: string, response: ApiResponse<unknown>): number | null {
+  const value = record[key];
+  if (value === null) {
+    return null;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
     invalidResponse(response);
   }
   return value;
@@ -966,16 +1448,23 @@ function failureParamIssues(failure: Envelope<unknown> | undefined): ParamIssue[
 /**
  * Splits an editor-side `WorkflowDef` into the `WireWorkflowDefWithMetadata`
  * body `createWorkflow`/`saveWorkflow` send (ADR-D4 §2.5): `position`/`ui`/
- * `notes` move off each node and into the `editor_metadata` sibling, and an
- * explicit `viewport` (the caller's canvas pan/zoom, which has no field on
- * `WorkflowDef`) is folded into the same sibling. `splitEditorMetadata`'s
+ * `notes` move off each node and into the `editor_metadata` sibling, and the
+ * explicit `viewport` and `sections` (caller-owned canvas state that has no
+ * field on `WorkflowDef`) are folded into the same sibling. An empty
+ * `sections` array is omitted so the encoded body matches Go's `omitempty`
+ * (empty and absent are the same value on the wire). `splitEditorMetadata`'s
  * diagnostics (`NODE_METADATA_KEYED_BY_NAME`) are dropped here -- the server
  * re-derives and returns the same findings via `RegisterWorkflowResult.warnings`,
  * so surfacing them twice would double every id-less-node warning for one save.
  */
-function splitForWire(workflow: WorkflowDef, viewport?: Viewport): WireWorkflowDefWithMetadata {
+function splitForWire(
+  workflow: WorkflowDef,
+  viewport?: Viewport,
+  sections?: WorkflowEditorSection[]
+): WireWorkflowDefWithMetadata {
   const { def, metadata } = splitEditorMetadata(workflow);
   if (viewport !== undefined) metadata.viewport = viewport;
+  if (sections !== undefined && sections.length > 0) metadata.sections = sections;
   return Object.keys(metadata).length > 0 ? { ...def, editor_metadata: metadata } : def;
 }
 
@@ -983,16 +1472,20 @@ function splitForWire(workflow: WorkflowDef, viewport?: Viewport): WireWorkflowD
  * Merges a `WireWorkflowDefWithMetadata` response body back into the editor's
  * internal (merged) `WorkflowDef` shape (ADR-D4 §2.5): `editor_metadata`'s
  * `positions`/`ui`/`notes` are restored onto their nodes and the sibling
- * field itself is dropped. The `viewport` is returned alongside, since it has
- * no field on `WorkflowDef` to merge onto. `mergeEditorMetadata`'s
- * diagnostics are discarded for the same reason as `splitForWire`'s: they
- * mirror server-side findings a caller already sees in `warnings` on write,
- * and GET has no `warnings` slot to place them in.
+ * field itself is dropped. `viewport` and `sections` are returned alongside,
+ * since they are workflow-level and have no field on `WorkflowDef` to merge
+ * onto. `mergeEditorMetadata`'s diagnostics are discarded for the same reason
+ * as `splitForWire`'s: they mirror server-side findings a caller already sees
+ * in `warnings` on write, and GET has no `warnings` slot to place them in.
  */
 function mapWorkflowDef(wire: WireWorkflowDefWithMetadata): GetWorkflowResult {
   const { editor_metadata: metadata, ...rest } = wire;
   const result: GetWorkflowResult = { workflow: mergeEditorMetadata(rest, metadata).def };
   if (metadata?.viewport !== undefined) result.viewport = metadata.viewport;
+  // Under Go's `omitempty` an empty slice and an absent one are the same
+  // value, so normalize `[]` to absent: callers see one representation for
+  // one value.
+  if (metadata?.sections !== undefined && metadata.sections.length > 0) result.sections = metadata.sections;
   return result;
 }
 
@@ -1017,6 +1510,216 @@ function mapExecuteWorkflow(response: ApiResponse<unknown>): ExecuteWorkflowResu
   return { executionId: requireString(data, "execution_id", response) };
 }
 
+/**
+ * Parses one `latest_execution` summary. All four fields are required by the
+ * OpenAPI contract; a present-but-malformed object is a broken response rather
+ * than "no recent run", so a caller never renders an invented status or time.
+ */
+function mapWorkflowLatestExecution(value: unknown, response: ApiResponse<unknown>): WorkflowLatestExecution {
+  const data = requireRecord(value, response);
+  return {
+    executionId: requireString(data, "execution_id", response),
+    status: requireExecutionStatus(data.status, response),
+    createdAt: requireString(data, "created_at", response),
+    updatedAt: requireString(data, "updated_at", response)
+  };
+}
+
+/**
+ * Parses one workflow row's `stats` object. Every count and `sample_size` is
+ * required; `success_rate` is required but NULLABLE (null = the window has no
+ * terminal run, which is not 0). The percentiles are optional/nullable
+ * (`omitempty` server-side, `nullable: true` in the contract).
+ */
+function mapWorkflowExecutionStats(value: unknown, response: ApiResponse<unknown>): WorkflowExecutionStats {
+  const data = requireRecord(value, response);
+  const window = requireString(data, "window", response);
+  if (!workflowStatsWindows.has(window)) {
+    invalidResponse(response);
+  }
+  const stats: WorkflowExecutionStats = {
+    window: window as WorkflowStatsWindow,
+    runs: requireCount(data, "runs", response),
+    succeeded: requireCount(data, "succeeded", response),
+    failed: requireCount(data, "failed", response),
+    successRate: nullableRate(data, "success_rate", response),
+    sampleSize: requireCount(data, "sample_size", response)
+  };
+  const p50 = optionalNullableCount(data, "p50_ms", response);
+  if (p50 !== undefined) {
+    stats.p50Ms = p50;
+  }
+  const p95 = optionalNullableCount(data, "p95_ms", response);
+  if (p95 !== undefined) {
+    stats.p95Ms = p95;
+  }
+  return stats;
+}
+
+/**
+ * Parses one workflow row's `recent_executions` array. `duration_ms` is
+ * optional and nullable: a non-terminal execution has none, which is different
+ * from a zero-length run.
+ */
+function mapWorkflowRecentExecutions(value: unknown, response: ApiResponse<unknown>): WorkflowRecentExecution[] {
+  if (!Array.isArray(value)) {
+    invalidResponse(response);
+  }
+  return value.map((entry) => {
+    const data = requireRecord(entry, response);
+    const row: WorkflowRecentExecution = {
+      executionId: requireString(data, "execution_id", response),
+      status: requireExecutionStatus(data.status, response),
+      createdAt: requireString(data, "created_at", response)
+    };
+    const duration = optionalNullableCount(data, "duration_ms", response);
+    if (duration !== undefined) {
+      row.durationMs = duration;
+    }
+    return row;
+  });
+}
+
+/** Reads a count map that must carry all nine status keys, each a non-negative integer. */
+function mapExecutionStatusCounts(value: unknown, response: ApiResponse<unknown>): ExecutionStatusCounts {
+  const data = requireRecord(value, response);
+  const counts = {} as ExecutionStatusCounts;
+  for (const status of executionStatusCountKeys) {
+    counts[status] = requireCount(data, status, response);
+  }
+  return counts;
+}
+
+/**
+ * Parses GET /v1/executions/stats. Both window bounds, `total` and the counts
+ * map are required; `histogram` is present only when a `bucket` was requested,
+ * and its buckets must carry the same complete counts map.
+ */
+function mapExecutionStats(response: ApiResponse<unknown>): ExecutionStats {
+  const data = requireRecord(response.data, response);
+  const stats: ExecutionStats = {
+    windowStart: requireString(data, "window_start", response),
+    windowEnd: requireString(data, "window_end", response),
+    total: requireCount(data, "total", response),
+    countsByStatus: mapExecutionStatusCounts(data.counts_by_status, response)
+  };
+  const histogram = data.histogram;
+  if (histogram !== undefined) {
+    if (!Array.isArray(histogram)) {
+      invalidResponse(response);
+    }
+    stats.histogram = histogram.map((value) => {
+      const bucket = requireRecord(value, response);
+      return {
+        start: requireString(bucket, "start", response),
+        counts: mapExecutionStatusCounts(bucket.counts, response)
+      };
+    });
+  }
+  return stats;
+}
+
+/**
+ * Parses GET /v1/overview. Every KPI the schema marks nullable is read through
+ * the same three-state rule as elsewhere: `null` is a real "no terminal run",
+ * never 0, and a missing required field is a broken response.
+ */
+function mapOverview(response: ApiResponse<OverviewWire>): OverviewResponse {
+  const data = requireRecord(response.data, response);
+  if (data.window !== "24h" && data.window !== "7d") {
+    invalidResponse(response);
+  }
+  const kpis = requireRecord(data.kpis, response);
+  const sparkline = requireRecord(kpis.sparkline, response);
+  const sparkRuns = sparkline.runs;
+  if (!Array.isArray(sparkRuns) || sparkRuns.some((v) => typeof v !== "number" || !Number.isSafeInteger(v) || v < 0)) {
+    invalidResponse(response);
+  }
+  const sparkRates = sparkline.success_rate;
+  if (
+    !Array.isArray(sparkRates) ||
+    sparkRates.some((v) => v !== null && (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > 1))
+  ) {
+    invalidResponse(response);
+  }
+  if (!Array.isArray(data.histogram)) {
+    invalidResponse(response);
+  }
+  if (!Array.isArray(data.top_failing)) {
+    invalidResponse(response);
+  }
+
+  const requiredNullableCount = (record: Record<string, unknown>, key: string): number | null => {
+    const value = optionalNullableCount(record, key, response);
+    if (value === undefined) {
+      invalidResponse(response);
+    }
+    return value;
+  };
+
+  const overview: OverviewResponse = {
+    window: data.window,
+    generatedAt: requireString(data, "generated_at", response),
+    kpis: {
+      runs: requireCount(kpis, "runs", response),
+      runsPrevious: requireCount(kpis, "runs_previous", response),
+      failedPrevious: requireCount(kpis, "failed_previous", response),
+      successRate: nullableRate(kpis, "success_rate", response),
+      p50Ms: requiredNullableCount(kpis, "p50_ms"),
+      p95Ms: requiredNullableCount(kpis, "p95_ms"),
+      activeWorkflows: requireCount(kpis, "active_workflows", response),
+      sparkline: {
+        runs: sparkRuns,
+        successRate: sparkRates
+      }
+    },
+    histogram: data.histogram.map((value) => {
+      const bucket = requireRecord(value, response);
+      return {
+        start: requireString(bucket, "start", response),
+        counts: mapExecutionStatusCounts(bucket.counts, response)
+      };
+    }),
+    topFailing: data.top_failing.map((value) => {
+      const row = requireRecord(value, response);
+      const failing: OverviewFailingWorkflow = {
+        workflowId: requireString(row, "workflow_id", response),
+        failed: requireCount(row, "failed", response)
+      };
+      const name = optionalString(row, "workflow_name", response);
+      if (name !== undefined && name !== "") {
+        failing.workflowName = name;
+      }
+      const lastError = optionalString(row, "last_error", response);
+      if (lastError !== undefined && lastError !== "") {
+        failing.lastError = lastError;
+      }
+      const lastFailedAt = optionalString(row, "last_failed_at", response);
+      if (lastFailedAt !== undefined && lastFailedAt !== "") {
+        failing.lastFailedAt = lastFailedAt;
+      }
+      return failing;
+    })
+  };
+
+  // The cluster segment is absent for a caller without management.runner.list;
+  // a present one is validated strictly like every other object.
+  if (data.cluster !== undefined) {
+    const cluster = requireRecord(data.cluster, response);
+    const runners = requireRecord(cluster.runners, response);
+    overview.cluster = {
+      isLeader: requireBoolean(cluster, "is_leader", response),
+      runners: {
+        online: requireCount(runners, "online", response),
+        total: requireCount(runners, "total", response),
+        capacity: requireCount(runners, "capacity", response),
+        inFlight: requireCount(runners, "in_flight", response)
+      }
+    };
+  }
+  return overview;
+}
+
 function mapWorkflowList(response: ApiResponse<unknown>): WorkflowListPage {
   const data = requireRecord(response.data, response);
   const list = data.list;
@@ -1027,13 +1730,56 @@ function mapWorkflowList(response: ApiResponse<unknown>): WorkflowListPage {
   return {
     list: list.map((value) => {
       const item = requireRecord(value, response);
-      return {
+      // `triggers` is required by the service contract, but an older server or
+      // a stale mock may omit it; absence means "no trigger node" (`[]`), and
+      // any other malformed shape is still a broken response. A present
+      // `latest_execution` is validated strictly; absence stays absence.
+      const triggers = optionalStringArray(item, "triggers", response) ?? [];
+      const summary: WorkflowSummary = {
         id: requireString(item, "id", response),
         name: requireString(item, "name", response),
         version: requireString(item, "version", response),
         definitionHash: requireString(item, "definition_hash", response),
-        registryRevision: requireInteger(item, "registry_revision", response)
+        registryRevision: requireInteger(item, "registry_revision", response),
+        triggers
       };
+      // Both metadata fields are optional on the wire (Go omits empty ones).
+      // An empty value and an absent one mean the same thing to a caller, so
+      // they normalize to absent rather than being stored as "" / [].
+      const description = optionalString(item, "description", response);
+      if (description !== undefined && description !== "") {
+        summary.description = description;
+      }
+      const cronExpressions = optionalStringArray(item, "cron_expressions", response);
+      if (cronExpressions !== undefined && cronExpressions.length > 0) {
+        summary.cronExpressions = cronExpressions;
+      }
+      // Absent means the record predates the registry timestamp; never
+      // substitute the zero instant for it.
+      const updatedAt = optionalString(item, "updated_at", response);
+      if (updatedAt !== undefined && updatedAt !== "") {
+        summary.updatedAt = updatedAt;
+      }
+      const latest = item.latest_execution;
+      if (latest !== undefined) {
+        summary.latestExecution = mapWorkflowLatestExecution(latest, response);
+      }
+      // The execution-derived projections are absent when the server could not
+      // (or may not) answer; a present one is validated strictly. An empty
+      // recent list is normalized to absent for the same reason as `[]`/absent
+      // metadata above.
+      const stats = item.stats;
+      if (stats !== undefined) {
+        summary.stats = mapWorkflowExecutionStats(stats, response);
+      }
+      const recent = item.recent_executions;
+      if (recent !== undefined) {
+        const rows = mapWorkflowRecentExecutions(recent, response);
+        if (rows.length > 0) {
+          summary.recentExecutions = rows;
+        }
+      }
+      return summary;
     }),
     total: requireInteger(data, "total", response)
   };
@@ -1160,6 +1906,12 @@ function mapExecutionDetail(response: ApiResponse<unknown>): ExecutionDetail {
   if (workflowVersion !== undefined) {
     detail.workflowVersion = workflowVersion;
   }
+  // Strictly a string when present: a malformed trace id must not be coerced
+  // into a link target, and an absent one must stay absent rather than "".
+  const traceId = optionalString(data, "trace_id", response);
+  if (traceId !== undefined) {
+    detail.traceId = traceId;
+  }
   const createdAt = optionalString(data, "created_at", response);
   if (createdAt !== undefined) {
     detail.createdAt = createdAt;
@@ -1228,6 +1980,32 @@ function mapExecutionListItem(value: unknown, response: ApiResponse<unknown>): E
   if (queuePosition !== undefined) {
     item.queuePosition = queuePosition;
   }
+  // The statistics-era fields are all optional on the wire: each is omitted
+  // when it is UNKNOWN (live row, store without the capability, pre-column
+  // row), and absence must stay absence rather than becoming 0 / "".
+  const durationMs = optionalInteger(row, "duration_ms", response);
+  if (durationMs !== undefined) {
+    item.durationMs = durationMs;
+  }
+  const finishedAt = optionalString(row, "finished_at", response);
+  if (finishedAt !== undefined) {
+    item.finishedAt = finishedAt;
+  }
+  const triggerKind = optionalString(row, "trigger_kind", response);
+  if (triggerKind !== undefined && triggerKind !== "") {
+    item.triggerKind = triggerKind;
+  }
+  const retries = optionalInteger(row, "retries", response);
+  if (retries !== undefined) {
+    item.retries = retries;
+  }
+  const progress = optionalRecord(row, "node_progress", response);
+  if (progress !== undefined) {
+    item.nodeProgress = {
+      done: requireCount(progress, "done", response),
+      total: requireCount(progress, "total", response)
+    };
+  }
   return item;
 }
 
@@ -1278,11 +2056,20 @@ function listWorkflowPage(
   baseUrl: string,
   options?: ListWorkflowsOptions
 ): Promise<WorkflowListPage> {
+  const include = options?.include && options.include.length > 0 ? options.include.join(",") : undefined;
   const path = withQuery("/workflows", {
     page: options?.page === undefined ? undefined : String(options.page),
-    page_size: options?.pageSize === undefined ? undefined : String(options.pageSize)
+    page_size: options?.pageSize === undefined ? undefined : String(options.pageSize),
+    include,
+    window: options?.window
   });
-  return request<WorkflowListWire>(fetcher, joinUrl(baseUrl, path)).then(mapWorkflowList);
+  // `q` is the only free-text parameter, so it is encoded with
+  // encodeURIComponent rather than folded into `withQuery`'s URLSearchParams
+  // (which would send a space as `+`). Absent, empty and whitespace-only values
+  // are not sent: the server would treat them as no filter anyway.
+  const q = options?.q?.trim();
+  const requested = q ? `${path}${path.includes("?") ? "&" : "?"}q=${encodeURIComponent(q)}` : path;
+  return request<WorkflowListWire>(fetcher, joinUrl(baseUrl, requested)).then(mapWorkflowList);
 }
 
 type ListWorkflowsFunction = {
@@ -1314,6 +2101,11 @@ export function executionDetailToRuntimeSnapshot(detail: ExecutionDetail): Runti
   const snapshot: RuntimeSnapshot = {
     status: executionStatusToRuntimeStatus(detail.status)
   };
+  // Diagnostic metadata, carried only when the server recorded it: the 运行日志
+  // tab offers it for copying and for an external trace link.
+  if (detail.traceId !== undefined) {
+    snapshot.traceId = detail.traceId;
+  }
 
   if (detail.nodes !== undefined) {
     const nodes: Record<string, RuntimeNodeSnapshot> = {};
@@ -1462,7 +2254,7 @@ export function createXFlowApiClient(options: XFlowApiClientOptions): XFlowApiCl
         headers: {
           "content-type": "application/json"
         },
-        body: JSON.stringify(workflow ? splitForWire(workflow, saveOptions?.viewport) : {})
+        body: JSON.stringify(workflow ? splitForWire(workflow, saveOptions?.viewport, saveOptions?.sections) : {})
       }).then(mapRegisterWorkflow);
     },
     getWorkflow(id) {
@@ -1485,7 +2277,7 @@ export function createXFlowApiClient(options: XFlowApiClientOptions): XFlowApiCl
           headers: {
             "content-type": "application/json"
           },
-          body: JSON.stringify(splitForWire(workflow, saveOptions?.viewport))
+          body: JSON.stringify(splitForWire(workflow, saveOptions?.viewport, saveOptions?.sections))
         }
       ).then(mapRegisterWorkflow);
     },
@@ -1522,6 +2314,19 @@ export function createXFlowApiClient(options: XFlowApiClientOptions): XFlowApiCl
     },
     getExecution(id) {
       return request<ExecutionDetailWire>(fetcher, joinUrl(options.baseUrl, executionPath(id))).then(mapExecutionDetail);
+    },
+    getExecutionStats(statsOptions) {
+      const path = withQuery("/executions/stats", {
+        created_after: statsOptions.createdAfter,
+        created_before: statsOptions.createdBefore,
+        workflow_id: statsOptions.workflowId,
+        bucket: statsOptions.bucket
+      });
+      return request<unknown>(fetcher, joinUrl(options.baseUrl, path)).then(mapExecutionStats);
+    },
+    getOverview(overviewOptions) {
+      const path = withQuery("/overview", { window: overviewOptions?.window });
+      return request<OverviewWire>(fetcher, joinUrl(options.baseUrl, path)).then(mapOverview);
     },
     pauseExecution(id) {
       return request<ExecutionDetailWire>(
@@ -1582,10 +2387,18 @@ export function createXFlowApiClient(options: XFlowApiClientOptions): XFlowApiCl
       );
     },
     listExecutions(listOptions) {
+      // One `status` parameter per selected value: the server ORs them. The
+      // scalar `status` is kept first for backward compatibility with callers
+      // (and tests) that only know the single-value form.
+      const statusParams = [
+        ...(listOptions?.status === undefined ? [] : [listOptions.status]),
+        ...(listOptions?.statuses ?? [])
+      ];
       const path = withQuery("/executions", {
         page: listOptions?.page === undefined ? undefined : String(listOptions.page),
         page_size: listOptions?.pageSize === undefined ? undefined : String(listOptions.pageSize),
-        status: listOptions?.status,
+        status: statusParams.length === 0 ? undefined : statusParams,
+        q: listOptions?.q,
         workflow_id: listOptions?.workflowId,
         created_after: listOptions?.createdAfter,
         created_before: listOptions?.createdBefore
