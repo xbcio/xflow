@@ -98,6 +98,11 @@ type CancelingExecutionCanceler interface {
 // optional assertion on the narrower execution.Engine.
 type ExecutionExpirer = engine.ExecutionExpirer
 
+// The pass reaches the engine through a type assertion, so a signature drift on
+// *engine.Engine would not fail a build: the pass would silently report itself
+// unsupported. This assertion turns that into a compile error.
+var _ ExecutionExpirer = (*engine.Engine)(nil)
+
 // LeaseIndexRepairer is an optional backend capability that reconciles lease
 // expiry discovery indexes from authoritative running-node metadata. Backends
 // without a secondary index do not implement it.
