@@ -138,7 +138,7 @@ exports[`A6-generated node-types fixture > xflow.approval@1 snapshot 1`] = `
             "$bindState": "/parameters/mode",
           },
         },
-        "type": "Select",
+        "type": "Radio",
       },
       "f.parameters.timeout": {
         "checks": [
@@ -1093,15 +1093,6 @@ exports[`A6-generated node-types fixture > xflow.function@1 snapshot 1`] = `
   "spec": {
     "elements": {
       "f.parameters.code": {
-        "checks": [
-          {
-            "args": {
-              "format": "expression",
-            },
-            "message": "需要表达式，例如 \${{ $input.x }}",
-            "type": "format",
-          },
-        ],
         "props": {
           "description": "Inline Expr expression to evaluate; ignored when function_name is set",
           "expect": {
@@ -1885,13 +1876,6 @@ exports[`A6-generated node-types fixture > xflow.if@1 snapshot 1`] = `
             "message": "必填",
             "type": "required",
           },
-          {
-            "args": {
-              "format": "expression",
-            },
-            "message": "需要表达式，例如 \${{ $input.x }}",
-            "type": "format",
-          },
         ],
         "props": {
           "description": "Boolean expression to evaluate",
@@ -2065,15 +2049,6 @@ exports[`A6-generated node-types fixture > xflow.map@1 snapshot 1`] = `
         "type": "Switch",
       },
       "f.parameters.expression": {
-        "checks": [
-          {
-            "args": {
-              "format": "expression",
-            },
-            "message": "需要表达式，例如 \${{ $input.x }}",
-            "type": "format",
-          },
-        ],
         "props": {
           "description": "Expression evaluated once per item over $item/$index/$items; mutually exclusive with body, and exactly one of the two is required",
           "expect": {
@@ -2093,13 +2068,6 @@ exports[`A6-generated node-types fixture > xflow.map@1 snapshot 1`] = `
           {
             "message": "必填",
             "type": "required",
-          },
-          {
-            "args": {
-              "format": "expression",
-            },
-            "message": "需要表达式，例如 \${{ $input.x }}",
-            "type": "format",
           },
         ],
         "props": {
@@ -3144,13 +3112,6 @@ exports[`A6-generated node-types fixture > xflow.switch@1 snapshot 1`] = `
               "eq": "expression",
             },
           },
-          {
-            "args": {
-              "format": "expression",
-            },
-            "message": "需要表达式，例如 \${{ $input.x }}",
-            "type": "format",
-          },
         ],
         "props": {
           "description": "Expression for expression mode",
@@ -3308,15 +3269,6 @@ exports[`A6-generated node-types fixture > xflow.switch@1 snapshot 1`] = `
         "type": "ArrayTable",
       },
       "f.parameters.rules[].condition": {
-        "checks": [
-          {
-            "args": {
-              "format": "expression",
-            },
-            "message": "需要表达式，例如 \${{ $input.x }}",
-            "type": "format",
-          },
-        ],
         "props": {
           "description": "Boolean expression; a rule with an empty condition is skipped",
           "expect": {
@@ -3405,13 +3357,6 @@ exports[`A6-generated node-types fixture > xflow.transform.aggregate@1 snapshot 
           {
             "message": "必填",
             "type": "required",
-          },
-          {
-            "args": {
-              "format": "expression",
-            },
-            "message": "需要表达式，例如 \${{ $input.x }}",
-            "type": "format",
           },
         ],
         "props": {
@@ -3649,13 +3594,6 @@ exports[`A6-generated node-types fixture > xflow.transform.filter@1 snapshot 1`]
             "message": "必填",
             "type": "required",
           },
-          {
-            "args": {
-              "format": "expression",
-            },
-            "message": "需要表达式，例如 \${{ $input.x }}",
-            "type": "format",
-          },
         ],
         "props": {
           "description": "Boolean expression evaluated per item; item, index, and the item's own fields are in scope",
@@ -3677,13 +3615,6 @@ exports[`A6-generated node-types fixture > xflow.transform.filter@1 snapshot 1`]
           {
             "message": "必填",
             "type": "required",
-          },
-          {
-            "args": {
-              "format": "expression",
-            },
-            "message": "需要表达式，例如 \${{ $input.x }}",
-            "type": "format",
           },
         ],
         "props": {
@@ -3740,13 +3671,6 @@ exports[`A6-generated node-types fixture > xflow.transform.limit@1 snapshot 1`] 
           {
             "message": "必填",
             "type": "required",
-          },
-          {
-            "args": {
-              "format": "expression",
-            },
-            "message": "需要表达式，例如 \${{ $input.x }}",
-            "type": "format",
           },
         ],
         "props": {
@@ -3962,13 +3886,6 @@ exports[`A6-generated node-types fixture > xflow.transform.remove_duplicates@1 s
           {
             "message": "必填",
             "type": "required",
-          },
-          {
-            "args": {
-              "format": "expression",
-            },
-            "message": "需要表达式，例如 \${{ $input.x }}",
-            "type": "format",
           },
         ],
         "props": {
@@ -4310,13 +4227,6 @@ exports[`A6-generated node-types fixture > xflow.transform.sort@1 snapshot 1`] =
           {
             "message": "必填",
             "type": "required",
-          },
-          {
-            "args": {
-              "format": "expression",
-            },
-            "message": "需要表达式，例如 \${{ $input.x }}",
-            "type": "format",
           },
         ],
         "props": {
