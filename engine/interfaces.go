@@ -589,15 +589,18 @@ type DeadlineExpiredExecution struct {
 // or no longer exists, succeeds.
 //
 // Every path that writes the timeout terminal status (ExecutionStatusTimeout),
-// in a backend or in the engine, must write a non-empty reason that differs from
-// ExecutionDeadlineExceededError with it. A queue timeout writes
+// in a backend or in the engine, must write a non-empty reason with it, and that
+// reason must differ from ExecutionDeadlineExceededError. A queue timeout writes
 // ConcurrencyQueueTimeoutError, for example. ExpireExecution tells the timeout
 // this mechanism wrote from any other timeout by that reason alone: an execution
 // already in timeout with exactly ExecutionDeadlineExceededError is treated as
 // this mechanism's own unfinished work and has its cascade replayed (and its
-// parent notified), while any other reason is left as another mechanism's
-// conclusion. A timeout written with an empty or deadline-matching reason by
-// anything else would be cascaded here as if this mechanism had written it.
+// parent notified), while any other reason, an empty one included, is left as
+// another mechanism's conclusion and only has its entry acknowledged. The
+// non-empty requirement is for diagnosability: a reasonless timeout cannot be
+// attributed to anything. Only a reason equal to ExecutionDeadlineExceededError
+// is misjudged, because it would be cascaded here as if this mechanism had
+// written it.
 type ExecutionDeadlineExpirer interface {
 	ListDeadlineExceededExecutions(ctx context.Context, before time.Time, limit int) ([]DeadlineExpiredExecution, error)
 	AckDeadlineExpired(ctx context.Context, id types.ExecutionID) error
