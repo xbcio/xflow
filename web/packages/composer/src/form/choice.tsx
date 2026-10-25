@@ -5,7 +5,7 @@
 // are keyed by the JSON encoding of the value, so a boolean or a value that
 // is not among the options is shown as-is instead of being coerced.
 
-import { CloseCircleFilled } from "@ant-design/icons";
+import { CloseCircleIcon } from "@xflow/icons";
 import {
   InputNumber as AntInputNumber,
   Radio as AntRadio,
@@ -288,7 +288,7 @@ export interface SelectProps extends FieldProps {
   showSearch?: boolean;
 }
 
-const clearIcon = <CloseCircleFilled className="xflow-composer-clear-icon" aria-label="清除" />;
+const clearIcon = <CloseCircleIcon className="xflow-composer-clear-icon" aria-label="清除" />;
 
 function antOptions(options: readonly Option[]) {
   return options.map((option) => ({
@@ -444,7 +444,11 @@ function MultiField({
           <AntSelect<string[]>
             id={ids.controlId}
             mode={tags ? "tags" : "multiple"}
-            classNames={{ root: "xflow-composer-control", popup: { root: "xflow-composer-select-popup" } }}
+            classNames={{
+              root: "xflow-composer-control",
+              item: "xflow-composer-select-item",
+              popup: { root: "xflow-composer-select-popup" }
+            }}
             value={tags ? (list as string[]) : list.map(optionKey)}
             options={tags ? options.map((o) => ({ value: String(o.value), label: o.label ?? String(o.value) })) : antOptions(options)}
             optionRender={tags ? undefined : renderOption}

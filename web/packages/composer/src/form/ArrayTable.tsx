@@ -4,7 +4,7 @@
 // writing the whole array through its `value` binding. Removing the last
 // row writes [] which core turns into unset.
 
-import { ArrowDownOutlined, ArrowUpOutlined, DeleteOutlined, PlusOutlined } from "@ant-design/icons";
+import { DownIcon, PlusIcon, TrashIcon } from "@xflow/icons";
 import { Button } from "antd";
 import { z } from "zod";
 import { zodProps } from "../core";
@@ -97,7 +97,7 @@ function ArrayTableField({ node, props, value, onChange, defaultHint, issues, re
                             size="small"
                             type="text"
                             className="xflow-composer-icon-button"
-                            icon={<ArrowUpOutlined />}
+                            icon={<DownIcon style={{ transform: "rotate(180deg)" }} />}
                             aria-label={`上移第 ${row.index + 1} 行`}
                             disabled={row.index === 0}
                             onClick={() => move(row.index, -1)}
@@ -106,7 +106,7 @@ function ArrayTableField({ node, props, value, onChange, defaultHint, issues, re
                             size="small"
                             type="text"
                             className="xflow-composer-icon-button"
-                            icon={<ArrowDownOutlined />}
+                            icon={<DownIcon />}
                             aria-label={`下移第 ${row.index + 1} 行`}
                             disabled={row.index === rows.length - 1}
                             onClick={() => move(row.index, 1)}
@@ -118,7 +118,7 @@ function ArrayTableField({ node, props, value, onChange, defaultHint, issues, re
                         type="text"
                         danger
                         className="xflow-composer-icon-button"
-                        icon={<DeleteOutlined />}
+                        icon={<TrashIcon />}
                         aria-label={`删除第 ${row.index + 1} 行`}
                         disabled={!canRemove}
                         onClick={() => onChange?.(list.filter((_, index) => index !== row.index))}
@@ -134,7 +134,7 @@ function ArrayTableField({ node, props, value, onChange, defaultHint, issues, re
                 size="small"
                 type="dashed"
                 className="xflow-composer-add"
-                icon={<PlusOutlined />}
+                icon={<PlusIcon />}
                 onClick={() => onChange?.([...list, cloneJson(props.newRow ?? {})])}
               >
                 {props.addText ?? "添加"}

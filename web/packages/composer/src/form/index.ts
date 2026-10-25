@@ -28,7 +28,7 @@ export {
 } from "./choice";
 export { JsonEditor, parseJsonText, type JsonEditorProps } from "./JsonEditor";
 export { KeyValue, type KeyValueProps } from "./KeyValue";
-export { FieldGroup, Form, ObjectGroup, type FieldGroupProps, type FormProps, type ObjectGroupProps } from "./layout";
+export { FieldGroup, Form, ObjectGroup, Section, type FieldGroupProps, type FormProps, type ObjectGroupProps, type SectionProps } from "./layout";
 export { ElementError, Unsupported } from "./placeholders";
 export { FieldFrame, FieldLayoutContext, RawValue, type FieldFrameProps, type FieldIds, type FieldLayout, type FieldProps, type Option } from "./shared";
 export { CodeEditor, Input, Password, TextArea, type CodeEditorProps, type InputProps, type TextAreaProps } from "./text";

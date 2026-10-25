@@ -33,6 +33,15 @@ const inputShape = {
 
 type Variant = "input" | "textarea" | "password" | "code";
 
+/**
+ * C12: the mockup's `.ctl.area` has a 64px floor, while AntD's `minRows: 3`
+ * measured ~77px. rc-textarea writes its own inline `minHeight` from
+ * `autoSize.minRows` and merges it after this style, so the default textarea
+ * leaves `minRows` out and lets this floor (plus autoSize's 16-row ceiling)
+ * size it. An explicit `rows` prop still asks for that many rows.
+ */
+const TEXTAREA_MIN_HEIGHT = "var(--xflow-composer-textarea-min-height, 64px)";
+
 const classes: Record<Variant, string> = {
   input: "xflow-composer-input",
   textarea: "xflow-composer-textarea",
@@ -107,7 +116,8 @@ function TextField({
               <AntInput.TextArea
                 {...common}
                 rootClassName="xflow-composer-control"
-                autoSize={{ minRows: props.rows ?? 3, maxRows: 16 }}
+                autoSize={props.rows === undefined ? { maxRows: 16 } : { minRows: props.rows, maxRows: 16 }}
+                style={{ minHeight: TEXTAREA_MIN_HEIGHT }}
                 onChange={(event) => onChange?.(event.target.value)}
               />
             );

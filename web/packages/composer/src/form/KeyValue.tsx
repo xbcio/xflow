@@ -11,7 +11,7 @@
 // contains complete rows, and nothing is written while a key is duplicated.
 // Removing the last row writes {} which core turns into unset.
 
-import { DeleteOutlined, PlusOutlined, WarningOutlined } from "@ant-design/icons";
+import { PlusIcon, TrashIcon, WarnIcon } from "@xflow/icons";
 import { Button, Input as AntInput } from "antd";
 import { useId, useRef, useState, type ReactNode } from "react";
 import { z } from "zod";
@@ -213,7 +213,7 @@ function KeyValueField({ node, props, value, onChange, defaultHint, issues, read
                       size="small"
                       type="text"
                       className="xflow-composer-icon-button"
-                      icon={<DeleteOutlined />}
+                      icon={<TrashIcon />}
                       aria-label={entry.key ? `删除 ${entry.key}` : `删除第 ${index + 1} 行`}
                       onClick={() => commit(current.entries.filter((item) => item.id !== entry.id))}
                     />
@@ -223,7 +223,7 @@ function KeyValueField({ node, props, value, onChange, defaultHint, issues, read
             })}
             {rowErrors.map((error) => (
               <span key={error.id} id={error.id} className="xflow-composer-row-error" role="alert">
-                <WarningOutlined aria-hidden className="xflow-composer-row-error-icon" />
+                <WarnIcon aria-hidden className="xflow-composer-row-error-icon" />
                 第 {error.index + 1} 行：{error.message}
               </span>
             ))}
@@ -232,7 +232,7 @@ function KeyValueField({ node, props, value, onChange, defaultHint, issues, read
               <Button
                 size="small"
                 className="xflow-composer-add xflow-composer-key-value-add"
-                icon={<PlusOutlined />}
+                icon={<PlusIcon />}
                 onClick={() => setRows({ source: current.source, entries: [...current.entries, { id: nextId(), key: "", value: undefined }] })}
               >
                 {props.addText ?? "添加"}

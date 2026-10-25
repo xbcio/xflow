@@ -234,7 +234,7 @@ for (const kernel of kernels) {
       const add = one<HTMLElement>(fieldOf(m.container, "kv"), ".xflow-composer-add");
       expect(add.classList.contains("ant-btn-dashed")).toBe(false);
       expect(add.classList.contains("ant-btn-sm")).toBe(true);
-      expect(add.querySelector(".anticon-plus")).not.toBeNull();
+      expect(add.querySelector('[data-xflow-icon="plus"]')).not.toBeNull();
     });
   });
 

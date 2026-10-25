@@ -1,6 +1,6 @@
 // Structural components: Form, FieldGroup, ObjectGroup.
 
-import { DownOutlined, RightOutlined, WarningOutlined } from "@ant-design/icons";
+import { DownIcon, WarnIcon } from "@xflow/icons";
 import { Button } from "antd";
 import { useCallback, useContext, useId, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { z } from "zod";
@@ -73,11 +73,13 @@ export const Form: ComposerComponent<FormProps> = {
 
 // ------------------------------------------------------------- sections
 
-interface SectionProps {
+export interface SectionProps {
   className: string;
   nodeId: string;
   title?: string;
   description?: string;
+  /** Short right-aligned status in the header (e.g. "继承工作流 · 重试 2 次"). */
+  summary?: string;
   collapsible?: boolean;
   defaultCollapsed?: boolean;
   issues: readonly Issue[];
@@ -152,7 +154,7 @@ function useHiddenErrors(): [IssueReporter, number, () => string | undefined] {
 }
 
 /** Titled, optionally collapsible section. Collapsed content stays mounted (drafts survive). */
-function Section(props: SectionProps) {
+export function Section(props: SectionProps) {
   const base = useId();
   const [collapsed, setCollapsed] = useState(props.defaultCollapsed === true);
   const [report, hiddenErrors, firstErrorPath] = useHiddenErrors();
@@ -189,7 +191,7 @@ function Section(props: SectionProps) {
               aria-describedby={badge ? badgeId : undefined}
               onClick={() => setCollapsed((value) => !value)}
             >
-              {open ? <DownOutlined aria-hidden /> : <RightOutlined aria-hidden />}
+              {open ? <DownIcon aria-hidden /> : <DownIcon aria-hidden style={{ transform: "rotate(-90deg)" }} />}
               <span id={titleId} className="xflow-composer-section-title">
                 {props.title}
               </span>
@@ -199,6 +201,7 @@ function Section(props: SectionProps) {
               {props.title}
             </h3>
           )}
+          {props.summary ? <span className="xflow-composer-section-summary">{props.summary}</span> : null}
           {badge ? (
             <button
               type="button"
@@ -211,7 +214,7 @@ function Section(props: SectionProps) {
                 setCollapsed(false);
               }}
             >
-              <WarningOutlined aria-hidden className="xflow-composer-section-badge-icon" />
+              <WarnIcon aria-hidden className="xflow-composer-section-badge-icon" />
               {hiddenErrors} 个错误
             </button>
           ) : null}
@@ -230,6 +233,7 @@ function Section(props: SectionProps) {
 const sectionShape = {
   title: z.string().optional(),
   description: z.string().optional(),
+  summary: z.string().optional(),
   collapsible: z.boolean().optional(),
   defaultCollapsed: z.boolean().optional()
 };
@@ -237,6 +241,8 @@ const sectionShape = {
 export interface FieldGroupProps {
   title?: string;
   description?: string;
+  /** Short right-aligned status in the section header. */
+  summary?: string;
   collapsible?: boolean;
   defaultCollapsed?: boolean;
 }
@@ -288,6 +294,7 @@ function ObjectGroupView({
       nodeId={nodeId}
       title={title}
       description={props.description}
+      summary={props.summary}
       collapsible={props.collapsible}
       defaultCollapsed={props.defaultCollapsed}
       issues={issues}

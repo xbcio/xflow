@@ -61,7 +61,7 @@ describe("composer import boundaries", () => {
   });
 
   it("composer/form imports only react, antd, icons, zod and the core/react subpaths", () => {
-    const allowed = /^(react|antd|@ant-design\/icons|zod|\.\.\/core|\.\.\/react|\.\/.+)$/;
+    const allowed = /^(react|antd|@xflow\/icons|zod|\.\.\/core|\.\.\/react|\.\/.+)$/;
     const violations = files
       .filter(([file]) => file.startsWith("./form/"))
       .flatMap(([file, text]) => importsOf(text).filter((spec) => !allowed.test(spec)).map((spec) => `${file}: ${spec}`));

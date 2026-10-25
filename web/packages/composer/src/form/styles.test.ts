@@ -153,6 +153,18 @@ describe("control height", () => {
     // No literal control height anywhere: the host decides (P1-c S3).
     expect(css).not.toMatch(/(?:min-)?height:\s*(24|28|32)px/);
   });
+
+  it("draws the baseline .ctl: 6px radius, a 10px inline inset and 6px textarea padding", () => {
+    expect(css).toMatch(
+      /\.xflow-composer-control\s*\{[^}]*border-radius:\s*var\(--xflow-composer-control-radius,\s*var\(--xflow-radius-sm,\s*6px\)\)/
+    );
+    expect(css).toMatch(
+      /\.xflow-composer-control:is\(input,\s*textarea\)\s*\{[^}]*padding-inline:\s*var\(--xflow-composer-control-padding,\s*10px\)/
+    );
+    expect(css).toMatch(
+      /\.xflow-composer-control:is\(textarea\)\s*\{[^}]*padding-block:\s*var\(--xflow-composer-control-block-padding,\s*6px\)/
+    );
+  });
 });
 
 describe("switch row (P1-c S6)", () => {

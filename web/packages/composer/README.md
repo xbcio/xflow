@@ -164,7 +164,8 @@ dropped, never applied to a neighbour.
 `Form`, `FieldGroup`, `Input`, `TextArea`, `Password`, `InputNumber`, `Switch`,
 `Select`, `Radio`, `MultiSelect`, `Tags`, `KeyValue`, `ObjectGroup`,
 `ArrayTable`, `JsonEditor`, `CodeEditor`, `Unsupported`, `ElementError`.
-`antd` / `@ant-design/icons` are (optional) peers needed by this subpath only.
+`antd` is an (optional) peer and `@xflow/icons` is a peer, both needed by
+this subpath only.
 
 ```ts
 import { createFormRegistry } from "@xflow/composer/form";

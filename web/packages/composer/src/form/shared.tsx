@@ -7,7 +7,7 @@
 // Nothing here writes on mount: every onChange call is the direct result of
 // a user event.
 
-import { QuestionCircleOutlined, WarningOutlined } from "@ant-design/icons";
+import { HelpIcon, WarnIcon } from "@xflow/icons";
 import { Button, Tooltip } from "antd";
 import { createContext, useContext, useEffect, useId, type CSSProperties, type ReactNode } from "react";
 import { z } from "zod";
@@ -248,7 +248,7 @@ export function FieldFrame(props: FieldFrameProps) {
         {label}
         <Tooltip title={props.description} rootClassName="xflow-composer-field-help-tooltip">
           <button type="button" className="xflow-composer-field-help" aria-label={`${props.label}说明`}>
-            <QuestionCircleOutlined aria-hidden="true" />
+            <HelpIcon aria-hidden="true" />
           </button>
         </Tooltip>
       </div>
@@ -317,7 +317,7 @@ export function IssueList({ id, issues }: { id: string; issues: readonly Issue[]
           key={`${index}:${issue.check ?? ""}:${issue.message}`}
           className={cx("xflow-composer-issue", `xflow-composer-issue--${issue.severity}`)}
         >
-          <WarningOutlined aria-hidden className="xflow-composer-issue-icon" />
+          <WarnIcon aria-hidden className="xflow-composer-issue-icon" />
           {issue.message}
           {issue.detail ? <span className="xflow-composer-issue-detail">{issue.detail}</span> : null}
         </li>

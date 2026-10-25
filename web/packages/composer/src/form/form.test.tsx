@@ -325,7 +325,7 @@ for (const kernel of kernels) {
             root: "form",
             elements: {
               form: { type: "Form", props: { layout: "horizontal", labelWidth: 96, title: "节点" }, children: ["g"] },
-              g: { type: "FieldGroup", props: { title: "基础", collapsible: true }, children: ["name"] },
+              g: { type: "FieldGroup", props: { title: "基础", summary: "继承工作流 · 重试 2 次", collapsible: true }, children: ["name"] },
               name: {
                 type: "Input",
                 props: { label: "Name", required: true, description: "说明", value: { $bindState: "/name" } },
@@ -340,6 +340,8 @@ for (const kernel of kernels) {
         const form = fieldOf(m.container, "form");
         expect(form.getAttribute("style")).toContain("--xflow-composer-label-width: 96px");
         expect(within(m.container).getByRole("group", { name: "节点" })).toBe(form);
+        // The section header carries a short right-aligned status line.
+        expect(within(form).getByText("继承工作流 · 重试 2 次")).toBeTruthy();
         const control = within(form).getByLabelText(/^Name/) as HTMLInputElement;
         expect(control.tagName).toBe("INPUT");
         expect(fieldOf(m.container, "name").querySelector(".xflow-composer-field-required")).not.toBeNull();
@@ -454,6 +456,27 @@ for (const kernel of kernels) {
     });
   });
 }
+
+describe("multiline textarea height (C12)", () => {
+  for (const kernel of kernels) {
+    it(`keeps an empty TextArea at the mockup's 64px floor (${kernel.name})`, async () => {
+      const m = mountComposer({
+        kernel,
+        registry,
+        spec: formSpec({ f: { type: "TextArea", props: { label: "备注", value: { $bindState: "/v" } } } }, ["f"]),
+        value: { v: "" }
+      });
+      await m.flush();
+
+      const area = textarea(fieldOf(m.container, "f"));
+      // C12: the mockup's .ctl.area floor. It is inline because rc-textarea
+      // merges its own autoSize.minHeight after the style prop; autoSize keeps
+      // only the 16-row ceiling so the field still grows with its content.
+      expect(area.style.minHeight).toBe("var(--xflow-composer-textarea-min-height, 64px)");
+      expect(consoleError).not.toHaveBeenCalled();
+    });
+  }
+});
 
 describe("option descriptions", () => {
   const described = [

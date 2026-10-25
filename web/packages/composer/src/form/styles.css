@@ -27,6 +27,16 @@
   line-height: 1.5;
 }
 
+/* @xflow/icons ships a 16px box of its own; inside the form an icon sizes from
+ * the surrounding font-size (12px in the section badge and help button, 14px
+ * in issue rows and small buttons), exactly as the AntD glyphs it replaced
+ * did. Colour is the inherited currentColor. */
+.xflow-composer-form .xflow-icon {
+  flex: none;
+  height: 1em;
+  width: 1em;
+}
+
 /* ---------------------------------------------------------------- sections */
 
 .xflow-composer-section {
@@ -49,7 +59,7 @@
   overflow: hidden;
   border: 1px solid var(--xflow-border, #e2e5ea);
   border-radius: var(--xflow-composer-section-radius, var(--xflow-radius-md, 8px));
-  background: var(--xflow-panel-raised, #f8f9fb);
+  background: var(--xflow-panel-raised, #eef0f3);
 }
 
 .xflow-composer-field-group > .xflow-composer-section-header {
@@ -86,6 +96,16 @@
   font-size: var(--xflow-composer-title-size, var(--xflow-font-md, 13px));
   font-weight: 600;
   line-height: 20px;
+}
+
+/* The header's right-aligned status line (e.g. 继承工作流 · 重试 2 次). */
+.xflow-composer-section-summary {
+  margin-left: auto;
+  color: var(--xflow-text-tertiary, #616b79);
+  font-size: var(--xflow-font-sm, 12px);
+  font-weight: 400;
+  line-height: 20px;
+  white-space: nowrap;
 }
 
 .xflow-composer-section-toggle {
@@ -136,7 +156,7 @@
   margin-left: auto;
   padding: 0 8px;
   border: 1px solid color-mix(in srgb, var(--xflow-danger, #d1333b) 55%, transparent);
-  border-radius: var(--xflow-radius-pill, 999px);
+  border-radius: var(--xflow-radius-pill, 9999px);
   background: var(--xflow-danger-bg-subtle, color-mix(in srgb, #d1333b 12%, transparent));
   color: var(--xflow-danger-fg, color-mix(in srgb, #d1333b 70%, #16191d));
   font-family: inherit;
@@ -159,7 +179,7 @@
   padding: 10px 12px;
   border: 1px solid var(--xflow-border, #e2e5ea);
   border-radius: var(--xflow-radius-sm, 6px);
-  background: var(--xflow-panel-raised, #f8f9fb);
+  background: var(--xflow-panel-raised, #eef0f3);
 }
 
 .xflow-composer-object-group.is-error {
@@ -228,12 +248,12 @@
   height: 16px;
   margin: 0;
   padding: 0;
-  color: var(--xflow-text-tertiary, #667085);
+  color: var(--xflow-text-tertiary, #616b79);
   font-size: var(--xflow-font-sm, 12px);
   line-height: 1;
   background: none;
   border: 0;
-  border-radius: var(--xflow-radius-xs, 4px);
+  border-radius: var(--xflow-radius-pill, 9999px);
   cursor: help;
 }
 
@@ -260,8 +280,19 @@
 .xflow-composer-control {
   width: 100%;
   min-width: 0;
-  /* The host sets the control height (§6.4); the editor passes its field height. */
+  /* The baseline .ctl: 6px corner and a 10px horizontal inset. The host sets
+     the control height (§6.4); the editor passes its field height. */
+  border-radius: var(--xflow-composer-control-radius, var(--xflow-radius-sm, 6px));
   min-height: var(--xflow-composer-control-height, var(--xflow-control-height, 32px));
+}
+
+.xflow-composer-control:is(input, textarea) {
+  padding-inline: var(--xflow-composer-control-padding, 10px);
+}
+
+/* Text areas keep the baseline's 6px vertical inset (the .ctl.area rule). */
+.xflow-composer-control:is(textarea) {
+  padding-block: var(--xflow-composer-control-block-padding, 6px);
 }
 
 /* Select popup row with a description (choice.tsx renderOption). */
@@ -287,7 +318,7 @@
  * Its 4px lead is .xflow-composer-field-body's own gap; the baseline's
  * margin-top would double it to 8px. */
 .xflow-composer-field-hint {
-  color: var(--xflow-text-tertiary, #667085);
+  color: var(--xflow-text-tertiary, #616b79);
   font-size: var(--xflow-font-sm, 12px);
   line-height: 18px;
 }
@@ -341,7 +372,7 @@
 
 .xflow-composer-issue-detail {
   margin-left: 6px;
-  color: var(--xflow-text-tertiary, #667085);
+  color: var(--xflow-text-tertiary, #616b79);
 }
 
 .xflow-composer-visually-hidden {
@@ -385,16 +416,31 @@
 
 /* Effectively off — including unset with no default: the baseline greys it. */
 .xflow-composer-switch-row.is-off .xflow-composer-field-label {
-  color: var(--xflow-text-tertiary, #667085);
+  color: var(--xflow-text-tertiary, #616b79);
 }
 
 .xflow-composer-switch-state {
-  color: var(--xflow-text-tertiary, #667085);
+  color: var(--xflow-text-tertiary, #616b79);
   font-size: var(--xflow-font-sm, 12px);
 }
 
 .xflow-composer-switch.is-unset .xflow-composer-switch-control {
   opacity: .72;
+}
+
+/* AntD hard-codes the switch track to 100px; the design scale calls it pill. */
+.xflow-composer-switch-control {
+  border-radius: var(--xflow-radius-pill, 9999px);
+}
+
+.xflow-composer-switch-control > * {
+  border-radius: inherit;
+}
+
+/* Multi-select values are baseline `.tag` marks: the xs step, not the control
+   step that AntD derives from borderRadiusSM. */
+.xflow-composer-select-item {
+  border-radius: var(--xflow-radius-xs, 4px);
 }
 
 .xflow-composer-reset {
@@ -404,7 +450,7 @@
 }
 
 .xflow-composer-clear-icon {
-  color: var(--xflow-text-tertiary, #667085);
+  color: var(--xflow-text-tertiary, #616b79);
 }
 
 /* -------------------------------------------------------------- code/json */
@@ -423,7 +469,7 @@
   padding: 0 6px;
   border-radius: var(--xflow-radius-xs, 4px);
   background: var(--xflow-field, #ffffff);
-  color: var(--xflow-text-tertiary, #667085);
+  color: var(--xflow-text-tertiary, #616b79);
   font-size: var(--xflow-font-xs, 11px);
   line-height: 18px;
   pointer-events: none;
@@ -491,13 +537,13 @@
   padding: 8px 10px;
   border: 1px dashed var(--xflow-border, #e2e5ea);
   border-radius: var(--xflow-radius-xs, 4px);
-  color: var(--xflow-text-tertiary, #667085);
+  color: var(--xflow-text-tertiary, #616b79);
   font-size: var(--xflow-font-sm, 12px);
   text-align: center;
 }
 
 .xflow-composer-icon-button {
-  color: var(--xflow-text-tertiary, #667085);
+  color: var(--xflow-text-tertiary, #616b79);
 }
 
 /* ---------------------------------------------------------------- array */
@@ -545,7 +591,7 @@
 .xflow-composer-array-head {
   padding-top: 4px;
   padding-bottom: 4px;
-  background: var(--xflow-panel-raised, #f8f9fb);
+  background: var(--xflow-panel-raised, #eef0f3);
 }
 
 .xflow-composer-array-heading {
