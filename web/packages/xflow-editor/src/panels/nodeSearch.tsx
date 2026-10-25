@@ -1,5 +1,5 @@
 import * as React from "react";
-import { SearchOutlined } from "@ant-design/icons";
+import { SearchIcon } from "@xflow/icons";
 import { Input, type InputRef } from "antd";
 
 export interface NodeSearchOption {
@@ -62,7 +62,7 @@ export const NodeSearch = React.forwardRef<InputRef, {
         aria-label="定位节点"
         autoFocus
         placeholder="定位节点 ⌘K"
-        prefix={<SearchOutlined />}
+        prefix={<SearchIcon />}
         ref={ref}
         role="combobox"
         value={query}

@@ -1,5 +1,5 @@
 import * as React from "react";
-import { CloseOutlined, SafetyCertificateOutlined, WarningOutlined } from "@ant-design/icons";
+import { ShieldIcon, WarnIcon, XMarkIcon } from "@xflow/icons";
 import { Button } from "antd";
 
 /**
@@ -29,9 +29,9 @@ export interface BannerSpec {
 }
 
 const toneIcon: Record<BannerTone, React.ReactNode> = {
-  warning: <WarningOutlined />,
-  danger: <CloseOutlined />,
-  neutral: <SafetyCertificateOutlined />
+  warning: <WarnIcon />,
+  danger: <XMarkIcon />,
+  neutral: <ShieldIcon />
 };
 
 export function Banner({
@@ -60,8 +60,8 @@ export function Banner({
   return (
     // alert for the states that need attention now, status for the quiet one.
     <div className="xflow-editor-banner" data-tone={tone} ref={rootRef} role={tone === "neutral" ? "status" : "alert"}>
-      {/* The wrapper carries the tone colour: `@ant-design/icons` injects an
-          unlayered `.anticon { color: inherit }`, which outranks every layer. */}
+      {/* The wrapper carries the tone colour; the sprite glyph strokes in
+          currentColor, so the icon itself inherits it. */}
       <span aria-hidden="true" className="xflow-editor-banner__icon">
         {toneIcon[tone]}
       </span>

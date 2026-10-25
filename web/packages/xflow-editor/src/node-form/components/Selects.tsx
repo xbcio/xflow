@@ -10,7 +10,7 @@
 // A current value missing from the list is shown as-is with a note, never
 // dropped or coerced.
 
-import { CloseCircleFilled } from "@ant-design/icons";
+import { CloseCircleIcon } from "@xflow/icons";
 import { Select as AntSelect } from "antd";
 import { z } from "zod";
 import { zodProps } from "@xflow/composer/core";
@@ -19,7 +19,7 @@ import type { ComposerComponent, ComposerComponentProps } from "@xflow/composer/
 import type { PortItem } from "../components";
 import { chromeShape, hintText, NODEFORM, type ChromeProps } from "./shared";
 
-const clearIcon = <CloseCircleFilled className={`${NODEFORM}-clear-icon`} aria-label="清除" />;
+const clearIcon = <CloseCircleIcon className={`${NODEFORM}-clear-icon`} aria-label="清除" />;
 
 const isString = (value: unknown): value is string => typeof value === "string";
 const isStringList = (value: unknown): value is string[] => Array.isArray(value) && value.every(isString);

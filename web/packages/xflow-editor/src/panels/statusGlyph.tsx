@@ -1,18 +1,18 @@
 import {
-  CheckOutlined,
-  ClockCircleOutlined,
-  CloseOutlined,
-  FieldTimeOutlined,
-  HourglassOutlined,
-  InboxOutlined,
-  LoadingOutlined,
-  MinusCircleOutlined,
-  PauseCircleOutlined,
-  PushpinOutlined,
-  StepForwardOutlined,
-  StopOutlined,
-  WarningOutlined
-} from "@ant-design/icons";
+  ArchiveIcon,
+  BanIcon,
+  CheckIcon,
+  ClockIcon,
+  HourglassIcon,
+  PauseIcon,
+  PinIcon,
+  SkipIcon,
+  SpinIcon,
+  StopIcon,
+  TimeoutIcon,
+  WarnIcon,
+  XMarkIcon
+} from "@xflow/icons";
 import type { StatusIconKey } from "@xflow/core";
 import type { ReactNode } from "react";
 
@@ -23,17 +23,17 @@ import type { ReactNode } from "react";
  * fails the typecheck until it has a glyph.
  */
 export const statusGlyph: Record<StatusIconKey, ReactNode> = {
-  clock: <ClockCircleOutlined />,
-  loading: <LoadingOutlined />,
-  hourglass: <HourglassOutlined />,
-  pause: <PauseCircleOutlined />,
-  check: <CheckOutlined />,
-  pin: <PushpinOutlined />,
-  warning: <WarningOutlined />,
-  close: <CloseOutlined />,
-  skip: <StepForwardOutlined />,
-  stop: <StopOutlined />,
-  archive: <InboxOutlined />,
-  disabled: <MinusCircleOutlined />,
-  "clock-close": <FieldTimeOutlined />
+  clock: <ClockIcon />,
+  loading: <SpinIcon />,
+  hourglass: <HourglassIcon />,
+  pause: <PauseIcon />,
+  check: <CheckIcon />,
+  pin: <PinIcon />,
+  warning: <WarnIcon />,
+  close: <XMarkIcon />,
+  skip: <SkipIcon />,
+  stop: <StopIcon />,
+  archive: <ArchiveIcon />,
+  disabled: <BanIcon />,
+  "clock-close": <TimeoutIcon />
 };

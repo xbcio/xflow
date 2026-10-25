@@ -1,5 +1,5 @@
 import * as React from "react";
-import { HistoryOutlined } from "@ant-design/icons";
+import { HistoryIcon } from "@xflow/icons";
 import { Button, Popconfirm, Tooltip } from "antd";
 import { versionHashPrefix, versionLabel } from "../versioning";
 
@@ -65,7 +65,7 @@ export function VersionHistory({
     <section aria-label="版本历史" className="xflow-editor-version-history">
       <header className="xflow-editor-version-history__head">
         <span aria-hidden="true" className="xflow-editor-version-history__icon">
-          <HistoryOutlined />
+          <HistoryIcon />
         </span>
         <h3 className="xflow-editor-version-history__title">版本历史</h3>
         {versions ? <span className="xflow-editor-version-history__count">{versions.total}</span> : null}

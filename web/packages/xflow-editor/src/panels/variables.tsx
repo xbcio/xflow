@@ -1,14 +1,5 @@
 import * as React from "react";
-import {
-  CodeOutlined,
-  CopyOutlined,
-  DeleteOutlined,
-  FunctionOutlined,
-  KeyOutlined,
-  PlusOutlined,
-  ProfileOutlined,
-  SettingOutlined
-} from "@ant-design/icons";
+import { AuditIcon, CodeIcon, CopyIcon, GearIcon, KeyIcon, PlusIcon, TrashIcon } from "@xflow/icons";
 import { Button, Input, Select, Switch, Tooltip, message } from "antd";
 import type { WorkflowCredential, WorkflowDef, WorkflowParam } from "@xflow/core";
 import {
@@ -256,7 +247,7 @@ function CopyReferenceButton({
           aria-label={ariaLabel}
           className="xflow-editor-variable-action"
           disabled={!onCopy}
-          icon={<CopyOutlined />}
+          icon={<CopyIcon />}
           size="small"
           type="text"
           onClick={() => onCopy?.(reference)}
@@ -273,7 +264,7 @@ export function DeleteRowButton({ ariaLabel, readOnly, onDelete }: { ariaLabel: 
       className="xflow-editor-variable-action xflow-editor-variable-action--danger"
       danger
       disabled={readOnly}
-      icon={<DeleteOutlined />}
+      icon={<TrashIcon />}
       size="small"
       type="text"
       onClick={onDelete}
@@ -288,7 +279,7 @@ export function SourceToggle({ ariaLabel, pressed, onToggle }: { ariaLabel: stri
         aria-label={ariaLabel}
         aria-pressed={pressed}
         className={`xflow-editor-variable-action xflow-editor-source-toggle ${pressed ? "is-active" : ""}`}
-        icon={<CodeOutlined />}
+        icon={<CodeIcon />}
         size="small"
         type="text"
         onClick={onToggle}
@@ -303,7 +294,7 @@ export function AddRowButton({ label, readOnly, onAdd }: { label: string; readOn
       aria-label={label}
       className="xflow-editor-variable-add"
       disabled={readOnly}
-      icon={<PlusOutlined />}
+      icon={<PlusIcon />}
       size="small"
       type="dashed"
       onClick={onAdd}
@@ -440,13 +431,13 @@ export function VariablesPanel({
       bodyClassName="xflow-editor-variables__body"
       className="xflow-editor-variables"
       count={readOnly ? `${titleCount} · 只读` : titleCount}
-      icon={<FunctionOutlined />}
+      icon={<CodeIcon />}
       title="变量"
     >
       {messageHolder}
       <SectionCard
         ariaLabel="输入参数"
-        icon={<ProfileOutlined />}
+        icon={<AuditIcon />}
         meta={paramNames.length}
         title="输入参数"
         actions={<SourceToggle ariaLabel="以 JSON 编辑输入参数" pressed={paramsSource} onToggle={() => setParamsSource((on) => !on)} />}
@@ -565,7 +556,7 @@ export function VariablesPanel({
 
       <SectionCard
         ariaLabel="变量"
-        icon={<FunctionOutlined />}
+        icon={<CodeIcon />}
         meta={Object.keys(vars).length}
         title="变量"
         actions={<SourceToggle ariaLabel="以 JSON 编辑变量" pressed={contextSource} onToggle={() => setContextSource((on) => !on)} />}
@@ -598,7 +589,7 @@ export function VariablesPanel({
 
       <SectionCard
         ariaLabel="配置"
-        icon={<SettingOutlined />}
+        icon={<GearIcon />}
         meta={Object.keys(config).length}
         title="配置"
         actions={<SourceToggle ariaLabel="以 JSON 编辑配置" pressed={contextSource} onToggle={() => setContextSource((on) => !on)} />}
@@ -619,7 +610,7 @@ export function VariablesPanel({
 
       <SectionCard
         ariaLabel="密钥引用"
-        icon={<KeyOutlined />}
+        icon={<KeyIcon />}
         meta={credentialNames.length}
         title="密钥引用"
         actions={<SourceToggle ariaLabel="以 JSON 编辑密钥引用" pressed={credentialsSource} onToggle={() => setCredentialsSource((on) => !on)} />}
