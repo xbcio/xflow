@@ -5,11 +5,13 @@ import {
   executionDetailToRuntimeSnapshot,
   executionStatusToRuntimeStatus,
   type ExecutionDetail,
+  type ExecutionListItem,
 } from '@xflow/api';
 import {
   XFlowEditor,
   type XFlowApprovalSignal,
   type XFlowEditorMode,
+  type XFlowEditorSaveContext,
   type XFlowEditorSaveResult,
   type XFlowExecutionListQuery,
   type XFlowExecutionListState,
@@ -23,9 +25,11 @@ import type {
   RuntimeSnapshot,
   Viewport,
   WorkflowDef,
+  WorkflowEditorSection,
 } from '@xflow/core';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
+import { useActionToast } from '../../components/useActionToast';
 import { authorizedFetch } from '../../services/http';
 import { saveThenRun, type SavedWorkflowResult } from './run';
 
@@ -95,6 +99,14 @@ export default function WorkflowDetailPage() {
   // never trigger a re-render of its own.
   const viewportRef = useRef<Viewport | undefined>(undefined);
   const [defaultViewport, setDefaultViewport] = useState<Viewport>();
+  // The visual canvas sections carried beside the definition
+  // (editor_metadata.sections). Kept exactly like the viewport: the ref is what
+  // a save persists -- including host-initiated saves such as Run, which have
+  // no editor save context -- and the state feeds the editor's `sections` prop.
+  // Dropping either means the next save rebuilds editor_metadata without its
+  // sections and silently loses the user's grouping boxes.
+  const sectionsRef = useRef<WorkflowEditorSection[] | undefined>(undefined);
+  const [sections, setSections] = useState<WorkflowEditorSection[]>();
   // The workflow id whose definition is already in state. A create redirects
   // `/workflows/new` to `/workflows/{id}`; that route change re-runs the load
   // effect without changing the definition, and a refetch there would flip
@@ -110,6 +122,7 @@ export default function WorkflowDetailPage() {
   const saveChainRef = useRef<Promise<void>>(Promise.resolve());
   const { initialState, refresh } = useModel('@@initialState');
   const { message, modal } = App.useApp();
+  const toast = useActionToast();
   // What the server last had (loaded or saved), to tell an unsaved draft from a clean one.
   const persistedRef = useRef<string | undefined>(undefined);
   // The run bar follows one execution at a time. `trackedExecutionId` is what
@@ -117,6 +130,10 @@ export default function WorkflowDetailPage() {
   // stops (the terminal detail stays for the editor's 5s bar).
   const [trackedExecutionId, setTrackedExecutionId] = useState<string>();
   const [execution, setExecution] = useState<ExecutionDetail>();
+  // The newest recorded execution, read once when the definition loads so the
+  // Inspector overview can show 最近运行 before 运行记录 is ever opened. It is a
+  // list projection, not a tracked run: it never drives the run bar.
+  const [latestRun, setLatestRun] = useState<ExecutionListItem>();
   // §6.10 查看: the archived label being displayed. The editor turns read-only
   // and swaps its value; the live record is untouched until a rollback.
   const [historicalVersion, setHistoricalVersion] = useState<string>();
@@ -222,6 +239,8 @@ export default function WorkflowDetailPage() {
     setExecution(undefined);
     setTrackedExecutionId(undefined);
     setHistoricalVersion(undefined);
+    // The previous workflow's newest run must not label this one.
+    setLatestRun(undefined);
     // A different route id is a different workflow: its replay selection, list
     // and snapshot must not carry over from the previous one.
     const urlExec = execFromSearch(history.location.search);
@@ -241,6 +260,8 @@ export default function WorkflowDetailPage() {
       setWorkflow(empty);
       viewportRef.current = undefined;
       setDefaultViewport(undefined);
+      sectionsRef.current = undefined;
+      setSections(undefined);
       setLoadError(undefined);
       setLoading(false);
       return;
@@ -260,6 +281,8 @@ export default function WorkflowDetailPage() {
       setWorkflow(fresh);
       viewportRef.current = loaded.viewport;
       setDefaultViewport(loaded.viewport);
+      sectionsRef.current = loaded.sections;
+      setSections(loaded.sections);
     } catch (error) {
       reportForbidden(error);
       setWorkflow(undefined);
@@ -273,6 +296,34 @@ export default function WorkflowDetailPage() {
     void loadWorkflow();
   }, [loadWorkflow]);
 
+  // Defect B: the overview's 最近运行 row must not wait for 运行记录 to mount.
+  // One lightweight page (page_size=1) supplies the newest summary row after
+  // the definition loads; the runs panel's own page 1 takes over from there.
+  // A credential without the execution capability never issues the read, and
+  // this probe is silent by design: an unavailable execution store (501) or a
+  // server-side scope refusal leaves the row absent rather than raising a
+  // toast or changing ?exec=. `workflow.id`, not the draft object, is the
+  // dependency: every keystroke replaces that object.
+  const loadedWorkflowId = workflow?.id;
+  useEffect(() => {
+    if (isNewWorkflow || loading || loadError || !loadedWorkflowId || !canViewExecutions) {
+      return undefined;
+    }
+    let cancelled = false;
+    setLatestRun(undefined);
+    api.listExecutions({ page: 1, pageSize: 1, workflowId: loadedWorkflowId }).then(
+      (page) => {
+        if (!cancelled) setLatestRun(page.list[0]);
+      },
+      () => {
+        // The overview row is an enhancement; never report this read.
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [api, canViewExecutions, isNewWorkflow, loadError, loadedWorkflowId, loading]);
+
   // Resolves to { workflow, paramIssues } so the editor places the server's
   // warn-mode param_issues on their fields; an enforce-mode 400 rejects with
   // an XFlowApiError whose `paramIssues` the editor reads the same way. The
@@ -281,8 +332,22 @@ export default function WorkflowDetailPage() {
   //
   // One request against the newest known id. Never called concurrently:
   // saveWorkflow below serialises host-initiated saves.
-  const persistWorkflow = useCallback(async (nextWorkflow: WorkflowDef): Promise<SavedWorkflowResult> => {
-    const saveOptions = { viewport: viewportRef.current };
+  const persistWorkflow = useCallback(async (
+    nextWorkflow: WorkflowDef,
+    context?: XFlowEditorSaveContext,
+  ): Promise<SavedWorkflowResult> => {
+    // The editor echoes the sections it is showing so rebuilding
+    // editor_metadata on save cannot drop them. A save with no context (Run,
+    // or a host-initiated save) keeps what was loaded. A context is
+    // authoritative even when its `sections` is empty: deleting the last
+    // section must clear the stored ones, not fall back to the old value.
+    const sectionsToSave = context === undefined ? sectionsRef.current : context.sections;
+    // `@xflow/api` drops an empty array from the wire body (Go's `omitempty`:
+    // absent and empty are one value), so clearing is persisted as "no
+    // sections". Keep the host's copy in that same canonical form, otherwise a
+    // later save without a context would carry the deleted sections back.
+    const storedSections = sectionsToSave?.length ? sectionsToSave : undefined;
+    const saveOptions = { viewport: viewportRef.current, sections: sectionsToSave };
     try {
       const targetId = nextWorkflow.id ?? workflowIdRef.current;
       if (!targetId) {
@@ -294,6 +359,8 @@ export default function WorkflowDetailPage() {
         loadedIdRef.current = result.workflowId;
         const createdWorkflow = { ...nextWorkflow, id: result.workflowId };
         persistedRef.current = JSON.stringify(createdWorkflow);
+        sectionsRef.current = storedSections;
+        setSections(storedSections);
         // Only the exact draft that was saved may be replaced by its saved form.
         // Edits made while the request was in flight are a newer object and must
         // survive (the editor's value effect would otherwise reset the canvas).
@@ -305,6 +372,8 @@ export default function WorkflowDetailPage() {
       const result = await api.saveWorkflow({ ...nextWorkflow, id: targetId }, saveOptions);
       const savedWorkflow = { ...nextWorkflow, id: targetId };
       persistedRef.current = JSON.stringify(savedWorkflow);
+      sectionsRef.current = storedSections;
+      setSections(storedSections);
       setWorkflow((current) => (current === nextWorkflow ? savedWorkflow : current));
       return { workflow: savedWorkflow, paramIssues: result.paramIssues };
     } catch (error) {
@@ -319,8 +388,11 @@ export default function WorkflowDetailPage() {
   // flight (or two Runs back to back) must queue behind it, otherwise both
   // see "no id yet" and create two workflows. A failed save does not break
   // the chain for the next one.
-  const saveWorkflow = useCallback((nextWorkflow: WorkflowDef): Promise<SavedWorkflowResult> => {
-    const performSave = () => persistWorkflow(nextWorkflow);
+  const saveWorkflow = useCallback((
+    nextWorkflow: WorkflowDef,
+    context?: XFlowEditorSaveContext,
+  ): Promise<SavedWorkflowResult> => {
+    const performSave = () => persistWorkflow(nextWorkflow, context);
     const chained = saveChainRef.current.then(performSave, performSave);
     saveChainRef.current = chained.then(
       () => undefined,
@@ -332,8 +404,11 @@ export default function WorkflowDetailPage() {
   // Publishing is a save with a new version label. The editor's live region
   // announces the result, but that region is visually hidden, so the host also
   // shows a visible confirmation (§6.10 review: success feedback must be seen).
-  const publishWorkflow = useCallback(async (nextWorkflow: WorkflowDef): Promise<XFlowEditorSaveResult> => {
-    const saved = await saveWorkflow(nextWorkflow);
+  const publishWorkflow = useCallback(async (
+    nextWorkflow: WorkflowDef,
+    context?: XFlowEditorSaveContext,
+  ): Promise<XFlowEditorSaveResult> => {
+    const saved = await saveWorkflow(nextWorkflow, context);
     void message.success(nextWorkflow.version ? `已发布 ${versionText(nextWorkflow.version)}` : '已发布新版本');
     return saved;
   }, [message, saveWorkflow]);
@@ -350,6 +425,8 @@ export default function WorkflowDetailPage() {
         persistedRef.current = JSON.stringify(fresh);
         viewportRef.current = loaded.viewport;
         setDefaultViewport(loaded.viewport);
+        sectionsRef.current = loaded.sections;
+        setSections(loaded.sections);
         setWorkflow(fresh);
       } catch (error) {
         if (!reportForbidden(error)) {
@@ -375,7 +452,13 @@ export default function WorkflowDetailPage() {
   const saveAsCopy = useCallback(async (definition: WorkflowDef) => {
     const copy: WorkflowDef = { ...definition, id: undefined, name: `${definition.name ?? '未命名工作流'}-副本` };
     try {
-      const result = await api.createWorkflow(copy, { viewport: viewportRef.current });
+      // A copy is the draft on screen, so its visual layout travels with it:
+      // the sections the editor is showing are the same ones the new record
+      // must keep, exactly like the viewport.
+      const result = await api.createWorkflow(copy, {
+        viewport: viewportRef.current,
+        sections: sectionsRef.current,
+      });
       void message.success(`已另存为「${copy.name}」`);
       history.push(`/workflows/${result.workflowId}`);
     } catch (error) {
@@ -436,6 +519,10 @@ export default function WorkflowDetailPage() {
       persistedRef.current = JSON.stringify(fresh);
       viewportRef.current = loaded.viewport;
       setDefaultViewport(loaded.viewport);
+      // The rollback replaced the definition, so its sections come from the
+      // record the server now serves, never from the pre-rollback draft.
+      sectionsRef.current = loaded.sections;
+      setSections(loaded.sections);
       setWorkflow(fresh);
       setHistoricalVersion(undefined);
     } catch (error) {
@@ -463,6 +550,8 @@ export default function WorkflowDetailPage() {
       persistedRef.current = JSON.stringify(fresh);
       viewportRef.current = loaded.viewport;
       setDefaultViewport(loaded.viewport);
+      sectionsRef.current = loaded.sections;
+      setSections(loaded.sections);
       setWorkflow(fresh);
       setHistoricalVersion(undefined);
     } catch (error) {
@@ -564,10 +653,14 @@ export default function WorkflowDetailPage() {
       (error: unknown) => {
         if (executionListRequestRef.current !== requestId) return;
         reportForbidden(error);
+        const status = (error as { status?: unknown } | null)?.status;
         setExecutionList((current) => ({
           list: current?.list ?? [],
           total: current?.total ?? 0,
           error: messageFor(error),
+          // EL-20: the panel shows the HTTP status as its secondary line; the
+          // raw server message stays out of the UI.
+          errorStatus: typeof status === 'number' ? status : undefined,
         }));
       },
     );
@@ -690,7 +783,20 @@ export default function WorkflowDetailPage() {
       const queue = result.status === 'queued' && result.queuePosition
         ? `（排队第 ${result.queuePosition} 位）`
         : '';
-      void message.success(`${result.duplicate ? '该重跑已提交' : '已提交重跑'}${queue}`);
+      // AL-29: in 编辑 the new run only takes over the run bar, so the toast
+      // offers the replay; in 运行记录 the selection already follows it.
+      toast.success(`${result.duplicate ? '该重跑已提交' : '已提交重跑'}${queue}`, {
+        key: `rerun:${request.executionId}`,
+        action: mode === 'edit' && canViewExecutions
+          ? {
+              label: '打开执行',
+              onClick: () => {
+                setMode('runs');
+                selectExecution(result.executionId);
+              },
+            }
+          : undefined,
+      });
       if (mode === 'runs') {
         selectExecution(result.executionId);
         const query = executionListQueryRef.current;
@@ -704,7 +810,7 @@ export default function WorkflowDetailPage() {
       reportForbidden(error);
       throw error;
     }
-  }, [api, loadExecutions, message, mode, reportForbidden, selectExecution]);
+  }, [api, canViewExecutions, loadExecutions, mode, reportForbidden, selectExecution, toast]);
 
   // Run is save-then-run: the draft on screen may be newer than the stored
   // definition (or not stored at all for a new workflow), while executing by id
@@ -908,12 +1014,14 @@ export default function WorkflowDetailPage() {
         onRun={runWorkflow}
         runtime={executionRuntime}
         execution={execution}
+        latestRun={latestRun}
         onExecutionAction={handleExecutionAction}
         currentUserSubject={initialState?.currentUser?.subject}
         onSignal={handleSignal}
         onRevokeSignal={handleRevokeSignal}
         onOpenRunHistory={canViewExecutions ? openRunHistory : undefined}
         defaultViewport={defaultViewport}
+        sections={sections}
         onViewportChange={handleViewportChange}
         mode={mode}
         onModeChange={handleModeChange}

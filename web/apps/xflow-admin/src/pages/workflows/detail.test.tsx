@@ -1,5 +1,6 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
-import type { WorkflowDef } from '@xflow/core';
+import type { WorkflowDef, WorkflowEditorSection } from '@xflow/core';
+import type { ReactElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // E4c wiring: the node-types failure reaches the editor as props (no toast), and
@@ -20,9 +21,16 @@ interface EditorProps {
   onReloadLatest: () => void;
   onSaveAsCopy: (definition: WorkflowDef) => void | Promise<void>;
   onChange: (value: WorkflowDef) => void;
-  onSave: (value: WorkflowDef) => Promise<unknown>;
+  sections?: readonly WorkflowEditorSection[];
+  onSave: (
+    value: WorkflowDef,
+    context?: { sections: WorkflowEditorSection[] },
+  ) => Promise<unknown>;
   onRun: (value: WorkflowDef) => Promise<unknown>;
-  onPublish?: (value: WorkflowDef) => Promise<unknown>;
+  onPublish?: (
+    value: WorkflowDef,
+    context?: { sections: WorkflowEditorSection[] },
+  ) => Promise<unknown>;
   onLoadVersions?: () => Promise<unknown>;
   onViewVersion?: (version: string) => void;
   onRollback?: (version: string) => Promise<unknown>;
@@ -30,6 +38,7 @@ interface EditorProps {
   onExitHistory?: () => void;
   runtime?: unknown;
   execution?: { executionId: string; status: string; nodes?: unknown[] };
+  latestRun?: { executionId: string; status: string; createdAt?: string; updatedAt?: string };
   onExecutionAction?: (executionId: string, action: 'pause' | 'resume' | 'cancel') => Promise<void>;
   currentUserSubject?: string;
   onSignal?: (
@@ -73,6 +82,10 @@ const host = vi.hoisted(() => {
   const error = vi.fn();
   const success = vi.fn();
   const confirm = vi.fn();
+  // AL-29: result toasts are notifications, not messages.
+  const notifySuccess = vi.fn();
+  const notifyError = vi.fn();
+  const notifyDestroy = vi.fn();
   return {
     api: {
       listNodeTypes: vi.fn(),
@@ -103,9 +116,13 @@ const host = vi.hoisted(() => {
     warning,
     error,
     success,
+    notifySuccess,
+    notifyError,
+    notifyDestroy,
     confirm,
     app: {
       message: { warning, error, success },
+      notification: { success: notifySuccess, error: notifyError, destroy: notifyDestroy },
       modal: { confirm },
     },
     refresh: vi.fn(),
@@ -214,6 +231,57 @@ describe('node types failure', () => {
     await waitFor(() => expect(host.api.listNodeTypes).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(editor().nodeTypesError).toBeUndefined());
     expect(editor().nodeTypes).toEqual({ node_types: [] });
+  });
+});
+
+describe('overview 最近运行', () => {
+  const latestRow = {
+    executionId: 'exec-new',
+    namespace: 'ns-a',
+    workflowId: 'wf-1',
+    workflowName: 'Orders',
+    status: 'success',
+    error: '',
+    createdAt: '2026-01-02T03:04:05Z',
+    updatedAt: '2026-01-02T03:04:15Z',
+  };
+
+  it('reads the newest execution on load, before 运行记录 is ever opened', async () => {
+    host.api.listExecutions.mockResolvedValue({ list: [latestRow], total: 1 });
+
+    await mounted();
+
+    await waitFor(() => expect(editor().latestRun?.executionId).toBe('exec-new'));
+    expect(host.api.listExecutions).toHaveBeenCalledWith({
+      page: 1,
+      pageSize: 1,
+      workflowId: 'wf-1',
+    });
+    // A list projection, not a tracked run: the run bar stays absent.
+    expect(editor().execution).toBeUndefined();
+  });
+
+  it('leaves the row absent and silent when the read is unavailable', async () => {
+    host.api.listExecutions.mockRejectedValue(
+      Object.assign(new Error('not implemented'), { status: 501 }),
+    );
+
+    await mounted();
+    await act(async () => {});
+
+    expect(editor().latestRun).toBeUndefined();
+    expect(host.error).not.toHaveBeenCalled();
+    expect(host.warning).not.toHaveBeenCalled();
+  });
+
+  it('does not ask for executions without the execution scope', async () => {
+    host.currentUser = { namespace: 'ns-a', scopes: ['workflow'] };
+
+    await mounted();
+    await act(async () => {});
+
+    expect(editor().latestRun).toBeUndefined();
+    expect(host.api.listExecutions).not.toHaveBeenCalled();
   });
 });
 
@@ -783,6 +851,167 @@ describe('execution tracking', () => {
   });
 });
 
+// editor_metadata.sections are visual grouping boxes carried beside the
+// definition. A save that drops them destroys user data silently, so every
+// load path must adopt them and every save must round-trip them.
+describe('editor sections round-trip', () => {
+  const loadedSections: WorkflowEditorSection[] = [
+    { id: 'sec-entry', title: '入口', node_keys: ['start'], x: 0, y: 0, width: 320, height: 180 },
+  ];
+  const rolledBackSections: WorkflowEditorSection[] = [
+    { id: 'sec-old', title: '旧分组', node_keys: ['start'], x: 40, y: 40, width: 320, height: 180 },
+  ];
+  const editedSections: WorkflowEditorSection[] = [
+    { id: 'sec-entry', title: '入口', node_keys: ['start', 'check'], x: 0, y: 0, width: 480, height: 260 },
+  ];
+
+  it('hands the loaded sections to the editor', async () => {
+    host.api.getWorkflow.mockResolvedValue({ workflow: { ...stored, id: undefined }, sections: loadedSections });
+    await mounted();
+
+    expect(editor().sections).toEqual(loadedSections);
+  });
+
+  it('saves the loaded sections back when the editor sends no context', async () => {
+    host.api.getWorkflow.mockResolvedValue({ workflow: { ...stored, id: undefined }, sections: loadedSections });
+    await mounted();
+
+    await act(async () => {
+      await editor().onSave(stored);
+    });
+
+    expect(host.api.saveWorkflow.mock.calls[0]?.[1]).toEqual({
+      viewport: undefined,
+      sections: loadedSections,
+    });
+  });
+
+  it('prefers the sections echoed by the editor and keeps them for later saves', async () => {
+    host.api.getWorkflow.mockResolvedValue({ workflow: { ...stored, id: undefined }, sections: loadedSections });
+    await mounted();
+
+    await act(async () => {
+      await editor().onSave(stored, { sections: editedSections });
+    });
+
+    expect(host.api.saveWorkflow.mock.calls[0]?.[1]?.sections).toEqual(editedSections);
+
+    // The ref now holds what the server holds, so a following contextless
+    // save (Run goes through the same path) must not revert to the old value.
+    await act(async () => {
+      await editor().onSave(stored);
+    });
+
+    expect(host.api.saveWorkflow.mock.calls[1]?.[1]?.sections).toEqual(editedSections);
+  });
+
+  it('clears the stored sections when the editor echoes an empty array', async () => {
+    host.api.getWorkflow.mockResolvedValue({ workflow: { ...stored, id: undefined }, sections: loadedSections });
+    await mounted();
+
+    await act(async () => {
+      await editor().onSave(stored, { sections: [] });
+    });
+
+    // Deleting the last section is an authoritative empty list, not "no
+    // news": the save must not fall back to the sections that were loaded.
+    // @xflow/api omits `[]` from the wire body (absent and empty are one
+    // value for Go's `omitempty`), so this clears editor_metadata.sections.
+    expect(host.api.saveWorkflow.mock.calls[0]?.[1]?.sections).toEqual([]);
+    // The host keeps the canonical post-save form the server now holds
+    // (`undefined`), not the sections the user just deleted.
+    expect(editor().sections).toBeUndefined();
+  });
+
+  it('does not resurrect cleared sections on a later contextless save', async () => {
+    host.api.getWorkflow.mockResolvedValue({ workflow: { ...stored, id: undefined }, sections: loadedSections });
+    await mounted();
+
+    await act(async () => {
+      await editor().onSave(stored, { sections: [] });
+    });
+
+    // A following Save-then-Run has no context; the ref must now hold the
+    // cleared value, or the deleted sections would come back with the run.
+    await act(async () => {
+      await editor().onSave(stored);
+    });
+
+    expect(host.api.saveWorkflow.mock.calls[1]?.[1]?.sections).toBeUndefined();
+  });
+
+  it('never materializes an empty sections array for a workflow that had none', async () => {
+    await mounted(); // the default GET response carries no sections
+
+    expect(editor().sections).toBeUndefined();
+
+    await act(async () => {
+      await editor().onSave(stored);
+    });
+
+    // `undefined`, not `[]`: @xflow/api omits both from the wire body, and the
+    // host must not turn an absent value into an explicit empty one.
+    expect(host.api.saveWorkflow.mock.calls[0]?.[1]).toEqual({
+      viewport: undefined,
+      sections: undefined,
+    });
+  });
+
+  it('adopts the rolled-back record sections instead of keeping the pre-rollback ones', async () => {
+    host.api.getWorkflow.mockResolvedValueOnce({
+      workflow: { ...stored, id: undefined },
+      sections: loadedSections,
+    });
+    await mounted();
+
+    host.api.rollbackWorkflow.mockResolvedValue({ workflowId: 'wf-1', version: '1.0.0', unchanged: false });
+    host.api.getWorkflow.mockResolvedValueOnce({
+      workflow: { ...stored, id: undefined },
+      sections: rolledBackSections,
+    });
+
+    await act(async () => {
+      await editor().onRollback?.('1.0.0');
+    });
+
+    // The rollback replaced the definition and its editor_metadata; the old
+    // sections would describe nodes the served version may no longer have.
+    expect(editor().sections).toEqual(rolledBackSections);
+
+    await act(async () => {
+      await editor().onSave(stored);
+    });
+
+    expect(host.api.saveWorkflow.mock.calls[0]?.[1]?.sections).toEqual(rolledBackSections);
+  });
+
+  it('另存为副本 carries the draft sections into the new workflow', async () => {
+    host.api.getWorkflow.mockResolvedValue({ workflow: { ...stored, id: undefined }, sections: loadedSections });
+    host.api.createWorkflow.mockResolvedValue({ workflowId: 'wf-copy' });
+    await mounted();
+
+    await act(async () => editor().onSaveAsCopy(stored));
+
+    // A copy is the draft on screen, layout included -- same as the viewport.
+    expect(host.api.createWorkflow.mock.calls[0]?.[1]).toEqual({
+      viewport: undefined,
+      sections: loadedSections,
+    });
+  });
+
+  it('publishes with the sections the editor echoed', async () => {
+    host.api.getWorkflow.mockResolvedValue({ workflow: { ...stored, id: undefined }, sections: loadedSections });
+    await mounted();
+    const published = { ...stored, version: '2.0.0' };
+
+    await act(async () => {
+      await editor().onPublish?.(published, { sections: editedSections });
+    });
+
+    expect(host.api.saveWorkflow.mock.calls[0]?.[1]?.sections).toEqual(editedSections);
+  });
+});
+
 describe('publish and version history (§6.10)', () => {
   it('publishes through the save path with the editor-chosen version', async () => {
     host.api.saveWorkflow.mockResolvedValue({});
@@ -793,7 +1022,10 @@ describe('publish and version history (§6.10)', () => {
       await editor().onPublish?.(published);
     });
 
-    expect(host.api.saveWorkflow).toHaveBeenCalledWith(published, { viewport: undefined });
+    expect(host.api.saveWorkflow).toHaveBeenCalledWith(published, {
+      viewport: undefined,
+      sections: undefined,
+    });
     expect(host.success).toHaveBeenCalledWith('已发布 v1.2.1');
     expect(screen.getByTestId('editor').getAttribute('data-name')).toBe('Orders');
   });
@@ -1171,7 +1403,17 @@ describe('run records mode (§6.8)', () => {
       idempotencyKey: 'key-1',
     });
     expect(result).toEqual({ executionId: 'exec-2', status: 'queued', queuePosition: 2 });
-    expect(host.success).toHaveBeenCalledWith('已提交重跑（排队第 2 位）');
+    // AL-29: a bottom-right notification; in 运行记录 the selection already
+    // follows the new run, so the toast carries no 打开执行 action.
+    expect(host.notifySuccess).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: '已提交重跑（排队第 2 位）',
+        placement: 'bottomRight',
+        pauseOnHover: true,
+        actions: undefined,
+      }),
+    );
+    expect(host.success).not.toHaveBeenCalled();
     await waitFor(() => expect(editor().selectedExecution?.executionId).toBe('exec-2'));
     expect(host.replace).toHaveBeenCalledWith('/workflows/wf-1?exec=exec-2');
   });
@@ -1191,6 +1433,13 @@ describe('run records mode (§6.8)', () => {
     });
     await waitFor(() => expect(editor().execution?.executionId).toBe('exec-2'));
     expect(host.api.getExecution).toHaveBeenCalledWith('exec-2');
+    // AL-29: from 编辑 the toast offers the replay of the new run.
+    const toast = host.notifySuccess.mock.calls.at(-1)?.[0] as { actions?: ReactElement<{ onClick: () => void }> };
+    expect(toast.actions).toBeDefined();
+    await act(async () => toast.actions?.props.onClick());
+    expect(host.notifyDestroy).toHaveBeenCalled();
+    expect(editor().mode).toBe('runs');
+    await waitFor(() => expect(editor().selectedExecution?.executionId).toBe('exec-2'));
   });
 
   it('opens the replay for the run the bar shows from 查看运行记录', async () => {
