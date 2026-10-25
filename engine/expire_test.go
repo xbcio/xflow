@@ -118,6 +118,7 @@ type expireState struct {
 	listSuspendedErr   error
 	listSuspendedErrBy map[types.ExecutionID]error
 	upsertNodeErr      error
+	ackErr             error
 	beforeTimeoutWrite func()
 }
 
@@ -279,7 +280,17 @@ func (s *expireAckState) ListDeadlineExceededExecutions(context.Context, time.Ti
 
 func (s *expireAckState) AckDeadlineExpired(_ context.Context, id types.ExecutionID) error {
 	s.log.add(id, "ack")
-	return nil
+	s.faultMu.Lock()
+	err := s.ackErr
+	s.faultMu.Unlock()
+	return err
+}
+
+// failAck makes every AckDeadlineExpired answer err until it is called with nil.
+func (s *expireState) failAck(err error) {
+	s.faultMu.Lock()
+	s.ackErr = err
+	s.faultMu.Unlock()
 }
 
 // expireHooks records the lifecycle hooks an expiry may or may not fire.
@@ -1363,6 +1374,79 @@ func TestExpireExecutionChildAlreadyConcludedStillAcknowledges(t *testing.T) {
 				t.Fatalf("child = %+v, want it gone", child)
 			case tc.wantChild != "" && (child == nil || child.Status != tc.wantChild):
 				t.Fatalf("child = %+v, want status %q", child, tc.wantChild)
+			}
+			rig.log.requireLast(t, "ack")
+		})
+	}
+}
+
+// TestExpireExecutionAckFailureIsReturned pins that a failed acknowledgement
+// reaches the caller on every path that acknowledges. Swallowing it would report
+// success for an entry that is still listed, and the sweeper's only signal that
+// the call must be repeated is the error. After the fault clears, the replay
+// acknowledges and, for an execution this mechanism timed out, does not repeat
+// the completion hook.
+func TestExpireExecutionAckFailureIsReturned(t *testing.T) {
+	cases := []struct {
+		name       string
+		prepare    func(rig *expireRig)
+		replay     ExpireOutcome
+		wantHooks  int
+		wantStatus types.ExecutionStatus
+	}{
+		{
+			name:       "expired",
+			prepare:    func(*expireRig) {},
+			replay:     ExpireOutcomeResumed,
+			wantHooks:  1,
+			wantStatus: types.ExecutionStatusTimeout,
+		},
+		{
+			name: "resumed",
+			prepare: func(rig *expireRig) {
+				rig.force(types.ExecutionStatusTimeout, ExecutionDeadlineExceededError)
+			},
+			replay:     ExpireOutcomeResumed,
+			wantStatus: types.ExecutionStatusTimeout,
+		},
+		{
+			name:       "already terminal",
+			prepare:    func(rig *expireRig) { rig.force(types.ExecutionStatusSuccess, "") },
+			replay:     ExpireOutcomeAlreadyTerminal,
+			wantStatus: types.ExecutionStatusSuccess,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newExpireRig(t, true)
+			rig.start(t)
+			rig.setDeadline(pastDeadline)
+			tc.prepare(rig)
+			injected := errors.New("injected: acknowledge failed")
+			rig.state.failAck(injected)
+
+			got, err := rig.eng.ExpireExecution(context.Background(), rig.id)
+			if !errors.Is(err, injected) {
+				t.Fatalf("ExpireExecution() = (%q, %v), want an error wrapping %v", got, err, injected)
+			}
+			if got != "" {
+				t.Fatalf("outcome = %q on error, want empty", got)
+			}
+			if n := rig.log.count("ack"); n != 1 {
+				t.Fatalf("ack attempted %d times, want 1", n)
+			}
+
+			rig.state.failAck(nil)
+			rig.expire(t, tc.replay)
+
+			if n := rig.log.count("ack"); n != 2 {
+				t.Fatalf("ack attempted %d times after the replay, want 2", n)
+			}
+			if got := rig.snapshot(t).Status; got != tc.wantStatus {
+				t.Fatalf("status = %q, want %q", got, tc.wantStatus)
+			}
+			if got := rig.hooks.completions(); len(got) != tc.wantHooks {
+				t.Fatalf("completion hooks = %v, want %d: a replay must not announce again", got, tc.wantHooks)
 			}
 			rig.log.requireLast(t, "ack")
 		})
