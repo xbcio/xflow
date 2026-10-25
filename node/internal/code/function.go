@@ -129,6 +129,12 @@ func (n *FunctionNode) executeExpr(_ context.Context, input *types.Input, code s
 		// deterministic — retrying with the same input cannot help.
 		return nil, types.NewPermanentError("function.expr_eval", err.Error())
 	}
+	// NaN/±Inf are valid expr results (1/0, 0/0) but not valid JSON, so letting
+	// the result through only defers the failure to the runner's report encoding,
+	// where it can no longer name this node. Deterministic input => permanent.
+	if err := exprx.CheckFinite(result); err != nil {
+		return nil, types.NewPermanentError("function.expr_eval", err.Error())
+	}
 
 	switch v := result.(type) {
 	case map[string]any:

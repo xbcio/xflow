@@ -32,6 +32,13 @@ func itemsFromInput(input *types.Input) ([]any, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
+	// The items expression feeds the node's output directly (filtered, sorted,
+	// limited or aggregated), so a non-finite number would only fail later, at
+	// runner report encoding. It is deterministic, so callers get a permanent
+	// classification through their %w wrap.
+	if err := exprx.CheckFinite(result); err != nil {
+		return nil, "", types.NewPermanentError("transform.items_non_finite", err.Error())
+	}
 	items, ok := result.([]any)
 	if ok {
 		return items, itemsExpr, nil

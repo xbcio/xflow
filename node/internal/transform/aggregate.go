@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cast"
+	"github.com/xbcio/xflow/exprx"
 	nodeinternal "github.com/xbcio/xflow/node/internal"
 	"github.com/xbcio/xflow/types"
 )
@@ -104,13 +105,21 @@ func (n *AggregateNode) Execute(_ context.Context, input *types.Input) (*types.O
 		case "count":
 			data[op.As] = len(items)
 		case "sum":
-			data[op.As] = sumField(items, op.Field)
+			total := sumField(items, op.Field)
+			if err := exprx.CheckFinite(total); err != nil {
+				return nil, aggregateNonFinite(op.As, err)
+			}
+			data[op.As] = total
 		case "avg", "average":
 			if len(items) == 0 {
 				data[op.As] = float64(0)
 				continue
 			}
-			data[op.As] = sumField(items, op.Field) / float64(len(items))
+			average := sumField(items, op.Field) / float64(len(items))
+			if err := exprx.CheckFinite(average); err != nil {
+				return nil, aggregateNonFinite(op.As, err)
+			}
+			data[op.As] = average
 		default:
 			return nil, fmt.Errorf("xflow.transform.aggregate: unsupported operation %q", op.Kind)
 		}
@@ -147,6 +156,14 @@ func parseAggregateOperations(value any) ([]AggregateOperation, error) {
 	default:
 		return nil, fmt.Errorf("expected operations array")
 	}
+}
+
+// aggregateNonFinite classifies an overflowed sum/avg as permanent: the items
+// and the operation are both fixed, so a retry recomputes the same ±Inf and
+// the result still cannot be JSON-encoded at report time.
+func aggregateNonFinite(as string, cause error) error {
+	return types.NewPermanentError("aggregate.non_finite",
+		fmt.Sprintf("xflow.transform.aggregate: output %q: %v", as, cause))
 }
 
 func sumField(items []any, field string) float64 {

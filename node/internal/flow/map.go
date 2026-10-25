@@ -144,6 +144,10 @@ func (n *MapNode) Execute(ctx context.Context, input *types.Input) (*types.Outpu
 	if err != nil {
 		return nil, fmt.Errorf("xflow.map: %w", err)
 	}
+	if err := exprx.CheckFinite(result); err != nil {
+		// Deterministic for the same items value, so it must not be retried.
+		return nil, types.NewPermanentError("map.expr_non_finite", "xflow.map: items: "+err.Error())
+	}
 
 	items, err := conv.ToSlice(result)
 	if err != nil {
@@ -202,6 +206,14 @@ func evalItemsInline(expression string, baseEnv map[string]any, items []any, kee
 
 	for index, item := range items {
 		value, err := exprx.EvalExpr(expression, itemEnv(baseEnv, item, index, items), false)
+		if err == nil {
+			// A non-finite value is a per-item failure, so continue_on_error
+			// decides whether it keeps its slot like any other bad item. It is
+			// deterministic, hence permanent rather than a retryable eval error.
+			if finiteErr := exprx.CheckFinite(value); finiteErr != nil {
+				err = types.NewPermanentError("map.expr_non_finite", finiteErr.Error())
+			}
+		}
 		if err != nil {
 			err = fmt.Errorf("xflow.map: item %d: %w", index, err)
 			if firstErr == nil {

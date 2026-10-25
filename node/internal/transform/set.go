@@ -90,6 +90,10 @@ func (n *SetNode) Execute(_ context.Context, input *types.Input) (*types.Output,
 		if err != nil {
 			return nil, fmt.Errorf("xflow.transform.set: field %q: %w", key, err)
 		}
+		if err := exprx.CheckFinite(value); err != nil {
+			return nil, types.NewPermanentError("set.expr_non_finite",
+				fmt.Sprintf("xflow.transform.set: field %q: %v", key, err))
+		}
 		data[key] = value
 		env[key] = value
 	}

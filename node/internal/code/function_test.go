@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/xbcio/xflow/node"
@@ -339,5 +340,43 @@ func TestFunction_ExtraParams(t *testing.T) {
 	}
 	if out.Data["result"] != 15.0 {
 		t.Fatalf("expected result=15, got %v", out.Data["result"])
+	}
+}
+
+// TestFunction_NonFiniteExprResultIsPermanent pins the guard that runs before
+// the result becomes node output: NaN/±Inf are valid expr values but not valid
+// JSON, and letting one through only fails later at runner report encoding
+// ("cannot be reported"), where the offending node is no longer identifiable.
+// The expression is deterministic, so the classification must be permanent.
+func TestFunction_NonFiniteExprResultIsPermanent(t *testing.T) {
+	h, _ := registry.Lookup("xflow.function")
+	cases := []struct {
+		name string
+		code string
+	}{
+		{"division_by_zero", "1 / 0"},
+		{"zero_over_zero", "0 / 0"},
+		{"nested_map_infinity", `{"ratio": 1 / 0}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := h.Execute(context.Background(), &types.Input{
+				Params: map[string]any{"code": c.code},
+				Data:   map[string]any{},
+			})
+			if err == nil {
+				t.Fatalf("code %q returned a non-finite result without error", c.code)
+			}
+			if !types.IsPermanent(err) {
+				t.Fatalf("non-finite result must be permanent; got err=%v", err)
+			}
+			var ce *types.ClassifiedError
+			if !errors.As(err, &ce) || ce.Code != "function.expr_eval" {
+				t.Fatalf("expected ClassifiedError code=function.expr_eval, got %T %v", err, err)
+			}
+			if !strings.Contains(err.Error(), "non-finite") {
+				t.Fatalf("error should name the non-finite value, got %q", err.Error())
+			}
+		})
 	}
 }
