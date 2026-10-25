@@ -105,7 +105,8 @@ func (c *GRPCClient) Poll(ctx context.Context, req PollTaskRequest) (PollTaskRes
 func (c *GRPCClient) ReportResult(ctx context.Context, req ReportResultRequest) (ReportResultResponse, error) {
 	in, err := ReportResultRequestToProto(req)
 	if err != nil {
-		return ReportResultResponse{}, err
+		// Every failure here is a JSON encode of the lease or result.
+		return ReportResultResponse{}, fmt.Errorf("runner protocol ReportResult: %w: %w", ErrRunnerRequestUnencodable, err)
 	}
 	resp, err := c.grpc.ReportResult(c.withAuth(ctx), in)
 	if err != nil {

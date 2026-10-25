@@ -742,12 +742,14 @@ func (r *Runner) executeAndReport(ctx context.Context, sessionID string, lease *
 		TraceCarrier: tracing.InjectCarrier(reportCtx),
 	}
 	reportResp, err := r.client.ReportResult(reportCtx, req)
-	if errors.Is(err, protocol.ErrRunnerRequestTooLarge) {
+	if errors.Is(err, protocol.ErrRunnerRequestTooLarge) || errors.Is(err, protocol.ErrRunnerRequestUnencodable) {
 		// The same body can never be accepted, and an unlanded report leaves
 		// the lease finalized for the server to replay, so retrying the
 		// handler would loop forever. Fail the lease permanently instead.
+		// Unencodable covers output JSON cannot carry (NaN/±Inf, e.g. an
+		// xflow.function `1 / 0`), which would otherwise pin the lease.
 		span.RecordError(err)
-		slog.Default().Warn("task report too large; reporting permanent failure",
+		slog.Default().Warn("task report cannot be sent; reporting permanent failure",
 			"runner_id", r.config.RunnerID, "lease_id", string(lease.LeaseID), "err", err)
 		reportResp, err = r.client.ReportResult(reportCtx, oversizeReport(req, err))
 	}
@@ -779,7 +781,7 @@ func oversizeReport(req protocol.ReportResultRequest, cause error) protocol.Repo
 		}
 	}
 	req.Lease = &slim
-	cause = errors.Join(types.ErrPermanent, fmt.Errorf("task result too large to report: %w", cause))
+	cause = errors.Join(types.ErrPermanent, fmt.Errorf("task result cannot be reported: %w", cause))
 	if slim.Task.Type == engine.TaskTypeGroupExec {
 		// A group task's oversize report must still carry a GroupResult, not
 		// fall back to req.Result: the control plane's ReportResult handler

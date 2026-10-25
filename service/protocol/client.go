@@ -39,6 +39,12 @@ const MaxRunnerRequestBodyBytes = MaxRunnerResponseBodyBytes
 // the server answered 413. Resending the same body cannot succeed.
 var ErrRunnerRequestTooLarge = errors.New("runner protocol request body exceeds size limit")
 
+// ErrRunnerRequestUnencodable reports a runner-protocol request the client
+// could not encode at all — e.g. a handler output holding a float NaN/±Inf,
+// which encoding/json rejects. Like ErrRunnerRequestTooLarge, resending the
+// same request cannot succeed.
+var ErrRunnerRequestUnencodable = errors.New("runner protocol request cannot be encoded")
+
 type Client struct {
 	baseURL string
 	http    *http.Client
@@ -208,7 +214,7 @@ func (c *Client) RenewLease(ctx context.Context, req RenewLeaseRequest) (RenewLe
 func (c *Client) post(ctx context.Context, path string, body any, out any) error {
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(body); err != nil {
-		return err
+		return fmt.Errorf("runner protocol %s: %w: %w", path, ErrRunnerRequestUnencodable, err)
 	}
 	if buf.Len() > MaxRunnerRequestBodyBytes {
 		return fmt.Errorf("runner protocol %s: %w (%d bytes, limit %d)", path, ErrRunnerRequestTooLarge, buf.Len(), MaxRunnerRequestBodyBytes)
