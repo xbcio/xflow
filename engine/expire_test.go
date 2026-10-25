@@ -1452,3 +1452,75 @@ func TestExpireExecutionAckFailureIsReturned(t *testing.T) {
 		})
 	}
 }
+
+// TestExpireExecutionEvictsOnlyAfterTheCascadeSucceeds pins the eviction timing.
+// A cascade that failed leaves the execution to be replayed, so its graph must
+// still be cached: evicting before or despite the failure costs the replay a
+// reload at best and, with the eviction ahead of the cascade, drops the entry
+// the cascade is about to use. The replay that succeeds then drops both the
+// graph and the trace memo.
+func TestExpireExecutionEvictsOnlyAfterTheCascadeSucceeds(t *testing.T) {
+	rig := newExpireRig(t, true)
+	rig.start(t)
+	rig.setDeadline(pastDeadline)
+	primeEvictProbe(t, rig)
+	injected := errors.New("injected: list suspended nodes failed")
+	rig.state.failListSuspended(injected)
+
+	if got, err := rig.eng.ExpireExecution(context.Background(), rig.id); !errors.Is(err, injected) {
+		t.Fatalf("ExpireExecution() = (%q, %v), want an error wrapping %v", got, err, injected)
+	}
+	if !graphCached(rig.eng, rig.id) {
+		t.Fatal("the graph cache entry was dropped by a failed cascade, want it kept for the replay")
+	}
+
+	rig.expire(t, ExpireOutcomeResumed)
+
+	if graphCached(rig.eng, rig.id) {
+		t.Fatal("the graph cache entry survived the resumed expiry, want it evicted")
+	}
+	if traceMemoized(rig.eng, rig.id) {
+		t.Fatal("the trace carrier memo survived the resumed expiry, want it evicted")
+	}
+}
+
+// TestExpireExecutionEvictsAfterASuccessfulCascade pins that both outcomes that
+// ran the cascade drop the graph and the trace memo: an engine that does not own
+// the execution (a sweeper's) would otherwise keep them for good.
+func TestExpireExecutionEvictsAfterASuccessfulCascade(t *testing.T) {
+	cases := []struct {
+		name    string
+		prepare func(rig *expireRig)
+		want    ExpireOutcome
+	}{
+		{"expired", func(*expireRig) {}, ExpireOutcomeExpired},
+		{
+			name: "resumed",
+			prepare: func(rig *expireRig) {
+				rig.force(types.ExecutionStatusTimeout, ExecutionDeadlineExceededError)
+			},
+			want: ExpireOutcomeResumed,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newExpireRig(t, true)
+			rig.start(t)
+			rig.setDeadline(pastDeadline)
+			tc.prepare(rig)
+			primeEvictProbe(t, rig)
+
+			rig.expire(t, tc.want)
+
+			if graphCached(rig.eng, rig.id) {
+				t.Fatalf("the graph cache entry survived a %q result, want it evicted", tc.want)
+			}
+			if traceMemoized(rig.eng, rig.id) {
+				t.Fatalf("the trace carrier memo survived a %q result, want it evicted", tc.want)
+			}
+			if got := rig.nodeStatus(t); got != types.NodeStatusCanceled {
+				t.Fatalf("node status = %q, want canceled: the cascade must have run", got)
+			}
+		})
+	}
+}
