@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -363,7 +364,8 @@ func TestListExecutionsPageOffsetArithmeticAndPageSizeCap(t *testing.T) {
 			}
 			// The count must carry the same scope and filter as the page, or the
 			// two describe different sets and `total` is not a total of anything.
-			if counts[0].ns != lists[0].ns || counts[0].filter != lists[0].filter {
+			// DeepEqual, not ==: ExecutionFilter now carries a status slice.
+			if counts[0].ns != lists[0].ns || !reflect.DeepEqual(counts[0].filter, lists[0].filter) {
 				t.Fatalf("count (ns=%q filter=%+v) disagrees with page (ns=%q filter=%+v)",
 					counts[0].ns, counts[0].filter, lists[0].ns, lists[0].filter)
 			}

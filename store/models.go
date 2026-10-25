@@ -48,8 +48,24 @@ type ExecutionRecord struct {
 	SpanID       string
 	Status       types.ExecutionStatus
 	Error        string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	// TriggerKind records the server-derived path that started the execution
+	// (types.TriggerKind*). Empty is UNKNOWN — a row written before the column
+	// existed, or a creation path with no source to record — and is never
+	// rendered as a specific kind.
+	TriggerKind string
+	// NodeTotal is the number of nodes the execution's graph contained, stamped
+	// once at creation so a list row can render node progress without reading
+	// the workflow_def JSON blob. 0 means UNKNOWN (a pre-column row or a seed
+	// with no graph), not "a graph with no nodes".
+	NodeTotal int
+	// FinishedAt is the moment the execution FIRST reached a terminal status —
+	// write-once, exactly like NodeRecord.FinishedAt: a duplicate terminal write
+	// (or a retry that arrives after completion) never moves it, and a
+	// non-terminal transition never sets it. nil means the fact never happened:
+	// a live execution, or a row written before the column existed.
+	FinishedAt *time.Time
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 // NodeRecord holds the persistent state of a single node within an execution.

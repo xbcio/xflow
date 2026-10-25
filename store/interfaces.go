@@ -48,9 +48,11 @@ type Executions interface {
 	//
 	// Filtering is limited to what the row actually stores. Supported:
 	// ExecutionFilter.Status (the status column), ExecutionFilter.WorkflowID
-	// (the workflow_id column, exact match) and ExecutionFilter.CreatedAfter/
-	// CreatedBefore (created_at). A row whose workflow_id is empty
-	// (unattributed) matches no non-empty WorkflowID filter, the same
+	// (the workflow_id column, exact match), ExecutionFilter.Query (a literal
+	// prefix on EITHER the execution_id or the workflow_id column, ORed) and
+	// ExecutionFilter.CreatedAfter/CreatedBefore (created_at). A row whose
+	// workflow_id is empty (unattributed) matches no non-empty WorkflowID
+	// filter and can match a Query only through its execution id, the same
 	// fail-closed rule the namespace scope applies. NOT supported, with the
 	// column-level reason:
 	//
