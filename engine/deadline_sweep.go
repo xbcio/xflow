@@ -18,6 +18,22 @@ const (
 	// multiple of its batch. Candidates still backing off are listed beyond the
 	// batch so they cannot hold every slot of the page; the cap keeps that read
 	// bounded when many of them are.
+	//
+	// The cap is also the hard limit of what a sweep can ever reach. The index is
+	// read from its oldest deadline and has no cursor, so a sweep sees only the
+	// head of it: Batch x FetchFactor entries (1000 by default). While fewer
+	// executions than that are older than a new one, however stubbornly they fail,
+	// the new one is reached once enough of them are backing off (the head then
+	// holds fewer than a batch of attemptable entries). At the cap or beyond, the
+	// head is made of nothing but set-aside executions and a newer one is never
+	// listed until some of them clear. That is a deliberate trade-off against an
+	// unbounded read per pass, and the saturation warning is how it is reported.
+	//
+	// Measured with a batch of 100 and the default factor, one failing-forever
+	// execution queued behind N others that fail forever is first attempted on
+	// pass: N=150: 5th, N=500: 34th, N=800: 60th, N=900 to 999: 68th (passes 5s
+	// apart; with 1s apart: 3rd, 22nd, 40th, 47th), and for N=1000 or more never
+	// (not within 400 passes).
 	DefaultDeadlineSweepFetchFactor = 10
 	// DefaultDeadlineSweepContinueEvery is how many candidates a sweep goes
 	// through between two calls of its Continue hook.
