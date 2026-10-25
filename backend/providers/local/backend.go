@@ -8,7 +8,6 @@ import (
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
-	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/types"
 )
@@ -341,13 +340,27 @@ const deadlineSweepBatch = 100
 // cancellation to what the execution still had suspended or running, and
 // acknowledges the index entry only once that finished.
 //
-// It holds no state: the deadlines live in the store, and every tick asks the
-// store which ones have passed. A candidate that fails is logged and left in
-// the index, so the next tick retries it.
-func (b *Backend) runDeadlineSweeper(ctx context.Context, eng *engine.Engine, interval time.Duration) {
+// The deadlines live in the store and every tick asks it which ones have
+// passed. The loop body is engine.DeadlineSweep, which sets an execution that
+// fails (or is canceling) aside for a growing window instead of retrying it every
+// tick: the index lists the oldest deadlines first and keeps a failing entry, so
+// a page of entries that never succeed would otherwise hold every slot and starve
+// the later ones, logging one error per entry per second. Its warnings come at
+// 5, 20 and 100 consecutive failures of one execution instead.
+func (b *Backend) runDeadlineSweeper(ctx context.Context, expirer engine.ExecutionExpirer, interval time.Duration) {
 	if interval <= 0 {
 		interval = deadlineSweepInterval
 	}
+	var logger engine.DeadlineSweepLogger
+	if b.logger != nil {
+		logger = b.logger
+	}
+	sweep := engine.NewDeadlineSweep(engine.DeadlineSweepConfig{
+		Lister:  b.state,
+		Expirer: expirer,
+		Batch:   deadlineSweepBatch,
+		Logger:  logger,
+	})
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -355,24 +368,8 @@ func (b *Backend) runDeadlineSweeper(ctx context.Context, eng *engine.Engine, in
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			overdue, err := b.state.ListDeadlineExceededExecutions(ctx, time.Now().UTC(), deadlineSweepBatch)
-			if err != nil {
-				if b.logger != nil {
-					b.logger.Error("execution_deadline_sweep_failed", "err", err)
-				}
-				continue
-			}
-			for _, candidate := range overdue {
-				if ctx.Err() != nil {
-					return
-				}
-				execCtx := ctx
-				if candidate.Namespace != "" {
-					execCtx = namespace.WithNamespace(ctx, candidate.Namespace)
-				}
-				if _, err := eng.ExpireExecution(execCtx, candidate.ExecutionID); err != nil && b.logger != nil {
-					b.logger.Error("execution_deadline_expire_failed", "execution_id", candidate.ExecutionID, "err", err)
-				}
+			if _, err := sweep.Sweep(ctx); err != nil && b.logger != nil {
+				b.logger.Error("execution_deadline_sweep_failed", "err", err)
 			}
 		}
 	}
