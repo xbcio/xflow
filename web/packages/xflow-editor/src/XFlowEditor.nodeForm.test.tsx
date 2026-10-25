@@ -254,7 +254,7 @@ describe("node form: the patch reducer (Doc C §6.1)", () => {
     expect((within(inspector()).getByLabelText("节点名称") as HTMLInputElement).value).toBe("hold");
     // The header follows the rename: the display name and the type badge.
     expect(within(inspector()).getByText("hold", { selector: ".xflow-editor-inspector-head__name" })).toBeTruthy();
-    expect(within(inspector()).getByText("hold · xflow.wait · v1", { selector: ".xflow-editor-inspector-head__type" })).toBeTruthy();
+    expect(within(inspector()).getByText("xflow.wait · v1", { selector: ".xflow-editor-inspector-head__type" })).toBeTruthy();
   });
 });
 
@@ -450,26 +450,52 @@ describe("node form: the JSON tab (Doc C §6.2)", () => {
     expect((within(root).getByLabelText("参数 JSON") as HTMLTextAreaElement).value).toBe("{ broken");
     // The header names the node the JSON view belongs to.
     expect(within(root).getByText("api", { selector: ".xflow-editor-inspector-head__name" })).toBeTruthy();
-    expect(within(root).getByText("api · xflow.http · v1", { selector: ".xflow-editor-inspector-head__type" })).toBeTruthy();
+    expect(within(root).getByText("xflow.http · v1", { selector: ".xflow-editor-inspector-head__type" })).toBeTruthy();
   });
 
   it("keeps drafts across a real unmount: panel collapse and the compact drawer", async () => {
-    render(<XFlowEditor value={workflow} nodeTypes={nodeTypes} />);
-    fireEvent.change(jsonTab(selectNode("api")), { target: { value: "{ broken" } });
+    // The ⋯ menu only exists in the compact layout (user ruling 2026-10-21):
+    // measure the editor narrow mid-test, as a container resize would.
+    const originalObserver = globalThis.ResizeObserver;
+    let resizeEditor: ((width: number) => void) | undefined;
+    class MockResizeObserver {
+      readonly callback: ResizeObserverCallback;
+      constructor(callback: ResizeObserverCallback) {
+        this.callback = callback;
+      }
+      observe(target: Element) {
+        if (target instanceof HTMLElement && target.classList.contains("xflow-editor")) {
+          resizeEditor = (width) => this.callback(
+            [{ target, contentRect: { width } } as ResizeObserverEntry],
+            this as unknown as ResizeObserver
+          );
+        }
+      }
+      unobserve() {}
+      disconnect() {}
+    }
+    globalThis.ResizeObserver = MockResizeObserver as unknown as typeof ResizeObserver;
+    try {
+      render(<XFlowEditor value={workflow} nodeTypes={nodeTypes} />);
+      fireEvent.change(jsonTab(selectNode("api")), { target: { value: "{ broken" } });
 
-    fireEvent.click(screen.getByRole("button", { name: "收起属性面板" }));
-    expect(screen.queryByRole("region", { name: /^(属性|工作流设置)$/ })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "展开属性面板" }));
-    expect(jsonTab().value).toBe("{ broken");
+      fireEvent.click(screen.getByRole("button", { name: "收起属性面板" }));
+      expect(screen.queryByRole("region", { name: /^(属性|工作流设置)$/ })).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "展开属性面板" }));
+      expect(jsonTab().value).toBe("{ broken");
 
-    // Compact layout: the Inspector lives in a destroyOnHidden drawer.
-    fireEvent.click(within(screen.getByRole("toolbar", { name: "编辑器工具栏" })).getByRole("button", { name: "更多操作" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "进入沉浸布局" }));
-    expect(screen.queryByRole("region", { name: /^(属性|工作流设置)$/ })).toBeNull();
-    fireEvent.click(within(screen.getByRole("complementary", { name: "紧凑导航" })).getByRole("button", { name: "属性面板" }));
-    await waitFor(() => expect(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).toBeTruthy());
-    expect(jsonTab().value).toBe("{ broken");
-    expect(within(inspector()).getByText("参数 JSON 格式错误")).toBeTruthy();
+      // Compact layout: the Inspector lives in a destroyOnHidden drawer, and
+      // the ⋯ menu is where that layout keeps its secondary actions.
+      act(() => resizeEditor?.(1279));
+      expect(screen.getByRole("button", { name: "更多操作" })).toBeTruthy();
+      expect(screen.queryByRole("region", { name: /^(属性|工作流设置)$/ })).toBeNull();
+      fireEvent.click(within(screen.getByRole("complementary", { name: "紧凑导航" })).getByRole("button", { name: "属性面板" }));
+      await waitFor(() => expect(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).toBeTruthy());
+      expect(jsonTab().value).toBe("{ broken");
+      expect(within(inspector()).getByText("参数 JSON 格式错误")).toBeTruthy();
+    } finally {
+      globalThis.ResizeObserver = originalObserver;
+    }
   });
 });
 
@@ -496,10 +522,10 @@ describe("node form: the diagnostics locate a parameter field", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "展开诊断台" }));
     const locate = await screen.findByRole("button", { name: "定位字段 api /parameters/url" });
-    // Walk away from the target node and its parameters tab first: locating
-    // has to select api, come back to 参数 and focus the field.
-    fireEvent.click(within(inspector()).getByRole("tab", { name: "设置" }));
-    expect(within(inspector()).getByRole("tab", { name: "设置" }).getAttribute("aria-selected")).toBe("true");
+    // Walk away from the target node and its 配置 tab first: locating has to
+    // select api, come back to 配置 and focus the field.
+    fireEvent.click(within(inspector()).getByRole("tab", { name: "连接" }));
+    expect(within(inspector()).getByRole("tab", { name: "连接" }).getAttribute("aria-selected")).toBe("true");
     // §6.0: collapsing the inspector must not swallow a locate request — this
     // entry exists specifically to look at the field.
     fireEvent.click(screen.getByRole("button", { name: "收起属性面板" }));
@@ -508,7 +534,7 @@ describe("node form: the diagnostics locate a parameter field", () => {
     await settle();
 
     expect(within(inspector()).getByText("api", { selector: ".xflow-editor-inspector-head__name" })).toBeTruthy();
-    expect(within(inspector()).getByRole("tab", { name: "参数" }).getAttribute("aria-selected")).toBe("true");
+    expect(within(inspector()).getByRole("tab", { name: "配置" }).getAttribute("aria-selected")).toBe("true");
     await waitFor(() => {
       const field = one<HTMLElement>(container, '[data-composer-path="/parameters/url"]');
       expect(field.contains(document.activeElement)).toBe(true);
@@ -547,10 +573,10 @@ describe("node form: the diagnostics locate a parameter field", () => {
     );
     (document.activeElement as HTMLElement | null)?.blur();
 
-    // The request was consumed and cleared: leaving the 参数 tab and coming
+    // The request was consumed and cleared: leaving the 配置 tab and coming
     // back remounts the form, but must not steal the focus again.
-    fireEvent.click(within(inspector()).getByRole("tab", { name: "设置" }));
-    fireEvent.click(within(inspector()).getByRole("tab", { name: "参数" }));
+    fireEvent.click(within(inspector()).getByRole("tab", { name: "连接" }));
+    fireEvent.click(within(inspector()).getByRole("tab", { name: "配置" }));
     await settle();
     expect(one<HTMLElement>(container, '[data-composer-path="/parameters/url"]').contains(document.activeElement)).toBe(false);
   });

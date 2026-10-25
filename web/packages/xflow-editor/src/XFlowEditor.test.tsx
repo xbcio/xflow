@@ -1,3 +1,4 @@
+import * as React from "react";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkflowDef } from "@xflow/core";
@@ -20,6 +21,13 @@ const workflowSettings = (): HTMLElement => {
 const variablesPanel = (): HTMLElement => {
   fireEvent.click(screen.getByRole("button", { name: "变量" }));
   return screen.getByRole("region", { name: "变量" });
+};
+/** ED-14 opens only 触发器 by default; tests that add a tile open the rest. */
+const expandAllGroups = () => {
+  const library = screen.getByRole("region", { name: "节点" });
+  for (const group of library.querySelectorAll<HTMLButtonElement>(".xflow-editor-node-group__title[aria-expanded='false']")) {
+    fireEvent.click(group);
+  }
 };
 
 describe("XFlowEditor", () => {
@@ -160,6 +168,7 @@ describe("XFlowEditor", () => {
   afterEach(() => {
     window.matchMedia = originalMatchMedia;
     globalThis.ResizeObserver = originalResizeObserver;
+    vi.unstubAllEnvs();
   });
 
   it("only shows the replay notice in 运行记录", () => {
@@ -196,6 +205,7 @@ describe("XFlowEditor", () => {
     fireEvent.keyDown(window, { key: "v" });
     expect(editor.getAttribute("data-canvas-tool")).toBe("select");
 
+    expandAllGroups();
     fireEvent.click(within(screen.getByRole("region", { name: "节点" })).getByRole("button", { name: "HTTP" }));
     expect(undo.disabled).toBe(false);
     fireEvent.click(undo);
@@ -223,10 +233,10 @@ describe("XFlowEditor", () => {
 
   it("starts a library drag with the node type the canvas reads back on drop", () => {
     render(<XFlowEditor value={workflow} />);
+    expandAllGroups();
 
     const tile = within(screen.getByRole("region", { name: "节点" })).getByRole("button", { name: "HTTP" });
     expect(tile.getAttribute("draggable")).toBe("true");
-
     const setData = vi.fn();
     fireEvent.dragStart(tile, { dataTransfer: { setData, effectAllowed: "" } });
 
@@ -254,10 +264,9 @@ describe("XFlowEditor", () => {
     // §6.0.1: the left column is two zones, the library over the outline tree.
     expect(screen.getByRole("complementary", { name: "节点与大纲" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "大纲" })).toBeTruthy();
-    // §6.3 (E2b): the top bar has no search field; ⌘K opens a locate panel and
-    // the canvas float carries the magnifier instead.
+    // §6.3 (E2b): the top bar has no search field; ⌘K opens the locate panel.
     expect(screen.queryByRole("combobox", { name: "定位节点" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "定位节点 ⌘K" }));
+    fireEvent.keyDown(window, { key: "k", metaKey: true });
     expect(await screen.findByRole("combobox", { name: "定位节点" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "画布" })).toBeTruthy();
     expect(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).toBeTruthy();
@@ -411,6 +420,53 @@ describe("XFlowEditor", () => {
     expect(chip().getAttribute("data-tone")).toBe("success");
   });
 
+  it("adopts a persisted definition the host swaps in with the same content", () => {
+    const versioned = { ...workflow, version: "2.1.0" };
+    let draft: WorkflowDef | undefined;
+    const { rerender } = render(
+      <XFlowEditor
+        value={versioned}
+        onChange={(next) => {
+          draft = next;
+        }}
+      />
+    );
+    const chip = () => document.querySelector(".xflow-editor-chip") as HTMLElement;
+    expect(chip().textContent).toBe("线上 v2.1.0");
+
+    fireEvent.change(within(workflowSettings()).getByLabelText("工作流名称"), {
+      target: { value: "Renamed before run" }
+    });
+    expect(chip().textContent).toBe("未保存 1 处 · 基于 v2.1.0");
+
+    // Save-then-run: the host persists the draft and hands the persisted copy
+    // back, without `onSave`. Content is equal but the object is new, so this
+    // is the new baseline and the chip returns to the saved state.
+    rerender(<XFlowEditor value={{ ...draft! }} />);
+    expect(chip().textContent).toBe("线上 v2.1.0");
+    expect(chip().getAttribute("data-tone")).toBe("success");
+  });
+
+  it("keeps the draft dirty when the host echoes the onChange payload back as value", () => {
+    const versioned = { ...workflow, version: "2.1.0" };
+    // A controlled host that stores the payload by reference, as documented on
+    // `value`: identity equality here means this is an echo, not a persisted
+    // definition swapped in, so it must not reset the dirty count.
+    const Controlled = () => {
+      const [state, setState] = React.useState(versioned);
+      return <XFlowEditor value={state} onChange={setState} />;
+    };
+    render(<Controlled />);
+    const chip = () => document.querySelector(".xflow-editor-chip") as HTMLElement;
+
+    fireEvent.change(within(workflowSettings()).getByLabelText("工作流名称"), {
+      target: { value: "Renamed in a controlled host" }
+    });
+
+    expect(chip().textContent).toBe("未保存 1 处 · 基于 v2.1.0");
+    expect(chip().getAttribute("data-tone")).toBe("warning");
+  });
+
   it("adopts a save result that changes the definition while edits are in flight", async () => {
     let resolveSave!: (saved: typeof workflow) => void;
     const pendingSave = new Promise<typeof workflow>((resolve) => {
@@ -452,14 +508,17 @@ describe("XFlowEditor", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "返回工作流列表" }));
     expect(handleBack).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole("button", { name: "返回工作流列表" }).querySelector(".anticon")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "返回工作流列表" }).querySelector("svg[data-xflow-icon]")).toBeTruthy();
 
     rerender(<XFlowEditor value={workflow} />);
     expect(screen.queryByRole("button", { name: "返回工作流列表" })).toBeNull();
   });
 
-  it("disables 新建工作流 in the ⋯ menu while in 运行记录 and keeps 沉浸布局 available", async () => {
+  it("disables 新建工作流 in the compact ⋯ menu while in 运行记录 and keeps 沉浸布局 available", async () => {
+    mockSystemColorScheme(false);
+    const container = mockEditorWidth();
     render(<XFlowEditor value={workflow} />);
+    act(() => container.setWidth(1279));
     fireEvent.click(screen.getByRole("radio", { name: /运行记录/ }));
 
     // §6.3: the two former top-bar icon buttons live in ⋯ now, not beside it.
@@ -549,6 +608,23 @@ describe("XFlowEditor", () => {
     expect(editor.getAttribute("data-theme")).toBe("dark");
   });
 
+  it("enters the immersive layout from the wide-screen theme settings", async () => {
+    render(<XFlowEditor value={workflow} />);
+
+    const editor = screen.getByRole("region", { name: "Purchase approval editor" });
+    expect(editor.getAttribute("data-layout")).toBe("a");
+    expect(editor.getAttribute("data-layout-policy")).toBe("auto");
+
+    // 布局 is the same radio-group contract as 颜色模式 and drives the same
+    // setLayoutPolicy as the compact ⋮ menu's 进入沉浸布局.
+    fireEvent.click(screen.getByRole("button", { name: "主题设置" }));
+    const layout = await screen.findByLabelText("布局");
+    fireEvent.click(within(layout).getByText("沉浸布局"));
+
+    expect(editor.getAttribute("data-layout-policy")).toBe("compact");
+    expect(editor.getAttribute("data-layout")).toBe("c");
+  });
+
   it("updates the resolved system theme and cleans its media-query listener", () => {
     const systemColorScheme = mockSystemColorScheme(false);
     const { unmount } = render(<XFlowEditor value={workflow} appearance="system" />);
@@ -603,7 +679,7 @@ describe("XFlowEditor", () => {
     }
   );
 
-  it("collapses the left panel at compact and both panes at narrow, keeping drawers mutually exclusive", async () => {
+  it("collapses both panes at compact and narrow, keeping drawers mutually exclusive", async () => {
     mockSystemColorScheme(false);
     const container = mockEditorWidth();
     render(<XFlowEditor value={workflow} />);
@@ -611,15 +687,14 @@ describe("XFlowEditor", () => {
     const editor = screen.getByRole("region", { name: "Purchase approval editor" });
     expect(editor.getAttribute("data-layout")).toBe("a");
 
-    // 1024-1280 (ui-preview COMPACT_LEFT): the left panel is a rail, the
-    // inspector keeps its docked column.
+    // Compact (§6.0): both panes are rails with drawers; the inspector no longer
+    // keeps a docked column at the old 1024-1280 band.
     act(() => container.setWidth(1279));
-    expect(editor.getAttribute("data-layout")).toBe("b");
+    expect(editor.getAttribute("data-layout")).toBe("c");
     expect(editor.getAttribute("data-layout-policy")).toBe("auto");
     expect(screen.getByRole("complementary", { name: "紧凑导航" })).toBeTruthy();
-    // The inspector is docked here, so the rail has no 属性 key.
-    expect(within(screen.getByRole("complementary", { name: "紧凑导航" })).queryByRole("button", { name: "属性面板" })).toBeNull();
-    expect(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).toBeTruthy();
+    expect(within(screen.getByRole("complementary", { name: "紧凑导航" })).getByRole("button", { name: "属性面板" })).toBeTruthy();
+    expect(screen.queryByRole("region", { name: /^(属性|工作流设置)$/ })).toBeNull();
 
     // The compact left rail in the same band opens its drawer.
     fireEvent.click(screen.getByRole("button", { name: "节点与大纲" }));
@@ -628,7 +703,7 @@ describe("XFlowEditor", () => {
     fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("region", { name: "节点" })).toBeNull());
 
-    // Below 1024 both panes are rails with drawers.
+    // Below the compact breakpoint the layout stays "c", with both panes as rails.
     act(() => container.setWidth(1023));
     expect(editor.getAttribute("data-layout")).toBe("c");
     expect(screen.getByRole("complementary", { name: "紧凑导航" })).toBeTruthy();
@@ -646,9 +721,11 @@ describe("XFlowEditor", () => {
     // The drawer shows no title of its own (the panel's title bar names it) but
     // the dialog keeps an accessible name.
     expect(screen.getByRole("dialog", { name: "节点与大纲" })).toBeTruthy();
-    const search = screen.getByPlaceholderText("搜索 Webhook / If / HTTP…");
+    // The box starts hidden; opening the drawer focuses its key instead.
+    expect(screen.queryByPlaceholderText("搜索 Webhook / If / HTTP…")).toBeNull();
+    const searchKey = within(screen.getByRole("region", { name: "节点" })).getByRole("button", { name: "搜索节点" });
     await waitFor(() => {
-      expect(document.activeElement).toBe(search);
+      expect(document.activeElement).toBe(searchKey);
     });
 
     const variablesRail = screen.getByRole("button", { name: "变量" });
@@ -692,7 +769,7 @@ describe("XFlowEditor", () => {
     fireEvent.click(screen.getByRole("button", { name: "收起左栏" }));
     expect(screen.queryByRole("region", { name: "节点" })).toBeNull();
 
-    // At 1024-1280 the canvas "添加节点" action opens the compact drawer; that
+    // At compact width the canvas "添加节点" action opens the compact drawer; that
     // must not rewrite the persisted desktop collapse flag.
     act(() => container.setWidth(1279));
     expect(screen.getByRole("complementary", { name: "紧凑导航" })).toBeTruthy();
@@ -731,13 +808,15 @@ describe("XFlowEditor", () => {
     mockSystemColorScheme(false);
     const container = mockEditorWidth();
     render(<XFlowEditor value={workflow} />);
-    act(() => container.setWidth(1600));
+    // Compact is where the ⋯ menu lives (user ruling 2026-10-21): entering
+    // immersive from it must not remount the canvas.
+    act(() => container.setWidth(1279));
 
     const editor = screen.getByRole("region", { name: "Purchase approval editor" });
     const preview = screen.getByRole("region", { name: "Purchase approval preview" });
-    expect(editor.getAttribute("data-layout")).toBe("a");
+    expect(editor.getAttribute("data-layout")).toBe("c");
 
-    // 沉浸布局 / 恢复自动布局 live in the ⋯ menu (user ruling 2026-10-17).
+    // 沉浸布局 / 恢复自动布局 live in the ⋯ menu.
     const chooseFromMoreMenu = async (name: string) => {
       fireEvent.click(within(screen.getByRole("toolbar", { name: "编辑器工具栏" })).getByRole("button", { name: "更多操作" }));
       fireEvent.click(await screen.findByRole("menuitem", { name }));
@@ -754,9 +833,8 @@ describe("XFlowEditor", () => {
       expect(screen.queryByRole("tab", { name: "节点库" })).toBeNull();
     });
 
-    // A wide container does not eject the manually chosen compact layout.
-    act(() => container.setWidth(1200));
-    expect(editor.getAttribute("data-layout")).toBe("c");
+    // A wide container does not eject the manually chosen compact layout; the
+    // ⋯ menu stays with it, so 恢复自动布局 remains reachable.
     act(() => container.setWidth(1600));
     expect(editor.getAttribute("data-layout")).toBe("c");
 
@@ -776,7 +854,7 @@ describe("XFlowEditor", () => {
     const editor = screen.getByRole("region", { name: "Purchase approval editor" });
 
     act(() => container.setWidth(1279));
-    expect(editor.getAttribute("data-layout")).toBe("b");
+    expect(editor.getAttribute("data-layout")).toBe("c");
 
     // A window resize leaves the measured container untouched: no switch. The
     // window is deliberately wider than compact, so a window listener would
@@ -787,7 +865,7 @@ describe("XFlowEditor", () => {
       act(() => {
         window.dispatchEvent(new Event("resize"));
       });
-      expect(editor.getAttribute("data-layout")).toBe("b");
+      expect(editor.getAttribute("data-layout")).toBe("c");
     } finally {
       // `delete` would remove the property outright (jsdom has no prototype
       // fallback), leaving every later test with an undefined window width.
@@ -809,15 +887,37 @@ describe("XFlowEditor", () => {
     expect(editor.getAttribute("data-layout")).toBe("c");
 
     act(() => container.setWidth(1024));
-    expect(editor.getAttribute("data-layout")).toBe("b");
+    expect(editor.getAttribute("data-layout")).toBe("c");
 
     // 1279.6 must not be rounded up to 1280: the @container query compares the
     // raw content width, so the JS tier must use the same unrounded value.
     act(() => container.setWidth(1279.6));
-    expect(editor.getAttribute("data-layout")).toBe("b");
+    expect(editor.getAttribute("data-layout")).toBe("c");
 
+    // The compact comparison is inclusive: a 1280-wide host is layout c, so
+    // the docked columns cannot leave the canvas under half the screen.
     act(() => container.setWidth(1280));
+    expect(editor.getAttribute("data-layout")).toBe("c");
+
+    act(() => container.setWidth(1280.4));
     expect(editor.getAttribute("data-layout")).toBe("a");
+  });
+
+  it("renders the ⋯ menu only in the compact layout", () => {
+    mockSystemColorScheme(false);
+    const container = mockEditorWidth();
+    render(<XFlowEditor value={workflow} />);
+    const toolbar = screen.getByRole("toolbar", { name: "编辑器工具栏" });
+
+    act(() => container.setWidth(1600));
+    expect(within(toolbar).queryByRole("button", { name: "更多操作" })).toBeNull();
+    // The wide toolbar keeps the baseline's individual actions instead.
+    for (const name of ["撤销", "重做", "校验", "主题设置"]) {
+      expect(within(toolbar).getByRole("button", { name })).toBeTruthy();
+    }
+
+    act(() => container.setWidth(1279));
+    expect(within(toolbar).getByRole("button", { name: "更多操作" })).toBeTruthy();
   });
 
   it("keeps 撤销 / 重做 / 校验 / 主题 independent at wide and folds them into ⋯ when compact", async () => {
@@ -831,11 +931,18 @@ describe("XFlowEditor", () => {
       expect(screen.getByRole("button", { name })).toBeTruthy();
     }
 
+    // Deselect at desktop width: inside the compact drawer Escape would close
+    // the drawer instead of clearing the canvas selection.
+    workflowSettings();
+
     act(() => container.setWidth(1279));
-    // Layout b: those buttons are gone; only the ⋯ menu carries them.
+    // Layout c (compact): those buttons are gone; only the ⋯ menu carries them,
+    // and the inspector is a drawer opened from the compact rail.
     for (const name of ["撤销", "重做", "校验", "主题设置"]) {
       expect(screen.queryByRole("button", { name })).toBeNull();
     }
+    fireEvent.click(within(screen.getByRole("complementary", { name: "紧凑导航" })).getByRole("button", { name: "属性面板" }));
+    await waitFor(() => expect(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).toBeTruthy());
 
     const openMenu = async () => {
       if (!screen.queryByRole("menu")) fireEvent.click(within(screen.getByRole("toolbar", { name: "编辑器工具栏" })).getByRole("button", { name: "更多操作" }));
@@ -864,8 +971,10 @@ describe("XFlowEditor", () => {
       "新建工作流"
     ]);
 
-    // 撤销 really undoes the edit the menu offers it for.
-    const settings = workflowSettings();
+    // 撤销 really undoes the edit the menu offers it for. The compact drawer is
+    // already showing the workflow settings (no node selected), so query it
+    // directly: Escape would close the drawer instead of deselecting.
+    const settings = await waitFor(() => screen.getByRole("region", { name: /^(属性|工作流设置)$/ }));
     fireEvent.change(within(settings).getByLabelText("工作流名称"), { target: { value: "Narrow edit" } });
     expect(document.querySelector(".xflow-editor-chip")?.textContent).toBe("未保存 1 处");
     await choose("撤销");
@@ -888,7 +997,7 @@ describe("XFlowEditor", () => {
     // Every theme row keeps a check-icon slot, active or not, so the labels
     // share one text column (the review measured a 21px indent on the active row).
     for (const name of ["浅色", "深色", /跟随系统.*当前/]) {
-      expect(themeMenu.getByRole("menuitem", { name }).querySelector(".anticon-check")).toBeTruthy();
+      expect(themeMenu.getByRole("menuitem", { name }).querySelector('[data-xflow-icon="check"]')).toBeTruthy();
     }
     // Inactive slots are hidden, the active one is not, so only the selected
     // row shows a check while all three labels stay aligned.
@@ -948,7 +1057,7 @@ describe("XFlowEditor", () => {
       render(<XFlowEditor value={workflow} />);
       expect(
         screen.getByRole("region", { name: "Purchase approval editor" }).getAttribute("data-layout")
-      ).toBe("b");
+      ).toBe("c");
     } finally {
       measure.mockRestore();
     }
@@ -996,12 +1105,20 @@ describe("XFlowEditor", () => {
     expect(screen.getByRole("button", { name: "保存" }).className).not.toContain("ant-btn-variant-solid");
   });
 
-  it("opens the locate panel from the canvas magnifier and closes it on Esc, restoring focus", async () => {
+  it("opens the locate panel from ⌘K and closes it on Esc, restoring focus", async () => {
+    // rc hands every overlay the constant id "test-id" in NODE_ENV=test. The
+    // merged 配置 tab keeps duration Selects in the DOM, so the panel's
+    // aria-labelledby would resolve to one of those instead of its title. A
+    // real build numbers each overlay; this test needs the same.
+    vi.stubEnv("NODE_ENV", "development");
     render(<XFlowEditor value={workflow} />);
 
-    const trigger = screen.getByRole("button", { name: "定位节点 ⌘K" });
+    // No canvas magnifier (user ruling 2026-10-21): the shortcut is the entry,
+    // and Esc returns focus to whatever was focused when it fired.
+    expect(screen.queryByRole("button", { name: "定位节点 ⌘K" })).toBeNull();
+    const trigger = screen.getByRole("button", { name: "主题设置" });
     trigger.focus();
-    fireEvent.click(trigger);
+    fireEvent.keyDown(window, { key: "k", metaKey: true });
 
     const panel = await screen.findByRole("dialog", { name: "定位节点" });
     const search = within(panel).getByRole("combobox", { name: "定位节点" });
@@ -1025,8 +1142,8 @@ describe("XFlowEditor", () => {
     // panel while its enter animation keeps it inaccessible, letting a
     // regression that does open it pass the negative assertion.
     expect(document.querySelector(".xflow-editor-locate")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "定位节点 ⌘K" }));
-    expect(document.querySelector(".xflow-editor-locate")).toBeNull();
+    // The removed magnifier cannot be a back door either.
+    expect(screen.queryByRole("button", { name: "定位节点 ⌘K" })).toBeNull();
   });
 
   it("scrolls the active locate option into view as the arrow keys move it", async () => {
@@ -1053,8 +1170,7 @@ describe("XFlowEditor", () => {
     render(<XFlowEditor value={workflow} />);
 
     const inspector = screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
-    const parameters = within(inspector).getByRole("tab", { name: "参数" });
-    const settings = within(inspector).getByRole("tab", { name: "设置" });
+    const parameters = within(inspector).getByRole("tab", { name: "配置" });
     const connections = within(inspector).getByRole("tab", { name: "连接" });
     const run = within(inspector).getByRole("tab", { name: "运行" });
     expect(parameters.getAttribute("aria-controls")).toBe("xflow-editor-inspector-panel-parameters");
@@ -1062,17 +1178,14 @@ describe("XFlowEditor", () => {
 
     parameters.focus();
     fireEvent.keyDown(parameters, { key: "ArrowRight", code: "ArrowRight" });
-    expect(document.activeElement).toBe(settings);
-    expect(settings.getAttribute("aria-selected")).toBe("true");
-    expect(within(inspector).getAllByRole("tabpanel")[0].getAttribute("aria-labelledby")).toBe(settings.id);
-
-    fireEvent.keyDown(settings, { key: "ArrowRight", code: "ArrowRight" });
     expect(document.activeElement).toBe(connections);
     expect(connections.getAttribute("aria-selected")).toBe("true");
+    expect(within(inspector).getAllByRole("tabpanel")[0].getAttribute("aria-labelledby")).toBe(connections.id);
 
-    fireEvent.keyDown(connections, { key: "End", code: "End" });
+    fireEvent.keyDown(connections, { key: "ArrowRight", code: "ArrowRight" });
     expect(document.activeElement).toBe(run);
     expect(run.getAttribute("aria-selected")).toBe("true");
+
     fireEvent.keyDown(run, { key: "Home", code: "Home" });
     expect(document.activeElement).toBe(parameters);
     expect(parameters.getAttribute("aria-selected")).toBe("true");
@@ -1115,7 +1228,7 @@ describe("XFlowEditor", () => {
     fireEvent.click(locate);
 
     expect(
-      within(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).getByText("route_by_amount · xflow.switch", {
+      within(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).getByText("xflow.switch", {
         selector: ".xflow-editor-inspector-head__type"
       })
     ).toBeTruthy();
@@ -1124,13 +1237,16 @@ describe("XFlowEditor", () => {
     expect(screen.getByText("未保存 1 处", { selector: ".xflow-editor-chip span" })).toBeTruthy();
   });
 
-  it("shows the node search always, with the / key hint, and filters by it", () => {
+  it("hides the node search until its key opens it, then filters by it", () => {
     render(<XFlowEditor value={workflow} />);
 
     const library = screen.getByRole("region", { name: "节点" });
     expect(library.querySelector(".xflow-editor-panel-title__icon")?.getAttribute("aria-hidden")).toBe("true");
-    // No toggle any more: the baseline's search box is on screen from the start.
-    expect(within(library).queryByRole("button", { name: "搜索节点" })).toBeNull();
+    // The baseline's box starts hidden; the title-bar key reveals it.
+    expect(within(library).queryByPlaceholderText("搜索 Webhook / If / HTTP…")).toBeNull();
+    const key = within(library).getByRole("button", { name: "搜索节点" });
+    expect(key.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(key);
 
     const searchInput = within(library).getByPlaceholderText("搜索 Webhook / If / HTTP…");
     expect(searchInput).toBeTruthy();
@@ -1178,10 +1294,9 @@ describe("XFlowEditor", () => {
     expect(within(inspector).getByText("属性")).toBeTruthy();
     expect(within(inspector).getAllByText(/route_by_amount/).length).toBeGreaterThan(0);
     expect(within(inspector).queryByText("running")).toBeNull();
-    expect(within(inspector).getByText("route_by_amount · xflow.switch", { selector: ".xflow-editor-inspector-head__type" })).toBeTruthy();
+    expect(within(inspector).getByText("xflow.switch", { selector: ".xflow-editor-inspector-head__type" })).toBeTruthy();
     expect(within(inspector).getByLabelText("节点名称").className).toContain("xflow-editor-nodeform-node-name-control");
-    expect(within(inspector).getByRole("tab", { name: "参数" }).getAttribute("aria-selected")).toBe("true");
-    expect(within(inspector).getByRole("tab", { name: "设置" })).toBeTruthy();
+    expect(within(inspector).getByRole("tab", { name: "配置" }).getAttribute("aria-selected")).toBe("true");
     expect(within(inspector).getByRole("tab", { name: "连接" })).toBeTruthy();
     expect(within(inspector).getByRole("tab", { name: "运行" })).toBeTruthy();
     expect(within(inspector).getByDisplayValue("Route purchase requests by amount")).toBeTruthy();
@@ -1388,7 +1503,7 @@ describe("XFlowEditor", () => {
     // The form owns /runner_selector (Doc C §4.2); node-level `mode` is a
     // compile error, so only match_labels is offered. The legacy JSON box is gone.
     expect(within(inspector).queryByLabelText("节点 Runner 选择 JSON")).toBeNull();
-    fireEvent.click(within(inspector).getByRole("tab", { name: "设置" }));
+    // The merged 配置 tab: expand the execution section in place.
     fireEvent.click(within(inspector).getByRole("button", { name: "执行策略" }));
     const labels = within(inspector).getByRole("group", { name: "匹配标签" });
     fireEvent.click(within(labels).getByRole("button", { name: /添加/ }));
@@ -1446,6 +1561,7 @@ describe("XFlowEditor", () => {
     const handleChange = vi.fn();
 
     render(<XFlowEditor value={workflow} onChange={handleChange} />);
+    expandAllGroups();
 
     const library = screen.getByRole("region", { name: "节点" });
     fireEvent.click(within(library).getByRole("button", { name: "HTTP" }));
@@ -1935,10 +2051,13 @@ describe("XFlowEditor", () => {
     expect(within(screen.getByRole("region", { name: "诊断台" })).queryByText("missing_target")).toBeNull();
   });
 
-  it("creates a new workflow draft from the toolbar", async () => {
+  it("creates a new workflow draft from the compact ⋯ menu", async () => {
     const handleChange = vi.fn();
 
+    mockSystemColorScheme(false);
+    const container = mockEditorWidth();
     render(<XFlowEditor value={workflow} onChange={handleChange} />);
+    act(() => container.setWidth(1279));
 
     fireEvent.click(within(screen.getByRole("toolbar", { name: "编辑器工具栏" })).getByRole("button", { name: "更多操作" }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "新建工作流" }));
@@ -1969,23 +2088,128 @@ describe("XFlowEditor", () => {
     expect(canvas.querySelector(".xflow-preview-ruler")).toBeNull();
   });
 
-  it("draws the preview's rulers and zoom bar instead of the old static ruler", () => {
+  it("inserts a starter template as one undoable draft edit (EL-14)", () => {
+    const onChange = vi.fn();
+    render(
+      <XFlowEditor
+        value={{ name: "Empty", spec: "1.0", nodes: [], connections: {} }}
+        onChange={onChange}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Webhook → HTTP/ }));
+    const inserted = onChange.mock.calls.at(-1)?.[0] as WorkflowDef;
+    expect(inserted.nodes?.map((node) => node.name)).toEqual(["webhook_in", "request_api"]);
+    expect(inserted.connections?.webhook_in?.main).toEqual([{ node: "request_api" }]);
+    // The template left the empty state: the canvas now shows its cards.
+    expect(screen.queryByRole("heading", { name: "添加触发器开始" })).toBeNull();
+
+    fireEvent.click(
+      within(screen.getByRole("group", { name: "常用画布与历史工具" })).getByRole("button", { name: "撤销" })
+    );
+    expect((onChange.mock.calls.at(-1)?.[0] as WorkflowDef).nodes).toEqual([]);
+    expect(screen.getByRole("heading", { name: "添加触发器开始" })).toBeTruthy();
+  });
+
+  it("writes a starter template's if condition as a bare expression (EL-14)", () => {
+    const onChange = vi.fn();
+    render(
+      <XFlowEditor
+        value={{ name: "Empty", spec: "1.0", nodes: [], connections: {} }}
+        onChange={onChange}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /条件分支/ }));
+    const inserted = onChange.mock.calls.at(-1)?.[0] as WorkflowDef;
+    const condition = inserted.nodes?.[0]?.parameters?.condition;
+    expect(condition).toBe("$input.ok == true");
+    expect(String(condition)).not.toContain("${{");
+  });
+
+  it("shows the workflow overview above the settings when nothing is selected (EL-13)", () => {
+    render(<XFlowEditor value={{ ...workflow, version: "2.1.0" }} />);
+    const inspector = workflowSettings();
+    const overview = within(inspector).getByRole("region", { name: "工作流概览" });
+
+    const stats = [...overview.querySelectorAll(".xflow-editor-overview__stat-value")].map(
+      (value) => value.textContent
+    );
+    expect(stats).toEqual(["3", "2", "0"]);
+    expect(overview.textContent).toContain("start");
+    expect(overview.textContent).toContain("v2.1.0");
+    expect(overview.textContent).toContain("已保存");
+
+    // The settings form stays below the overview rather than being replaced.
+    const config = inspector.querySelector(".xflow-editor-inspector-settings__config");
+    expect(config).toBeTruthy();
+    expect(overview.compareDocumentPosition(config as Node) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    fireEvent.click(overview.querySelector(".xflow-editor-overview__link") as HTMLElement);
+    expect(screen.getByRole("region", { name: "诊断台" }).getAttribute("data-dock")).not.toBe("collapsed");
+  });
+
+  it("shows the host's latest run before any execution list page exists", () => {
+    render(
+      <XFlowEditor
+        value={{ ...workflow, version: "2.1.0" }}
+        latestRun={{
+          executionId: "exec-latest",
+          status: "success",
+          createdAt: "2026-01-02T03:04:05Z",
+          updatedAt: "2026-01-02T03:04:15Z"
+        }}
+      />
+    );
+    const overview = within(workflowSettings()).getByRole("region", { name: "工作流概览" });
+
+    expect(overview.textContent).toContain("最近运行");
+    expect(overview.textContent).toContain("成功");
+  });
+
+  it("keeps the rulers off by default and turns them on from the zoom bar key", () => {
     render(<XFlowEditor value={workflow} />);
     const canvas = screen.getByRole("region", { name: "画布" });
+    const toggle = within(canvas).getByRole("button", { name: "标尺 (⇧R)" });
 
+    // EL-10: the workbench opens without rulers; the key stays the local gate.
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    expect(canvas.querySelectorAll(".xflow-preview-ruler")).toHaveLength(0);
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
     expect(canvas.querySelectorAll(".xflow-preview-ruler")).toHaveLength(2);
     expect(within(canvas).getByRole("toolbar", { name: "画布缩放" })).toBeTruthy();
     expect(canvas.querySelector(".xflow-editor-canvas__ruler")).toBeNull();
+  });
+
+  it("opens with the minimap on and toggles it from the zoom bar's 显示缩略图 key", () => {
+    render(<XFlowEditor value={workflow} />);
+    const canvas = screen.getByRole("region", { name: "画布" });
+    const toggle = within(canvas).getByRole("button", { name: "显示缩略图" });
+
+    // §6.2 / baseline #wb: the workbench shows the minimap without a click.
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+    expect(canvas.querySelector(".react-flow__minimap")).toBeTruthy();
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    expect(canvas.querySelector(".react-flow__minimap")).toBeNull();
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+    expect(canvas.querySelector(".react-flow__minimap")).toBeTruthy();
   });
 
   it("puts 添加节点 (A) at the canvas's top left and opens the library from it or from A", () => {
     render(<XFlowEditor value={workflow} />);
     const canvas = screen.getByRole("region", { name: "画布" });
     const add = within(canvas).getByRole("button", { name: "添加节点 (A)" });
-    expect(add.closest(".xflow-preview-canvas-float")).toBeTruthy();
-    // The magnifier shares that one float shell, as the baseline's add-node pair.
-    const locate = within(canvas).getByRole("button", { name: "定位节点 ⌘K" });
-    expect(locate.closest(".xflow-preview-canvas-float")).toBe(add.closest(".xflow-preview-canvas-float"));
+    const float = add.closest(".xflow-preview-canvas-float") as HTMLElement;
+    expect(float).toBeTruthy();
+    // The float holds 添加节点 alone (98x34); locate is ⌘K-only now.
+    expect(within(float).getAllByRole("button")).toHaveLength(1);
+    expect(within(canvas).queryByRole("button", { name: "定位节点 ⌘K" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "收起左栏" }));
     fireEvent.click(add);
@@ -1996,7 +2220,7 @@ describe("XFlowEditor", () => {
     expect(screen.getByRole("region", { name: "节点" })).toBeTruthy();
   });
 
-  it("drops 添加节点 and 自动布局 from the read-only canvas but keeps locate", async () => {
+  it("drops 添加节点, 自动布局 and the magnifier from the read-only canvas but keeps ⌘K", async () => {
     const { rerender } = render(<XFlowEditor value={workflow} />);
     const canvas = screen.getByRole("region", { name: "画布" });
     expect(within(canvas).getByRole("button", { name: "自动布局" })).toBeTruthy();
@@ -2005,11 +2229,12 @@ describe("XFlowEditor", () => {
 
     expect(within(canvas).queryByRole("button", { name: "添加节点 (A)" })).toBeNull();
     expect(within(canvas).queryByRole("button", { name: "自动布局" })).toBeNull();
+    expect(within(canvas).queryByRole("button", { name: "定位节点 ⌘K" })).toBeNull();
+    // No empty float shell lingers where the removed buttons used to be.
+    expect(canvas.querySelector(".xflow-preview-canvas-float")).toBeNull();
 
-    // A read-only viewer still needs locate: the magnifier is the only float.
-    const locate = within(canvas).getByRole("button", { name: "定位节点 ⌘K" });
-    expect(locate.closest(".xflow-preview-canvas-float")).toBeTruthy();
-    fireEvent.click(locate);
+    // A read-only viewer still locates with the shortcut.
+    fireEvent.keyDown(window, { key: "k", metaKey: true });
     expect(await screen.findByRole("dialog", { name: "定位节点" })).toBeTruthy();
   });
 
@@ -2032,6 +2257,7 @@ describe("XFlowEditor", () => {
     const handleChange = vi.fn();
     render(<XFlowEditor value={workflow} onChange={handleChange} />);
 
+    expandAllGroups();
     fireEvent.click(within(screen.getByRole("region", { name: "节点" })).getByRole("button", { name: "HTTP" }));
     const addedCount = handleChange.mock.calls.at(-1)?.[0]?.nodes.length;
     expect(addedCount).toBe(4);
@@ -2126,6 +2352,7 @@ describe("XFlowEditor", () => {
     const handleSave = vi.fn(async (nextWorkflow: typeof workflow) => nextWorkflow);
     render(<XFlowEditor value={workflow} onChange={handleChange} onSave={handleSave} />);
 
+    expandAllGroups();
     fireEvent.click(within(screen.getByRole("region", { name: "节点" })).getByRole("button", { name: "HTTP" }));
     const changeCountBefore = handleChange.mock.calls.length;
 

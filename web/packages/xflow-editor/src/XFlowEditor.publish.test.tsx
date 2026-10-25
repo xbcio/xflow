@@ -18,7 +18,7 @@ class WidthResizeObserver {
   }
   observe(target: Element): void {
     this.callback(
-      [{ target, contentRect: { width: 1280 } } as ResizeObserverEntry],
+      [{ target, contentRect: { width: 1440 } } as ResizeObserverEntry],
       this as unknown as ResizeObserver
     );
   }
@@ -123,6 +123,62 @@ describe("PublishDialog (§6.10)", () => {
     const dialog = screen.getByRole("dialog");
     expect(dialog.textContent).toContain("校验有 2 个错误");
     expect(dialog.textContent).toContain("在途执行不受影响");
+    expect((screen.getByRole("button", { name: "发布 v1.3.1" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("states a warning count as publishable, with the warning tone and the gate open", () => {
+    render(
+      <PublishDialog
+        changes={[]}
+        errorCount={0}
+        open
+        suggestedVersion="1.3.1"
+        usedVersions={[]}
+        version="1.3.1"
+        warningCount={2}
+        workflow={workflow}
+        onCancel={() => {}}
+        onPublish={() => {}}
+        onVersionChange={() => {}}
+      />
+    );
+    const dialog = screen.getByRole("dialog");
+    const banner = dialog.querySelector<HTMLElement>(".xflow-editor-banner");
+
+    expect(banner?.getAttribute("data-tone")).toBe("warning");
+    expect(banner?.textContent).toContain("可以发布");
+    expect(banner?.textContent).toContain("校验有 2 个警告");
+    expect(banner?.textContent).toContain("发布后新触发的执行使用新版本，在途执行不受影响");
+    expect(dialog.textContent).not.toContain("校验通过");
+    // Warnings do not block: the gate stays open.
+    expect((screen.getByRole("button", { name: "发布 v1.3.1" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("keeps an error above the warning count and closes the gate", () => {
+    render(
+      <PublishDialog
+        changes={[]}
+        errorCount={1}
+        open
+        suggestedVersion="1.3.1"
+        usedVersions={[]}
+        version="1.3.1"
+        warningCount={2}
+        workflow={workflow}
+        onCancel={() => {}}
+        onPublish={() => {}}
+        onVersionChange={() => {}}
+      />
+    );
+    const dialog = screen.getByRole("dialog");
+    const banner = dialog.querySelector<HTMLElement>(".xflow-editor-banner");
+
+    expect(banner?.getAttribute("data-tone")).toBe("danger");
+    expect(banner?.textContent).toContain("校验未通过");
+    expect(banner?.textContent).toContain("校验有 1 个错误");
+    // One banner only: the error branch wins over the warning count.
+    expect(dialog.querySelectorAll(".xflow-editor-banner")).toHaveLength(1);
+    expect(dialog.textContent).not.toContain("可以发布");
     expect((screen.getByRole("button", { name: "发布 v1.3.1" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
@@ -294,6 +350,34 @@ describe("VersionHistory (§6.10)", () => {
     const button = blockedRow.querySelector('[data-op="rollback-blocked"]') as HTMLButtonElement;
     expect(button.disabled).toBe(true);
     expect(blockedRow.textContent).toContain("当前编译器重算哈希不一致");
+  });
+
+  it("keeps every archived row's 回滚到此 reachable while only the rolling row is busy", () => {
+    render(
+      <VersionHistory
+        versions={versions}
+        blocked={{}}
+        rollingBackVersion="1.2.0"
+        onReload={() => {}}
+        onRollback={() => {}}
+        onViewVersion={() => {}}
+      />
+    );
+    const row = (version: string) => document.querySelector(`[data-version="${version}"]`) as HTMLElement;
+
+    // The online row carries no rollback at all.
+    expect(row("1.3.0").querySelector('[data-op="rollback"]')).toBeNull();
+    // Both archived rows offer 回滚到此 and 查看; only the in-flight one is
+    // disabled (and shows the button's loading state).
+    const rolling = row("1.2.0").querySelector('[data-op="rollback"]') as HTMLButtonElement;
+    expect(rolling.disabled).toBe(true);
+    expect(rolling.className).toContain("ant-btn-loading");
+    const idle = row("1.1.0").querySelector('[data-op="rollback"]') as HTMLButtonElement;
+    expect(idle.disabled).toBe(false);
+    expect(idle.className).not.toContain("ant-btn-loading");
+    for (const version of ["1.2.0", "1.1.0"]) {
+      expect(row(version).querySelector('[data-op="view"]')).not.toBeNull();
+    }
   });
 });
 

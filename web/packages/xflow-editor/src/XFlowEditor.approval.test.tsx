@@ -17,7 +17,7 @@ class WidthResizeObserver {
   }
   observe(target: Element): void {
     this.callback(
-      [{ target, contentRect: { width: 1280 } } as ResizeObserverEntry],
+      [{ target, contentRect: { width: 1440 } } as ResizeObserverEntry],
       this as unknown as ResizeObserver
     );
   }
@@ -219,6 +219,8 @@ describe("approval dialog (§6.12)", () => {
     // only one (AntD's default corner close would be a second control).
     expect(dialog.querySelector(".xflow-editor-category-icon")).toBeTruthy();
     expect(dialog.querySelector(".ant-modal-close")).toBeNull();
+    // Nothing has been ignored, so the 未计入 explanation banner is absent.
+    expect(dialog.querySelector('.xflow-editor-approval__banner[data-tone="info"]')).toBeNull();
   });
 
   it("upgrades the approval card's wait note and opens the dialog from 处理", async () => {
@@ -286,6 +288,9 @@ describe("approval dialog (§6.12)", () => {
     expect(within(dialog).queryByRole("group", { name: "决定" })).toBeNull();
     expect(within(dialog).queryByRole("button", { name: "提交同意" })).toBeNull();
     expect(within(dialog).queryByRole("button", { name: /转交/ })).toBeNull();
+    // An outsider is not on the force list either: no force entry, no force name.
+    expect(within(dialog).queryByRole("button", { name: "强制通过" })).toBeNull();
+    expect(dialog.textContent).not.toContain("manager_approval/approval/force");
     // The record remains readable to an outsider.
     expect(within(dialog).getByLabelText("审批记录").textContent).toContain("finance-mgr");
   });
@@ -407,7 +412,57 @@ describe("approval dialog (§6.12)", () => {
     );
   });
 
-  it("delegates the open slot to another approver", async () => {
+  it("shows no 强制通过 when the node carries no force_approvers list", async () => {
+    const onSignal = vi.fn();
+    // ciso is on the force list in the baseline fixture, but this node has
+    // none: the button follows the server-supplied list, not the user alone.
+    const view = await openApprovalDialog({
+      currentUserSubject: "ciso",
+      onSignal,
+      value: makeWorkflow({ mode: "any", approvers: ["finance-mgr", "alice"] })
+    });
+    const dialog = view.dialog();
+
+    expect(within(dialog).getByText("你不是审批人，本次审批只读")).toBeTruthy();
+    expect(within(dialog).queryByRole("button", { name: "强制通过" })).toBeNull();
+    expect(dialog.textContent).not.toContain("manager_approval/approval/force");
+  });
+
+  it("shows 强制通过 beside the decision controls to a force approver who is also in the chain", async () => {
+    const onSignal = vi.fn();
+    const view = await openApprovalDialog({
+      currentUserSubject: "alice",
+      onSignal,
+      value: makeWorkflow({ ...baseParameters, force_approvers: ["ciso", "alice"] })
+    });
+    const dialog = view.dialog();
+
+    // Both roles at once: the ordinary decision controls and the force entry.
+    expect(within(dialog).getByRole("group", { name: "决定" })).toBeTruthy();
+    expect(within(dialog).getByRole("button", { name: "提交同意" })).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "强制通过" }));
+
+    await waitFor(() =>
+      expect(onSignal).toHaveBeenCalledWith("exec-approval", {
+        name: "manager_approval/approval/force",
+        data: { action: "force" }
+      })
+    );
+    expect(within(dialog).getByRole("group", { name: "决定" })).toBeTruthy();
+  });
+
+  it("hides 强制通过 without the execution scope, even for a force approver", async () => {
+    const view = await openApprovalDialog({
+      capabilities: { ...allCapabilities, execution: false },
+      currentUserSubject: "ciso"
+    });
+    const dialog = view.dialog();
+
+    expect(within(dialog).getByText("没有 execution 权限，无法提交决定")).toBeTruthy();
+    expect(within(dialog).queryByRole("button", { name: "强制通过" })).toBeNull();
+  });
+
+  it("delegates the open slot to another approver with its own 说明", async () => {
     const onSignal = vi.fn();
     const view = await openApprovalDialog({ onSignal });
     const dialog = view.dialog();
@@ -416,12 +471,88 @@ describe("approval dialog (§6.12)", () => {
     fireEvent.change(within(dialog).getByPlaceholderText("输入审批人标识"), {
       target: { value: "bob" }
     });
+    fireEvent.change(within(dialog).getByLabelText("说明"), {
+      target: { value: "出差期间由 bob 代签" }
+    });
     fireEvent.click(within(dialog).getByRole("button", { name: "转交" }));
 
     await waitFor(() =>
       expect(onSignal).toHaveBeenCalledWith("exec-approval", {
         name: "manager_approval/approval",
-        data: { action: "delegate", assignee: "bob" }
+        data: {
+          action: "delegate",
+          assignee: "bob",
+          comment: "出差期间由 bob 代签"
+        }
+      })
+    );
+  });
+
+  it("keeps the add-signer 说明 independent from the decision 意见", async () => {
+    const onSignal = vi.fn();
+    const view = await openApprovalDialog({
+      onSignal,
+      value: makeWorkflow({ ...baseParameters, mode: "sequential" })
+    });
+    const dialog = view.dialog();
+
+    // The main decision comment is typed first; the amendment must not borrow
+    // it, and the amendment's note must not overwrite it.
+    fireEvent.change(within(dialog).getByLabelText("审批意见"), {
+      target: { value: "同意，预算没问题" }
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "加签…" }));
+    fireEvent.change(within(dialog).getByPlaceholderText("输入审批人标识"), {
+      target: { value: "bob" }
+    });
+    fireEvent.change(within(dialog).getByLabelText("说明"), {
+      target: { value: "请法务复核合同条款" }
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "加签" }));
+
+    await waitFor(() =>
+      expect(onSignal).toHaveBeenCalledWith("exec-approval", {
+        name: "manager_approval/approval/finance-mgr",
+        data: {
+          action: "add_signer",
+          assignee: "bob",
+          position: "after",
+          comment: "请法务复核合同条款"
+        }
+      })
+    );
+    // The main 意见 survives the amendment untouched.
+    expect((within(dialog).getByLabelText("审批意见") as HTMLTextAreaElement).value).toBe(
+      "同意，预算没问题"
+    );
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "提交同意" }));
+    await waitFor(() =>
+      expect(onSignal).toHaveBeenLastCalledWith("exec-approval", {
+        name: "manager_approval/approval/finance-mgr",
+        data: { action: "approve", comment: "同意，预算没问题" }
+      })
+    );
+  });
+
+  it("omits data.comment from an amendment when 说明 is blank", async () => {
+    const onSignal = vi.fn();
+    const view = await openApprovalDialog({ onSignal });
+    const dialog = view.dialog();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "加签…" }));
+    fireEvent.change(within(dialog).getByPlaceholderText("输入审批人标识"), {
+      target: { value: "bob" }
+    });
+    fireEvent.change(within(dialog).getByLabelText("说明"), {
+      target: { value: "   " }
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "加签" }));
+
+    await waitFor(() =>
+      expect(onSignal).toHaveBeenCalledWith("exec-approval", {
+        name: "manager_approval/approval",
+        data: { action: "add_signer", assignee: "bob", position: "after" }
       })
     );
   });
@@ -459,6 +590,7 @@ describe("approval dialog (§6.12)", () => {
               action: "add_signer",
               assignee: "bob",
               position: "before",
+              comment: "请法务复核合同条款",
               at: "2026-10-20T10:00:00Z"
             }
           ]
@@ -474,6 +606,7 @@ describe("approval dialog (§6.12)", () => {
     const amended = ledger.querySelector<HTMLElement>('.xflow-editor-approval__row[data-state="amended"]');
     expect(amended?.textContent).toContain("finance-mgr");
     expect(amended?.textContent).toContain("加签");
+    expect(amended?.textContent).toContain("“请法务复核合同条款”");
     expect(amended?.textContent).not.toContain("✓");
     const openRows = Array.from(
       ledger.querySelectorAll<HTMLElement>(
@@ -658,6 +791,14 @@ describe("approval dialog (§6.12)", () => {
 
     expect(within(dialog).getByText("未计入的信号（1）")).toBeTruthy();
     expect(within(dialog).getByText("不在审批链")).toBeTruthy();
+    // The info banner explains why those approvers do not count, and it is
+    // present exactly because the ignored trail is non-empty.
+    const banner = dialog.querySelector<HTMLElement>(
+      '.xflow-editor-approval__banner[data-tone="info"]'
+    );
+    expect(banner).not.toBeNull();
+    expect(banner?.textContent).toContain("未计入的审批人不计入通过条件");
+    expect(banner?.textContent).toContain("已转交或已加签时由新审批人接替，不会重复计数");
     expect(within(dialog).queryByText("决定已记入审批记录")).toBeNull();
 
     fireEvent.click(within(dialog).getByRole("button", { name: "提交同意" }));

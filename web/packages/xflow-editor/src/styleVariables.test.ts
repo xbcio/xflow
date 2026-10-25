@@ -27,6 +27,7 @@ const componentLevel = /^--xflow-(preview|composer|editor)-/;
  */
 const runtimeVariables: Record<string, string> = {
   "--xflow-composer-label-width": "../../composer/src/form/layout.tsx",
+  "--xflow-preview-inverse-zoom": "../../xflow-preview/src/index.tsx",
   "--xflow-preview-ruler-major": "../../xflow-preview/src/canvasChrome.tsx",
   "--xflow-preview-ruler-minor": "../../xflow-preview/src/canvasChrome.tsx",
   "--xflow-preview-ruler-origin": "../../xflow-preview/src/canvasChrome.tsx"
@@ -40,6 +41,9 @@ const runtimeVariables: Record<string, string> = {
  */
 const hostKnobs: Record<string, keyof typeof stylesheets> = {
   "--xflow-composer-control-height": "composer",
+  "--xflow-composer-control-radius": "composer",
+  "--xflow-composer-control-padding": "composer",
+  "--xflow-composer-control-block-padding": "composer",
   "--xflow-composer-field-gap": "composer",
   "--xflow-composer-font-size": "composer",
   "--xflow-composer-section-radius": "composer",

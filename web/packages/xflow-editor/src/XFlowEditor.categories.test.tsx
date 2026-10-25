@@ -43,6 +43,14 @@ const libraryIcon = (): HTMLElement | null =>
     .getByRole("region", { name: "节点" })
     .querySelector<HTMLElement>('button[data-node-type="acme.review"] .xflow-editor-category-icon');
 
+/** ED-14 folds every library group but the first; open the rest before reading a tile. */
+const expandAllGroups = () => {
+  const library = screen.getByRole("region", { name: "节点" });
+  for (const group of library.querySelectorAll<HTMLButtonElement>(".xflow-editor-node-group__title[aria-expanded='false']")) {
+    fireEvent.click(group);
+  }
+};
+
 const card = (): HTMLElement => {
   const found = document.querySelector<HTMLElement>('[data-node-id="review"]');
   if (!found) throw new Error("review card not found");
@@ -50,8 +58,32 @@ const card = (): HTMLElement => {
 };
 
 describe("declared node categories reach every surface (§6.13)", () => {
+  it("draws each canvas card with its node type's own glyph", () => {
+    const typed: WorkflowDef = {
+      id: "wf-type-icons",
+      name: "Type icons",
+      nodes: [
+        { name: "hook", type: "xflow.trigger.webhook" },
+        { name: "store", type: "xflow.database" },
+        { name: "review", type: "acme.review", parameters: { approver: "alice" } }
+      ],
+      connections: {}
+    };
+    render(<XFlowEditor nodeTypes={withReview} value={typed} />);
+
+    const glyph = (id: string): string | null | undefined =>
+      document.querySelector(`[data-node-id="${id}"] .xflow-preview-node__icon svg`)?.getAttribute("data-xflow-icon");
+
+    // The preview's `nodeIcon` channel paints the type's symbol, not the category's.
+    expect(glyph("hook")).toBe("link");
+    expect(glyph("store")).toBe("db");
+    // A type outside the table keeps its declared category's glyph (human → user).
+    expect(glyph("review")).toBe("user");
+  });
+
   it("draws the custom type's declared category in the library, canvas, outline, Inspector and diagnostics", () => {
     render(<XFlowEditor nodeTypes={withReview} value={workflow} />);
+    expandAllGroups();
 
     // Library tile: the type's declaration beats the (absent) prefix.
     expect(libraryIcon()?.getAttribute("data-cat")).toBe("human");
@@ -109,6 +141,7 @@ describe("declared node categories reach every surface (§6.13)", () => {
     } satisfies NodeFormSchema;
     const types: NodeTypesResponse = { ...nodeTypes, node_types: [...nodeTypes.node_types, unknown] };
     render(<XFlowEditor nodeTypes={types} value={{ ...workflow, nodes: [{ name: "mystery", type: "acme.unknown" }] }} />);
+    expandAllGroups();
 
     const tile = screen
       .getByRole("region", { name: "节点" })

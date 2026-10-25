@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { NodeTypesResponse, WorkflowDef, WorkflowNode } from "@xflow/core";
 import type { XFlowPreview as RealXFlowPreview } from "@xflow/preview";
 import { XFlowEditor } from "./index";
+import { nodeLibraryLabel, nodePurposeByType } from "./nodeLibraryCopy";
 import { translateNodeFormText } from "./node-form/i18n";
 import { zhCN } from "./node-form/locales/zh-CN";
 import type { NodeFormSchema } from "./node-form/schema";
@@ -35,8 +36,9 @@ vi.mock("@xflow/preview", async (importOriginal) => {
 const nodeTypes = generated as unknown as NodeTypesResponse;
 const builtinTypes = [...new Set(nodeTypes.node_types.map((schema) => schema.node_type))];
 const supplyTypes = ["xflow.supply.external", "xflow.supply.static"];
-/** The library shows display names through the editor's zh-CN catalog. */
-const shownLabel = (item: NodeFormSchema) => translateNodeFormText(zhCN, item.display_name ?? item.node_type, item.node_type);
+/** The library shows display names through the editor's zh-CN catalog, minus the trigger suffix. */
+const shownLabel = (item: NodeFormSchema) =>
+  nodeLibraryLabel(translateNodeFormText(zhCN, item.display_name ?? item.node_type, item.node_type), item.node_type);
 
 const workflow: WorkflowDef = {
   name: "library",
@@ -46,6 +48,12 @@ const workflow: WorkflowDef = {
 };
 
 const library = () => screen.getByRole("region", { name: "节点" });
+/** ED-14 opens only the first group by default; tile-level tests open the rest. */
+const expandAllGroups = () => {
+  for (const group of library().querySelectorAll<HTMLButtonElement>(".xflow-editor-node-group__title[aria-expanded='false']")) {
+    fireEvent.click(group);
+  }
+};
 const tiles = () => Array.from(library().querySelectorAll<HTMLButtonElement>("button[data-node-type]"));
 const tile = (type: string) => {
   const found = library().querySelector<HTMLButtonElement>(`button[data-node-type="${type}"]`);
@@ -54,6 +62,7 @@ const tile = (type: string) => {
 };
 const groupOf = (element: HTMLElement) =>
   element.closest(".xflow-editor-node-group")?.querySelector(".xflow-editor-block-title")?.textContent;
+const hintOf = (element: HTMLElement) => element.querySelector(".xflow-editor-node-tile__hint")?.textContent;
 /** The category the tile's icon block was drawn in (`categoryOf(type)`), exposed as `data-cat`. */
 const iconOf = (element: HTMLElement) => element.querySelector(".xflow-editor-category-icon")?.getAttribute("data-cat");
 const lastNode = (spy: ReturnType<typeof vi.fn>) => (spy.mock.calls.at(-1)?.[0] as WorkflowDef).nodes?.at(-1) as WorkflowNode;
@@ -65,23 +74,91 @@ function schema(overrides: Partial<NodeFormSchema> & Pick<NodeFormSchema, "node_
 describe("node library from /v1/node-types (Doc C §6.3)", () => {
   it("renders one tile per registered type, labelled by display_name, plus engine-declared supplies", () => {
     render(<XFlowEditor nodeTypes={nodeTypes} value={workflow} />);
+    expandAllGroups();
 
     expect(tiles().map((element) => element.dataset.nodeType).sort()).toEqual([...builtinTypes, ...supplyTypes].sort());
     for (const item of nodeTypes.node_types) {
       expect(tile(item.node_type).getAttribute("aria-label")).toBe(shownLabel(item));
     }
     expect(tile("xflow.approval").getAttribute("aria-label")).toBe("审批");
-    // Existing presentation is kept for known types...
-    expect(groupOf(tile("xflow.http"))).toBe("动作与人工");
+    // Existing presentation is kept for known types, in the design's vocabulary...
+    expect(groupOf(tile("xflow.http"))).toBe("动作");
     expect(iconOf(tile("xflow.http"))).toBe("action");
     expect(groupOf(tile("xflow.trigger.cron"))).toBe("触发器");
-    expect(groupOf(tile("xflow.transform.set"))).toBe("数据转换");
-    expect(groupOf(tile("xflow.supply.static"))).toBe("供应");
+    expect(groupOf(tile("xflow.transform.set"))).toBe("代码与转换");
+    expect(groupOf(tile("xflow.function"))).toBe("代码与转换");
+    expect(groupOf(tile("xflow.approval"))).toBe("人工");
+    // Supply declarations join 动作: data resources, not code/transform nodes.
+    expect(groupOf(tile("xflow.supply.static"))).toBe("动作");
     // ...and every current builtin has an entry, so nothing lands in "其他".
     // Unanchored: the group icon's accessible name prefixes the title
     // ("appstore 其他 3 down"), so an anchored match silently passed.
     expect(within(library()).queryByRole("button", { name: /其他/ })).toBeNull();
     expect(within(library()).getByRole("button", { name: /触发器 5/ })).toBeTruthy();
+    expect(within(library()).getByRole("button", { name: /动作 7/ })).toBeTruthy();
+    expect(within(library()).getByRole("button", { name: /代码与转换 10/ })).toBeTruthy();
+    expect(within(library()).getByRole("button", { name: /人工 1/ })).toBeTruthy();
+  });
+
+  it("opens only the first group by default and folds the rest with their counts (ED-14)", () => {
+    render(<XFlowEditor nodeTypes={nodeTypes} value={workflow} />);
+
+    const titles = Array.from(library().querySelectorAll<HTMLButtonElement>(".xflow-editor-node-group__title"));
+    expect(titles.map((title) => title.getAttribute("aria-expanded"))).toEqual(["true", "false", "false", "false", "false"]);
+    // The collapsed headers keep their counts.
+    const counts = titles.map((title) => title.querySelector(".xflow-editor-node-group__count")?.textContent);
+    expect(counts[0]).toBe("5");
+    expect(counts.slice(1).every((count) => Number(count) > 0)).toBe(true);
+    expect(tile("xflow.trigger.webhook")).toBeTruthy();
+    expect(library().querySelector('button[data-node-type="xflow.http"]')).toBeNull();
+
+    // Opening a group is session-local state: it survives search and closes again.
+    fireEvent.click(titles[2]);
+    expect(titles[2].getAttribute("aria-expanded")).toBe("true");
+    expect(tile("xflow.http")).toBeTruthy();
+    fireEvent.click(titles[2]);
+    expect(titles[2].getAttribute("aria-expanded")).toBe("false");
+    expect(library().querySelector('button[data-node-type="xflow.http"]')).toBeNull();
+
+    // A search ignores the fold so a match in a collapsed group stays reachable.
+    fireEvent.keyDown(window, { key: "/" });
+    const search = within(library()).getByPlaceholderText("搜索 Webhook / If / HTTP…");
+    fireEvent.change(search, { target: { value: "http" } });
+    expect(tile("xflow.http")).toBeTruthy();
+  });
+
+  it("drops the trigger suffix and writes a description or Chinese purpose on the second line", () => {
+    render(<XFlowEditor nodeTypes={nodeTypes} value={workflow} />);
+    expandAllGroups();
+
+    expect(tile("xflow.trigger.webhook").getAttribute("aria-label")).toBe("Webhook");
+    expect(tile("xflow.trigger.cron").getAttribute("aria-label")).toBe("Cron");
+    expect(tile("xflow.trigger.kafka").getAttribute("aria-label")).toBe("Kafka");
+    expect(tile("xflow.trigger.redis").getAttribute("aria-label")).toBe("Redis");
+    expect(tile("xflow.trigger.timer").getAttribute("aria-label")).toBe("定时器");
+    for (const item of nodeTypes.node_types) {
+      // P1 descriptors carry a one-line description; it wins over the table.
+      const expected = item.description?.trim() || nodePurposeByType[item.node_type];
+      expect(hintOf(tile(item.node_type)), `${item.node_type} hint`).toBe(expected);
+    }
+    expect(hintOf(tile("xflow.supply.static"))).toBe(nodePurposeByType["xflow.supply.static"]);
+  });
+
+  it("prefers a descriptor description and falls back to the type id when absent", () => {
+    const described: NodeTypesResponse = {
+      ...nodeTypes,
+      node_types: [
+        ...nodeTypes.node_types.map((item) =>
+          item.node_type === "xflow.http" ? { ...item, description: "发送 HTTP 请求" } : item
+        ),
+        schema({ node_type: "acme.fax", display_name: "Fax" })
+      ]
+    };
+    render(<XFlowEditor nodeTypes={described} value={workflow} />);
+    expandAllGroups();
+
+    expect(hintOf(tile("xflow.http"))).toBe("发送 HTTP 请求");
+    expect(hintOf(tile("acme.fax"))).toBe("acme.fax");
   });
 
   it("shows a type the frontend has never heard of with the generic icon, grouped by kind", () => {
@@ -96,6 +173,7 @@ describe("node library from /v1/node-types (Doc C §6.3)", () => {
       ]
     };
     render(<XFlowEditor nodeTypes={withNew} value={workflow} />);
+    expandAllGroups();
 
     const fax = tile("xflow.acme.fax");
     expect(tiles().filter((element) => element.dataset.nodeType === "xflow.acme.fax")).toHaveLength(1);
@@ -111,6 +189,7 @@ describe("node library from /v1/node-types (Doc C §6.3)", () => {
 
   it("falls back to the offline list when the host provides no nodeTypes", () => {
     render(<XFlowEditor value={workflow} />);
+    expandAllGroups();
 
     const types = tiles().map((element) => element.dataset.nodeType);
     expect(types).toContain("xflow.http");
@@ -123,6 +202,7 @@ describe("node library from /v1/node-types (Doc C §6.3)", () => {
   it("adds every library type with identity and placement only: no parameters, no defaults", () => {
     const handleChange = vi.fn();
     render(<XFlowEditor nodeTypes={nodeTypes} value={workflow} onChange={handleChange} />);
+    expandAllGroups();
 
     for (const type of [...builtinTypes, ...supplyTypes]) {
       const before = handleChange.mock.calls.length;
@@ -142,6 +222,7 @@ describe("node library from /v1/node-types (Doc C §6.3)", () => {
   it("drags a schema-only type onto the canvas and ignores types outside the library", () => {
     const handleChange = vi.fn();
     render(<XFlowEditor nodeTypes={nodeTypes} value={workflow} onChange={handleChange} />);
+    expandAllGroups();
 
     const setData = vi.fn();
     fireEvent.dragStart(tile("xflow.map"), { dataTransfer: { setData, effectAllowed: "" } });
@@ -168,6 +249,7 @@ describe("node library from /v1/node-types (Doc C §6.3)", () => {
       nodes: [...(workflow.nodes ?? []), { name: "fax", type: "custom.runner.fax", parameters: { to: "+1" } }]
     };
     render(<XFlowEditor nodeTypes={nodeTypes} value={custom} />);
+    expandAllGroups();
 
     fireEvent.click(canvasNode("fax"));
     const inspector = screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
@@ -200,6 +282,7 @@ describe("node library from /v1/node-types (Doc C §6.3)", () => {
     };
     const handleChange = vi.fn();
     render(<XFlowEditor nodeTypes={withRunner} value={workflow} onChange={handleChange} />);
+    expandAllGroups();
 
     const analyse = tile("acme.analyse");
     expect(analyse.dataset.source).toBe("runner");

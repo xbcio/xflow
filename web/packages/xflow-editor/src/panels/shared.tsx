@@ -18,6 +18,7 @@ export const editorTextAreaClassNames = {
 };
 
 export const editorSelectClassNames = {
+  clear: "xflow-editor-select__clear",
   content: "xflow-editor-select__content",
   popup: {
     list: "xflow-editor-select__popup-list",
@@ -31,6 +32,19 @@ export const editorTooltipClassNames = {
   container: "xflow-editor-tooltip__container",
   root: "xflow-editor-tooltip"
 };
+
+/**
+ * User-facing copy for a host that did not wire a capability. Never name the
+ * prop: the operator cannot act on "onSave", only on the fact that saving is
+ * unavailable here. ED-11/ED-12 share this one source so the toolbar, the
+ * context menu and the disabled 测试此节点 key cannot drift apart.
+ */
+export const hostCapabilityCopy = {
+  publish: "当前环境不支持发布",
+  run: "当前环境不支持运行",
+  runNode: "当前环境不支持单节点运行",
+  save: "当前环境不支持保存"
+} as const;
 
 /** Every Inspector writer goes through one of these, run against the latest committed draft. */
 export type WorkflowUpdater = (latest: WorkflowDef) => WorkflowDef;
@@ -134,6 +148,8 @@ export interface EditorPanelProps {
   children: React.ReactNode;
   className?: string;
   count?: React.ReactNode;
+  /** Draws the 1px rule under the title bar; the left column's zones turn it off. */
+  divider?: boolean;
   icon: React.ReactNode;
   title: React.ReactNode;
 }
@@ -149,13 +165,14 @@ export function EditorPanel({
   children,
   className,
   count,
+  divider = true,
   icon,
   title
 }: EditorPanelProps): React.ReactElement {
   const titleId = React.useId();
   return (
     <section aria-labelledby={titleId} className={`xflow-editor-panel ${className ?? ""}`}>
-      <header className="xflow-editor-panel-title">
+      <header className={`xflow-editor-panel-title${divider ? " xflow-editor-panel-title--divider" : ""}`}>
         <span aria-hidden="true" className="xflow-editor-panel-title__icon">
           {icon}
         </span>

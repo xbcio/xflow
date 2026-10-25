@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import * as React from "react";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { RuntimeSnapshot, WorkflowDef, XFlowEditorCapabilities } from "@xflow/core";
 import type { XFlowPreview as RealXFlowPreview } from "@xflow/preview";
 
@@ -52,6 +52,9 @@ beforeAll(() => {
 afterAll(() => {
   globalThis.ResizeObserver = originalResizeObserver;
   window.DOMMatrixReadOnly = originalDomMatrixReadOnly;
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
 });
 
 const workflow: WorkflowDef = {
@@ -107,6 +110,19 @@ const selectedExecution: XFlowExecution = {
     { name: "approve", status: "success" },
     { name: "audit", status: "success" },
     { name: "finish", status: "success" }
+  ]
+};
+
+/** Rerun entry points are keyed on status: success no longer offers one. */
+const failedExecution: XFlowExecution = {
+  ...selectedExecution,
+  executionId: "exec-runs-failed",
+  status: "failed",
+  nodes: [
+    { name: "start", status: "success" },
+    { name: "approve", status: "failed" },
+    { name: "audit", status: "success" },
+    { name: "finish", status: "pending" }
   ]
 };
 
@@ -350,7 +366,9 @@ describe("运行记录 mode (§6.8)", () => {
     expect(screen.getByText("重跑起点")).toBeTruthy();
 
     const top = screen.getByRole("region", { name: "Runs editor" });
-    expect(within(top).getByLabelText("当前执行").textContent).toContain("exec-runs-1");
+    // EL-19: the id is shown once, in the status bar; the top bar keeps only
+    // the state chip and the lineage.
+    expect(within(top).getByLabelText("当前执行").textContent).not.toContain("exec-runs-1");
     expect(within(top).getByLabelText("当前执行").textContent).toContain("重跑自 exec-parent · 起点 approve");
 
     const statusbar = screen.getByLabelText("执行状态栏");
@@ -361,6 +379,37 @@ describe("运行记录 mode (§6.8)", () => {
     // The title chip names the run's version, not the draft's; the leading `v`
     // matches the version chip and the /ui-preview runs baseline.
     expect(screen.getByText("运行版本 v3")).toBeTruthy();
+  });
+
+  it("draws the run summary bar and keeps the section boxes over the replay (EL-11)", () => {
+    const onModeChange = vi.fn();
+    render(
+      <XFlowEditor
+        {...runsProps}
+        executionSnapshotRuntime={{ ...snapshotRuntime, traceId: "trace-runs-1" }}
+        onModeChange={onModeChange}
+        sections={[{ id: "sec-approval", title: "审批", node_keys: ["start"], x: 0, y: 0, width: 420, height: 220 }]}
+        traceHref={(traceId) => `/traces/${traceId}`}
+      />
+    );
+
+    const summary = screen.getByRole("region", { name: "本次运行" });
+    expect(summary.textContent).toContain("成功");
+    expect(summary.textContent).toContain("开始 ");
+    expect(summary.textContent).toContain("耗时 10.0 s");
+    expect(summary.textContent).toContain("成功 4 · 失败 0 · 跳过 0");
+    expect(within(summary).getByRole("link", { name: "查看 trace" }).getAttribute("href")).toBe(
+      "/traces/trace-runs-1"
+    );
+
+    // The replay keeps the edit canvas's visual landmarks, read-only.
+    const boxes = [...document.querySelectorAll<HTMLElement>(".xflow-preview-section")];
+    expect(boxes.map((box) => box.querySelector(".xflow-preview-section__title")?.textContent)).toEqual(["审批"]);
+    expect(document.querySelector(".xflow-preview-section__title-action")).toBeNull();
+    expect(document.querySelector(".xflow-preview-section__delete")).toBeNull();
+
+    fireEvent.click(within(summary).getByRole("button", { name: "返回编辑" }));
+    expect(onModeChange).toHaveBeenCalledWith("edit");
   });
 
   it("falls back to the current definition and marks it 定义已变化", () => {
@@ -376,19 +425,22 @@ describe("运行记录 mode (§6.8)", () => {
     expect(screen.getByLabelText("执行状态栏").textContent).toContain("定义已变化，仅供参考");
   });
 
-  it("offers the top-bar 重跑… entry for a terminal execution", async () => {
-    render(<XFlowEditor {...runsProps} onRerun={vi.fn()} />);
-
+  it("offers the top-bar 重跑… entry only for a failed terminal execution", async () => {
+    const { rerender } = render(<XFlowEditor {...runsProps} onRerun={vi.fn()} />);
     const top = screen.getByRole("region", { name: "Runs editor" });
+    // Ruling 2026-10-21: a successful run offers no rerun action.
+    expect(within(top).queryByRole("button", { name: /重跑…/ })).toBeNull();
+
+    rerender(<XFlowEditor {...runsProps} selectedExecution={failedExecution} onRerun={vi.fn()} />);
     fireEvent.click(within(top).getByRole("button", { name: /重跑…/ }));
 
     const dialog = await screen.findByRole("dialog", { name: "重跑执行" });
-    expect(within(dialog).getByText("exec-runs-1")).toBeTruthy();
+    expect(within(dialog).getByText("exec-runs-failed")).toBeTruthy();
   });
 
   it("opens the Inspector on 运行 and reruns from the selected snapshot node", async () => {
     const onRerun = vi.fn(async () => ({ executionId: "exec-runs-2", status: "queued" as const }));
-    render(<XFlowEditor {...runsProps} onRerun={onRerun} />);
+    render(<XFlowEditor {...runsProps} selectedExecution={failedExecution} onRerun={onRerun} />);
 
     fireEvent.click(canvasNode("approve"));
     const inspector = screen.getByRole("region", { name: /属性/ });
@@ -396,18 +448,38 @@ describe("运行记录 mode (§6.8)", () => {
 
     fireEvent.click(within(inspector).getByRole("button", { name: "从此节点重跑" }));
     const dialog = await screen.findByRole("dialog", { name: "重跑执行" });
-    fireEvent.click(within(dialog).getByRole("checkbox", { name: "确认重跑已成功的执行" }));
+    // A failed source needs no include_success confirmation.
+    expect(within(dialog).queryByRole("checkbox")).toBeNull();
     fireEvent.click(within(dialog).getByRole("button", { name: "从这里重跑" }));
 
     await waitFor(() => expect(onRerun).toHaveBeenCalledTimes(1));
     const request = onRerun.mock.calls[0][0];
-    expect(request.executionId).toBe("exec-runs-1");
+    expect(request.executionId).toBe("exec-runs-failed");
     // The Inspector entry names the node the user selected, not the default.
     expect(request.fromNode).toBe("approve");
-    expect(request.includeSuccess).toBe(true);
+    expect(request.includeSuccess).toBe(false);
     expect(typeof request.idempotencyKey).toBe("string");
     expect(request.idempotencyKey.length).toBeGreaterThan(8);
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "重跑执行" })).toBeNull());
+  });
+
+  it("drops the Inspector footer in a replay whose status offers no rerun", () => {
+    // Ruling 2026-10-21: success/canceled no longer carry `rerun`, so a replay
+    // must not fall back to the editing-only, disabled 测试此节点 footer.
+    const { rerender } = render(<XFlowEditor {...runsProps} />);
+
+    fireEvent.click(canvasNode("approve"));
+    const successInspector = screen.getByRole("region", { name: /属性/ });
+    expect(successInspector.querySelector(".xflow-editor-inspector-foot")).toBeNull();
+    expect(within(successInspector).queryByRole("button", { name: "测试此节点" })).toBeNull();
+    expect(within(successInspector).queryByRole("button", { name: "从此节点重跑" })).toBeNull();
+
+    // A failed source keeps exactly the rerun entry.
+    rerender(<XFlowEditor {...runsProps} selectedExecution={failedExecution} onRerun={vi.fn()} />);
+    fireEvent.click(canvasNode("approve"));
+    const failedInspector = screen.getByRole("region", { name: /属性/ });
+    expect(within(failedInspector).getByRole("button", { name: "从此节点重跑" })).toBeTruthy();
+    expect(within(failedInspector).queryByRole("button", { name: "测试此节点" })).toBeNull();
   });
 
   it("hides the floating run bar in the replay and brings it back in 编辑", () => {
@@ -424,6 +496,8 @@ describe("运行记录 mode (§6.8)", () => {
 
   it("keeps the draft when the user visits the replay and comes back", () => {
     const { container } = render(<XFlowEditor value={workflow} />);
+    // ED-14 folds every group but the first; open 动作 so HTTP is on screen.
+    fireEvent.click(within(screen.getByRole("region", { name: "节点" })).getByRole("button", { name: /动作/ }));
     const nodeCount = () => container.querySelectorAll(".xflow-preview-node").length;
     expect(nodeCount()).toBe(3);
 
@@ -458,6 +532,11 @@ describe("运行记录 mode (§6.8)", () => {
   });
 
   it("keeps the run bar's 重跑 entry for terminal runs and drops it without a host handler", async () => {
+    // rc hands every overlay the constant id "test-id" in NODE_ENV=test. The
+    // merged 配置 tab keeps duration Selects in the DOM, so the dialog's
+    // aria-labelledby would resolve to one of those instead of its title. A
+    // real build numbers each overlay; this test needs the same.
+    vi.stubEnv("NODE_ENV", "development");
     const failed: XFlowExecution = {
       executionId: "exec-failed",
       status: "failed",
@@ -482,6 +561,7 @@ describe("运行记录 mode (§6.8)", () => {
   });
 
   it("reuses one Idempotency-Key across a failed submission's retry", async () => {
+    vi.stubEnv("NODE_ENV", "development");
     const onRerun = vi.fn()
       .mockRejectedValueOnce(new Error("工作流执行不可重跑"))
       .mockResolvedValueOnce({ executionId: "exec-retry", status: "queued" as const });

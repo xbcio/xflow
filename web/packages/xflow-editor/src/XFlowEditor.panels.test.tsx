@@ -63,8 +63,10 @@ describe("XFlowEditor panel collapse (§6.0)", () => {
     expect(screen.getByRole("region", { name: "节点" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "节点与大纲" }).getAttribute("aria-pressed")).toBe("true");
 
-    // The title-bar key reads as pressed (active) while the column is open, as the baseline's does.
-    expect(screen.getByRole("button", { name: "收起左栏" }).getAttribute("aria-pressed")).toBe("true");
+    // The title-bar key reports the pane it controls as expanded (it only
+    // renders while the column is open), not a pressed toggle.
+    expect(screen.getByRole("button", { name: "收起左栏" }).getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("button", { name: "收起左栏" }).hasAttribute("aria-pressed")).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "收起左栏" }));
     expect(screen.queryByRole("region", { name: "节点" })).toBeNull();
     // The rail survives at width 0 and reports the collapsed panel.
@@ -106,7 +108,9 @@ describe("XFlowEditor panel collapse (§6.0)", () => {
     expect(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).toBeTruthy();
 
     // Canvas-scope shortcuts defer to a text field (the same rule as ⌘B).
-    const search = screen.getByPlaceholderText("搜索 Webhook / If / HTTP…");
+    const library = screen.getByRole("region", { name: "节点" });
+    fireEvent.click(within(library).getByRole("button", { name: "搜索节点" }));
+    const search = within(library).getByPlaceholderText("搜索 Webhook / If / HTTP…");
     fireEvent.keyDown(search, { key: "b", metaKey: true });
     fireEvent.keyDown(search, { key: "∫", code: "KeyB", metaKey: true, altKey: true });
     expect(screen.getByRole("region", { name: "节点" })).toBeTruthy();
@@ -119,6 +123,14 @@ describe("XFlowEditor panel collapse (§6.0)", () => {
     fireEvent.click(screen.getByRole("button", { name: "收起属性面板" }));
     const reopen = screen.getByRole("button", { name: "展开属性面板" });
     expect(reopen.textContent).toContain("属性 · fetch");
+    // The canvas chip's own hook (12px inset, 28px wrapper, 6px radius).
+    expect(reopen.classList.contains("xflow-editor-canvas-reopen")).toBe(true);
+    // The chip's glyph is the baseline's #i-side-right, not AntD's menu-unfold.
+    const glyph = reopen.querySelector<SVGSVGElement>('[data-xflow-icon="side-right"]');
+    expect(glyph?.getAttribute("aria-hidden")).toBe("true");
+    expect(glyph?.getAttribute("viewBox")).toBe("0 0 24 24");
+    expect(glyph?.querySelector("path")?.getAttribute("d")).toBe("M14.5 5v14");
+    expect(reopen.querySelector(".anticon")).toBeNull();
 
     // A single click selects (and renames the chip) without expanding.
     fireEvent.click(canvasNode("finish"));

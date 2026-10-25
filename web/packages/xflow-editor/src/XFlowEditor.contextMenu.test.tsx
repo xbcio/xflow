@@ -144,13 +144,14 @@ describe("canvas context menu", () => {
     expect(lastWorkflow(handleChange).connections?.start?.main).toEqual([{ node: "api" }, { node: "tail" }]);
   });
 
-  it("keeps the partial-run items disabled while the host provides no onRunNode", () => {
+  it("hides the partial-run items when the host provides no onRunNode", () => {
     render(<XFlowEditor value={workflow} />);
 
     openNodeMenu("api");
-    expect(menuItem(/从此节点运行/).getAttribute("aria-disabled")).toBe("true");
-    expect(menuItem(/运行到此节点/).getAttribute("aria-disabled")).toBe("true");
-    expect(screen.getAllByText("宿主未提供 onRunNode").length).toBe(2);
+    expect(screen.queryByRole("menuitem", { name: /从此节点运行/ })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: /运行到此节点/ })).toBeNull();
+    // No developer copy survives anywhere in the menu.
+    expect(screen.queryByText(/宿主|onRunNode|处理器/)).toBeNull();
   });
 
   it("runs from a node through the host's onRunNode", async () => {
@@ -304,18 +305,29 @@ describe("canvas context menu", () => {
   });
 
   it("enters the header rename when 重命名 opens the compact drawer", async () => {
-    render(<XFlowEditor value={workflow} />);
-    fireEvent.click(within(screen.getByRole("toolbar", { name: "编辑器工具栏" })).getByRole("button", { name: "更多操作" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "进入沉浸布局" }));
-    expect(screen.queryByRole("region", { name: /^(属性|工作流设置)$/ })).toBeNull();
-
-    openNodeMenu("api");
-    fireEvent.click(menuItem(/重命名/));
-
-    await waitFor(() => {
-      const field = screen.getByLabelText("节点显示名") as HTMLInputElement;
-      expect(document.activeElement).toBe(field);
+    // The ⋯ menu only exists in the compact layout (user ruling 2026-10-21);
+    // jsdom has no ResizeObserver, so seed the measured container as narrow.
+    const originalRect = HTMLElement.prototype.getBoundingClientRect;
+    const measure = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const rect = originalRect.call(this);
+      return this.classList.contains("xflow-editor") ? ({ ...rect, width: 1279, right: 1279 } as DOMRect) : rect;
     });
+    try {
+      render(<XFlowEditor value={workflow} />);
+      fireEvent.click(within(screen.getByRole("toolbar", { name: "编辑器工具栏" })).getByRole("button", { name: "更多操作" }));
+      fireEvent.click(await screen.findByRole("menuitem", { name: "进入沉浸布局" }));
+      expect(screen.queryByRole("region", { name: /^(属性|工作流设置)$/ })).toBeNull();
+
+      openNodeMenu("api");
+      fireEvent.click(menuItem(/重命名/));
+
+      await waitFor(() => {
+        const field = screen.getByLabelText("节点显示名") as HTMLInputElement;
+        expect(document.activeElement).toBe(field);
+      });
+    } finally {
+      measure.mockRestore();
+    }
   });
 
   it("offers 适应视图 and 自动布局 on the pane menu, laying the graph out in one step", async () => {

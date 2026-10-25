@@ -6,6 +6,8 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkflowDef } from "@xflow/core";
 import { XFlowEditor } from "./index";
+import { NodeFormCompiler, createNodeFormRegistry } from "./node-form";
+import { Inspector } from "./panels/inspector";
 import { expressionReference } from "./panels/variables";
 
 const workflow: WorkflowDef = {
@@ -216,6 +218,162 @@ describe("node search and workflow settings", () => {
     expect(handleChange).not.toHaveBeenCalled();
   });
 
+  it("lays the settings out in §6.4 order, with 标识 and 时区 under 基本", () => {
+    const handleChange = vi.fn();
+    render(
+      <XFlowEditor
+        value={{ ...workflow, id: "wf-abcdefgh-1234", settings: { timezone: "Asia/Shanghai" } }}
+        onChange={handleChange}
+      />
+    );
+    fireEvent.keyDown(window, { key: "Escape" });
+    const inspector = screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
+
+    // 入口 sits between 基本 and 并发, and no dead 超时 row survives the split.
+    const groups = within(inspector)
+      .getAllByRole("group")
+      .map((group) => group.getAttribute("aria-label"))
+      .filter((name): name is string => Boolean(name));
+    expect(groups.slice(0, 5)).toEqual(["基本", "入口", "并发", "错误与重试", "高级"]);
+    expect(groups.at(-1)).toBe("Pin Data");
+    expect(within(inspector).queryByLabelText("超时")).toBeNull();
+    expect(within(inspector).queryByText("超时")).toBeNull();
+
+    // The fixture's start node is the workflow's only entry.
+    const entry = within(inspector).getByRole("group", { name: "入口" });
+    expect(within(entry).getByText("start")).toBeTruthy();
+    expect(within(entry).getByText("xflow.start")).toBeTruthy();
+    // ED-19: the row reuses the outline's category icon + secondary type, and
+    // the locate key is an icon (not the word 定位).
+    expect(entry.querySelector(".xflow-editor-entry-row .xflow-editor-category-icon")?.getAttribute("data-cat")).toBe(
+      "control"
+    );
+    const locate = within(entry).getByRole("button", { name: "定位入口 start" });
+    expect(locate.classList.contains("xflow-editor-entry-row__locate")).toBe(true);
+    expect(locate.querySelector("svg")).toBeTruthy();
+    expect(within(entry).queryByText("定位")).toBeNull();
+
+    const basic = within(inspector).getByRole("group", { name: "基本" });
+    expect((within(basic).getByLabelText("执行时区") as HTMLInputElement).value).toBe("Asia/Shanghai");
+    const idText = basic.querySelector(".xflow-editor-workflow-id__text");
+    expect(idText?.textContent).toBe("wf-abcde…");
+    expect(idText?.getAttribute("title")).toBe("wf-abcdefgh-1234");
+    expect(idText?.getAttribute("aria-label")).toBe("wf-abcdefgh-1234");
+    // The 24px hit-area rule hangs off Typography's semantic action hook, not
+    // its generated `.ant-*` class.
+    expect(
+      within(basic).getByRole("button", { name: "复制工作流标识" }).classList.contains("xflow-editor-workflow-id__copy"),
+    ).toBe(true);
+
+    const errorRetry = within(inspector).getByRole("group", { name: "错误与重试" });
+    expect(within(errorRetry).getByText("节点默认继承")).toBeTruthy();
+
+    // 高级 is collapsed by default: no Runner row, no option, no source view.
+    const advanced = within(inspector).getByRole("group", { name: "高级" });
+    expect(within(advanced).queryByLabelText("Runner 模式")).toBeNull();
+    expect(within(advanced).queryByLabelText("允许环路")).toBeNull();
+    expect(within(advanced).queryByText(/FAF/i)).toBeNull();
+    fireEvent.click(within(advanced).getByRole("button", { name: "展开高级" }));
+    expect(within(advanced).getByLabelText("Runner 模式")).toBeTruthy();
+    expect(within(advanced).getByLabelText("Pin 数据模式")).toBeTruthy();
+    expect(within(advanced).getByLabelText("允许环路")).toBeTruthy();
+    expect(within(advanced).getByLabelText("最大自动深度")).toBeTruthy();
+    expect(within(advanced).getByLabelText("节点组协议（实验）")).toBeTruthy();
+    expect(within(advanced).getByLabelText("Transient 执行")).toBeTruthy();
+    // The open state is local: expanding and collapsing writes nothing.
+    fireEvent.click(within(advanced).getByRole("button", { name: "收起高级" }));
+    expect(within(advanced).queryByLabelText("Runner 模式")).toBeNull();
+    expect(handleChange).not.toHaveBeenCalled();
+  });
+
+  it("keeps settings help to one line with a ? key and hides raw enums as secondary text (ED-18)", () => {
+    render(<XFlowEditor value={workflow} />);
+    fireEvent.keyDown(window, { key: "Escape" });
+    const inspector = screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
+
+    const errorRetry = within(inspector).getByRole("group", { name: "错误与重试" });
+    expect(within(errorRetry).getByText("未单独配置的节点沿用这里的默认值。")).toBeTruthy();
+    expect(within(errorRetry).queryByText(/节点未单独配置错误处理与重试时/)).toBeNull();
+    expect(
+      within(errorRetry).getByRole("button", { name: "帮助：未单独配置的节点沿用这里的默认值。" })
+    ).toBeTruthy();
+
+    const pinData = within(inspector).getByRole("group", { name: "Pin Data" });
+    expect(within(pinData).getByText("按节点名固定输出，调试时跳过真实执行。")).toBeTruthy();
+    expect(within(pinData).getByRole("button", { name: /^帮助：/ })).toBeTruthy();
+    expect(within(pinData).queryByText(/键是任意节点名/)).toBeNull();
+
+    // The list leads with the Chinese meaning; the wire enum follows as mono text.
+    fireEvent.mouseDown(within(errorRetry).getByLabelText("执行出错时"));
+    const popup = [...document.querySelectorAll<HTMLElement>(".xflow-editor-select__popup")].at(-1);
+    expect(popup).toBeTruthy();
+    expect(within(popup!).getByText("失败即停止")).toBeTruthy();
+    // Every option carries its raw enum as the secondary mono value.
+    const rawValues = [...popup!.querySelectorAll(".xflow-editor-select__option-value")].map((node) => node.textContent);
+    expect(rawValues).toEqual(["stop", "error_output", "main_output", "continue"]);
+    expect(within(popup!).queryByText("stop：失败即停止")).toBeNull();
+  });
+
+  it("lists start, trigger-typed and trigger-kind nodes in 入口, and 定位 selects the node", () => {
+    const entryWorkflow: WorkflowDef = {
+      ...workflow,
+      nodes: [
+        { name: "hook", type: "xflow.trigger.webhook", ui: { label: "客户回调" } },
+        { name: "start", type: "xflow.start" },
+        { name: "worker", type: "xflow.function", kind: "action" }
+      ],
+      connections: {}
+    };
+    render(<XFlowEditor value={entryWorkflow} />);
+    fireEvent.keyDown(window, { key: "Escape" });
+    const inspector = screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
+    const entry = within(inspector).getByRole("group", { name: "入口" });
+
+    // Only the webhook and the start node are entries; the action node is not.
+    expect(within(entry).getAllByRole("listitem")).toHaveLength(2);
+    // Each row's icon follows the type's own category (ED-19).
+    const entryRows = within(entry).getAllByRole("listitem");
+    expect(entryRows.map((row) => row.querySelector(".xflow-editor-category-icon")?.getAttribute("data-cat"))).toEqual([
+      "trigger",
+      "control"
+    ]);
+    // The display label wins over the node name, and the type keeps its own cell.
+    expect(within(entry).getByText("客户回调")).toBeTruthy();
+    expect(within(entry).getByText("xflow.trigger.webhook")).toBeTruthy();
+    expect(within(entry).getByText("xflow.start")).toBeTruthy();
+    expect(within(entry).queryByText("worker")).toBeNull();
+
+    fireEvent.click(within(entry).getByRole("button", { name: "定位入口 客户回调" }));
+    expect(canvasNode("hook").closest(".xflow-preview-node")?.getAttribute("data-selected")).toBe("true");
+    // Selecting an entry hands the Inspector to that node's form.
+    const nodePanel = screen.getByRole("region", { name: "属性" });
+    expect(within(nodePanel).getByText("客户回调", { selector: ".xflow-editor-inspector-head__name" })).toBeTruthy();
+  });
+
+  it("draws 入口 rows without a 定位 key when no locate callback is passed, and an empty note with no entries", () => {
+    const registry = createNodeFormRegistry();
+    const formHost = { registry, compiler: new NodeFormCompiler(registry), renameRef: { current: undefined } };
+    const { unmount } = render(
+      <Inspector formHost={formHost} parameterTab="form" selectedIndex={-1} workflow={workflow} />
+    );
+    const entry = screen.getByRole("group", { name: "入口" });
+    expect(within(entry).getByText("start")).toBeTruthy();
+    expect(within(entry).queryByRole("button", { name: /^定位入口/ })).toBeNull();
+    unmount();
+
+    render(
+      <Inspector
+        formHost={formHost}
+        parameterTab="form"
+        selectedIndex={-1}
+        workflow={{ ...workflow, nodes: [{ name: "worker", type: "xflow.function" }] }}
+      />
+    );
+    const empty = screen.getByRole("group", { name: "入口" });
+    expect(within(empty).getByText("该工作流没有入口节点。")).toBeTruthy();
+    expect(within(empty).queryByRole("listitem")).toBeNull();
+  });
+
   it("deselects from the Inspector header into the workflow settings, and back by selecting a node", () => {
     const handleChange = vi.fn();
     render(<XFlowEditor value={workflow} onChange={handleChange} />);
@@ -223,12 +381,16 @@ describe("node search and workflow settings", () => {
     expect(within(inspector()).queryByLabelText("工作流名称")).toBeNull();
 
     fireEvent.keyDown(window, { key: "Escape" });
-    expect(within(inspector()).getByRole("group", { name: "基本信息" })).toBeTruthy();
-    // Runner and 执行设置 are structured rows; their JSON source view is one
-    // `</>` click away. Pin Data has no rows to build, so it stays source-only.
+    expect(within(inspector()).getByRole("group", { name: "基本" })).toBeTruthy();
+    // Runner and the advanced options sit behind the collapsed 高级 section.
+    expect(within(inspector()).queryByLabelText("Runner 模式")).toBeNull();
+    expect(within(inspector()).queryByLabelText("允许环路")).toBeNull();
+    fireEvent.click(within(inspector()).getByRole("button", { name: "展开高级" }));
     expect(within(inspector()).getByLabelText("Runner 模式")).toBeTruthy();
-    expect(within(inspector()).getByLabelText("执行超时")).toBeTruthy();
-    expect(within(inspector()).getByLabelText("启用重试")).toBeTruthy();
+    expect(within(inspector()).getByLabelText("允许环路")).toBeTruthy();
+    // 并发 and 错误与重试 stay open and reachable beside it.
+    expect(within(inspector()).getByLabelText("并发上限")).toBeTruthy();
+    expect(within(inspector()).getByLabelText("自动重试")).toBeTruthy();
     expect(within(inspector()).queryByLabelText("工作流 Runner 选择 JSON")).toBeNull();
     expect(within(inspector()).getByLabelText("工作流 Pin Data JSON")).toBeTruthy();
 
@@ -247,7 +409,7 @@ describe("node search and workflow settings", () => {
     expect(screen.getByRole("region", { name: "属性" })).toBeTruthy();
   });
 
-  it("writes the structured Runner and 执行设置 rows into the workflow", () => {
+  it("writes the structured Runner, settings and advanced option rows into the workflow", () => {
     const handleChange = vi.fn();
     render(
       <XFlowEditor
@@ -257,11 +419,13 @@ describe("node search and workflow settings", () => {
     );
     const inspector = () => screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
     fireEvent.keyDown(window, { key: "Escape" });
+    // The Runner rows and every advanced option live inside the collapsed 高级 card.
+    fireEvent.click(within(inspector()).getByRole("button", { name: "展开高级" }));
 
     // Runner: a mode select plus one key/value row per match label.
     const mode = within(inspector()).getByLabelText("Runner 模式").closest(".xflow-editor-select__root");
     expect(mode?.textContent).toContain("必须匹配标签");
-    pickEditorOption(within(inspector()).getByLabelText("Runner 模式"), "默认：任意可用 Runner");
+    pickEditorOption(within(inspector()).getByLabelText("Runner 模式"), "任意可用 Runner");
     expect(lastWorkflow(handleChange).runner_selector).toEqual({ mode: "default", match_labels: { env: "prod" } });
 
     fireEvent.change(within(inspector()).getByLabelText("匹配标签 1 值"), { target: { value: "staging" } });
@@ -270,19 +434,36 @@ describe("node search and workflow settings", () => {
     fireEvent.click(within(inspector()).getByRole("button", { name: "删除匹配标签 env" }));
     expect(lastWorkflow(handleChange).runner_selector).toEqual({ mode: "default" });
 
-    // 执行设置: each row writes exactly its own key of workflow.settings.
-    fireEvent.change(within(inspector()).getByLabelText("执行超时"), { target: { value: "30s" } });
-    expect(lastWorkflow(handleChange).settings).toEqual({ timeout: "30s" });
+    // 并发: each row writes exactly its own key of workflow.settings.
+    // A bare limit alone keeps the int shorthand the server preserves.
+    fireEvent.change(within(inspector()).getByLabelText("并发上限"), { target: { value: "4" } });
+    expect(lastWorkflow(handleChange).settings).toEqual({ concurrency: 4 });
 
-    fireEvent.change(within(inspector()).getByLabelText("执行并发"), { target: { value: "4" } });
-    expect(lastWorkflow(handleChange).settings).toEqual({ timeout: "30s", concurrency: 4 });
+    // Reject mode forces the object form; queue controls only exist in queue mode.
+    fireEvent.click(within(inspector()).getByRole("radio", { name: "拒绝" }));
+    expect(lastWorkflow(handleChange).settings).toEqual({ concurrency: { limit: 4, mode: "reject" } });
+    expect(within(inspector()).queryByLabelText("队列上限")).toBeNull();
+    expect(within(inspector()).queryByLabelText("排队超时（分钟）")).toBeNull();
 
-    fireEvent.change(within(inspector()).getByLabelText("执行时区"), { target: { value: "Asia/Shanghai" } });
-    pickEditorOption(within(inspector()).getByLabelText("执行错误策略"), "continue：继续执行");
-    pickEditorOption(within(inspector()).getByLabelText("Pin 数据模式"), "always：总是使用");
+    // Back to the default queue mode the limit collapses to the shorthand again.
+    fireEvent.click(within(inspector()).getByRole("radio", { name: "排队" }));
+    expect(lastWorkflow(handleChange).settings).toEqual({ concurrency: 4 });
+    fireEvent.change(within(inspector()).getByLabelText("队列上限"), { target: { value: "9" } });
     expect(lastWorkflow(handleChange).settings).toEqual({
-      timeout: "30s",
-      concurrency: 4,
+      concurrency: { limit: 4, mode: "queue", max_queued: 9 }
+    });
+    // Minutes are stored as a nanosecond integer.
+    fireEvent.change(within(inspector()).getByLabelText("排队超时（分钟）"), { target: { value: "2" } });
+    expect(lastWorkflow(handleChange).settings).toEqual({
+      concurrency: { limit: 4, mode: "queue", max_queued: 9, queue_timeout: 120000000000 }
+    });
+
+    // 基本 carries the timezone; 错误与重试 carries the error policy and retry.
+    fireEvent.change(within(inspector()).getByLabelText("执行时区"), { target: { value: "Asia/Shanghai" } });
+    pickEditorOption(within(inspector()).getByLabelText("执行出错时"), "继续执行");
+    pickEditorOption(within(inspector()).getByLabelText("Pin 数据模式"), "总是使用");
+    expect(lastWorkflow(handleChange).settings).toEqual({
+      concurrency: { limit: 4, mode: "queue", max_queued: 9, queue_timeout: 120000000000 },
       timezone: "Asia/Shanghai",
       on_error: "continue",
       pin_data_mode: "always"
@@ -290,41 +471,97 @@ describe("node search and workflow settings", () => {
 
     // Retry keeps its nested object, and its rows only appear once it is on.
     expect(within(inspector()).queryByLabelText("重试最大尝试次数")).toBeNull();
-    fireEvent.click(within(inspector()).getByLabelText("启用重试"));
+    fireEvent.click(within(inspector()).getByLabelText("自动重试"));
     expect(lastWorkflow(handleChange).settings?.retry).toEqual({ enabled: true });
     fireEvent.change(within(inspector()).getByLabelText("重试最大尝试次数"), { target: { value: "3" } });
     expect(lastWorkflow(handleChange).settings?.retry).toEqual({ enabled: true, max_attempts: 3 });
+
+    // 高级 options write to workflow.options under their DSL keys, never into settings.
+    fireEvent.click(within(inspector()).getByLabelText("允许环路"));
+    expect(lastWorkflow(handleChange).options).toEqual({ allow_cycles: true });
+    fireEvent.change(within(inspector()).getByLabelText("最大自动深度"), { target: { value: "4" } });
+    expect(lastWorkflow(handleChange).options).toEqual({ allow_cycles: true, max_auto_depth: 4 });
+    fireEvent.click(within(inspector()).getByLabelText("节点组协议（实验）"));
+    expect(lastWorkflow(handleChange).options).toEqual({
+      allow_cycles: true,
+      max_auto_depth: 4,
+      experimental_node_group: true
+    });
+    fireEvent.click(within(inspector()).getByLabelText("Transient 执行"));
+    expect(lastWorkflow(handleChange).options).toEqual({
+      allow_cycles: true,
+      max_auto_depth: 4,
+      experimental_node_group: true,
+      transient: true
+    });
+    // The TTL row only appears while transient is on, and seconds become nanoseconds.
+    fireEvent.change(within(inspector()).getByLabelText("Transient 保留时长（秒）"), { target: { value: "60" } });
+    expect(lastWorkflow(handleChange).options).toEqual({
+      allow_cycles: true,
+      max_auto_depth: 4,
+      experimental_node_group: true,
+      transient: true,
+      transient_ttl: 60000000000
+    });
+    expect(lastWorkflow(handleChange).settings?.timezone).toBe("Asia/Shanghai");
 
     // An emptied row leaves the DSL rather than writing an empty value.
     fireEvent.change(within(inspector()).getByLabelText("执行时区"), { target: { value: "" } });
     expect(lastWorkflow(handleChange).settings?.timezone).toBeUndefined();
   });
 
-  it("round-trips the 执行设置 source view and blocks save on a broken draft", () => {
+  it("reads the bare-int concurrency shorthand into the structured rows", () => {
+    render(<XFlowEditor value={{ ...workflow, settings: { concurrency: 4 } }} />);
+    fireEvent.keyDown(window, { key: "Escape" });
+    const inspector = () => screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
+
+    expect((within(inspector()).getByLabelText("并发上限") as HTMLInputElement).value).toBe("4");
+    expect((within(inspector()).getByRole("radio", { name: "排队" }) as HTMLInputElement).checked).toBe(true);
+    // Queue mode is the shorthand's meaning, so its controls are visible.
+    expect(within(inspector()).getByLabelText("队列上限")).toBeTruthy();
+  });
+
+  it("round-trips the settings source view and blocks save on a broken draft", () => {
     const handleChange = vi.fn();
     const onSave = vi.fn();
     render(<XFlowEditor value={workflow} onSave={onSave} onChange={handleChange} />);
     const inspector = () => screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
     fireEvent.keyDown(window, { key: "Escape" });
 
+    // The settings source lives in 高级; opening it expands the section.
     const toggle = within(inspector()).getByRole("button", { name: "以 JSON 编辑执行设置" });
     fireEvent.click(toggle);
     const source = within(inspector()).getByLabelText("工作流执行设置 JSON") as HTMLTextAreaElement;
     expect(JSON.parse(source.value)).toEqual({});
-    fireEvent.change(source, { target: { value: '{ "timeout": "1m", "retry": { "enabled": true } }' } });
-    expect(lastWorkflow(handleChange).settings).toEqual({ timeout: "1m", retry: { enabled: true } });
+    fireEvent.change(source, {
+      target: { value: '{ "concurrency": { "limit": 4, "mode": "reject" }, "retry": { "enabled": true } }' }
+    });
+    expect(lastWorkflow(handleChange).settings).toEqual({
+      concurrency: { limit: 4, mode: "reject" },
+      retry: { enabled: true }
+    });
 
     // Back on the rows, they read what the source wrote.
     fireEvent.click(toggle);
-    expect((within(inspector()).getByLabelText("执行超时") as HTMLInputElement).value).toBe("1m");
-    expect((within(inspector()).getByLabelText("启用重试") as HTMLButtonElement).getAttribute("aria-checked")).toBe("true");
+    expect((within(inspector()).getByLabelText("并发上限") as HTMLInputElement).value).toBe("4");
+    expect((within(inspector()).getByRole("radio", { name: "拒绝" }) as HTMLInputElement).checked).toBe(true);
+    expect(within(inspector()).queryByLabelText("队列上限")).toBeNull();
+    expect((within(inspector()).getByLabelText("自动重试") as HTMLButtonElement).getAttribute("aria-checked")).toBe(
+      "true"
+    );
 
     // A draft that does not parse is kept on screen, names its field, and stops save.
     fireEvent.click(toggle);
     fireEvent.change(within(inspector()).getByLabelText("工作流执行设置 JSON"), { target: { value: "{ broken" } });
     expect(within(inspector()).getByText("JSON 格式错误")).toBeTruthy();
     expect(screen.getByRole("button", { name: "保存" }).getAttribute("data-blocked")).toBe("true");
+    // The broken source stays on screen and 高级 stays open while it blocks save.
+    expect(within(inspector()).getByLabelText("工作流执行设置 JSON")).toBeTruthy();
+    expect(within(inspector()).getByRole("button", { name: "收起高级" }).getAttribute("aria-expanded")).toBe("true");
     // The parseable commit before it is still what the workflow holds.
-    expect(lastWorkflow(handleChange).settings).toEqual({ timeout: "1m", retry: { enabled: true } });
+    expect(lastWorkflow(handleChange).settings).toEqual({
+      concurrency: { limit: 4, mode: "reject" },
+      retry: { enabled: true }
+    });
   });
 });

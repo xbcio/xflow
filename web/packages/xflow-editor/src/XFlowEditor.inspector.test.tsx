@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { nodeCategoryMeta, nodeStatusMeta, type NodeCategory, type RuntimeSnapshot, type WorkflowDef } from "@xflow/core";
+import { nodeCategoryMeta, nodeStatusMeta, type NodeCategory, type RuntimeSnapshot, type WorkflowDef, type WorkflowNode } from "@xflow/core";
 import { XFlowEditor } from "./index";
 import { NodeFormCompiler, createNodeFormRegistry } from "./node-form";
 import { Inspector } from "./panels/inspector";
@@ -47,7 +47,8 @@ describe("inspector header (§6.4)", () => {
     expect(chip?.getAttribute("data-tone")).toBe("danger");
 
     const typeLine = panel.querySelector(".xflow-editor-inspector-head__type");
-    expect(typeLine?.textContent).toBe("api · xflow.http");
+    // C03: no label, so the name is not repeated — the type line carries the type only.
+    expect(typeLine?.textContent).toBe("xflow.http");
     expect(typeLine?.querySelector("code, em")).toBeNull();
   });
 
@@ -254,18 +255,22 @@ describe("inspector footer (baseline 测试此节点)", () => {
     render(<XFlowEditor value={workflow} onRunNode={onRunNode} />);
     const panel = selectNode("api");
     // The baseline draws the key with a leading ▶ (caret-right).
-    expect(within(panel).getByRole("button", { name: "测试此节点" }).querySelector(".anticon-caret-right")).not.toBeNull();
+    expect(within(panel).getByRole("button", { name: "测试此节点" }).querySelector('[data-xflow-icon="play"]')).not.toBeNull();
     fireEvent.click(within(panel).getByRole("button", { name: "测试此节点" }));
     await vi.waitFor(() => expect(onRunNode).toHaveBeenCalledTimes(1));
     expect(onRunNode.mock.calls[0]?.[1]).toEqual({ node: "api", mode: "to" });
   });
 
-  it("draws the key disabled with the reason when the host has no onRunNode, and none without a node", () => {
+  it("draws the key disabled with a user-language reason when the host has no onRunNode, and none without a node", () => {
     render(<XFlowEditor value={workflow} />);
     const panel = selectNode("api");
     const button = within(panel).getByRole("button", { name: "测试此节点" }) as HTMLButtonElement;
     expect(button.disabled).toBe(true);
-    expect(button.closest(".xflow-editor-inspector-foot")?.getAttribute("title")).toBe("宿主未接 onRunNode");
+    // The reason is both the tooltip and the accessible description (ED-12).
+    const descriptionId = button.getAttribute("aria-describedby");
+    expect(descriptionId).toBeTruthy();
+    expect(document.getElementById(descriptionId as string)?.textContent).toBe("当前环境不支持单节点运行");
+    expect(panel.textContent).not.toContain("宿主");
     fireEvent.keyDown(window, { key: "Escape" });
     expect(within(inspector()).queryByRole("button", { name: "测试此节点" })).toBeNull();
   });
@@ -377,35 +382,418 @@ describe("inspector header rename keeps display name and identity apart", () => 
   });
 });
 
+describe("node display name and header identity (IN-01 / C03)", () => {
+  const labelled: WorkflowDef = {
+    ...workflow,
+    nodes: [
+      workflow.nodes![0],
+      { name: "fetch_profile", type: "xflow.http", ui: { label: "拉取客户档案" } },
+      workflow.nodes![2]
+    ],
+    connections: { start: { main: [{ node: "fetch_profile" }] }, fetch_profile: { main: [{ node: "tail" }] } }
+  };
+  const displayNameField = (panel: HTMLElement): HTMLInputElement =>
+    within(panel).getByLabelText("显示名") as HTMLInputElement;
+  const head = (panel: HTMLElement): HTMLElement => panel.querySelector(".xflow-editor-inspector-head") as HTMLElement;
+  const formHost = () => {
+    const registry = createNodeFormRegistry();
+    return { registry, compiler: new NodeFormCompiler(registry), renameRef: { current: undefined } };
+  };
+
+  it("writes editor_metadata ui.label from 基础信息 and falls back to the node name when cleared", () => {
+    const handleChange = vi.fn();
+    render(<XFlowEditor value={workflow} onChange={handleChange} />);
+    const panel = selectNode("api");
+    const field = displayNameField(panel);
+    expect(field.value).toBe("");
+    // The placeholder is the identity, never a stored value.
+    expect(field.placeholder).toBe("api");
+
+    fireEvent.change(field, { target: { value: "拉取客户档案" } });
+    fireEvent.blur(field);
+
+    const next = lastWorkflow(handleChange);
+    expect(next.nodes?.[1]?.name).toBe("api");
+    expect(next.nodes?.[1]?.ui?.label).toBe("拉取客户档案");
+    expect(within(inspector()).getByText("拉取客户档案", { selector: ".xflow-editor-inspector-head__name" })).toBeTruthy();
+    // A distinct label takes the primary line; the name moves to the type line.
+    expect(inspector().querySelector(".xflow-editor-inspector-head__type")?.textContent).toBe("api · xflow.http");
+
+    fireEvent.change(displayNameField(inspector()), { target: { value: "" } });
+    fireEvent.blur(displayNameField(inspector()));
+
+    expect(lastWorkflow(handleChange).nodes?.[1]?.ui?.label).toBeUndefined();
+    expect(within(inspector()).getByText("api", { selector: ".xflow-editor-inspector-head__name" })).toBeTruthy();
+  });
+
+  it("never stores the node name as a display name and writes nothing for a blank edit", () => {
+    const handleChange = vi.fn();
+    render(<XFlowEditor value={workflow} onChange={handleChange} />);
+    const field = displayNameField(selectNode("api"));
+
+    fireEvent.change(field, { target: { value: " api " } });
+    fireEvent.blur(field);
+    expect(handleChange).not.toHaveBeenCalled();
+
+    fireEvent.change(field, { target: { value: "   " } });
+    fireEvent.blur(field);
+    expect(handleChange).not.toHaveBeenCalled();
+    expect(field.value).toBe("");
+  });
+
+  it("commits on Enter as well as blur", () => {
+    const handleChange = vi.fn();
+    render(<XFlowEditor value={workflow} onChange={handleChange} />);
+    const field = displayNameField(selectNode("api"));
+    fireEvent.change(field, { target: { value: "抓取档案" } });
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(lastWorkflow(handleChange).nodes?.[1]?.ui?.label).toBe("抓取档案");
+  });
+
+  it("seeds the field from ui.label and disables it on a read-only panel", () => {
+    const { unmount } = render(
+      <Inspector
+        editable={false}
+        formHost={formHost()}
+        parameterTab="form"
+        selectedIndex={1}
+        selectedNode={labelled.nodes?.[1]}
+        workflow={labelled}
+      />
+    );
+    const field = displayNameField(inspector());
+    expect(field.value).toBe("拉取客户档案");
+    expect(field.disabled).toBe(true);
+    unmount();
+
+    render(
+      <Inspector
+        formHost={formHost()}
+        parameterTab="form"
+        selectedIndex={1}
+        selectedNode={workflow.nodes?.[1]}
+        workflow={workflow}
+        onChangeWith={vi.fn()}
+      />
+    );
+    expect(displayNameField(inspector()).disabled).toBe(false);
+  });
+
+  it("shows the node name once when the label is empty or identical", () => {
+    const echoed: WorkflowDef = {
+      ...workflow,
+      nodes: [
+        workflow.nodes![0],
+        { name: "api", type: "xflow.http", position: { x: 240, y: 120 }, ui: { label: "api" } },
+        workflow.nodes![2]
+      ]
+    };
+    const { unmount } = render(<XFlowEditor value={echoed} />);
+    let panel = selectNode("api");
+    expect(within(head(panel)).getAllByText("api")).toHaveLength(1);
+    expect(panel.querySelector(".xflow-editor-inspector-head__type")?.textContent).toBe("xflow.http");
+    unmount();
+
+    // An empty label falls back to the name, still exactly once.
+    render(
+      <XFlowEditor
+        value={{
+          ...echoed,
+          nodes: echoed.nodes?.map((node) => (node.name === "api" ? { ...node, ui: { label: "" } } : node))
+        }}
+      />
+    );
+    panel = selectNode("api");
+    expect(within(head(panel)).getAllByText("api")).toHaveLength(1);
+    expect(panel.querySelector(".xflow-editor-inspector-head__type")?.textContent).toBe("xflow.http");
+  });
+
+  it("shows a distinct label as the primary line and the name as the secondary one", () => {
+    render(<XFlowEditor value={labelled} />);
+    const panel = selectNode("fetch_profile");
+    expect(within(panel).getByText("拉取客户档案", { selector: ".xflow-editor-inspector-head__name" })).toBeTruthy();
+    expect(panel.querySelector(".xflow-editor-inspector-head__type")?.textContent).toBe(
+      "fetch_profile · xflow.http"
+    );
+  });
+});
+
+describe("node template field (IN-02 / §6.4)", () => {
+  const templates = {
+    tpl_a: { type: "xflow.http", parameters: { url: "https://example.com" } },
+    tpl_b: { type: "xflow.function", parameters: { code: "return 1;" } }
+  };
+  const templated: WorkflowDef = {
+    ...workflow,
+    node_templates: templates,
+    nodes: [
+      workflow.nodes![0],
+      { name: "api", type: "xflow.http", position: { x: 240, y: 120 } },
+      workflow.nodes![2]
+    ]
+  };
+  const usingTemplate: WorkflowDef = {
+    ...templated,
+    nodes: [
+      templated.nodes![0],
+      { name: "api", template: "tpl_a", position: { x: 240, y: 120 } },
+      templated.nodes![2]
+    ]
+  };
+  const formHost = () => {
+    const registry = createNodeFormRegistry();
+    return { registry, compiler: new NodeFormCompiler(registry), renameRef: { current: undefined } };
+  };
+  const templateField = (panel: HTMLElement): HTMLInputElement =>
+    within(panel).getByRole("combobox", { name: "模板" }) as HTMLInputElement;
+  const templateContent = (panel: HTMLElement): HTMLElement | null | undefined =>
+    templateField(panel).closest(".ant-select")?.querySelector<HTMLElement>(".ant-select-content");
+  const selectedLabel = (panel: HTMLElement): string | null =>
+    templateContent(panel)?.textContent ?? null;
+  const openOptions = (panel: HTMLElement): HTMLElement[] => {
+    fireEvent.mouseDown(templateField(panel));
+    const popup = [...document.querySelectorAll(".xflow-editor-select__popup")].at(-1);
+    return [...(popup?.querySelectorAll<HTMLElement>(".ant-select-item-option") ?? [])];
+  };
+  const pickTemplate = (panel: HTMLElement, label: string): void => {
+    const option = openOptions(panel).find((candidate) => candidate.textContent === label);
+    if (!option) throw new Error(`no template option ${label}`);
+    fireEvent.click(option);
+  };
+
+  it("lists 无模板 plus every node_templates key, and picking one writes template while dropping type", () => {
+    const handleChange = vi.fn();
+    render(<XFlowEditor value={templated} onChange={handleChange} />);
+    const panel = selectNode("api");
+
+    const options = openOptions(panel);
+    expect(options.map((option) => option.textContent)).toEqual(["无模板", "tpl_a", "tpl_b"]);
+    expect(selectedLabel(panel)).toBe("无模板");
+
+    fireEvent.click(options[1]!);
+
+    const next = lastWorkflow(handleChange);
+    expect(next.nodes?.[1]?.template).toBe("tpl_a");
+    expect(next.nodes?.[1]?.type).toBeUndefined();
+    expect("type" in (next.nodes?.[1] ?? {})).toBe(false);
+    const updatedPanel = inspector();
+    expect(selectedLabel(updatedPanel)).toBe("tpl_a");
+    expect(updatedPanel.querySelector(".xflow-editor-inspector-head__type")?.textContent).toContain("模板 tpl_a");
+    expect(within(updatedPanel).getByText("参数由模板提供，切换模板会改变表单。")).toBeTruthy();
+
+    // One undo entry puts both fields back.
+    fireEvent.click(undo());
+    const undone = lastWorkflow(handleChange);
+    expect(undone.nodes?.[1]?.type).toBe("xflow.http");
+    expect(undone.nodes?.[1]?.template).toBeUndefined();
+    expect(selectedLabel(inspector())).toBe("无模板");
+  });
+
+  it("clears template on 无模板 and restores the type the template shadowed", () => {
+    const handleChange = vi.fn();
+    render(<XFlowEditor value={usingTemplate} onChange={handleChange} />);
+    const panel = selectNode("api");
+    expect(selectedLabel(panel)).toBe("tpl_a");
+
+    pickTemplate(panel, "无模板");
+
+    const next = lastWorkflow(handleChange);
+    expect(next.nodes?.[1]?.template).toBeUndefined();
+    expect("template" in (next.nodes?.[1] ?? {})).toBe(false);
+    expect(next.nodes?.[1]?.type).toBe("xflow.http");
+    expect(selectedLabel(inspector())).toBe("无模板");
+    expect(within(inspector()).queryByText("参数由模板提供，切换模板会改变表单。")).toBeNull();
+  });
+
+  it("writes nothing when 无模板 is picked on a node that has no template", () => {
+    const handleChange = vi.fn();
+    render(<XFlowEditor value={templated} onChange={handleChange} />);
+    const panel = selectNode("api");
+    expect(selectedLabel(panel)).toBe("无模板");
+
+    pickTemplate(panel, "无模板");
+
+    expect(handleChange).not.toHaveBeenCalled();
+    expect(lastWorkflow(handleChange)).toBeUndefined();
+  });
+
+  it("draws no 模板 row when node_templates is missing or empty", () => {
+    const { unmount } = render(<XFlowEditor value={workflow} onChange={vi.fn()} />);
+    let panel = selectNode("api");
+    expect(within(panel).queryByRole("combobox", { name: "模板" })).toBeNull();
+    expect(within(panel).queryByText("参数由模板提供，切换模板会改变表单。")).toBeNull();
+    unmount();
+
+    render(<XFlowEditor value={{ ...workflow, node_templates: {} }} onChange={vi.fn()} />);
+    panel = selectNode("api");
+    expect(within(panel).queryByRole("combobox", { name: "模板" })).toBeNull();
+  });
+
+  it("disables the 模板 select on a read-only panel", () => {
+    const { unmount } = render(
+      <Inspector
+        editable={false}
+        formHost={formHost()}
+        parameterTab="form"
+        selectedIndex={1}
+        selectedNode={usingTemplate.nodes?.[1]}
+        workflow={usingTemplate}
+      />
+    );
+    expect(templateField(inspector()).disabled).toBe(true);
+    unmount();
+
+    render(
+      <Inspector
+        formHost={formHost()}
+        parameterTab="form"
+        selectedIndex={1}
+        selectedNode={templated.nodes?.[1]}
+        workflow={templated}
+        onChangeWith={vi.fn()}
+      />
+    );
+    expect(templateField(inspector()).disabled).toBe(false);
+  });
+
+  it("moves the chosen value with the selected node", () => {
+    const mixed: WorkflowDef = {
+      ...templated,
+      nodes: [
+        templated.nodes![0],
+        templated.nodes![1],
+        { name: "tail", template: "tpl_b", position: { x: 480, y: 120 } }
+      ]
+    };
+    render(<XFlowEditor value={mixed} />);
+
+    expect(selectedLabel(selectNode("api"))).toBe("无模板");
+    const tailPanel = selectNode("tail");
+    expect(selectedLabel(tailPanel)).toBe("tpl_b");
+    expect(templateContent(tailPanel)?.getAttribute("title")).toBe("tpl_b");
+  });
+});
+
 const tab = (name: string): HTMLElement => within(inspector()).getByRole("tab", { name });
 const tabPanels = (): HTMLElement[] => within(inspector()).getAllByRole("tabpanel", { hidden: true });
 
 describe("inspector tabs (§6.4, AntD Tabs)", () => {
-  it("names the four tabs exactly, in order, with parameters selected", () => {
+  it("names the three tabs exactly, in order, with 配置 selected", () => {
     render(<XFlowEditor value={workflow} />);
     selectNode("api");
 
     const tabs = within(inspector()).getAllByRole("tab");
-    expect(tabs.map((node) => node.textContent?.replace(/^Tab \d of \d/, ""))).toEqual(["参数", "设置", "连接 2", "运行"]);
-    expect(tab("参数").getAttribute("aria-selected")).toBe("true");
-    expect(tab("设置").getAttribute("aria-selected")).toBe("false");
+    expect(tabs.map((node) => node.textContent?.replace(/^Tab \d of \d/, ""))).toEqual(["配置", "连接 2", "运行"]);
+    expect(tab("配置").getAttribute("aria-selected")).toBe("true");
+    expect(tab("连接").getAttribute("aria-selected")).toBe("false");
   });
 
-  it("mounts only the active panel", () => {
+  it("mounts only the active panel, with the execution settings inside 配置", () => {
     render(<XFlowEditor value={workflow} />);
     selectNode("api");
     expect(tabPanels()).toHaveLength(1);
     expect(inspector().querySelector('[aria-label="节点参数"]')).not.toBeNull();
-    expect(inspector().querySelector('[aria-label="节点设置"]')).toBeNull();
+    expect(within(inspector()).getByRole("button", { name: "执行策略" })).toBeTruthy();
 
-    fireEvent.click(tab("设置"));
+    fireEvent.click(tab("连接"));
     expect(tabPanels()).toHaveLength(1);
-    expect(inspector().querySelector('[aria-label="节点设置"]')).not.toBeNull();
     expect(inspector().querySelector('[aria-label="节点参数"]')).toBeNull();
+    expect(within(inspector()).queryByRole("button", { name: "执行策略" })).toBeNull();
 
     fireEvent.click(tab("运行"));
     expect(tabPanels()).toHaveLength(1);
-    expect(inspector().querySelector('[aria-label="节点设置"]')).toBeNull();
+    expect(inspector().querySelector('[aria-label="节点参数"]')).toBeNull();
+  });
+
+  it("keeps every old 设置 function in the merged execution section", () => {
+    render(<XFlowEditor value={workflow} />);
+    const panel = selectNode("api");
+
+    // Collapsed by default, with the design's summary on the header.
+    const execution = within(panel).getByRole("button", { name: "执行策略" });
+    expect(execution.getAttribute("aria-expanded")).toBe("false");
+    expect(panel.textContent).toContain("继承工作流");
+    fireEvent.click(execution);
+    expect(execution.getAttribute("aria-expanded")).toBe("true");
+
+    // Error policy and timeout.
+    expect(within(panel).getByLabelText("错误处理")).toBeTruthy();
+    expect(within(panel).getByLabelText("超时")).toBeTruthy();
+
+    // Retry: every knob of the old 设置 tab (the object group renders inline).
+    for (const label of ["启用", "最大尝试次数", "策略", "初始间隔", "最大间隔", "倍率"]) {
+      expect(within(panel).getByLabelText(label), `${label} is still editable`).toBeTruthy();
+    }
+
+    // Node-level Runner selector.
+    const labels = within(panel).getByRole("group", { name: "匹配标签" });
+    expect(labels).toBeTruthy();
+    expect(within(labels).getByRole("button", { name: /添加/ })).toBeTruthy();
+  });
+
+  it("summarises the node's execution settings on the merged section header", () => {
+    const configured: WorkflowDef = {
+      ...workflow,
+      settings: { retry: { max_attempts: 5 } },
+      nodes: [
+        { name: "start", type: "xflow.start", kind: "trigger" },
+        {
+          name: "api",
+          type: "xflow.http",
+          position: { x: 240, y: 120 },
+          on_error: "continue",
+          retry: { max_attempts: 2 },
+          timeout: 30_000_000_000
+        },
+        { name: "tail", type: "xflow.end", position: { x: 480, y: 120 } }
+      ]
+    };
+    render(<XFlowEditor value={configured} />);
+    const panel = selectNode("api");
+
+    // A node-level error policy, retry count and timeout win over the
+    // workflow-level retry default (5), exactly as the engine resolves them.
+    expect(panel.querySelector(".xflow-composer-section-summary")?.textContent).toBe(
+      "错误处理 继续执行 · 重试 2 次 · 超时 30s"
+    );
+  });
+
+  it("omits the retry summary when retries are explicitly disabled", () => {
+    const configured: WorkflowDef = {
+      ...workflow,
+      settings: { retry: { max_attempts: 5 } },
+      nodes: [
+        { name: "start", type: "xflow.start", kind: "trigger" },
+        {
+          name: "api",
+          type: "xflow.http",
+          position: { x: 240, y: 120 },
+          retry: { enabled: false, max_attempts: 2 },
+          timeout: 30_000_000_000
+        },
+        { name: "tail", type: "xflow.end", position: { x: 480, y: 120 } }
+      ]
+    };
+    const { unmount } = render(<XFlowEditor value={configured} />);
+    let panel = selectNode("api");
+    // engine/graph resolveRetry: enabled=false on the node suppresses both the
+    // node count and the workflow fallback.
+    expect(panel.querySelector(".xflow-composer-section-summary")?.textContent).toBe("继承工作流 · 超时 30s");
+    unmount();
+
+    render(
+      <XFlowEditor
+        value={{
+          ...configured,
+          settings: { retry: { enabled: false, max_attempts: 5 } },
+          nodes: configured.nodes?.map((node) =>
+            node.name === "api" ? { ...node, retry: undefined, on_error: undefined } : node
+          )
+        }}
+      />
+    );
+    panel = selectNode("api");
+    expect(panel.querySelector(".xflow-composer-section-summary")?.textContent).toBe("继承工作流 · 超时 30s");
   });
 
   it("moves between tabs with the arrow, Home and End keys, and selection follows focus", () => {
@@ -416,14 +804,14 @@ describe("inspector tabs (§6.4, AntD Tabs)", () => {
     // the focused element instead of re-querying it by name.
     const focused = (): HTMLElement => document.activeElement as HTMLElement;
     const press = (key: string) => fireEvent.keyDown(focused(), { key, code: key });
-    const parameters = tab("参数");
+    const parameters = tab("配置");
     parameters.focus();
 
     press("ArrowRight");
-    expect(focused().textContent).toContain("设置");
+    expect(focused().textContent).toContain("连接");
     expect(focused().getAttribute("aria-selected")).toBe("true");
     expect(parameters.getAttribute("aria-selected")).toBe("false");
-    press("End");
+    press("ArrowRight");
     expect(focused().textContent).toContain("运行");
     expect(focused().getAttribute("aria-selected")).toBe("true");
     press("Home");
@@ -432,6 +820,201 @@ describe("inspector tabs (§6.4, AntD Tabs)", () => {
     press("ArrowLeft");
     expect(focused().textContent).toContain("运行");
     expect(focused().getAttribute("aria-selected")).toBe("true");
+  });
+});
+
+describe("connections tab groups (C02)", () => {
+  const openConnections = (name: string): HTMLElement => {
+    selectNode(name);
+    fireEvent.click(tab("连接"));
+    return inspector();
+  };
+  const connectionGroup = (name: string): HTMLElement =>
+    within(inspector()).getByRole("group", { name });
+  const groupCount = (name: string): string | undefined =>
+    connectionGroup(name).querySelector(".xflow-editor-section-card__title em")?.textContent?.trim() ?? undefined;
+  const withNode = (node: WorkflowNode): WorkflowDef => ({
+    ...workflow,
+    nodes: [...(workflow.nodes ?? []), node]
+  });
+
+  it("draws 输入端口 / 输出端口 / 错误策略 with in-and-out counts, and keeps empty groups on screen", () => {
+    render(<XFlowEditor value={withNode({ name: "lonely", type: "xflow.function", position: { x: 720, y: 120 } })} />);
+    openConnections("lonely");
+
+    expect(connectionGroup("输入端口").querySelector(".xflow-editor-section-card__title strong")?.textContent).toBe(
+      "输入端口"
+    );
+    expect(groupCount("输入端口")).toBe("0");
+    expect(groupCount("输出端口")).toBe("0");
+    expect(connectionGroup("错误策略").querySelector(".xflow-editor-section-card__title strong")?.textContent).toBe(
+      "错误策略"
+    );
+    // An empty bucket keeps its card and says why; the tab does not collapse.
+    expect(within(connectionGroup("输入端口")).getByText("暂无输入连接。")).toBeTruthy();
+    expect(within(connectionGroup("输出端口")).getByText("暂无输出连接。")).toBeTruthy();
+    expect(within(inspector()).getByText("在配置 tab 修改。")).toBeTruthy();
+  });
+
+  it("counts only the side that has edges", () => {
+    render(<XFlowEditor value={workflow} />);
+
+    openConnections("tail");
+    expect(groupCount("输入端口")).toBe("1");
+    expect(groupCount("输出端口")).toBe("0");
+    expect(within(connectionGroup("输出端口")).getByText("暂无输出连接。")).toBeTruthy();
+
+    openConnections("start");
+    expect(groupCount("输入端口")).toBe("0");
+    expect(groupCount("输出端口")).toBe("1");
+    expect(within(connectionGroup("输入端口")).getByText("暂无输入连接。")).toBeTruthy();
+  });
+
+  it("groups incoming by target port and outgoing by source port, display name first", () => {
+    const grouped: WorkflowDef = {
+      ...workflow,
+      nodes: [
+        { name: "start", type: "xflow.start", kind: "trigger", ui: { label: "入口" } },
+        { name: "feeder", type: "xflow.function" },
+        { name: "api", type: "xflow.http", inputs: [{ name: "main" }, { name: "payload" }] },
+        { name: "tail", type: "xflow.end", ui: { label: "结束" } },
+        { name: "handler", type: "xflow.function", ui: { label: "错误处理" } }
+      ],
+      connections: {
+        start: { main: [{ node: "api" }] },
+        feeder: { main: [{ node: "api", input: "payload" }] },
+        api: { main: [{ node: "tail" }], error: [{ node: "handler" }] }
+      }
+    };
+    render(<XFlowEditor value={grouped} />);
+    openConnections("api");
+
+    const incoming = connectionGroup("输入端口");
+    const inputMain = within(incoming).getByRole("group", { name: "输入端口 main" });
+    const inputPayload = within(incoming).getByRole("group", { name: "输入端口 payload" });
+    expect(inputMain.textContent).toContain("入口");
+    expect(inputMain.textContent).toContain("start");
+    expect(inputPayload.textContent).toContain("feeder");
+    expect(inputPayload.textContent).not.toContain("入口");
+
+    const outgoing = connectionGroup("输出端口");
+    const outputMain = within(outgoing).getByRole("group", { name: "输出端口 main" });
+    const outputError = within(outgoing).getByRole("group", { name: "输出端口 error" });
+    expect(outputMain.textContent).toContain("结束");
+    expect(outputMain.textContent).toContain("tail");
+    expect(outputError.textContent).toContain("错误处理");
+    expect(outputError.textContent).toContain("handler");
+  });
+
+  it("keeps the 添加数据连接 form inside 输出端口 and writes through onChange", () => {
+    const handleChange = vi.fn();
+    const withSink: WorkflowDef = {
+      ...workflow,
+      nodes: [...(workflow.nodes ?? []), { name: "sink", type: "xflow.function", position: { x: 720, y: 120 } }]
+    };
+    render(<XFlowEditor value={withSink} onChange={handleChange} />);
+    openConnections("api");
+
+    const output = connectionGroup("输出端口");
+    expect(within(output).getByText("添加数据连接")).toBeTruthy();
+    fireEvent.click(within(output).getByRole("button", { name: "连接到 sink" }));
+
+    expect(lastWorkflow(handleChange).connections?.api?.main).toEqual([{ node: "tail" }, { node: "sink" }]);
+  });
+
+  it("keeps deletion inside the grouped rows and empties the bucket", () => {
+    const handleChange = vi.fn();
+    render(<XFlowEditor value={workflow} onChange={handleChange} />);
+    openConnections("api");
+
+    const incoming = connectionGroup("输入端口");
+    fireEvent.click(within(incoming).getByRole("button", { name: "删除连接 start main 到 api main" }));
+
+    expect(lastWorkflow(handleChange).connections?.start).toEqual({ main: [] });
+    expect(groupCount("输入端口")).toBe("0");
+    expect(within(connectionGroup("输入端口")).getByText("暂无输入连接。")).toBeTruthy();
+  });
+
+  it("reports on_error and the node's retry policy read-only", () => {
+    const configured: WorkflowDef = {
+      ...workflow,
+      settings: { retry: { max_attempts: 5, strategy: "exponential" } },
+      nodes: [
+        workflow.nodes![0],
+        {
+          name: "api",
+          type: "xflow.http",
+          position: { x: 240, y: 120 },
+          on_error: "main_output",
+          retry: { max_attempts: 3, strategy: "fixed" }
+        },
+        workflow.nodes![2]
+      ]
+    };
+    render(<XFlowEditor value={configured} />);
+    openConnections("api");
+
+    const policy = connectionGroup("错误策略");
+    expect(policy.textContent).toContain("主端口");
+    expect(policy.textContent).toContain("重试 3 次");
+    expect(policy.textContent).toContain("固定间隔");
+    expect(policy.textContent).toContain("在配置 tab 修改");
+    // Read-only by design in this batch: no write controls in the group.
+    expect(within(policy).queryByRole("button")).toBeNull();
+  });
+
+  it("shows inherited defaults and 未启用, and honours a node-level disabled retry", () => {
+    const inherited: WorkflowDef = {
+      ...workflow,
+      settings: { on_error: "continue", retry: { max_attempts: 5, strategy: "exponential" } },
+      nodes: [workflow.nodes![0], { name: "api", type: "xflow.http" }, workflow.nodes![2]]
+    };
+    const { unmount } = render(<XFlowEditor value={inherited} />);
+    openConnections("api");
+    expect(connectionGroup("错误策略").textContent).toContain("继承工作流（继续执行）");
+    expect(connectionGroup("错误策略").textContent).toContain("继承工作流 · 重试 5 次 · 指数退避");
+    unmount();
+
+    const disabled: WorkflowDef = {
+      ...inherited,
+      nodes: [
+        inherited.nodes![0],
+        { name: "api", type: "xflow.http", retry: { enabled: false, max_attempts: 2 } },
+        inherited.nodes![2]!
+      ]
+    };
+    render(<XFlowEditor value={disabled} />);
+    openConnections("api");
+    const policy = connectionGroup("错误策略");
+    // engine/graph resolveRetry: enabled=false suppresses the workflow fallback.
+    expect(policy.textContent).toContain("未启用");
+    expect(policy.textContent).not.toContain("重试 2 次");
+  });
+
+  it("disables the add controls and every delete button on a read-only panel", () => {
+    const registry = createNodeFormRegistry();
+    const formHost = { registry, compiler: new NodeFormCompiler(registry), renameRef: { current: undefined } };
+    render(
+      <Inspector
+        editable={false}
+        formHost={formHost}
+        parameterTab="form"
+        selectedIndex={1}
+        selectedNode={workflow.nodes?.[1]}
+        workflow={workflow}
+      />
+    );
+    fireEvent.click(tab("连接"));
+
+    expect(
+      (within(inspector()).getByRole("button", { name: "连接到 tail" }) as HTMLButtonElement).disabled
+    ).toBe(true);
+    expect(
+      (within(inspector()).getByRole("button", { name: "删除连接 start main 到 api main" }) as HTMLButtonElement)
+        .disabled
+    ).toBe(true);
+    expect((within(inspector()).getByRole("combobox", { name: "输出端口" }) as HTMLInputElement).disabled).toBe(true);
+    expect((within(inspector()).getByRole("combobox", { name: "输入端口" }) as HTMLInputElement).disabled).toBe(true);
   });
 });
 

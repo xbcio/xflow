@@ -1,5 +1,5 @@
 import * as React from "react";
-import { UploadOutlined } from "@ant-design/icons";
+import { UploadIcon } from "@xflow/icons";
 import { Button, Input, Modal } from "antd";
 import type { WorkflowDef } from "@xflow/core";
 import type { WorkflowChange } from "../workflowChanges";
@@ -154,7 +154,7 @@ export function PublishDialog({
       title={
         <span className="xflow-editor-publish-dialog__title">
           <span aria-hidden="true" className="xflow-editor-publish-dialog__icon">
-            <UploadOutlined />
+            <UploadIcon />
           </span>
           <span className="xflow-editor-publish-dialog__heading-group">
             <span className="xflow-editor-publish-dialog__heading">发布新版本</span>
@@ -166,25 +166,24 @@ export function PublishDialog({
           </span>
         </span>
       }
-      width={560}
+      width={520}
       footer={[
         <Button
-          className="xflow-editor-publish-dialog__full-diff"
+          className="xflow-editor-publish-dialog__action xflow-editor-publish-dialog__full-diff"
           key="full-diff"
-          size="small"
           onClick={() => setFullDiffOpen(true)}
         >
           查看完整 diff
         </Button>,
-        <Button key="cancel" size="small" onClick={onCancel}>
+        <Button className="xflow-editor-publish-dialog__action" key="cancel" onClick={onCancel}>
           取消
         </Button>,
         <Button
+          className="xflow-editor-publish-dialog__action"
           data-publish-version={trimmed}
           disabled={blocked}
           key="publish"
           loading={publishing}
-          size="small"
           type="primary"
           onClick={onPublish}
         >
@@ -227,7 +226,6 @@ export function PublishDialog({
         <Input
           aria-label="新版本号"
           id={inputId}
-          size="small"
           value={version}
           onChange={(event) => onVersionChange(event.target.value)}
         />

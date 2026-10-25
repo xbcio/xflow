@@ -1,5 +1,5 @@
 import * as React from "react";
-import { CloseOutlined } from "@ant-design/icons";
+import { PlusIcon, UserIcon, XMarkIcon } from "@xflow/icons";
 import { Button, Input, Modal, Segmented } from "antd";
 import {
   APPROVAL_MAX_CHAIN,
@@ -150,6 +150,8 @@ export function ApprovalDialog({
     kind: SecondaryKind;
     assignee: string;
     position: "before" | "after";
+    /** The amendment's own note; never shared with the decision comment. */
+    note: string;
   }>();
 
   const params = approvalParamsFrom(node?.parameters);
@@ -185,7 +187,7 @@ export function ApprovalDialog({
   if (capabilities?.execution === false) {
     readOnlyReason = "没有 execution 权限，无法提交决定";
   } else if (!onSignal) {
-    readOnlyReason = "宿主未提供 onSignal，无法提交决定";
+    readOnlyReason = "当前环境不支持提交审批决定";
   } else if (!executionNode) {
     readOnlyReason = "找不到该审批节点的运行记录";
   } else if (!suspended) {
@@ -235,7 +237,11 @@ export function ApprovalDialog({
       ? approvalSignalName(nodeKey, mode, subject, true)
       : undefined;
 
-  const submit = async (action: string, extra?: Record<string, unknown>): Promise<void> => {
+  const submit = async (
+    action: string,
+    extra?: Record<string, unknown>,
+    note?: string
+  ): Promise<void> => {
     if (!subject || !onSignal || !node) return;
     const force = action === approvalActions.force;
     // `force` is answered before the mode checks server-side (approval.go) and
@@ -251,7 +257,10 @@ export function ApprovalDialog({
     const ignoredNameBefore = ignored.filter((item) => item.signal === name).length;
     try {
       const data: Record<string, unknown> = { action };
-      const commentText = comment.trim();
+      // A decision reads the main 意见; an amendment reads only its own 说明.
+      // The two fields never overwrite each other (`data.comment` is the one
+      // key the node stores on the ledger entry for either kind of request).
+      const commentText = (note ?? comment).trim();
       if (commentText) data.comment = commentText;
       if (extra) Object.assign(data, extra);
       await onSignal(executionId, { name, data });
@@ -285,7 +294,7 @@ export function ApprovalDialog({
     if (!assignee) return;
     const extra: Record<string, unknown> = { assignee };
     if (secondary.kind === "add_signer") extra.position = secondary.position;
-    void submit(secondary.kind, extra);
+    void submit(secondary.kind, extra, secondary.note);
   };
 
   return (
@@ -321,28 +330,25 @@ export function ApprovalDialog({
           <Button
             aria-label="关闭审批对话框"
             className="xflow-editor-approval__close"
-            icon={<CloseOutlined />}
+            icon={<XMarkIcon />}
             size="small"
             type="text"
             onClick={onClose}
           />
         </span>
       }
-      width={560}
+      width={520}
       footer={
         <div className="xflow-editor-approval__foot">
           <span className="xflow-editor-approval__policy">
             {timeoutPolicy(params.timeout, params.timeoutAction)}
           </span>
           <span className="xflow-editor-approval__foot-gap" />
-          <Button size="small" onClick={onClose}>
-            关闭
-          </Button>
+          <Button onClick={onClose}>{canDecide ? "取消" : "关闭"}</Button>
           {canDecide ? (
             <Button
               disabled={Boolean(submitting)}
               loading={submitting === choice}
-              size="small"
               type="primary"
               onClick={() => void submit(choice)}
             >
@@ -384,7 +390,7 @@ export function ApprovalDialog({
               </span>
               <span className="xflow-editor-approval__actor">{decision.approver}</span>
               <span className="xflow-editor-approval__say">
-                <strong>{approvalActionLabel[decision.action] ?? decision.action}</strong>
+                {approvalActionLabel[decision.action] ?? decision.action}
                 {decision.assignee ? <span> · {decision.assignee}</span> : null}
                 {decision.comment ? (
                   <span className="xflow-editor-approval__muted"> “{decision.comment}”</span>
@@ -458,6 +464,7 @@ export function ApprovalDialog({
             <Input.TextArea
               id="xflow-editor-approval-comment"
               aria-label="审批意见"
+              className="xflow-editor-approval__textarea"
               placeholder="选填，会写入审批记录"
               rows={2}
               value={comment}
@@ -472,16 +479,20 @@ export function ApprovalDialog({
           {canAmend ? (
             <>
               <Button
+                className="xflow-editor-approval__action"
                 disabled={Boolean(submitting)}
+                icon={<UserIcon aria-hidden />}
                 size="small"
-                onClick={() => setSecondary({ kind: "delegate", assignee: "", position: "after" })}
+                onClick={() => setSecondary({ kind: "delegate", assignee: "", position: "after", note: "" })}
               >
                 转交…
               </Button>
               <Button
+                className="xflow-editor-approval__action"
                 disabled={Boolean(submitting)}
+                icon={<PlusIcon aria-hidden />}
                 size="small"
-                onClick={() => setSecondary({ kind: "add_signer", assignee: "", position: "after" })}
+                onClick={() => setSecondary({ kind: "add_signer", assignee: "", position: "after", note: "" })}
               >
                 加签…
               </Button>
@@ -510,6 +521,7 @@ export function ApprovalDialog({
             </label>
             <Input
               aria-label={secondary.kind === "delegate" ? "转交人" : "加签人"}
+              className="xflow-editor-approval__input"
               id="xflow-editor-approval-assignee"
               placeholder="输入审批人标识"
               size="small"
@@ -539,6 +551,21 @@ export function ApprovalDialog({
               </p>
             </div>
           ) : null}
+          <div className="xflow-editor-approval__field">
+            <label className="xflow-editor-approval__label" htmlFor="xflow-editor-approval-note">
+              说明
+            </label>
+            <Input.TextArea
+              id="xflow-editor-approval-note"
+              className="xflow-editor-approval__textarea"
+              placeholder="选填"
+              rows={2}
+              value={secondary.note}
+              onChange={(event) =>
+                setSecondary((current) => (current ? { ...current, note: event.target.value } : current))
+              }
+            />
+          </div>
           <div className="xflow-editor-approval__secondary-actions">
             <Button size="small" onClick={() => setSecondary(undefined)}>
               取消
@@ -603,6 +630,15 @@ export function ApprovalDialog({
         <div className="xflow-editor-approval__status" data-tone="danger" role="alert">
           <strong>操作失败</strong>
           <span>{error}</span>
+        </div>
+      ) : null}
+
+      {ignored.length > 0 ? (
+        <div className="xflow-editor-approval__banner" data-tone="info" role="note">
+          <strong>未计入的审批人不计入通过条件</strong>
+          <span>
+            已转交或已加签时由新审批人接替，不会重复计数。提交后若信号未被采纳（不在审批链、已决定等），会在「未计入」中显示原因。
+          </span>
         </div>
       ) : null}
 

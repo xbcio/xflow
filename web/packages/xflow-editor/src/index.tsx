@@ -1,50 +1,36 @@
 import {
-  ApartmentOutlined,
-  AppstoreAddOutlined,
-  AppstoreOutlined,
-  ArrowLeftOutlined,
-  AuditOutlined,
-  BgColorsOutlined,
-  BranchesOutlined,
-  CaretRightOutlined,
-  CheckCircleOutlined,
-  CheckOutlined,
-  CloudServerOutlined,
-  ClockCircleOutlined,
-  CodeOutlined,
-  CompressOutlined,
-  DatabaseOutlined,
-  DeleteOutlined,
-  DesktopOutlined,
-  DownOutlined,
-  EditOutlined,
-  ExportOutlined,
-  EyeOutlined,
-  FileSearchOutlined,
-  FunctionOutlined,
-  GlobalOutlined,
-  HistoryOutlined,
-  LinkOutlined,
-  MenuFoldOutlined,
-  MenuUnfoldOutlined,
-  MergeCellsOutlined,
-  MoreOutlined,
-  MoonOutlined,
-  NotificationOutlined,
-  PartitionOutlined,
-  PlayCircleOutlined,
-  PlusOutlined,
-  QuestionCircleOutlined,
-  RedoOutlined,
-  SafetyCertificateOutlined,
-  SearchOutlined,
-  SlidersOutlined,
-  StepForwardOutlined,
-  SunOutlined,
-  ThunderboltOutlined,
-  UndoOutlined,
-  WarningOutlined
-} from "@ant-design/icons";
+  BackIcon,
+  BranchIcon,
+  CheckIcon,
+  ClockIcon,
+  CodeIcon,
+  DownIcon,
+  EditIcon,
+  EyeIcon,
+  FitIcon,
+  GearIcon,
+  GridIcon,
+  HelpIcon,
+  HistoryIcon,
+  LayoutIcon,
+  LinkIcon,
+  MoreIcon,
+  NodeIndexIcon,
+  PlayIcon,
+  PlusIcon,
+  RedoIcon,
+  SearchIcon,
+  ShieldIcon,
+  SideLeftIcon,
+  SideRightIcon,
+  SkipIcon,
+  SlidersIcon,
+  ThemeIcon,
+  TrashIcon,
+  UndoIcon,
+  UploadIcon,
+  WarnIcon
+} from "@xflow/icons";
 import * as React from "react";
 import {
   Button,
@@ -64,12 +50,15 @@ import {
 } from "antd";
 import type {
   CardSummaryRow,
+  ConnectionTargets,
   Connections,
+  GraphNode,
   NodeTypesResponse,
   ParamIssue,
   RuntimeSnapshot,
   Viewport,
   WorkflowDef,
+  WorkflowEditorSection,
   WorkflowNode,
   XFlowEditorCapabilities
 } from "@xflow/core";
@@ -88,11 +77,12 @@ import {
   missingCapabilityScopes,
   nodeStatusMeta,
   resolveAppearance,
+  toGraphModel,
   workflowStatusMeta
 } from "@xflow/core";
 import type { Patch } from "@xflow/composer/core";
 import type { FocusRequest } from "@xflow/composer/react";
-import { XFlowPreview, XFLOW_NODE_DRAG_MIME, type PreviewConnection, type XFlowPreviewHandle } from "@xflow/preview";
+import { READABLE_FIT_ZOOM, XFlowPreview, XFLOW_NODE_DRAG_MIME, type PreviewConnection, type PreviewNodePosition, type PreviewSectionGeometry, type XFlowPreviewHandle } from "@xflow/preview";
 import {
   createNodeFormRegistry,
   danglingPorts,
@@ -107,12 +97,13 @@ import {
   type DanglingEdge
 } from "./node-form";
 import type { NodeFormKind, NodeFormPort, NodeFormPorts, NodeFormSchema, NodeFormSource } from "./node-form/schema";
+import { nodeLibraryLabel, nodeLibraryMatches, nodeTilePurpose } from "./nodeLibraryCopy";
 import { statusGlyph } from "./panels/statusGlyph";
 import { VariablesPanel } from "./panels/variables";
 import type { WorkflowDiagnostic } from "./panels/diagnostics";
 import { DiagnosticsDock, type DiagnosticsDockController, type DockState } from "./panels/diagnostics";
 import { NodeSearch, type NodeSearchOption } from "./panels/nodeSearch";
-import { NodeCategoryIcon } from "./panels/categoryIcon";
+import { NodeCategoryIcon, categoryGlyphFor, nodeTypeGlyph } from "./panels/categoryIcon";
 import { OutlinePanel } from "./panels/outlinePanel";
 import { RailKey } from "./panels/rail";
 import { BannerStack, editorBanners, isWorkflowConflictError } from "./panels/banner";
@@ -121,9 +112,12 @@ import { RunBar, type ExecutionControlAction, type XFlowExecution } from "./pane
 import {
   ExecutionListPanel,
   executionClock,
+  executionDuration,
   type XFlowExecutionListQuery,
   type XFlowExecutionListState
 } from "./panels/executionList";
+import { STARTER_TEMPLATES, applyStarterTemplate, type StarterTemplate } from "./panels/emptyTemplates";
+import type { WorkflowOverviewData } from "./panels/workflowOverview";
 import { RerunDialog, type XFlowRerunRequest, type XFlowRerunResult } from "./panels/rerunDialog";
 import { PublishDialog } from "./panels/publishDialog";
 import { ApprovalDialog, type XFlowApprovalSignal } from "./panels/approvalDialog";
@@ -152,6 +146,7 @@ import {
 import {
   EditorPanel,
   editorTooltipClassNames,
+  hostCapabilityCopy,
   serializeJson,
   workflowJsonLabels,
   type WorkflowJsonDraft,
@@ -169,7 +164,7 @@ import {
   versionLabel,
   versionUnavailableReason
 } from "./versioning";
-import { createEditorThemeConfig, type ResolvedXFlowEditorAppearance, type XFlowEditorAppearance } from "./theme";
+import { createEditorThemeConfig, useReducedMotion, type ResolvedXFlowEditorAppearance, type XFlowEditorAppearance } from "./theme";
 // Tokens declare the --xflow-* variables every stylesheet below reads. Both sheets are
 // layered — the composer's in `@layer xflow.composer`, this editor's in `@layer
 // xflow.editor`. The host declares the order (tailwind.css) with xflow.editor after
@@ -201,8 +196,8 @@ export type { XFlowRerunRequest, XFlowRerunResult } from "./panels/rerunDialog";
 export type { XFlowApprovalSignal } from "./panels/approvalDialog";
 export type { XFlowWorkflowVersion, XFlowWorkflowVersions } from "./panels/versionHistory";
 type LayoutPolicy = "auto" | "compact";
-/** a = both panels docked, b = left rail + docked inspector, c = both as rails. */
-type EditorLayout = "a" | "b" | "c";
+/** a = both panels docked, c = at or below 1280 both panes are rails with drawers. */
+type EditorLayout = "a" | "c";
 type CanvasTool = "select" | "connect";
 
 interface WorkflowHistory {
@@ -210,7 +205,54 @@ interface WorkflowHistory {
   redo: WorkflowDef[];
 }
 
+/**
+ * Canvas selection state. `keys` is every selected node; `primary` is the one
+ * the Inspector follows. Keeping both in one object is what prevents a second
+ * source of truth: `selectedKey` below is the primary's alias.
+ */
+interface CanvasSelection {
+  keys: string[];
+  primary?: string;
+}
+
 const historyLimit = 80;
+
+/** Breathing room between the selected cards and the section box around them, in flow pixels. */
+const sectionPadding = 24;
+
+/** A shallow copy is enough: section objects are replaced, never mutated in place. */
+function cloneSections(source: readonly WorkflowEditorSection[] | undefined): WorkflowEditorSection[] {
+  return (source ?? []).map((section) => ({ ...section }));
+}
+
+/**
+ * The default name for a visual section: 分区 N, with the smallest free N so a
+ * create after a delete does not duplicate a live title. `exceptId` lets an
+ * emptied rename fall back to the name the section would get as a new one.
+ */
+function defaultSectionTitle(sections: readonly WorkflowEditorSection[], exceptId?: string): string {
+  const used = new Set<number>();
+  for (const section of sections) {
+    if (exceptId !== undefined && section.id === exceptId) continue;
+    const match = /^分区\s*(\d+)$/.exec((section.title ?? "").trim());
+    if (match) used.add(Number(match[1]));
+  }
+  let index = 1;
+  while (used.has(index)) index += 1;
+  return `分区 ${index}`;
+}
+
+/**
+ * EL-19: the execution id lives in exactly one place, the status bar. The top
+ * bar names the run by its state chip and lineage only.
+ */
+
+/** A section id has to be unique and stable; UUID where the platform offers one. */
+function newSectionId(): string {
+  return typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `section-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 /**
  * Which keystrokes survive focus landing in a text field. Canvas bindings defer
@@ -228,6 +270,12 @@ interface EditorShortcut {
   scope: ShortcutScope;
   /** Escape leaves the key's default alone so it can still cancel a live drag. */
   preventDefault?: boolean;
+  /**
+   * A printable-key binding is only acted on (and only has its browser default
+   * swallowed) while the event comes from this editor: the host page keeps its
+   * own keyboard behavior everywhere else.
+   */
+  inEditorOnly?: boolean;
   match: (event: KeyboardEvent) => boolean;
 }
 
@@ -304,6 +352,20 @@ const editorShortcuts: EditorShortcut[] = [
     match: (event) => isPrimaryModifier(event) && !event.altKey && !event.shiftKey && event.code === "KeyJ"
   },
   {
+    id: "toggleDiagnosticsSummary",
+    label: "切换诊断台摘要 / 展开",
+    keys: "⇧ + P",
+    // A printable key: only outside text fields (canvas scope does that) and
+    // only while the event belongs to this editor (inEditorOnly), so the host
+    // page keeps its own ⇧P behavior.
+    scope: "canvas",
+    inEditorOnly: true,
+    // ⇧P produces "P" on most layouts; the physical key covers the rest.
+    match: (event) =>
+      event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey
+      && (event.code === "KeyP" || event.key.toLowerCase() === "p")
+  },
+  {
     id: "toggleRightPanel",
     label: "收起 / 展开属性面板",
     keys: "⌥⌘B / Ctrl + Alt + B",
@@ -370,6 +432,7 @@ const expandedDockShortcuts: ReadonlySet<string> = new Set([
   "run",
   "findNode",
   "toggleDiagnostics",
+  "toggleDiagnosticsSummary",
   "escape",
   "shortcutsHelp"
 ]);
@@ -383,6 +446,23 @@ const expandedDockShortcuts: ReadonlySet<string> = new Set([
 export interface XFlowEditorSaveResult {
   workflow: WorkflowDef;
   paramIssues?: ParamIssue[];
+}
+
+/**
+ * Editor-owned canvas state a save must carry back verbatim (ADR-D4 §2.3):
+ * today the visual canvas sections. The host folds it into `@xflow/api`'s
+ * `SaveWorkflowOptions` beside `viewport`. A save path that rebuilds
+ * `editor_metadata` without it would silently delete the author's grouping.
+ *
+ * The editor passes this as an optional second `onSave` / `onPublish`
+ * argument when sections are in force, and also when an edit emptied the
+ * list: a delete has to reach the host as `sections: []` or the persisted
+ * metadata would keep the removed boxes. A host whose handler still takes one
+ * argument keeps its exact old call shape, and an untouched sectionless
+ * workflow keeps the one-argument call.
+ */
+export interface XFlowEditorSaveContext {
+  sections: WorkflowEditorSection[];
 }
 
 /**
@@ -415,6 +495,13 @@ export interface XFlowRollbackResult {
 export type XFlowEditorMode = "edit" | "runs";
 
 export interface XFlowEditorProps {
+  /**
+   * The definition the editor edits. The host must keep the object identity of
+   * the payload it receives through `onChange` (do not re-clone it on every
+   * render): the editor uses identity to tell an echo of the draft from a
+   * definition the host persisted and swapped in, which decides whether the
+   * dirty count resets.
+   */
   value: WorkflowDef;
   /** Optional host layout class; useful when the workbench lives below an app header. */
   className?: string;
@@ -430,8 +517,15 @@ export interface XFlowEditorProps {
    * `{ workflow, paramIssues }` (XFlowEditorSaveResult) to also report the
    * server's param issues. Rejections may carry `paramIssues` too
    * (XFlowEditorSaveError).
+   *
+   * The optional second argument carries editor-owned canvas state the host
+   * must persist beside the definition (see `XFlowEditorSaveContext`); it is
+   * present when sections are in force or when the editor changed them.
    */
-  onSave?: (value: WorkflowDef) => Promise<WorkflowDef | XFlowEditorSaveResult> | WorkflowDef | XFlowEditorSaveResult;
+  onSave?: (
+    value: WorkflowDef,
+    context?: XFlowEditorSaveContext
+  ) => Promise<WorkflowDef | XFlowEditorSaveResult> | WorkflowDef | XFlowEditorSaveResult;
   onRun?: (value: WorkflowDef) => Promise<RuntimeSnapshot> | RuntimeSnapshot;
   /**
    * Runs one node's slice of the workflow (the canvas context menu's 从此节点
@@ -469,6 +563,20 @@ export interface XFlowEditorProps {
    */
   onViewportChange?: (viewport: Viewport) => void;
   /**
+   * The workflow's visual canvas sections (`GetWorkflowResult.sections`,
+   * ADR-D4 §2.3 / spec §6.2). Purely visual grouping boxes: the canvas draws
+   * them behind the cards and the outline groups by them.
+   *
+   * The editor seeds its own section state from this prop (a new value or a
+   * different workflow resets it) and lets the user create a section from the
+   * canvas selection, rename it inline, and delete it after a confirmation.
+   * Saves and publishes report the editor's current list through
+   * `XFlowEditorSaveContext`, so the host can persist
+   * `editor_metadata.sections`. Sections are deliberately outside the
+   * `WorkflowDef` undo history.
+   */
+  sections?: readonly WorkflowEditorSection[];
+  /**
    * The host's GET /v1/node-types failed. Shows the 节点类型加载失败 banner;
    * the Inspector already falls back to JSON parameter editing when `nodeTypes`
    * is absent, and the canvas and connections are unaffected.
@@ -488,9 +596,13 @@ export interface XFlowEditorProps {
    * Publishes the draft under a new version label (§6.10): the host PUTs
    * `value` — whose `version` the publish dialog set — and resolves like
    * `onSave`. Omit and 发布 stays disabled; `capabilities.workflow === false`
-   * hides it with the rest of the write actions.
+   * hides it with the rest of the write actions. The second argument is the
+   * same optional save context `onSave` receives.
    */
-  onPublish?: (value: WorkflowDef) => Promise<WorkflowDef | XFlowEditorSaveResult> | WorkflowDef | XFlowEditorSaveResult;
+  onPublish?: (
+    value: WorkflowDef,
+    context?: XFlowEditorSaveContext
+  ) => Promise<WorkflowDef | XFlowEditorSaveResult> | WorkflowDef | XFlowEditorSaveResult;
   /**
    * GET /v1/workflows/{id}/versions. The version chip opens the history panel
    * only when this is present; the publish dialog also reads the online
@@ -538,6 +650,15 @@ export interface XFlowEditorProps {
    */
   execution?: XFlowExecution;
   /**
+   * The workflow's newest recorded execution, read by the host on page load
+   * without opening 运行记录 (a lightweight `GET /v1/executions` row with
+   * `workflow_id` and `page_size=1`). The Inspector overview's 最近运行 row
+   * falls back to it when neither a tracked execution nor a loaded list page
+   * exists, so the row is present on first load. Omit it and the row stays
+   * absent until one of those arrives; the editor never requests the API.
+   */
+  latestRun?: XFlowExecution;
+  /**
    * Asks the host to run one pause / resume / cancel on the tracked execution.
    * The host calls the API and feeds the refreshed detail back through
    * `execution`; a rejection surfaces as the editor's operation error (the host
@@ -576,6 +697,13 @@ export interface XFlowEditorProps {
    * times it (default 5000); `null` keeps the bar until the user closes it.
    */
   runBarDismissMs?: number | null;
+  /**
+   * Maps the tracked execution's trace id to its page in the host's tracing
+   * system (WB-06). The diagnostics drawer's 运行日志 tab renders
+   * 在追踪系统打开 only when this is supplied; the editor never builds a
+   * tracing URL on its own.
+   */
+  traceHref?: (traceId: string) => string;
   /**
    * The active view. Omit to let the switch keep its own state; the host owns
    * `?exec=` and passes this so a reload or a shared URL lands in the same
@@ -705,15 +833,15 @@ function useEditorWidth(ref: React.RefObject<HTMLElement | null>): number {
 
 /**
  * Layout tier from the container width; `xflow-core`'s `breakpoints` is the
- * single source shared with the stylesheet's `@container` rules. Below
- * `compact` only the left panel collapses (layout "b"); below `narrow` both do
- * (layout "c"). That band split mirrors the ui-preview baseline's
- * COMPACT_LEFT / COMPACT_RIGHT pair.
+ * single source shared with the stylesheet's `@container` rules. §6.0: at or
+ * below `compact` both panes collapse to rails/drawers, so compact and narrow
+ * share layout "c"; there is no docked middle band. The comparison is inclusive
+ * so a 1280-wide host is compact: at that width the docked 700px of panels left
+ * the canvas under half the screen (EL-02).
  */
-function layoutTier(width: number): "wide" | "compact" | "narrow" {
+function layoutTier(width: number): "wide" | "compact" {
   if (width <= 0) return "wide";
-  if (width < breakpoints.narrow) return "narrow";
-  if (width < breakpoints.compact) return "compact";
+  if (width <= breakpoints.compact) return "compact";
   return "wide";
 }
 
@@ -751,13 +879,36 @@ const editorCompactDrawerClassNamesEnd = {
   wrapper: "xflow-editor-compact-drawer__wrapper xflow-editor-compact-drawer__wrapper--end"
 };
 
+/**
+ * The baseline's theme trigger (#i-theme) is a half-filled circle. AntD has no
+ * contrast glyph, and its paint-bucket icon reads as a colour picker rather
+ * than the light/dark switch this trigger opens.
+ */
+function ThemeContrastIcon(): React.ReactElement {
+  return (
+    <svg aria-hidden="true" className="xflow-editor-theme-glyph" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 3.5v17a8.5 8.5 0 0 0 0-17z" fill="currentColor" />
+    </svg>
+  );
+}
+
 function ThemeSettings({
   appearance,
-  onAppearanceChange
+  layoutPolicy,
+  onAppearanceChange,
+  onLayoutPolicyChange
 }: {
   appearance: XFlowEditorAppearance;
+  layoutPolicy: LayoutPolicy;
   onAppearanceChange: (appearance: XFlowEditorAppearance) => void;
+  onLayoutPolicyChange: (policy: LayoutPolicy) => void;
 }): React.ReactElement {
+  const segmentedClassNames = {
+    item: "xflow-editor-theme-segmented__item",
+    label: "xflow-editor-theme-segmented__label",
+    root: "xflow-editor-theme-segmented__root"
+  };
   return (
     <div className="xflow-editor-theme-settings">
       <div className="xflow-editor-theme-settings__row">
@@ -767,19 +918,33 @@ function ThemeSettings({
         </div>
         <Segmented
           aria-label="颜色模式"
-          classNames={{
-            item: "xflow-editor-theme-segmented__item",
-            label: "xflow-editor-theme-segmented__label",
-            root: "xflow-editor-theme-segmented__root"
-          }}
+          classNames={segmentedClassNames}
           rootClassName="xflow-editor-theme-segmented"
           options={[
-            { icon: <SunOutlined />, label: "浅色", value: "light" },
-            { icon: <MoonOutlined />, label: "深色", value: "dark" },
-            { icon: <DesktopOutlined />, label: "跟随系统", value: "system" }
+            { icon: <ThemeIcon />, label: "浅色", value: "light" },
+            { icon: <ThemeIcon style={{ transform: "rotate(180deg)" }} />, label: "深色", value: "dark" },
+            { icon: <GearIcon />, label: "跟随系统", value: "system" }
           ]}
           value={appearance}
           onChange={(nextAppearance) => onAppearanceChange(nextAppearance as XFlowEditorAppearance)}
+        />
+      </div>
+      <div className="xflow-editor-theme-settings__row">
+        <div>
+          <span className="xflow-editor-theme-settings__label">布局</span>
+          <span className="xflow-editor-theme-settings__hint">自动布局随宽度适配，沉浸布局固定为紧凑工作台</span>
+        </div>
+        {/* Same Segmented contract as 颜色模式: a radiogroup of one choice. */}
+        <Segmented
+          aria-label="布局"
+          classNames={segmentedClassNames}
+          rootClassName="xflow-editor-theme-segmented"
+          options={[
+            { label: "自动布局", value: "auto" },
+            { label: "沉浸布局", value: "compact" }
+          ]}
+          value={layoutPolicy}
+          onChange={(nextLayout) => onLayoutPolicyChange(nextLayout as LayoutPolicy)}
         />
       </div>
     </div>
@@ -787,7 +952,7 @@ function ThemeSettings({
 }
 
 /** Node-library groups in display order; "其他" collects types with no presentation entry. */
-const nodeLibraryGroups = ["触发器", "流程控制", "动作与人工", "数据转换", "供应", "其他"] as const;
+const nodeLibraryGroups = ["触发器", "流程控制", "动作", "代码与转换", "人工", "其他"] as const;
 type NodeLibraryGroup = (typeof nodeLibraryGroups)[number];
 type NodeTone = "blue" | "cyan" | "green" | "amber" | "violet";
 
@@ -828,10 +993,16 @@ function canvasOutputPorts(node: WorkflowNode): string[] {
   return [...(declared.hasMain ? ["main"] : []), ...declared.ports];
 }
 
-/** Per-node issue counts of the node forms, for the save button and enforce blocking. */
+/**
+ * Per-node issue counts of the node forms, for the save button and enforce
+ * blocking. `diagnostics` holds the very rows those counts are taken from
+ * (WB-13), so the drawer and the button can never disagree about the set.
+ */
 interface FormIssueSummary {
   errors: number;
+  warnings: number;
   nodes: string[];
+  diagnostics: WorkflowDiagnostic[];
 }
 
 /**
@@ -847,28 +1018,31 @@ interface FormIssueSummary {
  * no-schema nodes (Doc C §2.1).
  */
 const fallbackNodeDescriptors: NodeDescriptor[] = ([
-  { label: "Webhook", type: "xflow.trigger.webhook", group: "触发器", tone: "blue", icon: <LinkOutlined /> },
-  { label: "Kafka", type: "xflow.trigger.kafka", group: "触发器", tone: "cyan", icon: <CloudServerOutlined /> },
-  { label: "Cron", type: "xflow.trigger.cron", group: "触发器", tone: "amber", icon: <ClockCircleOutlined /> },
-  { label: "Timer", type: "xflow.trigger.timer", group: "触发器", tone: "violet", icon: <ThunderboltOutlined /> },
-  { label: "Start", type: "xflow.start", group: "流程控制", tone: "green", icon: <PlayCircleOutlined /> },
-  { label: "End", type: "xflow.end", group: "流程控制", tone: "green", icon: <StepForwardOutlined /> },
-  { label: "Switch", type: "xflow.switch", group: "流程控制", tone: "blue", icon: <BranchesOutlined /> },
-  { label: "If", type: "xflow.if", group: "流程控制", tone: "blue", icon: <BranchesOutlined /> },
-  { label: "Merge", type: "xflow.merge", group: "流程控制", tone: "cyan", icon: <MergeCellsOutlined /> },
-  { label: "Wait", type: "xflow.wait", group: "流程控制", tone: "amber", icon: <ClockCircleOutlined /> },
-  { label: "HTTP", type: "xflow.http", group: "动作与人工", tone: "blue", icon: <GlobalOutlined /> },
-  { label: "gRPC", type: "xflow.grpc", group: "动作与人工", tone: "cyan", icon: <CloudServerOutlined /> },
-  { label: "Database", type: "xflow.database", group: "动作与人工", tone: "green", icon: <DatabaseOutlined /> },
-  { label: "Approval", type: "xflow.approval", group: "动作与人工", tone: "amber", icon: <AuditOutlined /> },
-  { label: "Function", type: "xflow.function", group: "动作与人工", tone: "violet", icon: <CodeOutlined /> },
-  { label: "Script", type: "xflow.script", group: "动作与人工", tone: "violet", icon: <CodeOutlined /> },
-  { label: "Set", type: "xflow.transform.set", group: "数据转换", tone: "blue", icon: <CodeOutlined /> },
-  { label: "Pick", type: "xflow.transform.pick", group: "数据转换", tone: "cyan", icon: <CodeOutlined /> },
-  { label: "Filter", type: "xflow.transform.filter", group: "数据转换", tone: "amber", icon: <CodeOutlined /> },
-  { label: "External Supply", type: "xflow.supply.external", group: "供应", tone: "cyan", icon: <DatabaseOutlined />, kind: "supply" },
-  { label: "Static Supply", type: "xflow.supply.static", group: "供应", tone: "violet", icon: <DatabaseOutlined />, kind: "supply" }
-] satisfies NodeDescriptor[]).map((descriptor) => ({ ...descriptor, label: translateNodeFormText(nodeFormCatalog, descriptor.label, descriptor.type) }));
+  { label: "Webhook", type: "xflow.trigger.webhook", group: "触发器", tone: "blue", icon: nodeTypeGlyph("xflow.trigger.webhook") },
+  { label: "Kafka", type: "xflow.trigger.kafka", group: "触发器", tone: "cyan", icon: nodeTypeGlyph("xflow.trigger.kafka") },
+  { label: "Cron", type: "xflow.trigger.cron", group: "触发器", tone: "amber", icon: nodeTypeGlyph("xflow.trigger.cron") },
+  { label: "Timer", type: "xflow.trigger.timer", group: "触发器", tone: "violet", icon: nodeTypeGlyph("xflow.trigger.timer") },
+  { label: "Start", type: "xflow.start", group: "流程控制", tone: "green", icon: nodeTypeGlyph("xflow.start") },
+  { label: "End", type: "xflow.end", group: "流程控制", tone: "green", icon: nodeTypeGlyph("xflow.end") },
+  { label: "Switch", type: "xflow.switch", group: "流程控制", tone: "blue", icon: nodeTypeGlyph("xflow.switch") },
+  { label: "If", type: "xflow.if", group: "流程控制", tone: "blue", icon: nodeTypeGlyph("xflow.if") },
+  { label: "Merge", type: "xflow.merge", group: "流程控制", tone: "cyan", icon: nodeTypeGlyph("xflow.merge") },
+  { label: "Wait", type: "xflow.wait", group: "流程控制", tone: "amber", icon: nodeTypeGlyph("xflow.wait") },
+  { label: "HTTP", type: "xflow.http", group: "动作", tone: "blue", icon: nodeTypeGlyph("xflow.http") },
+  { label: "gRPC", type: "xflow.grpc", group: "动作", tone: "cyan", icon: nodeTypeGlyph("xflow.grpc") },
+  { label: "Database", type: "xflow.database", group: "动作", tone: "green", icon: nodeTypeGlyph("xflow.database") },
+  { label: "Approval", type: "xflow.approval", group: "人工", tone: "amber", icon: nodeTypeGlyph("xflow.approval") },
+  { label: "Function", type: "xflow.function", group: "代码与转换", tone: "violet", icon: nodeTypeGlyph("xflow.function") },
+  { label: "Script", type: "xflow.script", group: "代码与转换", tone: "violet", icon: nodeTypeGlyph("xflow.script") },
+  { label: "Set", type: "xflow.transform.set", group: "代码与转换", tone: "blue", icon: nodeTypeGlyph("xflow.transform.set") },
+  { label: "Pick", type: "xflow.transform.pick", group: "代码与转换", tone: "cyan", icon: nodeTypeGlyph("xflow.transform.pick") },
+  { label: "Filter", type: "xflow.transform.filter", group: "代码与转换", tone: "amber", icon: nodeTypeGlyph("xflow.transform.filter") },
+  { label: "External Supply", type: "xflow.supply.external", group: "动作", tone: "cyan", icon: nodeTypeGlyph("xflow.supply.external"), kind: "supply" },
+  { label: "Static Supply", type: "xflow.supply.static", group: "动作", tone: "violet", icon: nodeTypeGlyph("xflow.supply.static"), kind: "supply" }
+] satisfies NodeDescriptor[]).map((descriptor) => ({
+  ...descriptor,
+  label: nodeLibraryLabel(translateNodeFormText(nodeFormCatalog, descriptor.label, descriptor.type), descriptor.type)
+}));
 
 type NodePresentation = Pick<NodeDescriptor, "group" | "tone" | "icon">;
 
@@ -880,25 +1054,42 @@ type NodePresentation = Pick<NodeDescriptor, "group" | "tone" | "icon">;
  */
 const nodePresentation: ReadonlyMap<string, NodePresentation> = new Map<string, NodePresentation>([
   ...fallbackNodeDescriptors.map(({ type, group, tone, icon }): [string, NodePresentation] => [type, { group, tone, icon }]),
-  ["xflow.trigger.redis", { group: "触发器", tone: "green", icon: <DatabaseOutlined /> }],
-  ["xflow.map", { group: "流程控制", tone: "violet", icon: <ApartmentOutlined /> }],
-  ["xflow.subworkflow", { group: "流程控制", tone: "cyan", icon: <ApartmentOutlined /> }],
-  ["xflow.notification", { group: "动作与人工", tone: "amber", icon: <NotificationOutlined /> }],
-  ["xflow.browser.cdp", { group: "动作与人工", tone: "cyan", icon: <DesktopOutlined /> }],
-  ["xflow.transform.rename", { group: "数据转换", tone: "violet", icon: <CodeOutlined /> }],
-  ["xflow.transform.sort", { group: "数据转换", tone: "green", icon: <CodeOutlined /> }],
-  ["xflow.transform.limit", { group: "数据转换", tone: "amber", icon: <CodeOutlined /> }],
-  ["xflow.transform.aggregate", { group: "数据转换", tone: "blue", icon: <CodeOutlined /> }],
-  ["xflow.transform.remove_duplicates", { group: "数据转换", tone: "cyan", icon: <CodeOutlined /> }]
+  ["xflow.trigger.redis", { group: "触发器", tone: "green", icon: nodeTypeGlyph("xflow.trigger.redis") }],
+  ["xflow.map", { group: "流程控制", tone: "violet", icon: nodeTypeGlyph("xflow.map") }],
+  ["xflow.subworkflow", { group: "流程控制", tone: "cyan", icon: nodeTypeGlyph("xflow.subworkflow") }],
+  ["xflow.notification", { group: "动作", tone: "amber", icon: nodeTypeGlyph("xflow.notification") }],
+  ["xflow.browser.cdp", { group: "动作", tone: "cyan", icon: nodeTypeGlyph("xflow.browser.cdp") }],
+  ["xflow.transform.rename", { group: "代码与转换", tone: "violet", icon: nodeTypeGlyph("xflow.transform.rename") }],
+  ["xflow.transform.sort", { group: "代码与转换", tone: "green", icon: nodeTypeGlyph("xflow.transform.sort") }],
+  ["xflow.transform.limit", { group: "代码与转换", tone: "amber", icon: nodeTypeGlyph("xflow.transform.limit") }],
+  ["xflow.transform.aggregate", { group: "代码与转换", tone: "blue", icon: nodeTypeGlyph("xflow.transform.aggregate") }],
+  ["xflow.transform.remove_duplicates", { group: "代码与转换", tone: "cyan", icon: nodeTypeGlyph("xflow.transform.remove_duplicates") }]
 ]);
 /** Tile order inside a group: presentation-map order, then unknown types by label. */
 const nodePresentationOrder = new Map([...nodePresentation.keys()].map((type, index) => [type, index]));
 
-/** Presentation for a type with no entry: the group follows the schema's kind. */
-function fallbackPresentation(kind: NodeFormKind): NodePresentation {
-  if (kind === "trigger") return { group: "触发器", tone: "blue", icon: <AppstoreOutlined /> };
-  if (kind === "supply") return { group: "供应", tone: "violet", icon: <AppstoreOutlined /> };
-  return { group: "其他", tone: "blue", icon: <AppstoreOutlined /> };
+/** The design's category vocabulary (descriptor.category) → library group. */
+const categoryGroups: Readonly<Record<string, NodeLibraryGroup>> = {
+  trigger: "触发器",
+  control: "流程控制",
+  action: "动作",
+  code: "代码与转换",
+  transform: "代码与转换",
+  human: "人工"
+};
+
+/**
+ * Presentation for a type with no entry: the group follows the schema's
+ * declared category first, then its kind. Supply declarations join 动作: they
+ * are data-resource declarations like Database/HTTP, and unlike the 代码与转换
+ * group they execute neither code nor a transformation.
+ */
+function fallbackPresentation(kind: NodeFormKind, category?: string): NodePresentation {
+  const group = category ? categoryGroups[category] : undefined;
+  if (group) return { group, tone: "blue", icon: <GridIcon /> };
+  if (kind === "trigger") return { group: "触发器", tone: "blue", icon: <GridIcon /> };
+  if (kind === "supply") return { group: "动作", tone: "violet", icon: <GridIcon /> };
+  return { group: "其他", tone: "blue", icon: <GridIcon /> };
 }
 
 /**
@@ -929,10 +1120,11 @@ function nodeLibraryDescriptors(nodeTypes: NodeTypesResponse | undefined): NodeD
   }
   const derived: NodeDescriptor[] = [...latest.values()].map((schema) => {
     const kind: NodeFormKind = schema.kind === "trigger" || schema.kind === "supply" ? schema.kind : "action";
-    const presentation = nodePresentation.get(schema.node_type) ?? fallbackPresentation(kind);
+    const declaredCategory = typeof schema.category === "string" && schema.category.trim() ? schema.category.trim() : undefined;
+    const presentation = nodePresentation.get(schema.node_type) ?? fallbackPresentation(kind, declaredCategory);
     return {
       ...presentation,
-      label: schema.display_name?.trim() || schema.node_type,
+      label: nodeLibraryLabel(schema.display_name?.trim() || schema.node_type, schema.node_type),
       type: schema.node_type,
       kind,
       ...(schema.description ? { description: schema.description } : {}),
@@ -1090,6 +1282,69 @@ function paramIssueDiagnostics(issues: readonly ParamIssue[] | undefined): Workf
   return rows;
 }
 
+/** Every identity a diagnostics row may name a node by → the editor's own nodeName. */
+function nodeIdentityIndex(workflow: WorkflowDef): Map<string, string> {
+  const identities = new Map<string, string>();
+  (workflow.nodes ?? []).forEach((node, index) => {
+    const name = nodeName(node, index);
+    identities.set(name, name);
+    if (node.id) identities.set(node.id, name);
+    if (node.name) identities.set(node.name, name);
+  });
+  return identities;
+}
+
+/** A parameter finding's identity: same node, same JSON Pointer, same severity. */
+function parameterDiagnosticKey(row: WorkflowDiagnostic, identities: ReadonlyMap<string, string>): string {
+  const node = row.nodeName ? identities.get(row.nodeName) ?? row.nodeName : "";
+  return `${node}\u0000${row.path ?? ""}\u0000${row.status}`;
+}
+
+/**
+ * WB-13: the live node forms and the backend's `param_issues` both report into
+ * the 参数 area. A server row that repeats a local finding (same node, pointer
+ * and severity) is dropped: the local row describes the draft on screen, while
+ * `param_issues` describes the last save attempt and is cleared by the next
+ * one. Server-only rows stay and are marked as such in the drawer.
+ */
+function mergeParameterDiagnostics(
+  local: readonly WorkflowDiagnostic[],
+  issues: readonly ParamIssue[] | undefined,
+  workflow: WorkflowDef
+): WorkflowDiagnostic[] {
+  const rows = [...local];
+  if (!issues?.length) return rows;
+  const identities = nodeIdentityIndex(workflow);
+  const seen = new Set(local.map((row) => parameterDiagnosticKey(row, identities)));
+  for (const row of paramIssueDiagnostics(issues)) {
+    const key = parameterDiagnosticKey(row, identities);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push({ ...row, source: "server" });
+  }
+  return rows;
+}
+
+/**
+ * The input ports an authored node declares, or undefined when it declares
+ * none. Mirrors `declaredInputPorts` in `engine/graph/input_ports.go`: only a
+ * declaration constrains an edge target, and an empty name means the implicit
+ * main port. A node with no declaration accepts any incoming label at
+ * compile time — which is how trigger→`xflow.start` entry edges and cyclic
+ * back-edges into start compile — so the diagnostics must not reuse
+ * `supportedInputPorts`, whose [] for entry nodes describes what the editor
+ * OFFERS for new connections, not what the compiler accepts.
+ */
+function declaredInputPortNames(node: WorkflowNode | undefined): string[] | undefined {
+  if (!node?.inputs?.length) return undefined;
+  const names: string[] = [];
+  for (const input of node.inputs) {
+    const name = typeof input.name === "string" && input.name.trim() ? input.name : "main";
+    if (!names.includes(name)) names.push(name);
+  }
+  return names;
+}
+
 function validateWorkflow(
   workflow: WorkflowDef,
   operationError?: string,
@@ -1228,7 +1483,10 @@ function validateWorkflow(
           continue;
         }
         const targetInput = target.input ?? "main";
-        if (targetNode && !supportedInputPorts(targetNode).includes(targetInput)) {
+        // Backend `validateEdgeTarget`: a node that declares nothing accepts
+        // any label, so only a declaration can make this edge invalid.
+        const declaredInputs = declaredInputPortNames(targetNode);
+        if (declaredInputs && !declaredInputs.includes(targetInput)) {
           diagnostics.push({
             status: "error",
             area: "edges",
@@ -1288,6 +1546,195 @@ function validateWorkflow(
     });
   }
 
+  return diagnostics;
+}
+
+/**
+ * WB-07: node-template references, the one rule a draft can check without the
+ * server. `engine/graph/node_templates.go` expands each node's `template`
+ * against `workflow.node_templates` and rejects a node carrying both `type`
+ * and `template`. This pre-check mirrors only those two structural facts.
+ * Template parameter merging, a template without a type, and the compiled
+ * result stay with the server: reproducing them here would drift as soon as
+ * the compiler's merge rules move.
+ */
+function validateTemplateReferences(workflow: WorkflowDef): WorkflowDiagnostic[] {
+  const diagnostics: WorkflowDiagnostic[] = [];
+  const templates = workflow.node_templates ?? {};
+  const nodes = (workflow.nodes ?? []).map((node, index) => ({ node, name: nodeName(node, index) }));
+  let referenced = 0;
+  for (const { node, name } of nodes) {
+    if (!node.template) continue;
+    referenced += 1;
+    if (node.type) {
+      diagnostics.push({
+        status: "error",
+        area: "templates",
+        message: `节点 ${name} 同时声明了 type 与 template；模板已提供类型，二者不能并存`,
+        nodeName: name
+      });
+      continue;
+    }
+    if (!Object.hasOwn(templates, node.template)) {
+      diagnostics.push({
+        status: "error",
+        area: "templates",
+        message: `节点 ${name} 引用了不存在的节点模板 ${node.template}`,
+        nodeName: name
+      });
+    }
+  }
+  // A check with a finding does not also read as passed; the error row is the
+  // finding, exactly as the edge check reports itself.
+  if (!diagnostics.some((row) => row.status === "error")) {
+    diagnostics.push({
+      status: "pass",
+      area: "templates",
+      message: referenced > 0 ? `${referenced} 个节点的模板引用已解析` : "没有节点引用模板"
+    });
+  }
+  return diagnostics;
+}
+
+/**
+ * A `$nodes` name a draft can resolve statically, and the JSON Pointer it sits
+ * at, so the diagnostics row can offer 定位字段.
+ */
+interface NodesReference {
+  name: string;
+  path: string;
+}
+
+/**
+ * engine/graph/nodes_refs.go extracts the quoted literal form; the expression
+ * evaluator also accepts the dot form (`$nodes.upstream.out`), so both are
+ * read here. A computed subscript (`$nodes[$vars.which]`) is not guessed at.
+ */
+const nodesRefQuotedPattern = /\$nodes\[['"]([^'"]+)['"]\]/g;
+const nodesRefDotPattern = /\$nodes\.([A-Za-z_][A-Za-z0-9_]*)/g;
+/** engine/graph/group_portability.go `nodesDynamicPattern`. */
+const nodesRefDynamicPattern = /\$nodes\s*\[\s*[^'"\s]/;
+
+/** JSON Pointer escaping (RFC 6901): `~` then `/`, in that order. */
+function escapeJsonPointer(key: string): string {
+  return key.replace(/~/g, "~0").replace(/\//g, "~1");
+}
+
+/** The value-shape criterion engine/graph's `declaresSubgraphBody` uses. */
+function declaresSubgraphBody(parameters: Record<string, unknown>): boolean {
+  const body = parameters.body;
+  return Boolean(
+    body
+    && typeof body === "object"
+    && !Array.isArray(body)
+    && (body as Record<string, unknown>).type === "xflow.subgraph"
+  );
+}
+
+/**
+ * Collects static `$nodes` names below one value and reports whether a
+ * computed subscript was seen. One row per (pointer, name) is enough: the same
+ * reference twice in one string is one finding at that field.
+ */
+function collectNodesReferences(
+  value: unknown,
+  path: string,
+  found: NodesReference[],
+  seen: Set<string>
+): boolean {
+  if (typeof value === "string") {
+    const add = (name: string): void => {
+      const key = `${path}\u0000${name}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      found.push({ name, path });
+    };
+    for (const match of value.matchAll(nodesRefQuotedPattern)) add(match[1]);
+    for (const match of value.matchAll(nodesRefDotPattern)) add(match[1]);
+    return nodesRefDynamicPattern.test(value);
+  }
+  let dynamic = false;
+  if (Array.isArray(value)) {
+    value.forEach((child, index) => {
+      dynamic = collectNodesReferences(child, `${path}/${index}`, found, seen) || dynamic;
+    });
+    return dynamic;
+  }
+  if (value && typeof value === "object") {
+    for (const [key, child] of Object.entries(value)) {
+      dynamic = collectNodesReferences(child, `${path}/${escapeJsonPointer(key)}`, found, seen) || dynamic;
+    }
+  }
+  return dynamic;
+}
+
+/**
+ * WB-08: `$nodes` references, name existence only.
+ *
+ * The server's `engine/graph/nodes_refs.go` also rejects self and forward
+ * references, warns about cross-branch ones, and resolves group/body scopes.
+ * Those need the compiled topology, which the editor does not re-derive here;
+ * this check answers the one question a draft can: does the referenced node
+ * exist? A computed subscript stays a warning, as the server's own
+ * compile-time diagnostic does, and the area gets no pass row then — an
+ * unresolved expression is not reported as passed.
+ *
+ * A sub-graph body is skipped because its `$nodes` references resolve against
+ * the inner graph, not this workflow's node list; checking them against the
+ * outer names would reject every legitimate map body. Template parameters are
+ * not merged in either: the server expands `node_templates` before running
+ * nodes_refs, so a reference only a template carries is adjudicated there.
+ */
+function validateVariableReferences(workflow: WorkflowDef): WorkflowDiagnostic[] {
+  const nodes = workflow.nodes ?? [];
+  const knownNames = new Set(nodes.map((node, index) => nodeName(node, index)));
+  const diagnostics: WorkflowDiagnostic[] = [];
+  let references = 0;
+  let sawDynamic = false;
+
+  nodes.forEach((node, index) => {
+    const parameters = node.parameters;
+    if (!parameters || typeof parameters !== "object" || Array.isArray(parameters)) return;
+    const name = nodeName(node, index);
+    const params = parameters as Record<string, unknown>;
+    const found: NodesReference[] = [];
+    const seen = new Set<string>();
+    let dynamic = false;
+    const bodyIsSubgraph = declaresSubgraphBody(params);
+    for (const [key, value] of Object.entries(params)) {
+      if (key === "body" && bodyIsSubgraph) continue;
+      dynamic = collectNodesReferences(value, `/parameters/${escapeJsonPointer(key)}`, found, seen) || dynamic;
+    }
+    references += found.length;
+    sawDynamic = sawDynamic || dynamic;
+    for (const reference of found) {
+      if (knownNames.has(reference.name)) continue;
+      diagnostics.push({
+        status: "error",
+        area: "variables",
+        message: `节点 ${name} 引用了不存在的节点 $nodes['${reference.name}']`,
+        nodeName: name,
+        path: reference.path
+      });
+    }
+    if (dynamic) {
+      diagnostics.push({
+        status: "warn",
+        area: "variables",
+        message: `节点 ${name} 的 $nodes 下标不是字面量，无法预检引用是否存在`,
+        nodeName: name,
+        path: "/parameters"
+      });
+    }
+  });
+
+  if (references > 0 && !sawDynamic && !diagnostics.some((row) => row.status === "error")) {
+    diagnostics.push({
+      status: "pass",
+      area: "variables",
+      message: `${references} 处 $nodes 引用均指向已存在的节点`
+    });
+  }
   return diagnostics;
 }
 
@@ -1384,6 +1831,78 @@ function duplicateNodeInWorkflow(workflow: WorkflowDef, source: WorkflowNode, so
 }
 
 /**
+ * Clones every named node under the next free `<base>_<n>` name (the same
+ * naming and id rule `duplicateNodeInWorkflow` uses) and copies only the edges
+ * whose two ends are both inside the copied set. The clones keep the source's
+ * relative layout, offset once so a paste never hides exactly behind it.
+ *
+ * Every clone is returned in its own insertion order; the caller commits the
+ * whole batch once, so a copy is one undo entry.
+ */
+function duplicateNodesInWorkflow(
+  workflow: WorkflowDef,
+  sourceKeys: readonly string[]
+): { workflow: WorkflowDef; keys: string[]; cloneByKey: Map<string, string> } {
+  const wanted = new Set(sourceKeys);
+  const sources = (workflow.nodes ?? [])
+    .map((node, index) => ({ node, index, key: nodeKey(node, index) }))
+    .filter((entry) => wanted.has(entry.key));
+  if (sources.length === 0) return { workflow, keys: [], cloneByKey: new Map() };
+
+  const offset = 36;
+  const usedNames = new Set((workflow.nodes ?? []).map((node, index) => nodeName(node, index)));
+  /** Source name → clone name; also the membership test for copied edges. */
+  const cloneNames = new Map<string, string>();
+  const cloneByKey = new Map<string, string>();
+  const clones: WorkflowNode[] = [];
+  for (const { node, index, key } of sources) {
+    const sourceName = nodeName(node, index);
+    const baseName = sourceName.replace(/_\d+$/, "") || sourceName;
+    let suffix = 1;
+    while (usedNames.has(`${baseName}_${suffix}`)) suffix += 1;
+    const name = `${baseName}_${suffix}`;
+    usedNames.add(name);
+    const { id: _droppedId, ...rest } = node;
+    const position = node.position
+      ? { x: (node.position.x ?? 0) + offset, y: (node.position.y ?? 0) + offset }
+      : undefined;
+    clones.push({ ...rest, name, ...(position ? { position } : {}) });
+    cloneNames.set(sourceName, name);
+    cloneByKey.set(key, name);
+  }
+
+  // Only edges with both ends in the copied set travel with it; an edge to a
+  // node left behind would be a dangling reference to the original graph.
+  const connections: Connections | undefined = workflow.connections ? { ...workflow.connections } : undefined;
+  for (const { node, index } of sources) {
+    const sourceName = nodeName(node, index);
+    const sourceConnections = workflow.connections?.[sourceName];
+    if (!sourceConnections || !connections) continue;
+    const copiedPorts: Record<string, ConnectionTargets> = {};
+    let copied = false;
+    for (const [port, portConnections] of Object.entries(sourceConnections)) {
+      const targets = targetsFor(portConnections)
+        .filter((target) => target.node !== undefined && cloneNames.has(target.node))
+        .map((target) => ({ ...target, node: cloneNames.get(target.node as string) }));
+      if (targets.length === 0) continue;
+      copiedPorts[port] = withTargets(portConnections, targets);
+      copied = true;
+    }
+    if (copied) connections[cloneNames.get(sourceName) as string] = copiedPorts;
+  }
+
+  return {
+    workflow: {
+      ...workflow,
+      nodes: [...(workflow.nodes ?? []), ...clones],
+      ...(connections ? { connections } : {})
+    },
+    keys: clones.map((node) => node.name as string),
+    cloneByKey
+  };
+}
+
+/**
  * A new node carries identity and placement only: name, type, kind, position
  * and the tile label. It deliberately has no `parameters` (not even `{}`) and
  * no `version`: Doc C §5.2 keeps schema defaults as display hints, never
@@ -1451,21 +1970,65 @@ function nodeTileTooltip(descriptor: NodeDescriptor): React.ReactNode {
 function NodeLibrary({
   descriptors: libraryDescriptors,
   onAddNode,
-  autoFocusSearch = false,
+  onSearchOpenChange,
+  searchButtonRef,
   searchInputRef,
+  searchOpen,
   headerAction
 }: {
   descriptors: NodeDescriptor[];
   onAddNode: (descriptor: NodeDescriptor) => void;
-  autoFocusSearch?: boolean;
+  /** The title-bar key opens and closes the search box. */
+  onSearchOpenChange: (open: boolean) => void;
+  /** The key itself, so Esc can hand focus back after closing. */
+  searchButtonRef?: React.RefObject<HTMLButtonElement | null>;
   searchInputRef?: React.Ref<InputRef>;
+  searchOpen: boolean;
   headerAction?: React.ReactNode;
 }): React.ReactElement {
   const [query, setQuery] = React.useState("");
+  // ED-14: progressive disclosure. The first group (触发器) opens by default and
+  // every other group starts collapsed with its count in the header; a search
+  // ignores the fold so matches stay visible. The fold is session-local state —
+  // the library stays mounted for the whole editing session.
   const [collapsedGroups, setCollapsedGroups] = React.useState<ReadonlySet<NodeDescriptor["group"]>>(
-    () => new Set()
+    () => new Set(nodeLibraryGroups.filter((group) => group !== nodeLibraryGroups[0]))
   );
+  // The box is hidden (and out of the layout) until its key opens it; the key
+  // stays the control that owns it, hence aria-controls on the always-present
+  // wrapper rather than on the conditionally mounted field.
+  const searchId = React.useId();
   const normalizedQuery = query.trim().toLowerCase();
+  const closeSearch = React.useCallback(() => {
+    setQuery("");
+    onSearchOpenChange(false);
+  }, [onSearchOpenChange]);
+  // A close from outside the input (Esc on the key, the shortcut path, a layout
+  // switch) must not leave the next open showing the old filter.
+  React.useEffect(() => {
+    if (!searchOpen) setQuery("");
+  }, [searchOpen]);
+  const searchButton = (
+    <Tooltip classNames={editorTooltipClassNames} title="搜索节点（/）">
+      <Button
+        aria-controls={searchId}
+        aria-expanded={searchOpen}
+        aria-keyshortcuts="/"
+        aria-label="搜索节点"
+        className="xflow-editor-panel-collapse"
+        color="default"
+        data-active={searchOpen || normalizedQuery.length > 0 ? "true" : undefined}
+        icon={<SearchIcon />}
+        ref={searchButtonRef}
+        size="small"
+        variant="text"
+        onClick={() => {
+          if (searchOpen) closeSearch();
+          else onSearchOpenChange(true);
+        }}
+      />
+    </Tooltip>
+  );
   const toggleGroup = React.useCallback((group: NodeDescriptor["group"]) => {
     setCollapsedGroups((current) => {
       const next = new Set(current);
@@ -1475,10 +2038,7 @@ function NodeLibrary({
     });
   }, []);
   const matchesQuery = React.useCallback(
-    (descriptor: NodeDescriptor) =>
-      !normalizedQuery ||
-      descriptor.label.toLowerCase().includes(normalizedQuery) ||
-      descriptor.type.toLowerCase().includes(normalizedQuery),
+    (descriptor: NodeDescriptor) => nodeLibraryMatches(descriptor, normalizedQuery),
     [normalizedQuery]
   );
   const descriptorsForGroup = React.useCallback(
@@ -1489,25 +2049,49 @@ function NodeLibrary({
 
   return (
     <EditorPanel
-      actions={headerAction}
+      actions={
+        <>
+          {searchButton}
+          {headerAction}
+        </>
+      }
       bodyClassName="xflow-editor-library__body"
       className="xflow-editor-library"
       count={libraryDescriptors.length}
-      icon={<AppstoreOutlined />}
+      divider={false}
+      icon={<GridIcon />}
       title="节点"
     >
-      {/* Always shown, as in the baseline; "/" focuses it (the shortcut list). */}
-      <div className="xflow-editor-library__search">
-        <Input
-          autoFocus={autoFocusSearch}
-          ref={searchInputRef}
-          classNames={editorLibrarySearchClassNames}
-          placeholder="搜索 Webhook / If / HTTP…"
-          prefix={<SearchOutlined />}
-          suffix={<kbd className="xflow-editor-kbd">/</kbd>}
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-        />
+      {/* Hidden until its key opens it; "/" opens and focuses it (the shortcut
+       * list). The wrapper keeps the aria-controls target in the DOM. */}
+      <div className="xflow-editor-library__search" hidden={!searchOpen} id={searchId}>
+        {searchOpen ? (
+          <Input
+            autoFocus
+            ref={searchInputRef}
+            classNames={editorLibrarySearchClassNames}
+            placeholder="搜索 Webhook / If / HTTP…"
+            prefix={<SearchIcon />}
+            suffix={<kbd className="xflow-editor-kbd">/</kbd>}
+            value={query}
+            onBlur={(event) => {
+              // An empty box folds away, but not when the pointer is on its
+              // key: that key's click closes it and must not be undone by the
+              // blur firing first.
+              if (query.trim() !== "" || event.relatedTarget === searchButtonRef?.current) return;
+              onSearchOpenChange(false);
+            }}
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== "Escape") return;
+              event.preventDefault();
+              event.stopPropagation();
+              setQuery("");
+              onSearchOpenChange(false);
+              searchButtonRef?.current?.focus({ preventScroll: true });
+            }}
+          />
+        ) : null}
       </div>
       <div className="xflow-editor-library__list">
       {nodeLibraryGroups.map((group) => {
@@ -1527,7 +2111,7 @@ function NodeLibrary({
             >
               <span className="xflow-editor-node-group__heading">
                 <span className="xflow-editor-block-title">{group}</span>
-                <DownOutlined aria-hidden="true" className={collapsed ? "xflow-editor-node-group__chevron is-collapsed" : "xflow-editor-node-group__chevron"} />
+                <DownIcon aria-hidden="true" className={collapsed ? "xflow-editor-node-group__chevron is-collapsed" : "xflow-editor-node-group__chevron"} />
                 <span className="xflow-editor-node-group__count">{descriptors.length}</span>
               </span>
             </button>
@@ -1553,12 +2137,12 @@ function NodeLibrary({
                       <NodeCategoryIcon category={descriptor.category} type={descriptor.type} />
                       <span className="xflow-editor-node-tile__content">
                         <strong>{descriptor.label}</strong>
-                        {/* The schema's description, or the type id when it has none; the id stays in the tooltip and the search. */}
+                        {/* A descriptor description, else the builtin purpose table, else the type id. */}
                         <small
                           className="xflow-editor-node-tile__hint"
                           title={descriptor.description || descriptor.type}
                         >
-                          {descriptor.description || descriptor.type}
+                          {nodeTilePurpose(descriptor)}
                         </small>
                       </span>
                       {descriptor.source === "runner" ? (
@@ -1590,26 +2174,48 @@ function NodeLibrary({
 /**
  * §6.2 empty canvas: shown only while the workflow has no nodes, centred on the
  * canvas (the preview places it and keeps the pane a drop target around it).
- * 导入 DSL has no host hook yet, so it is offered disabled with the reason.
+ * EL-14: besides the trigger pick, three starter templates insert a small
+ * definition through the ordinary draft commit (one undo entry), plus the
+ * keyboard path and the (unwired) DSL import.
  */
-function EmptyCanvasCard({ editable, onPickTrigger }: {
+function EmptyCanvasCard({ editable, onPickTemplate, onPickTrigger }: {
   editable: boolean;
+  onPickTemplate: (template: StarterTemplate) => void;
   onPickTrigger: () => void;
 }): React.ReactElement {
   return (
     <div className="xflow-editor-empty-canvas">
-      <span className="xflow-editor-empty-canvas__icon" data-cat="trigger"><LinkOutlined /></span>
+      <span className="xflow-editor-empty-canvas__icon" data-cat="trigger"><LinkIcon /></span>
       <h2 className="xflow-editor-empty-canvas__title">添加触发器开始</h2>
       <p className="xflow-editor-empty-canvas__text">从 Webhook、Cron、Kafka 等入口开始，或导入已有 DSL。</p>
       {editable ? (
-        <div className="xflow-editor-empty-canvas__actions">
-          <Button size="small" type="primary" onClick={onPickTrigger}>选择触发器</Button>
-          <Tooltip classNames={editorTooltipClassNames} title="未接入">
-            <span className="xflow-editor-disabled-control">
-              <Button disabled size="small">导入 DSL</Button>
-            </span>
-          </Tooltip>
-        </div>
+        <>
+          <div className="xflow-editor-empty-canvas__actions">
+            <Button size="small" type="primary" onClick={onPickTrigger}>选择触发器</Button>
+            <Tooltip classNames={editorTooltipClassNames} title="未接入">
+              <span className="xflow-editor-disabled-control">
+                <Button disabled size="small">导入 DSL</Button>
+              </span>
+            </Tooltip>
+          </div>
+          <div aria-label="起步模板" className="xflow-editor-empty-canvas__templates">
+            {STARTER_TEMPLATES.map((template) => (
+              <button
+                className="xflow-editor-empty-canvas__template"
+                key={template.id}
+                type="button"
+                onClick={() => onPickTemplate(template)}
+              >
+                <span className="xflow-editor-empty-canvas__template-head">
+                  <NodeCategoryIcon size="sm" type={template.nodes[0]?.type} />
+                  <span className="xflow-editor-empty-canvas__template-title">{template.title}</span>
+                </span>
+                <span className="xflow-editor-empty-canvas__template-text">{template.description}</span>
+              </button>
+            ))}
+          </div>
+          <p className="xflow-editor-empty-canvas__hint">从左侧节点库拖入，或按 A 添加节点 · ⌘K 搜索</p>
+        </>
       ) : null}
     </div>
   );
@@ -1673,6 +2279,7 @@ export function XFlowEditor({
   onAppearanceChange,
   defaultViewport,
   onViewportChange,
+  sections,
   nodeTypesError,
   onRetryNodeTypes,
   onReloadLatest,
@@ -1686,6 +2293,7 @@ export function XFlowEditor({
   readOnlyReason,
   capabilities,
   execution,
+  latestRun,
   onExecutionAction,
   onLocateNode,
   onOpenRunHistory,
@@ -1694,6 +2302,7 @@ export function XFlowEditor({
   onSignal,
   onRevokeSignal,
   runBarDismissMs,
+  traceHref,
   mode: controlledMode,
   onModeChange,
   executionList,
@@ -1712,9 +2321,17 @@ export function XFlowEditor({
     React.useState<XFlowEditorAppearance>("system");
   const activeAppearance = controlledAppearance ?? uncontrolledAppearance;
   const resolvedAppearance = useResolvedAppearance(activeAppearance);
+  const reducedMotion = useReducedMotion();
+  // AntD's MotionWrapper starts without a provider and adds one the first time
+  // `token.motion` changes, which remounts the whole subtree — toggling the OS
+  // "reduce motion" switch would otherwise drop the editor's in-memory state.
+  // Pinning motion off for the first commit makes the wrapper permanent; the
+  // real value lands on the commit right after mount and only updates it.
+  const [motionReady, setMotionReady] = React.useState(false);
+  React.useEffect(() => setMotionReady(true), []);
   const editorThemeConfig = React.useMemo(
-    () => createEditorThemeConfig(resolvedAppearance),
-    [resolvedAppearance]
+    () => createEditorThemeConfig(resolvedAppearance, { reducedMotion: !motionReady || reducedMotion }),
+    [resolvedAppearance, motionReady, reducedMotion]
   );
   const changeAppearance = React.useCallback(
     (nextAppearance: XFlowEditorAppearance) => {
@@ -1736,21 +2353,58 @@ export function XFlowEditor({
   const latestDraftRef = React.useRef<WorkflowDef>(value);
   const historyRef = React.useRef<WorkflowHistory>({ undo: [], redo: [] });
   const [history, setHistory] = React.useState<WorkflowHistory>({ undo: [], redo: [] });
+  // §6.2 visual sections are editor metadata, not part of the WorkflowDef the
+  // history snapshots. They live in their own state seeded from the host's
+  // `sections` prop (ADR-D4 §2.3); the host remains the persistence owner.
+  const [editorSections, setEditorSections] = React.useState<WorkflowEditorSection[]>(() => cloneSections(sections));
+  // A host may pass a fresh-but-equal array on every render, so a sync keyed on
+  // prop identity would erase an in-progress edit. Compare content instead, and
+  // also reset when the workflow itself changes.
+  const sectionsSignature = JSON.stringify(sections ?? []);
+  const sectionsPropRef = React.useRef({ signature: sectionsSignature, workflowId: value.id });
+  /**
+   * Whether this editor changed the sections since the prop last arrived. A
+   * save must clear persisted sections when the user deleted the last one, so
+   * the save context is sent for a dirty list even when it is now empty.
+   */
+  const sectionsDirtyRef = React.useRef(false);
+  React.useEffect(() => {
+    const previous = sectionsPropRef.current;
+    // A draft gaining its server id after a save is not a workflow switch and
+    // must not discard edits the just-accepted save carried; only a defined id
+    // replaced by another defined id is.
+    const switchedWorkflow =
+      previous.workflowId !== undefined && value.id !== undefined && previous.workflowId !== value.id;
+    const contentChanged = previous.signature !== sectionsSignature;
+    sectionsPropRef.current = { signature: sectionsSignature, workflowId: value.id };
+    if (!switchedWorkflow && !contentChanged) return;
+    setEditorSections(cloneSections(sections));
+    sectionsDirtyRef.current = false;
+  }, [sections, sectionsSignature, value.id]);
+  const updateSections = React.useCallback(
+    (update: (current: WorkflowEditorSection[]) => WorkflowEditorSection[]) => {
+      sectionsDirtyRef.current = true;
+      setEditorSections(update);
+    },
+    []
+  );
   const [canvasTool, setCanvasTool] = React.useState<CanvasTool>("select");
   const [localRuntime, setLocalRuntime] = React.useState<RuntimeSnapshot | undefined>(runtime);
   const editorRootRef = React.useRef<HTMLElement | null>(null);
   const editorWidth = useEditorWidth(editorRootRef);
   const widthTier = layoutTier(editorWidth);
   const [layoutPolicy, setLayoutPolicy] = React.useState<LayoutPolicy>("auto");
-  const layout: EditorLayout =
-    layoutPolicy === "compact" ? "c" : widthTier === "narrow" ? "c" : widthTier === "compact" ? "b" : "a";
-  // §6.3: below 1280 (layout b/c, manual immersive included) the secondary
+  const layout: EditorLayout = layoutPolicy === "compact" || widthTier === "compact" ? "c" : "a";
+  // §6.3: in compact (layout c, manual immersive included) the secondary
   // history / validate / theme actions fold into the ⋯ menu.
   const compactToolbar = layout !== "a";
   const [compactDrawer, setCompactDrawer] = React.useState<"left" | "right" | undefined>();
   const [leftDrawerTab, setLeftDrawerTab] = React.useState<"library" | "variables" | "executions">("library");
   const [desktopRailSection, setDesktopRailSection] = React.useState<"library" | "variables">("library");
   const nodeLibrarySearchRef = React.useRef<InputRef | null>(null);
+  const nodeLibrarySearchButtonRef = React.useRef<HTMLButtonElement | null>(null);
+  /** Whether the library's search box is open; the title-bar key toggles it. */
+  const [nodeLibrarySearchOpen, setNodeLibrarySearchOpen] = React.useState(false);
   // Bumped by the "/" shortcut; the effect below focuses the search once the
   // library column (re)mounted by the same gesture is in the DOM.
   const [librarySearchFocusNonce, setLibrarySearchFocusNonce] = React.useState(0);
@@ -1765,6 +2419,24 @@ export function XFlowEditor({
   // §6.13: one declared-category map from the schemas, shared by the canvas, the
   // outline, the node library and the diagnostics mix.
   const nodeCategories = React.useMemo(() => nodeCategoriesFromTypes(nodeTypes), [nodeTypes]);
+  // E-A: the card speaks the descriptor's display name instead of the raw type
+  // id; the id stays in the inspector. Same source as the node library, so the
+  // tile and the card always name a type the same way.
+  const nodeTypeLabels = React.useMemo(() => {
+    const labels: Record<string, string> = Object.create(null);
+    for (const descriptor of nodeLibraryDescriptors(nodeTypes)) labels[descriptor.type] = descriptor.label;
+    return labels;
+  }, [nodeTypes]);
+  // The preview compares `nodeIcon` by reference in `PreviewNodeData` and the
+  // flow-node memo, so it must keep one identity for the editor's lifetime. The
+  // ref hands it the latest category map without changing that identity.
+  const nodeCategoriesRef = React.useRef(nodeCategories);
+  nodeCategoriesRef.current = nodeCategories;
+  const canvasNodeIcon = React.useCallback(
+    (node: GraphNode): React.ReactNode =>
+      nodeTypeGlyph(node.type) ?? categoryGlyphFor(node.type, nodeCategoriesRef.current[node.type]),
+    []
+  );
   // §6.1.1 card summaries, resolved once per definition: the preview only
   // draws rows it is handed, so field labels and formatting stay on this side
   // of the package boundary (and follow the localized schemas). The replay
@@ -1819,6 +2491,13 @@ export function XFlowEditor({
   const [uncontrolledMode, setUncontrolledMode] = React.useState<XFlowEditorMode>("edit");
   const viewMode: XFlowEditorMode = controlledMode ?? uncontrolledMode;
   const runsMode = viewMode === "runs";
+  /**
+   * The execution the editor is currently acting on: the selected historic
+   * record in 运行记录, or the live run otherwise. Approval reads both the
+   * node ledger and the dialog's identity from this one value, so a replay can
+   * never open a dialog over the edit run (or vice versa).
+   */
+  const trackedExecution = runsMode ? selectedExecution : execution;
   /** The canvas instance is remounted per mode so a saved edit viewport can be restored. */
   const [canvasEpoch, setCanvasEpoch] = React.useState(0);
   const [restoreViewport, setRestoreViewport] = React.useState<Viewport | undefined>(defaultViewport);
@@ -1859,12 +2538,12 @@ export function XFlowEditor({
   const dockControllerRef = React.useRef<DiagnosticsDockController | null>(null);
   /** The canvas frame: the focus target for 定位 when the node's card is not rendered. */
   const canvasFrameRef = React.useRef<HTMLDivElement | null>(null);
-  /** The run-bar row, measured against the preview's top floats (see the effect below). */
+  /** The run toast, measured against the preview's top floats (see the effect below). */
   const runBarRowRef = React.useRef<HTMLDivElement | null>(null);
-  // A run bar wider than the gap between the canvas's top floats would cover
+  // A run toast wider than the gap between the canvas's top floats would cover
   // 添加节点 / 定位节点 (the baseline's float row has the same collision below
   // ~1400px). There is no allowed container breakpoint for "how wide is this
-  // execution's bar", so the row is measured and drops one float row instead.
+  // execution's toast", so the toast is measured and drops one float row instead.
   const [runBarStacked, setRunBarStacked] = React.useState(false);
   /** The auto-open points: a closed dock docks; an expanded one is never pressed back down. */
   const revealDock = React.useCallback(() => setDock((current) => (current === "collapsed" ? "docked" : current)), []);
@@ -1898,9 +2577,45 @@ export function XFlowEditor({
   const rollingBackRef = React.useRef(false);
   const [operationStatus, setOperationStatus] = React.useState(() => value.id ? "已保存" : "未保存");
   const [operationError, setOperationError] = React.useState<string>();
-  const [selectedKey, setSelectedKey] = React.useState<string | undefined>(() => defaultSelectedKey(nodes));
+  const [selection, setSelection] = React.useState<CanvasSelection>(() => {
+    const initial = defaultSelectedKey(nodes);
+    return initial === undefined ? { keys: [] } : { keys: [initial], primary: initial };
+  });
+  /** The primary selection's key: the Inspector, outline and run actions read this. */
+  const selectedKey = selection.primary;
+  const selectedKeys = selection.keys;
+  /** Replaces the whole selection with one node (every pre-multi-select caller). */
+  const setSelectedKey = React.useCallback((key?: string) => {
+    setSelection(key === undefined ? { keys: [] } : { keys: [key], primary: key });
+  }, []);
+  /**
+   * Applies the canvas's selection report. `primaryId` is the node a single
+   * click or toggle just picked; without one the current primary is kept while
+   * it remains selected, else the first key (the preview reports graph order)
+   * takes over.
+   */
+  const applyCanvasSelection = React.useCallback((keys: readonly string[], primaryId?: string) => {
+    setSelection((current) => {
+      const nextKeys = [...new Set(keys)];
+      const primary = primaryId !== undefined && nextKeys.includes(primaryId)
+        ? primaryId
+        : current.primary !== undefined && nextKeys.includes(current.primary)
+          ? current.primary
+          : nextKeys[0];
+      if (
+        current.primary === primary
+        && current.keys.length === nextKeys.length
+        && current.keys.every((key, index) => key === nextKeys[index])
+      ) {
+        return current;
+      }
+      return primary === undefined ? { keys: nextKeys } : { keys: nextKeys, primary };
+    });
+  }, []);
   const selectedIndex = nodes.findIndex((node, index) => nodeKey(node, index) === selectedKey);
   const selectedNode = selectedIndex >= 0 ? nodes[selectedIndex] : undefined;
+  /** The runtime snapshot's key for the selected node (the drawer's 输出 tab, WB-04). */
+  const selectedName = selectedNode ? nodeName(selectedNode, selectedIndex) : undefined;
   const selectedKeyRef = React.useRef(selectedKey);
   selectedKeyRef.current = selectedKey;
   /** §6.9: the execution and optional node the rerun dialog was opened from. */
@@ -1999,44 +2714,46 @@ export function XFlowEditor({
    */
   const [approvalTarget, setApprovalTarget] = React.useState<{ executionId: string; nodeName: string }>();
   const openApprovalFor = React.useCallback((approvalNodeName: string) => {
-    if (!execution) return;
-    setApprovalTarget({ executionId: execution.executionId, nodeName: approvalNodeName });
-  }, [execution]);
+    if (!trackedExecution) return;
+    setApprovalTarget({ executionId: trackedExecution.executionId, nodeName: approvalNodeName });
+  }, [trackedExecution]);
   // A target whose node left the suspended state (a decision closed the gate,
   // the run moved on) closes the dialog: it would otherwise show a stale wait.
   React.useEffect(() => {
     if (!approvalTarget) return;
-    if (!execution || execution.executionId !== approvalTarget.executionId) {
+    if (!trackedExecution || trackedExecution.executionId !== approvalTarget.executionId) {
       setApprovalTarget(undefined);
       return;
     }
-    const node = execution.nodes?.find((candidate) => candidate.name === approvalTarget.nodeName);
+    const node = trackedExecution.nodes?.find((candidate) => candidate.name === approvalTarget.nodeName);
     if (!node || node.status !== "suspended") setApprovalTarget(undefined);
-  }, [approvalTarget, execution]);
+  }, [approvalTarget, trackedExecution]);
   /**
    * Suspended approval cards get the chain/progress line and a 处理 action
    * (§6.12); every other suspended card keeps the preview's 等待信号.
    */
   const approvalNotes = React.useMemo(() => {
     const notes: Record<string, { text: string; action: string }> = {};
-    for (const execNode of execution?.nodes ?? []) {
+    for (const execNode of trackedExecution?.nodes ?? []) {
       if (execNode.status !== "suspended") continue;
-      const def = workflowNodeByName(draftWorkflow, execNode.name);
+      // The run's own definition (the version snapshot in 运行记录) decides
+      // whether this card is an approval gate and what its chain looks like.
+      const def = workflowNodeByName(canvasWorkflow, execNode.name);
       if (!def || def.type !== APPROVAL_NODE_TYPE) continue;
       const params = approvalParamsFrom(def.parameters);
       const progress = approvalProgress(params.approvers ?? [], approvalDecisions(execNode.output));
       notes[execNode.name] = { text: approvalWaitText(params.mode, progress), action: "处理" };
     }
     return notes;
-  }, [draftWorkflow, execution]);
+  }, [canvasWorkflow, trackedExecution]);
   /** The first suspended approval of the tracked execution, if there is one. */
   const firstApprovalNode = React.useMemo(() => {
-    for (const execNode of execution?.nodes ?? []) {
+    for (const execNode of trackedExecution?.nodes ?? []) {
       if (execNode.status !== "suspended") continue;
-      if (workflowNodeByName(draftWorkflow, execNode.name)?.type === APPROVAL_NODE_TYPE) return execNode.name;
+      if (workflowNodeByName(canvasWorkflow, execNode.name)?.type === APPROVAL_NODE_TYPE) return execNode.name;
     }
     return undefined;
-  }, [draftWorkflow, execution]);
+  }, [canvasWorkflow, trackedExecution]);
   // An archived version is opened read-only (§6.10): 查看 must never edit history.
   const readOnly = Boolean(readOnlyReason) || capabilities?.workflow === false || historicalVersion !== undefined;
   // Writes stay available while viewing history (回滚 is the one write this
@@ -2063,13 +2780,18 @@ export function XFlowEditor({
   const leftSection = desktopRailSection;
   const leftDrawerSection = leftDrawerTab;
   const hostNotices = [
-    !readOnly && !onSave ? "保存不可用：宿主未提供 onSave 处理器" : undefined,
-    !readOnly && !onRun ? "运行不可用：宿主未提供 onRun 处理器" : undefined,
-    !readOnly && !onPublish ? "发布不可用：宿主未提供 onPublish 处理器" : undefined
-  ].filter((notice): notice is string => Boolean(notice));
+    !readOnly && !onSave ? hostCapabilityCopy.save : undefined,
+    !readOnly && !onRun ? hostCapabilityCopy.run : undefined,
+    !readOnly && !onPublish ? hostCapabilityCopy.publish : undefined
+  ].filter((notice): notice is NonNullable<typeof notice> => Boolean(notice));
 
   React.useEffect(() => {
     if (serializeJson(latestDraftRef.current) === serializeJson(value)) {
+      // Equal content is either the host echoing the draft back through onChange
+      // (same object, so the draft stays dirty) or the host swapping in the
+      // definition it just persisted (a new object, so this is the new baseline;
+      // save-then-run reaches here without going through onSave).
+      if (value !== latestDraftRef.current) setBaselineWorkflow(value);
       latestDraftRef.current = value;
       return;
     }
@@ -2264,9 +2986,12 @@ export function XFlowEditor({
   }, []);
   const validationMode = nodeTypes?.param_validation_mode ?? "warn";
   // Frontend node-form errors over the whole workflow (Doc C §1 rule 3): shown
-  // on the save button in every mode, blocking only in enforce mode.
+  // on the save button in every mode, blocking only in enforce mode. The same
+  // single pass collects the diagnostics rows (WB-13): counts are incremented
+  // while the rows are built, never by filtering a separately computed set.
   const formIssueSummary = React.useMemo<FormIssueSummary>(() => {
-    const summary: FormIssueSummary = { errors: 0, nodes: [] };
+    const diagnostics: WorkflowDiagnostic[] = [];
+    const summary: FormIssueSummary = { errors: 0, warnings: 0, nodes: [], diagnostics };
     if (!nodeTypes) return summary;
     const credentials = Object.keys(draftWorkflow.credentials ?? {});
     (draftWorkflow.nodes ?? []).forEach((node, index) => {
@@ -2278,15 +3003,64 @@ export function XFlowEditor({
         { hasTemplate: nodeHasTemplate(draftWorkflow, node), parameters: node.parameters, schemasLoaded: true },
         { ports: portsForNode(schema, node), credentials }
       );
-      const errors = issues.filter((issue) => issue.severity === "error").length;
-      if (errors === 0) return;
-      summary.errors += errors;
-      summary.nodes.push(nodeName(node, index));
+      if (issues.length === 0) return;
+      const name = nodeName(node, index);
+      let errors = 0;
+      for (const issue of issues) {
+        const status = issue.severity === "warning" ? "warn" : "error";
+        if (status === "error") errors += 1;
+        else summary.warnings += 1;
+        diagnostics.push({
+          status,
+          area: "parameters",
+          message: issue.message,
+          nodeName: name,
+          ...(issue.path ? { path: issue.path } : {}),
+          source: "local"
+        });
+      }
+      if (errors > 0) {
+        summary.errors += errors;
+        summary.nodes.push(name);
+      }
     });
     return summary;
   }, [draftWorkflow, formHost, nodeTypes]);
   const formIssueSummaryRef = React.useRef(formIssueSummary);
   formIssueSummaryRef.current = formIssueSummary;
+  /**
+   * CP-01: the canvas badge reads the same local-form rows as the diagnostics
+   * panel, so the card and the drawer cannot disagree. The first error (else
+   * the first warning) is the badge's title; form messages carry a rule's
+   * sentence, never a parameter value.
+   */
+  const nodeIssueBadges = React.useMemo(() => {
+    const byNode = new Map<string, { errors: number; warnings: number; errorMessage?: string; warningMessage?: string }>();
+    for (const row of formIssueSummary.diagnostics) {
+      if (!row.nodeName) continue;
+      const entry = byNode.get(row.nodeName) ?? { errors: 0, warnings: 0 };
+      if (row.status === "error") {
+        entry.errors += 1;
+        entry.errorMessage ??= row.message;
+      } else if (row.status === "warn") {
+        entry.warnings += 1;
+        entry.warningMessage ??= row.message;
+      }
+      byNode.set(row.nodeName, entry);
+    }
+    return new Map(
+      [...byNode].map(([name, entry]) => [
+        name,
+        { errors: entry.errors, warnings: entry.warnings, message: entry.errorMessage ?? entry.warningMessage }
+      ])
+    );
+  }, [formIssueSummary.diagnostics]);
+  // Stable between draft edits so the preview keeps its cards' memo identity;
+  // a new identity here is the same signal as any other changed node data.
+  const previewNodeIssues = React.useCallback(
+    (node: GraphNode) => nodeIssueBadges.get(node.name),
+    [nodeIssueBadges]
+  );
   const [blockedDraftNodes, setBlockedDraftNodes] = React.useState<string[]>([]);
   const invalidDraftCount = Object.values(parameterDrafts).filter((draft) => draft.error).length;
   const invalidWorkflowJsonFields = (Object.keys(workflowJsonLabels) as WorkflowJsonField[])
@@ -2301,7 +3075,7 @@ export function XFlowEditor({
   const saveBlocked = invalidDraftCount > 0 || invalidWorkflowJsonFields.length > 0
     || (validationMode === "enforce" && formIssueSummary.errors > 0);
   const saveTooltip = !onSave
-    ? "保存不可用：宿主未提供 onSave 处理器"
+    ? hostCapabilityCopy.save
     : saveClean
       ? "没有未保存的修改"
     : invalidDraftCount > 0
@@ -2410,15 +3184,23 @@ export function XFlowEditor({
   ];
 
   // Computed once and shared by the Diagnostics panel and the validate button,
-  // so the button's verdict always matches the panel's findings. param_issues
-  // join as area="parameters" rows, each carrying its node and field pointer.
+  // so the button's verdict always matches the panel's findings. The node
+  // forms' own rows join through the same 参数 area (WB-13), with param_issues
+  // deduplicated against them on node + pointer + severity.
   const diagnostics = React.useMemo(
-    () => [...validateWorkflow(draftWorkflow, operationError, nodeTypes), ...paramIssueDiagnostics(paramIssues)],
-    [draftWorkflow, nodeTypes, operationError, paramIssues]
+    () => [
+      ...validateWorkflow(draftWorkflow, operationError, nodeTypes),
+      ...validateTemplateReferences(draftWorkflow),
+      ...validateVariableReferences(draftWorkflow),
+      ...mergeParameterDiagnostics(formIssueSummary.diagnostics, paramIssues, draftWorkflow)
+    ],
+    [draftWorkflow, nodeTypes, operationError, paramIssues, formIssueSummary]
   );
   // §6.10 publish gate: unparseable drafts and diagnostics errors block; node
   // form findings are errors only where the server enforces them (everywhere
-  // else they are the warnings the dialog says may be published).
+  // else they are the warnings the dialog says may be published). Local form
+  // rows are already part of `diagnostics`, so the non-enforce count must
+  // exclude them there and add them as warnings instead of counting twice.
   const publishDiagnostics = React.useMemo(() => {
     const enforce = validationMode === "enforce";
     // `area: "operation"` rows are the last failed save / run / rollback, not
@@ -2426,13 +3208,10 @@ export function XFlowEditor({
     // them here would disable publish after an unrelated operation failed and
     // only an edit that clears `operationError` would re-enable it.
     const definitionErrors = diagnostics.filter(
-      (entry) => entry.status === "error" && entry.area !== "operation"
+      (entry) => entry.status === "error" && entry.area !== "operation" && (enforce || entry.source !== "local")
     ).length;
     return {
-      errors: invalidDraftCount
-        + invalidWorkflowJsonFields.length
-        + definitionErrors
-        + (enforce ? formIssueSummary.errors : 0),
+      errors: invalidDraftCount + invalidWorkflowJsonFields.length + definitionErrors,
       warnings: diagnostics.filter((entry) => entry.status === "warn").length
         + (enforce ? 0 : formIssueSummary.errors)
     };
@@ -2445,7 +3224,8 @@ export function XFlowEditor({
 
   // §6.3 compact top bar (layout b/c): 撤销 / 重做 / 校验 / 主题 join the ⋯ menu
   // in that order, keeping each button's disabled state and shortcut hint. The
-  // menu itself never moves: it sits just before 保存 at every width.
+  // menu renders only in the compact layout (user ruling 2026-10-21): the wide
+  // toolbar keeps the baseline's individual buttons and has no ⋯ of its own.
   // rc-menu owns the item role and exposes no aria-checked, so the active row
   // states the selection in its accessible name. Every row keeps an icon slot
   // (hidden when inactive) so the three labels share one text column.
@@ -2460,7 +3240,7 @@ export function XFlowEditor({
         </>
       ),
       icon: (
-        <CheckOutlined
+        <CheckIcon
           aria-hidden="true"
           className={active ? undefined : "xflow-editor-menu-check-inactive"}
         />
@@ -2477,45 +3257,35 @@ export function XFlowEditor({
     historicalVersion,
     onExitHistory
   });
-  const moreMenuItems: MenuProps["items"] = compactToolbar
-    ? [
-        { key: "undo", label: "撤销", title: "撤销（⌘ / Ctrl + Z）", disabled: !editMode || history.undo.length === 0 },
-        { key: "redo", label: "重做", title: "重做（⌘ / Ctrl + Shift + Z）", disabled: !editMode || history.redo.length === 0 },
-        {
-          key: "validate",
-          label: "校验",
-          title: runsMode ? "运行记录模式不提供诊断台" : "校验当前工作流",
-          // A replay has no draft and no diagnostics dock: the action would
-          // change hidden state with no visible result.
-          disabled: runsMode
-        },
-        {
-          type: "group",
-          label: "主题",
-          children: [
-            themeMenuItem("theme-light", "浅色", "light"),
-            themeMenuItem("theme-dark", "深色", "dark"),
-            themeMenuItem("theme-system", "跟随系统", "system")
-          ]
-        },
-        { type: "divider" },
-        { key: "layout", label: layoutPolicy === "auto" ? "进入沉浸布局" : "恢复自动布局" },
-        {
-          key: "new",
-          label: "新建工作流",
-          disabled: !editMode,
-          title: editMode ? undefined : editLockedTitle
-        }
+  const moreMenuItems: MenuProps["items"] = [
+    { key: "undo", label: "撤销", title: "撤销（⌘ / Ctrl + Z）", disabled: !editMode || history.undo.length === 0 },
+    { key: "redo", label: "重做", title: "重做（⌘ / Ctrl + Shift + Z）", disabled: !editMode || history.redo.length === 0 },
+    {
+      key: "validate",
+      label: "校验",
+      title: runsMode ? "运行记录模式不提供诊断台" : "校验当前工作流",
+      // A replay has no draft and no diagnostics dock: the action would
+      // change hidden state with no visible result.
+      disabled: runsMode
+    },
+    {
+      type: "group",
+      label: "主题",
+      children: [
+        themeMenuItem("theme-light", "浅色", "light"),
+        themeMenuItem("theme-dark", "深色", "dark"),
+        themeMenuItem("theme-system", "跟随系统", "system")
       ]
-    : [
-        { key: "layout", label: layoutPolicy === "auto" ? "进入沉浸布局" : "恢复自动布局" },
-        {
-          key: "new",
-          label: "新建工作流",
-          disabled: !editMode,
-          title: editMode ? undefined : editLockedTitle
-        }
-      ];
+    },
+    { type: "divider" },
+    { key: "layout", label: layoutPolicy === "auto" ? "进入沉浸布局" : "恢复自动布局" },
+    {
+      key: "new",
+      label: "新建工作流",
+      disabled: !editMode,
+      title: editMode ? undefined : editLockedTitle
+    }
+  ];
   const handleMoreMenuClick: MenuProps["onClick"] = ({ key }) => {
     if (key === "undo") undoWorkflow();
     else if (key === "redo") redoWorkflow();
@@ -2562,20 +3332,60 @@ export function XFlowEditor({
     [addNode, libraryDescriptors]
   );
 
-  const updateNodePosition = React.useCallback(
-    (nodeId: string, position: { x: number; y: number }) => {
-      if (!editMode) return;
-      const nextWorkflow: WorkflowDef = {
-        ...draftWorkflow,
-        nodes: (draftWorkflow.nodes ?? []).map((node, index) =>
-          nodeKey(node, index) === nodeId ? { ...node, position } : node
-        )
-      };
-      commitWorkflow(nextWorkflow);
+  /**
+   * EL-14: a starter template lands as one ordinary draft commit, so it is one
+   * undo entry and the host's onChange sees exactly the definition a manual
+   * add would produce.
+   */
+  const pickStarterTemplate = React.useCallback((template: StarterTemplate) => {
+    if (!editMode) return;
+    commitWorkflowWith((latest) => applyStarterTemplate(latest, template));
+    const first = template.nodes[0]?.name;
+    if (first) setSelectedKey(first);
+  }, [commitWorkflowWith, editMode]);
+
+  /**
+   * Writes every node a finished drag moved in ONE commit. During the gesture
+   * React Flow owns the visual movement; only the final positions reach the
+   * definition, so a multi-node drag lands as a single undo snapshot instead of
+   * one per mouse move or one per node.
+   */
+  const updateNodePositions = React.useCallback(
+    (moved: readonly PreviewNodePosition[]) => {
+      if (!editMode || moved.length === 0) return;
+      const byKey = new Map(moved.map((entry) => [entry.id, entry.position]));
+      commitWorkflowWith((latest) => ({
+        ...latest,
+        nodes: (latest.nodes ?? []).map((node, index) => {
+          const position = byKey.get(nodeKey(node, index));
+          if (!position) return node;
+          if (node.position?.x === position.x && node.position?.y === position.y) return node;
+          return { ...node, position: { x: position.x, y: position.y } };
+        })
+      }));
     },
-    [commitWorkflow, draftWorkflow, editMode]
+    [commitWorkflowWith, editMode]
   );
 
+  /**
+   * Removes every named node in one commit, so a batch delete produces exactly
+   * one undo snapshot. Its edges go through the same per-node rule the single
+   * delete has always used (`removeNodeFromWorkflow`), not a second edge rule.
+   */
+  const deleteNodesByKeys = React.useCallback((doomedKeys: readonly string[]) => {
+    if (!editMode || doomedKeys.length === 0) return;
+    const doomed = new Set(doomedKeys);
+    let nextWorkflow = draftWorkflow;
+    (draftWorkflow.nodes ?? []).forEach((node, index) => {
+      if (doomed.has(nodeKey(node, index))) nextWorkflow = removeNodeFromWorkflow(nextWorkflow, node);
+    });
+    if (nextWorkflow === draftWorkflow) return;
+    commitWorkflow(nextWorkflow);
+    setSelectedKey(undefined);
+  }, [commitWorkflow, draftWorkflow, editMode]);
+
+  // The menu and Inspector verbs stay single-node: each names the node it acts
+  // on. The Delete key and the marquee go through the batch callback instead.
   const deleteSelectedNode = React.useCallback(() => {
     if (!selectedNode) return;
     const nextWorkflow = removeNodeFromWorkflow(draftWorkflow, selectedNode);
@@ -2589,6 +3399,21 @@ export function XFlowEditor({
     commitWorkflow(nextWorkflow);
     setSelectedKey(nodeKey(node, (nextWorkflow.nodes ?? []).length - 1));
   }, [commitWorkflow, draftWorkflow, editMode, selectedIndex, selectedNode]);
+
+  /**
+   * ⌘/Ctrl+D over the whole selection: every selected node is cloned with the
+   * edges whose two ends are both selected, in one commit (one undo snapshot).
+   * The selection moves to the clones, so pressing it again walks the copies
+   * another offset away instead of stacking them on the same spot.
+   */
+  const duplicateSelectedNodes = React.useCallback(() => {
+    if (!editMode || selectedKeys.length === 0) return;
+    const { workflow: nextWorkflow, keys, cloneByKey } = duplicateNodesInWorkflow(draftWorkflow, selectedKeys);
+    if (keys.length === 0) return;
+    commitWorkflow(nextWorkflow);
+    const primary = selection.primary !== undefined ? cloneByKey.get(selection.primary) : undefined;
+    setSelection(primary === undefined ? { keys } : { keys, primary });
+  }, [commitWorkflow, draftWorkflow, editMode, selectedKeys, selection.primary]);
 
   // A compact left panel is a rail, not a collapsible column, so the same
   // intent opens or closes the drawer instead.
@@ -2646,6 +3471,13 @@ export function XFlowEditor({
       setShortcutsOpen(false);
       return;
     }
+    // "/" opened the library search; Esc closes it from anywhere, not only from
+    // the input, and hands focus back to the key that owns it.
+    if (nodeLibrarySearchOpen) {
+      setNodeLibrarySearchOpen(false);
+      nodeLibrarySearchButtonRef.current?.focus({ preventScroll: true });
+      return;
+    }
     if (compactDrawer) {
       setCompactDrawer(undefined);
       return;
@@ -2656,7 +3488,7 @@ export function XFlowEditor({
     }
     if (nodeSearchOpen) return;
     setSelectedKey(undefined);
-  }, [canvasTool, compactDrawer, nodeSearchOpen, shortcutsOpen]);
+  }, [canvasTool, compactDrawer, nodeLibrarySearchOpen, nodeSearchOpen, shortcutsOpen]);
 
   const addCanvasConnection = React.useCallback(
     (connection: PreviewConnection) => {
@@ -2696,7 +3528,7 @@ export function XFlowEditor({
   const saveWorkflow = React.useCallback(async () => {
     if (readOnly) return;
     if (!onSave) {
-      setOperationError("保存不可用：宿主未提供 onSave 处理器");
+      setOperationError(hostCapabilityCopy.save);
       setOperationStatus("保存不可用");
       revealDock();
       return;
@@ -2712,7 +3544,14 @@ export function XFlowEditor({
     setSaving(true);
     setOperationError(undefined);
     try {
-      const saved = await onSave(workflowToSave);
+      // The sections travel with the save so rebuilding editor_metadata on the
+      // host cannot drop them. The two-argument form is used when sections are
+      // in force, and also when an edit emptied the list: a deletion must reach
+      // the host as `sections: []` rather than as silence that leaves the old
+      // metadata in place. Untouched sectionless flows keep the old call shape.
+      const saved = editorSections.length > 0 || sectionsDirtyRef.current
+        ? await onSave(workflowToSave, { sections: cloneSections(editorSections) })
+        : await onSave(workflowToSave);
       const savedWorkflow = isSaveResult(saved) ? saved.workflow : saved;
       if (!savedWorkflow) throw new Error("保存处理器未返回工作流定义");
       // Server findings describe the snapshot just saved; show them even if
@@ -2753,7 +3592,7 @@ export function XFlowEditor({
       savingRef.current = false;
       setSaving(false);
     }
-  }, [blockedByParameterDraft, onSave, readOnly]);
+  }, [blockedByParameterDraft, editorSections, onSave, readOnly]);
 
   // §6.10 versions. The current row is the online version; before the list
   // answers, the baseline definition's own label is the fallback (the hash is
@@ -2835,7 +3674,11 @@ export function XFlowEditor({
     setPublishing(true);
     setPublishError(undefined);
     try {
-      const saved = await onPublish(next);
+      // Same section round-trip as onSave: publishing is a save with a version,
+      // including the emptied-list case that has to clear persisted sections.
+      const saved = editorSections.length > 0 || sectionsDirtyRef.current
+        ? await onPublish(next, { sections: cloneSections(editorSections) })
+        : await onPublish(next);
       const savedWorkflow = isSaveResult(saved) ? saved.workflow : saved;
       if (!savedWorkflow) throw new Error("发布处理器未返回工作流定义");
       setParamIssues(isSaveResult(saved) && saved.paramIssues?.length ? saved.paramIssues : undefined);
@@ -2869,7 +3712,7 @@ export function XFlowEditor({
       publishingRef.current = false;
       setPublishing(false);
     }
-  }, [blockedByParameterDraft, onPublish, publishVersion, readOnly]);
+  }, [blockedByParameterDraft, editorSections, onPublish, publishVersion, readOnly]);
 
   const rollbackToVersion = React.useCallback(async (version: string) => {
     if (!canWriteWorkflow || !onRollback || rollingBackRef.current) return;
@@ -2909,7 +3752,7 @@ export function XFlowEditor({
   const runWorkflow = React.useCallback(async () => {
     if (readOnly) return;
     if (!onRun) {
-      setOperationError("运行不可用：宿主未提供 onRun 处理器");
+      setOperationError(hostCapabilityCopy.run);
       setOperationStatus("运行不可用");
       revealDock();
       return;
@@ -2974,25 +3817,34 @@ export function XFlowEditor({
     openApprovalFor(approvalNodeName);
   }, [openApprovalFor]);
 
-  // The bar's natural width (its id text ellipsizes when clamped, so the hidden
-  // remainder is scrollWidth - clientWidth). If centring that width would reach
-  // either of the preview's top floats, drop the row one float row: §6.3 keeps
-  // the bar centred, and the plan forbids covering 添加节点 / 定位节点. The
-  // editor width arrives through `editorWidth`, which re-renders on resize.
+  // The toast's natural width (its id text ellipsizes when clamped, so the
+  // hidden remainder is scrollWidth - clientWidth). It is centred on the
+  // ruler-inset canvas content (§6.3: 标尺内侧), matching the stylesheet's
+  // `left: calc(50% + ruler / 2)`. If that would reach either of the preview's
+  // top floats, drop the toast one float row: §6.3 keeps it centred, and the
+  // plan forbids covering 添加节点 / 定位节点. The editor width arrives through
+  // `editorWidth`, which re-renders on resize.
   React.useLayoutEffect(() => {
-    const row = runBarRowRef.current;
-    const bar = row?.querySelector<HTMLElement>(".xflow-editor-runbar");
-    if (!execution || !row || !bar || editorWidth <= 0) {
+    const toast = runBarRowRef.current;
+    const bar = toast?.querySelector<HTMLElement>(".xflow-editor-runbar");
+    if (!execution || !toast || !bar || editorWidth <= 0) {
       setRunBarStacked(false);
       return;
     }
     const canvas = canvasFrameRef.current;
     const canvasRect = canvas?.getBoundingClientRect();
     if (!canvas || !canvasRect || canvasRect.width === 0) return;
+    // jsdom has no stylesheet: an unset custom property reads as "", i.e. no ruler.
+    const ruler =
+      Number.parseFloat(
+        window
+          .getComputedStyle(toast.parentElement ?? toast)
+          .getPropertyValue("--xflow-editor-banner-ruler")
+      ) || 0;
     const idText = bar.querySelector<HTMLElement>(".xflow-editor-runbar__id-text");
     const hiddenId = idText ? Math.max(0, idText.scrollWidth - idText.clientWidth) : 0;
     const natural = bar.clientWidth + hiddenId;
-    const start = canvasRect.left + (canvasRect.width - natural) / 2;
+    const start = canvasRect.left + ruler + (canvasRect.width - ruler - natural) / 2;
     const end = start + natural;
     const root = editorRootRef.current;
     const leftFloat = root?.querySelector<HTMLElement>(
@@ -3006,16 +3858,26 @@ export function XFlowEditor({
   }, [editorWidth, execution]);
 
   React.useEffect(() => {
-    if (nodes.length === 0) {
-      setSelectedKey(undefined);
-      return;
-    }
-    // No selection is a real state (the Inspector shows the workflow settings);
-    // only a key whose node is gone falls back to a default.
-    if (selectedKey !== undefined && !nodes.some((node, index) => nodeKey(node, index) === selectedKey)) {
-      setSelectedKey(defaultSelectedKey(nodes));
-    }
-  }, [nodes, selectedKey]);
+    setSelection((current) => {
+      if (nodes.length === 0) {
+        return current.keys.length === 0 && current.primary === undefined ? current : { keys: [] };
+      }
+      const live = new Set(nodes.map((node, index) => nodeKey(node, index)));
+      const keys = current.keys.filter((key) => live.has(key));
+      if (keys.length === current.keys.length) return current;
+      if (keys.length === 0) {
+        // No selection is a real state (the Inspector shows the workflow
+        // settings); only a selection whose nodes are all gone falls back to a
+        // default, exactly as the single-selection rule did.
+        const fallback = defaultSelectedKey(nodes);
+        return fallback === undefined ? { keys: [] } : { keys: [fallback], primary: fallback };
+      }
+      // The primary survives when its node does; otherwise the first remaining
+      // key becomes the Inspector's subject.
+      const primary = current.primary !== undefined && live.has(current.primary) ? current.primary : keys[0];
+      return { keys, primary };
+    });
+  }, [nodes]);
 
   React.useEffect(() => {
     // Drop drawers the new layout cannot show: the left drawer exists in "b"
@@ -3030,12 +3892,20 @@ export function XFlowEditor({
   const focusNodeLibrarySearch = React.useCallback(() => {
     nodeLibrarySearchRef.current?.focus({ preventScroll: true });
   }, []);
+  /**
+   * The drawer's opening focus: the search field when the box is already open,
+   * else its title-bar key (the box itself starts hidden).
+   */
+  const focusNodeLibrarySearchControl = React.useCallback(() => {
+    if (nodeLibrarySearchOpen) nodeLibrarySearchRef.current?.focus({ preventScroll: true });
+    else nodeLibrarySearchButtonRef.current?.focus({ preventScroll: true });
+  }, [nodeLibrarySearchOpen]);
 
   React.useEffect(() => {
     if (layout !== "a" && compactDrawer === "left" && leftDrawerTab === "library" && editMode) {
-      focusNodeLibrarySearch();
+      focusNodeLibrarySearchControl();
     }
-  }, [compactDrawer, editMode, focusNodeLibrarySearch, layout, leftDrawerTab]);
+  }, [compactDrawer, editMode, focusNodeLibrarySearchControl, layout, leftDrawerTab]);
 
   const selectNodeByName = React.useCallback((name: string) => {
     const index = nodes.findIndex((node, nodeIndex) => nodeName(node, nodeIndex) === name);
@@ -3110,6 +3980,46 @@ export function XFlowEditor({
     openCompactDrawer("left");
   }, [changeMode, layout, openCompactDrawer]);
 
+  /**
+   * EL-13: the no-selection overview reads only facts the editor already holds.
+   * A run comes from the host's tracked execution, its loaded list page, or the
+   * lightweight latest-run read the host made on page load; with none, the row
+   * is absent instead of a placeholder.
+   */
+  const latestOverviewRun = execution ?? executionList?.list[0] ?? latestRun;
+  const workflowOverview = React.useMemo<WorkflowOverviewData>(() => ({
+    sectionCount: editorSections.length,
+    diagnostics,
+    version: baselineWorkflow.version,
+    persisted: Boolean(baselineWorkflow.id),
+    unsavedCount: unsavedChanges,
+    latestRun: latestOverviewRun
+      ? {
+          executionId: latestOverviewRun.executionId,
+          status: latestOverviewRun.status,
+          createdAt: latestOverviewRun.createdAt,
+          updatedAt: latestOverviewRun.updatedAt
+        }
+      : undefined,
+    onOpenDiagnostics: () => dockControllerRef.current?.open(),
+    onOpenRun: onSelectExecution && canViewExecutions
+      ? (executionId: string) => {
+          onSelectExecution(executionId);
+          enterRuns();
+        }
+      : undefined
+  }), [
+    baselineWorkflow.id,
+    baselineWorkflow.version,
+    canViewExecutions,
+    diagnostics,
+    editorSections.length,
+    enterRuns,
+    latestOverviewRun,
+    onSelectExecution,
+    unsavedChanges
+  ]);
+
   /** Doc C §6.2: from a blocked save/run, jump to the node's parameters JSON. */
   const revealParameterJson = React.useCallback((name: string) => {
     selectNodeByName(name);
@@ -3167,6 +4077,9 @@ export function XFlowEditor({
 
   const focusLibrarySearchFromKey = React.useCallback(() => {
     openNodeLibrary();
+    setNodeLibrarySearchOpen(true);
+    // The nonce matters when the box is already open: `open` does not change,
+    // so the focus effect below is the one that reaches it.
     setLibrarySearchFocusNonce((nonce) => nonce + 1);
   }, [openNodeLibrary]);
   React.useEffect(() => {
@@ -3213,6 +4126,8 @@ export function XFlowEditor({
   // ---- Canvas context menu -------------------------------------------------
 
   const [contextMenu, setContextMenu] = React.useState<ContextMenuRequest>();
+  /** The section whose × was pressed, waiting on the delete confirmation. */
+  const [sectionPendingDelete, setSectionPendingDelete] = React.useState<string>();
   /**
    * Bumped to ask the Inspector to start its header rename. Kept until a
    * mounted Inspector consumes it: the same gesture may mount the panel first
@@ -3326,6 +4241,98 @@ export function XFlowEditor({
   );
 
   /**
+   * 创建分区: one visual box around the current selection. Geometry is the
+   * union of the cards' measured boxes (the same measurement 自动布局 uses;
+   * card height follows its content, so no fixed size is assumed) plus a
+   * uniform padding. `node_keys` reuses the canvas's stable identity (`id ??
+   * name`), exactly like positions/ui. The selection is deliberately left
+   * alone: a section is not selectable yet, so moving the selection would
+   * throw away the node context the box was just drawn from.
+   */
+  const createSectionFromSelection = React.useCallback(() => {
+    if (!editMode || selection.keys.length === 0) return;
+    const byKey = new Map(toGraphModel(latestDraftRef.current).nodes.map((node) => [node.id, node]));
+    const keys: string[] = [];
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const key of selection.keys) {
+      const node = byKey.get(key);
+      if (!node) continue;
+      const box = nodeBox(key);
+      keys.push(key);
+      minX = Math.min(minX, node.position.x);
+      minY = Math.min(minY, node.position.y);
+      maxX = Math.max(maxX, node.position.x + box.width);
+      maxY = Math.max(maxY, node.position.y + box.height);
+    }
+    if (keys.length === 0) return;
+    updateSections((current) => [
+      ...current,
+      {
+        id: newSectionId(),
+        title: defaultSectionTitle(current),
+        node_keys: keys,
+        x: minX - sectionPadding,
+        y: minY - sectionPadding,
+        width: maxX - minX + sectionPadding * 2,
+        height: maxY - minY + sectionPadding * 2
+      }
+    ]);
+  }, [editMode, nodeBox, selection.keys, updateSections]);
+
+  /** An emptied title falls back to the default name instead of an invisible chip. */
+  const renameSection = React.useCallback((sectionId: string, title: string) => {
+    updateSections((current) =>
+      current.map((section) => {
+        if (section.id !== sectionId) return section;
+        const nextTitle = title.trim() || defaultSectionTitle(current, sectionId);
+        return section.title === nextTitle ? section : { ...section, title: nextTitle };
+      })
+    );
+  }, [updateSections]);
+
+  /**
+   * A move or resize, committed once when the preview's gesture ends. Only the
+   * rectangle changes: `node_keys` is the membership snapshot taken at
+   * creation and moving the box never moves (or adopts) the cards inside it.
+   * Like every other section write this bypasses the WorkflowDef history
+   * (ruling a), and it is not confirmed -- confirmation is for deletes.
+   */
+  const updateSectionGeometry = React.useCallback(
+    (sectionId: string, geometry: PreviewSectionGeometry) => {
+      updateSections((current) =>
+        current.map((section) => {
+          if (section.id !== sectionId) return section;
+          const unchanged =
+            section.x === geometry.x &&
+            section.y === geometry.y &&
+            section.width === geometry.width &&
+            section.height === geometry.height;
+          return unchanged ? section : { ...section, ...geometry };
+        })
+      );
+    },
+    [updateSections]
+  );
+
+  /*
+   * Sections are not part of the WorkflowDef history snapshots, so a delete is
+   * not undoable; it asks first. The confirmation is editor-owned because the
+   * preview package has no modal primitives (and no antd dependency).
+   */
+  const requestSectionDelete = React.useCallback((sectionId: string) => {
+    setSectionPendingDelete(sectionId);
+  }, []);
+  const confirmSectionDelete = React.useCallback(() => {
+    const sectionId = sectionPendingDelete;
+    setSectionPendingDelete(undefined);
+    if (sectionId === undefined) return;
+    updateSections((current) => current.filter((section) => section.id !== sectionId));
+  }, [sectionPendingDelete, updateSections]);
+
+  /**
    * Fits the view once the moved cards are actually on the canvas. The new
    * positions reach React Flow through the owner (which echoes the updated
    * workflow back down), so they land a few frames after the commit; framing
@@ -3349,7 +4356,10 @@ export function XFlowEditor({
       });
       if (landed || attempt >= 20) {
         layoutFitFrameRef.current = undefined;
-        previewHandleRef.current?.fitView();
+        // The row/column pitch now follows the measured cards, but a large graph
+        // still cannot fit at a readable zoom; the fit anchors its top-left
+        // rather than shrinking to the 11% the old whole-graph fit chose.
+        previewHandleRef.current?.fitView({ minZoom: READABLE_FIT_ZOOM });
         return;
       }
       layoutFitFrameRef.current = requestAnimationFrame(() => fitWhenNodesMoved(positions, attempt + 1));
@@ -3442,19 +4452,18 @@ export function XFlowEditor({
       }));
     const hasConnections = listConnectionReferences(draftWorkflow)
       .some((reference) => reference.sourceName === name || reference.targetName === name);
-    const runNote = onRunNode ? undefined : "宿主未提供 onRunNode";
     return [
-      { icon: <FileSearchOutlined />, key: "open", label: <ContextMenuLabel>打开属性</ContextMenuLabel> },
-      { icon: <EditOutlined />, key: "rename", label: <ContextMenuLabel>重命名</ContextMenuLabel> },
+      { icon: <SearchIcon />, key: "open", label: <ContextMenuLabel>打开属性</ContextMenuLabel> },
+      { icon: <EditIcon />, key: "rename", label: <ContextMenuLabel>重命名</ContextMenuLabel> },
       {
         disabled: !patchable,
-        icon: <ExportOutlined />,
+        icon: <UploadIcon />,
         key: "duplicate",
         label: <ContextMenuLabel hint="⌘D">复制节点</ContextMenuLabel>
       },
       {
         disabled: !patchable,
-        icon: node.disabled ? <CheckCircleOutlined /> : <WarningOutlined />,
+        icon: node.disabled ? <CheckIcon /> : <WarnIcon />,
         key: "toggle-disabled",
         label: <ContextMenuLabel>{node.disabled ? "启用节点" : "禁用节点"}</ContextMenuLabel>
       },
@@ -3462,33 +4471,37 @@ export function XFlowEditor({
       {
         children: connectTargets.length > 0 ? connectTargets : [{ disabled: true, key: "connect:none", label: "没有可连接的目标" }],
         disabled: !connectable,
-        icon: <BranchesOutlined />,
+        icon: <BranchIcon />,
         key: "connect",
         label: <ContextMenuLabel note={connectable ? undefined : "该节点没有输出端口"}>连接到</ContextMenuLabel>
       },
       {
         disabled: !hasConnections,
-        icon: <ApartmentOutlined />,
+        icon: <NodeIndexIcon />,
         key: "disconnect-all",
         label: <ContextMenuLabel>断开所有连接</ContextMenuLabel>
       },
       { type: "divider" },
-      {
-        disabled: !onRunNode,
-        icon: <PlayCircleOutlined />,
-        key: "run-from",
-        label: <ContextMenuLabel note={runNote}>从此节点运行</ContextMenuLabel>
-      },
-      {
-        disabled: !onRunNode,
-        icon: <StepForwardOutlined />,
-        key: "run-to",
-        label: <ContextMenuLabel note={runNote}>运行到此节点</ContextMenuLabel>
-      },
-      { type: "divider" },
+      // A host without onRunNode cannot run part of a graph; an item that only
+      // says why it is dead is developer copy in a product menu. Hide both.
+      ...(onRunNode
+        ? [
+            {
+              icon: <PlayIcon />,
+              key: "run-from",
+              label: <ContextMenuLabel>从此节点运行</ContextMenuLabel>
+            },
+            {
+              icon: <SkipIcon />,
+              key: "run-to",
+              label: <ContextMenuLabel>运行到此节点</ContextMenuLabel>
+            },
+            { type: "divider" as const }
+          ]
+        : []),
       {
         danger: true,
-        icon: <DeleteOutlined />,
+        icon: <TrashIcon />,
         key: "delete",
         label: <ContextMenuLabel hint="Del">删除节点</ContextMenuLabel>
       }
@@ -3515,31 +4528,47 @@ export function XFlowEditor({
     return [
       {
         children: groups,
-        icon: <AppstoreAddOutlined />,
+        icon: <PlusIcon />,
         key: "add-node",
         label: <ContextMenuLabel>添加节点</ContextMenuLabel>
       },
+      {
+        disabled: selection.keys.length === 0,
+        icon: <GridIcon />,
+        key: "create-section",
+        label: (
+          <ContextMenuLabel note={selection.keys.length === 0 ? "先选中节点" : `${selection.keys.length} 个节点`}>
+            创建分区
+          </ContextMenuLabel>
+        )
+      },
       { type: "divider" },
       {
-        icon: <CompressOutlined />,
+        icon: <FitIcon />,
         key: "fit-view",
         label: <ContextMenuLabel>适应视图</ContextMenuLabel>
       },
       {
         disabled: (draftWorkflow.nodes ?? []).length === 0,
-        icon: <PartitionOutlined />,
+        icon: <LayoutIcon />,
         key: "auto-layout",
         label: <ContextMenuLabel>自动布局</ContextMenuLabel>
       }
     ];
-  }, [draftWorkflow.nodes, libraryDescriptors]);
+  }, [draftWorkflow.nodes, libraryDescriptors, selection.keys.length]);
 
   const handleContextMenuSelect = React.useCallback((itemKey: string) => {
     const request = contextMenu;
     if (!request) return;
     if (request.kind === "pane") {
+      if (itemKey === "create-section") {
+        createSectionFromSelection();
+        return;
+      }
       if (itemKey === "fit-view") {
-        previewHandleRef.current?.fitView();
+        // Same readable floor as 自动布局 and the initial view: a huge graph is
+        // anchored at its entry column rather than shrunk to an unreadable fit.
+        previewHandleRef.current?.fitView({ minZoom: READABLE_FIT_ZOOM });
         return;
       }
       if (itemKey === "auto-layout") {
@@ -3565,6 +4594,7 @@ export function XFlowEditor({
     autoLayoutWorkflow,
     connectNodeTo,
     contextMenu,
+    createSectionFromSelection,
     deleteSelectedNode,
     disconnectNode,
     dropNode,
@@ -3591,7 +4621,7 @@ export function XFlowEditor({
           if (onRun && editMode && !running) void runWorkflow();
           return;
         case "duplicate":
-          duplicateSelectedNode();
+          duplicateSelectedNodes();
           return;
         case "findNode":
           openNodeSearch();
@@ -3604,6 +4634,13 @@ export function XFlowEditor({
           return;
         case "toggleDiagnostics":
           dockControllerRef.current?.toggle();
+          return;
+        case "toggleDiagnosticsSummary":
+          // ⇧P walks the dock between its summary (docked) and expanded
+          // heights; a collapsed dock opens to the summary first. 运行记录 does
+          // not mount the dock, so there is no state to walk there.
+          if (!dockControllerRef.current) return;
+          setDock((current) => (current === "docked" ? "expanded" : "docked"));
           return;
         case "selectTool":
           setCanvasTool("select");
@@ -3635,10 +4672,23 @@ export function XFlowEditor({
       // takes Escape, and Delete / ⌘D must not act on the node behind it (that
       // would delete the node and leave the menu pointing at nothing).
       if (contextMenu) return;
+      /**
+       * Printable-key bindings must not fire — or swallow the browser default —
+       * for events the host page handed somewhere else. A window/document
+       * dispatch (nothing focused) still belongs to the mounted editor.
+       */
+      const editorOwnsEvent = (target: EventTarget | null): boolean => {
+        const root = editorRootRef.current;
+        if (!root) return false;
+        if (target instanceof Node && root.contains(target)) return true;
+        const focus = document.activeElement;
+        return !focus || focus === document.body || focus === document.documentElement || root.contains(focus);
+      };
       const inTextEntry = isTextEntryTarget(event.target);
       for (const shortcut of editorShortcuts) {
         if (inTextEntry && shortcut.scope === "canvas") continue;
         if (!shortcut.match(event)) continue;
+        if (shortcut.inEditorOnly && !editorOwnsEvent(event.target)) continue;
         // Esc inside a popup (menu, listbox, dialog) closes that popup only.
         if (shortcut.id === "escape" && isInsidePopup(event.target)) continue;
         // The workbench behind an expanded drawer is inert: shortcuts that act on
@@ -3647,7 +4697,10 @@ export function XFlowEditor({
         if (shortcut.preventDefault !== false) event.preventDefault();
         // Holding the chord must not flicker the dock, and a dialog in front
         // owns the keyboard: the browser default is still swallowed above.
-        if (shortcut.id === "toggleDiagnostics" && (event.repeat || shortcutsOpen || nodeSearchOpen)) return;
+        if (
+          (shortcut.id === "toggleDiagnostics" || shortcut.id === "toggleDiagnosticsSummary")
+          && (event.repeat || shortcutsOpen || nodeSearchOpen)
+        ) return;
         runShortcut(shortcut.id);
         return;
       }
@@ -3657,7 +4710,7 @@ export function XFlowEditor({
   }, [
     contextMenu,
     dock,
-    duplicateSelectedNode,
+    duplicateSelectedNodes,
     editMode,
     leaveTransientMode,
     nodeSearchOpen,
@@ -3724,13 +4777,13 @@ export function XFlowEditor({
       ?.focus();
   }, [layout]);
   const collapseLeftAction = layout === "a" ? (
-    <Tooltip classNames={editorTooltipClassNames} title="收起左栏（⌘ / Ctrl + B）">
+    <Tooltip classNames={editorTooltipClassNames} title="收起左栏 ⌘B">
       <Button
+        aria-expanded
         aria-label="收起左栏"
-        aria-pressed
         className="xflow-editor-panel-collapse"
         color="default"
-        icon={<MenuFoldOutlined />}
+        icon={<SideLeftIcon />}
         size="small"
         variant="text"
         onClick={() => setLeftCollapsed(true)}
@@ -3751,13 +4804,13 @@ export function XFlowEditor({
   }, []);
   // The last outline row was deleted while it held focus: nothing in the tree
   // can take it (the empty note is not focusable), so hand it to the library
-  // search, else (preview, or no library on screen) the rail's 节点与大纲 key.
+  // search key, else (preview, or no library on screen) the rail's 节点与大纲 key.
   const handleOutlineFocusLost = React.useCallback(() => {
     if (document.activeElement && document.activeElement !== document.body) return;
-    // Try the search for real and judge by where focus ended up, not by a
+    // Try the key for real and judge by where focus ended up, not by a
     // pre-check of the ref: a library that is on screen takes focus, one that is
     // not (preview, unmounted) leaves it on <body> and the rail key gets it.
-    nodeLibrarySearchRef.current?.focus({ preventScroll: true });
+    nodeLibrarySearchButtonRef.current?.focus({ preventScroll: true });
     if (document.activeElement && document.activeElement !== document.body) return;
     editorRootRef.current
       ?.querySelector<HTMLButtonElement>(".xflow-editor-desktop-rail button[aria-label='节点与大纲'], .xflow-editor-compact-rail--left button[aria-label='节点与大纲']")
@@ -3766,18 +4819,19 @@ export function XFlowEditor({
   /**
    * The 节点 state of the left column (§6.0.1): the node library over the
    * outline, one region each. Preview has no library, so the outline fills the
-   * column alone and carries the collapse action itself. `inDrawer` is the
-   * compact drawer, which focuses the search on open.
+   * column alone and carries the collapse action itself.
    */
-  const renderNodeZones = (headerAction: React.ReactNode, inDrawer = false): React.ReactElement => (
+  const renderNodeZones = (headerAction: React.ReactNode): React.ReactElement => (
     <aside aria-label="节点与大纲" className="xflow-editor-lib" data-zones={editMode ? "dual" : "single"}>
       {editMode ? (
         <NodeLibrary
-          autoFocusSearch={inDrawer}
           descriptors={libraryDescriptors}
           headerAction={headerAction}
+          searchButtonRef={nodeLibrarySearchButtonRef}
           searchInputRef={nodeLibrarySearchRef}
+          searchOpen={nodeLibrarySearchOpen}
           onAddNode={addNode}
+          onSearchOpenChange={setNodeLibrarySearchOpen}
         />
       ) : null}
       <OutlinePanel
@@ -3785,6 +4839,7 @@ export function XFlowEditor({
         headerAction={editMode ? undefined : headerAction}
         nodeCategories={nodeCategories}
         runtime={localRuntime}
+        sections={editorSections}
         selectedKey={selectedKey}
         workflow={draftWorkflow}
         onFocusLost={handleOutlineFocusLost}
@@ -3795,13 +4850,13 @@ export function XFlowEditor({
     </aside>
   );
   const collapseRightAction = layout === "a" ? (
-    <Tooltip classNames={editorTooltipClassNames} title="收起属性面板（⌥⌘B / Ctrl + Alt + B）">
+    <Tooltip classNames={editorTooltipClassNames} title="收起属性面板 ⌥⌘B">
       <Button
+        aria-expanded
         aria-label="收起属性面板"
-        aria-pressed
         className="xflow-editor-panel-collapse"
         color="default"
-        icon={<MenuUnfoldOutlined />}
+        icon={<SideRightIcon />}
         size="small"
         variant="text"
         onClick={() => setRightCollapsed(true)}
@@ -3826,11 +4881,17 @@ export function XFlowEditor({
   }, [selectedKey, toggleNodeDisabled]);
 
   // §6.12 运行 tab: a suspended approval node offers 处理审批 for the tracked run.
+  // The replay selects from the snapshot graph, so the definition and index
+  // must come from that graph too — a live draft may have renamed the node.
+  const selectedApprovalDefinition = runsMode ? replaySelectedNode : selectedNode;
+  const selectedApprovalDefinitionIndex = runsMode ? replaySelectedIndex : selectedIndex;
   const selectedApprovalName =
-    selectedNode?.type === APPROVAL_NODE_TYPE ? nodeName(selectedNode, selectedIndex) : undefined;
+    selectedApprovalDefinition?.type === APPROVAL_NODE_TYPE
+      ? nodeName(selectedApprovalDefinition, selectedApprovalDefinitionIndex)
+      : undefined;
   const selectedApprovalSuspended = Boolean(
     selectedApprovalName &&
-      execution?.nodes?.some((candidate) => candidate.name === selectedApprovalName && candidate.status === "suspended")
+      trackedExecution?.nodes?.some((candidate) => candidate.name === selectedApprovalName && candidate.status === "suspended")
   );
   const handleSelectedApproval = selectedApprovalSuspended && selectedApprovalName
     ? () => openApprovalFor(selectedApprovalName)
@@ -3861,9 +4922,12 @@ export function XFlowEditor({
       onChangeWith={commitWorkflowWith}
       running={running}
       onOpenExecution={onOpenExecution}
-      onHandleApproval={runsMode ? undefined : handleSelectedApproval}
+      // §6.12: the Inspector's 运行 tab is an entry in the replay too — the
+      // snapshot node is where an operator already looks for its attempt.
+      onHandleApproval={handleSelectedApproval}
       onRerunFromNode={replayRerunFromNode}
       onRunNode={!runsMode && onRunNode && selectedKey ? () => void runNode(selectedKey, "to") : undefined}
+      replay={runsMode}
       onDeleteNode={deleteSelectedNode}
       onDuplicateNode={duplicateSelectedNode}
       onToggleNodeDisabled={toggleSelectedNodeDisabled}
@@ -3874,16 +4938,23 @@ export function XFlowEditor({
       onParameterTabChange={setParameterTab}
       onParameterText={updateParameterText}
       onWorkflowJsonText={updateWorkflowJsonText}
+      // The workflow settings' 入口 rows carry canvas keys, so they reuse the
+      // outline's key-keyed select-and-centre pair (locateDiagnosticNode takes
+      // a node *name* and would miss a node whose id differs from it).
+      onLocateNode={selectOutlineNode}
+      // EL-13: the overview describes this draft, so a replay (which shows the
+      // snapshot definition) keeps the settings-only panel.
+      overview={runsMode ? undefined : workflowOverview}
     />
   );
 
   // §6.12 dialog inputs: the definition node (parameters, label) and the
   // execution record (public ledger) of the same node name.
   const approvalDefinitionNode = approvalTarget
-    ? workflowNodeByName(draftWorkflow, approvalTarget.nodeName)
+    ? workflowNodeByName(canvasWorkflow, approvalTarget.nodeName)
     : undefined;
-  const approvalExecutionNode = approvalTarget && execution?.executionId === approvalTarget.executionId
-    ? execution.nodes?.find((candidate) => candidate.name === approvalTarget.nodeName)
+  const approvalExecutionNode = approvalTarget && trackedExecution?.executionId === approvalTarget.executionId
+    ? trackedExecution.nodes?.find((candidate) => candidate.name === approvalTarget.nodeName)
     : undefined;
 
   const moreMenuButton = (
@@ -3896,7 +4967,7 @@ export function XFlowEditor({
       <Button
         aria-label="更多操作"
         className="xflow-editor-icon-button"
-        icon={<MoreOutlined />}
+        icon={<MoreIcon />}
         title="更多操作"
         type="text"
       />
@@ -3904,8 +4975,8 @@ export function XFlowEditor({
   );
 
   // §6.8 top bar: execution id + status + lineage + the status table's control
-  // ops + 重跑…. The replay has no editing actions; the ⋯ menu stays for the
-  // view-level entries (布局 / 帮助) but 保存 / 运行 / 发布 are absent.
+  // ops + 重跑…. The replay has no editing actions; the compact layout's ⋯ menu
+  // stays for the view-level entries (布局 / 帮助) but 保存 / 运行 / 发布 are absent.
   const runsStatusMeta = selectedExecution ? workflowStatusMeta[selectedExecution.status] : undefined;
   const runsOps = runsStatusMeta
     ? runsStatusMeta.ops.filter((op): op is ExecutionControlAction => op !== "rerun" && (
@@ -3937,6 +5008,20 @@ export function XFlowEditor({
       .map((status) => `${counts[status]} ${nodeStatusMeta[status].label}`)
       .join(" · ");
   }, [selectedExecution?.nodes]);
+  // EL-11 run header: the three counts the replay's status bar already derives,
+  // plus the run's wall clock and the tracing link the diagnostics dock uses.
+  const replayCounts = React.useMemo(() => {
+    const counts = { failed: 0, skipped: 0, success: 0 };
+    for (const node of selectedExecution?.nodes ?? []) {
+      if (node.status === "success" || node.status === "failed" || node.status === "skipped") {
+        counts[node.status] += 1;
+      }
+    }
+    return counts;
+  }, [selectedExecution?.nodes]);
+  const replayDuration = selectedExecution ? executionDuration(selectedExecution) : undefined;
+  const replayTraceId = executionSnapshotRuntime?.traceId;
+  const replayTraceUrl = replayTraceId && traceHref ? traceHref(replayTraceId) : undefined;
   const rerunExecution = rerunTarget === undefined
     ? undefined
     : [selectedExecution, execution].find((candidate) => candidate?.executionId === rerunTarget.executionId);
@@ -3944,9 +5029,6 @@ export function XFlowEditor({
     <div className="xflow-editor-runmeta" aria-label="当前执行">
       {selectedExecution ? (
         <>
-          <span className="xflow-editor-runmeta__id" title={selectedExecution.executionId}>
-            {selectedExecution.executionId}
-          </span>
           <span
             className="xflow-editor-chip"
             data-status={selectedExecution.status}
@@ -3992,12 +5074,13 @@ export function XFlowEditor({
                 onConfirm={() => void runExecutionAction(selectedExecution.executionId, "cancel")}
                 title={`取消执行 ${selectedExecution.executionId}？`}
               >
-                <Button danger disabled={!onExecutionAction} size="small">
+                <Button className="xflow-editor-run-action" danger disabled={!onExecutionAction} size="small">
                   {executionOpLabel[op]}
                 </Button>
               </Popconfirm>
             ) : (
               <Button
+                className="xflow-editor-run-action"
                 disabled={!onExecutionAction}
                 key={op}
                 size="small"
@@ -4010,7 +5093,7 @@ export function XFlowEditor({
           {runsCanRerun ? (
             <Button
               className="xflow-editor-rerun-button"
-              icon={<StepForwardOutlined />}
+              icon={<SkipIcon />}
               size="small"
               type="primary"
               onClick={() => openRerun(selectedExecution.executionId)}
@@ -4022,9 +5105,11 @@ export function XFlowEditor({
       ) : (
         <span className="xflow-editor-runmeta__empty">未选择执行</span>
       )}
-      {moreMenuButton}
+      {compactToolbar ? moreMenuButton : null}
     </div>
   );
+
+  const sectionPendingDeleteTitle = editorSections.find((section) => section.id === sectionPendingDelete)?.title;
 
   return (
     <ConfigProvider
@@ -4057,7 +5142,7 @@ export function XFlowEditor({
             <Button
               aria-label="返回工作流列表"
               className="xflow-editor-icon-button"
-              icon={<ArrowLeftOutlined />}
+              icon={<BackIcon />}
               type="text"
               onClick={onBack}
             />
@@ -4068,7 +5153,7 @@ export function XFlowEditor({
           {runsMode ? (
             <span className="xflow-editor-chip" data-tone="neutral">
               <span aria-hidden="true" className="xflow-editor-chip__icon">
-                <ClockCircleOutlined />
+                <ClockIcon />
               </span>
               <span>
                 运行版本{" "}
@@ -4107,17 +5192,11 @@ export function XFlowEditor({
                 data-tone={versionChip.tone}
                 type="button"
               >
-                <span aria-hidden="true" className="xflow-editor-chip__icon">
-                  {versionChip.tone === "warning" ? <WarningOutlined /> : versionChip.tone === "neutral" ? <HistoryOutlined /> : <CheckOutlined />}
-                </span>
                 <span>{versionChip.label}</span>
               </button>
             </Popover>
           ) : (
             <span className="xflow-editor-chip" data-tone={versionChip.tone}>
-              <span aria-hidden="true" className="xflow-editor-chip__icon">
-                {versionChip.tone === "warning" ? <WarningOutlined /> : versionChip.tone === "neutral" ? <HistoryOutlined /> : <CheckOutlined />}
-              </span>
               <span>{versionChip.label}</span>
             </span>
           )}
@@ -4151,7 +5230,7 @@ export function XFlowEditor({
                   aria-label="撤销"
                   className="xflow-editor-icon-button"
                   disabled={!editMode || history.undo.length === 0}
-                  icon={<UndoOutlined />}
+                  icon={<UndoIcon />}
                   type="text"
                   onClick={undoWorkflow}
                 />
@@ -4163,7 +5242,7 @@ export function XFlowEditor({
                   aria-label="重做"
                   className="xflow-editor-icon-button"
                   disabled={!editMode || history.redo.length === 0}
-                  icon={<RedoOutlined />}
+                  icon={<RedoIcon />}
                   type="text"
                   onClick={redoWorkflow}
                 />
@@ -4175,7 +5254,7 @@ export function XFlowEditor({
             <Button
               aria-label="校验"
               className="xflow-editor-validate-button"
-              icon={<SafetyCertificateOutlined />}
+              icon={<ShieldIcon className="xflow-editor-toolbar-icon" />}
               type="text"
               onClick={validateCurrentWorkflow}
             >
@@ -4192,7 +5271,9 @@ export function XFlowEditor({
             content={
               <ThemeSettings
                 appearance={activeAppearance}
+                layoutPolicy={layoutPolicy}
                 onAppearanceChange={changeAppearance}
+                onLayoutPolicyChange={setLayoutPolicy}
               />
             }
             placement="bottomRight"
@@ -4202,11 +5283,10 @@ export function XFlowEditor({
             <Button
               aria-label="主题设置"
               className="xflow-editor-icon-button xflow-editor-theme-trigger"
-              icon={<BgColorsOutlined />}
+              icon={<ThemeContrastIcon />}
               type="text"
             />
           </Popover>
-              {moreMenuButton}
               <Divider className="xflow-editor-sep" orientation="vertical" />
             </>
           )}
@@ -4221,7 +5301,7 @@ export function XFlowEditor({
                   className="xflow-editor-save-button"
                   data-blocked={saveBlocked || undefined}
                   disabled={!onSave || saveClean}
-                  icon={saveBlocked ? <WarningOutlined className="xflow-editor-save-button__icon" /> : undefined}
+                  icon={saveBlocked ? <WarnIcon className="xflow-editor-save-button__icon" /> : undefined}
                   loading={saving}
                   onClick={() => void saveWorkflow()}
                 >
@@ -4236,13 +5316,13 @@ export function XFlowEditor({
               </span>
             </Tooltip>
             <span className="xflow-editor-run-split">
-              <Tooltip classNames={editorTooltipClassNames} title={onRun ? "运行工作流（⌘ / Ctrl + Enter）" : "运行不可用：宿主未提供 onRun 处理器"}>
+              <Tooltip classNames={editorTooltipClassNames} title={onRun ? "运行工作流（⌘ / Ctrl + Enter）" : hostCapabilityCopy.run}>
                 <span>
                   <Button
                     aria-label="运行工作流"
                     className="xflow-editor-run-split__main"
                     disabled={running || !onRun}
-                    icon={<CaretRightOutlined />}
+                    icon={<PlayIcon className="xflow-editor-toolbar-icon" />}
                     loading={running}
                     type="primary"
                     onClick={() => void runWorkflow()}
@@ -4262,7 +5342,7 @@ export function XFlowEditor({
                     <Button
                       aria-label="运行选项"
                       className="xflow-editor-run-split__options"
-                      icon={<DownOutlined />}
+                      icon={<DownIcon className="xflow-editor-toolbar-icon" />}
                       type="primary"
                     />
                   </Dropdown>
@@ -4273,7 +5353,7 @@ export function XFlowEditor({
               classNames={editorTooltipClassNames}
               title={onPublish
                 ? "发布新版本：归档当前线上版本，此后新触发的执行使用新版本"
-                : "发布不可用：宿主未提供 onPublish 处理器"}
+                : hostCapabilityCopy.publish}
             >
               <span>
                 <Button
@@ -4307,10 +5387,11 @@ export function XFlowEditor({
           <div className="xflow-editor-left">
             <nav className="xflow-editor-rail xflow-editor-desktop-rail" aria-label="工作台导航">
               <RailKey
-                icon={<AppstoreOutlined />}
+                icon={<GridIcon />}
                 label="节点与大纲"
                 pressed={!runsMode && !leftCollapsed && leftSection === "library"}
                 text="节点"
+                title="节点与大纲 ⌘B"
                 onClick={() => {
                   // Coming back from the replay the column shows the execution
                   // list, so 节点 must expand it: "same section on screen" is
@@ -4326,7 +5407,7 @@ export function XFlowEditor({
               />
               {canViewExecutions ? (
                 <RailKey
-                  icon={<HistoryOutlined />}
+                  icon={<HistoryIcon />}
                   label="执行记录"
                   pressed={runsMode}
                   text="执行"
@@ -4334,7 +5415,7 @@ export function XFlowEditor({
                 />
               ) : null}
               <RailKey
-                icon={<FunctionOutlined />}
+                icon={<CodeIcon />}
                 label="变量"
                 pressed={!runsMode && !leftCollapsed && leftSection === "variables"}
                 text="变量"
@@ -4350,7 +5431,7 @@ export function XFlowEditor({
               />
               <span className="xflow-editor-rail__spacer" />
               <RailKey
-                icon={<QuestionCircleOutlined />}
+                icon={<HelpIcon />}
                 label="快捷键与帮助"
                 text="帮助"
                 title="快捷键（?）"
@@ -4384,7 +5465,7 @@ export function XFlowEditor({
         ) : (
           <aside className="xflow-editor-rail xflow-editor-compact-rail xflow-editor-compact-rail--left" aria-label="紧凑导航">
             <RailKey
-              icon={<AppstoreOutlined />}
+              icon={<GridIcon />}
               label="节点与大纲"
               pressed={!runsMode && compactDrawer === "left" && leftDrawerSection === "library"}
               text="节点"
@@ -4400,7 +5481,7 @@ export function XFlowEditor({
             />
             {canViewExecutions ? (
               <RailKey
-                icon={<HistoryOutlined />}
+                icon={<HistoryIcon />}
                 label="执行记录"
                 pressed={runsMode}
                 text="执行"
@@ -4408,7 +5489,7 @@ export function XFlowEditor({
               />
             ) : null}
             <RailKey
-              icon={<FunctionOutlined />}
+              icon={<CodeIcon />}
               label="变量"
               pressed={!runsMode && compactDrawer === "left" && leftDrawerSection === "variables"}
               text="变量"
@@ -4423,10 +5504,10 @@ export function XFlowEditor({
               }}
             />
             <span className="xflow-editor-rail__spacer" />
-            {/* Below `narrow` the inspector has no column left; the rail opens it as an overlay. */}
+            {/* In layout "c" the inspector has no column; the rail opens it as an overlay. */}
             {layout === "c" ? (
               <RailKey
-                icon={<SlidersOutlined />}
+                icon={<SlidersIcon />}
                 label="属性面板"
                 pressed={compactDrawer === "right"}
                 text="属性"
@@ -4434,7 +5515,7 @@ export function XFlowEditor({
               />
             ) : null}
             <RailKey
-              icon={<QuestionCircleOutlined />}
+              icon={<HelpIcon />}
               label="快捷键与帮助"
               text="帮助"
               title="快捷键（?）"
@@ -4444,11 +5525,12 @@ export function XFlowEditor({
         )}
 
         <section className="xflow-editor-canvas" aria-label="画布">
-          {/* §6.3: the run bar owns the centre column of the canvas's top float
-              row; the banner stack starts below the shared float height. */}
+          {/* §6.3: the run state floats as a toast over the canvas's top centre
+              (12px inside the ruler), not a toolbar row. The banner stack starts
+              below the float row so the two never overlap. */}
           {!runsMode && execution ? (
             <div
-              className="xflow-editor-runbar-row"
+              className="xflow-editor-run-toast"
               data-stacked={runBarStacked ? "true" : undefined}
               ref={runBarRowRef}
             >
@@ -4470,6 +5552,41 @@ export function XFlowEditor({
             </div>
           ) : null}
           {runsMode ? null : <BannerStack banners={banners} onFocusLost={focusCanvasFrame} />}
+          {runsMode && selectedExecution ? (
+            <div aria-label="本次运行" className="xflow-editor-replay-summary" role="region">
+              <span
+                className="xflow-editor-chip"
+                data-status={selectedExecution.status}
+                data-tone={runsStatusMeta?.tone}
+              >
+                <span aria-hidden="true" className="xflow-editor-chip__icon">
+                  {runsStatusMeta ? statusGlyph[runsStatusMeta.icon] : null}
+                </span>
+                <span>{runsStatusMeta?.label}</span>
+              </span>
+              <span className="xflow-editor-replay-summary__meta">
+                开始 {selectedExecution.createdAt ? executionClock(selectedExecution.createdAt) : "—"}
+              </span>
+              <span className="xflow-editor-replay-summary__meta">
+                耗时 {replayDuration ?? (runsStatusMeta?.terminal ? "—" : "进行中")}
+              </span>
+              <span className="xflow-editor-replay-summary__counts">
+                成功 {replayCounts.success} · 失败 {replayCounts.failed} · 跳过 {replayCounts.skipped}
+              </span>
+              <span className="xflow-editor-statusbar__spacer" />
+              {replayTraceUrl ? (
+                <a
+                  className="xflow-editor-replay-summary__link"
+                  href={replayTraceUrl}
+                  rel="noreferrer"
+                  target="_blank"
+                >
+                  查看 trace
+                </a>
+              ) : null}
+              <Button size="small" onClick={() => changeMode("edit")}>返回编辑</Button>
+            </div>
+          ) : null}
           <div
             className="xflow-editor-preview-frame"
             ref={canvasFrameRef}
@@ -4483,29 +5600,56 @@ export function XFlowEditor({
               className="xflow-editor-preview"
               editable={editMode}
               interactionMode={runsMode ? "select" : canvasTool}
+              // §6.2: the workbench opens with the minimap on (baseline #wb),
+              // except on an empty canvas, where there is nothing to shrink and
+              // EL-14 hides the empty thumbnail frame. The zoom bar's
+              // 显示缩略图 key and ⇧M stay the local override.
+              minimap={(canvasWorkflow.nodes ?? []).length > 0}
+              // EL-10: rulers are off by default; the zoom bar's ⇧R keeps the
+              // toggle and its per-mount memory.
+              ruler={false}
               // "" rather than undefined: an empty editor selection must not
               // fall back to the preview's own uncontrolled selection.
               selectedNodeId={selectedKey ?? ""}
+              // The full selection set; `selectedNodeId` above stays the primary
+              // the Inspector follows. Both come from one state object.
+              selectedNodeIds={selectedKeys}
               onSelectNode={setSelectedKey}
+              onSelectionChange={applyCanvasSelection}
               onPaneClick={clearSelection}
-              onNodePositionChange={runsMode ? undefined : updateNodePosition}
+              onNodePositionsChange={runsMode ? undefined : updateNodePositions}
               onConnect={runsMode ? undefined : addCanvasConnection}
               onDeleteConnection={runsMode ? undefined : removeCanvasConnection}
               // The preview's Delete / Backspace listener is on the window: with the
               // workbench inert behind an expanded drawer it must not delete a node.
-              onDeleteNode={runsMode || dock === "expanded" ? undefined : deleteSelectedNode}
+              // One call for the whole selection, so it lands as one undo step.
+              onDeleteNodes={runsMode || dock === "expanded" ? undefined : deleteNodesByKeys}
               onDropNode={runsMode ? undefined : dropNode}
               danglingPorts={runsMode ? undefined : canvasDanglingPorts}
               // A remount takes `defaultViewport`; the way back reuses the
               // viewport captured from the edit canvas before entering the replay.
               defaultViewport={runsMode ? undefined : restoreViewport ?? defaultViewport}
               onViewportChange={runsMode ? undefined : handleViewportChange}
-              nodeNotes={runsMode ? undefined : approvalNotes}
+              // §6.2 / EL-11: section boxes are visual annotations of this
+              // workflow; a replay draws them read-only over the snapshot so the
+              // run keeps the same landmarks as the edit canvas.
+              sections={editorSections}
+              onSectionTitleChange={editMode ? renameSection : undefined}
+              onSectionDelete={editMode ? requestSectionDelete : undefined}
+              onSectionGeometryChange={editMode ? updateSectionGeometry : undefined}
+              nodeNotes={approvalNotes}
               nodeCategories={nodeCategories}
+              nodeTypeLabels={nodeTypeLabels}
+              nodeIcon={canvasNodeIcon}
               nodeSummaries={canvasNodeSummaries}
               nodeMetaNotes={runsMode ? replayMetaNotes : undefined}
+              // CP-01: a replay is a past run, so the current draft's form
+              // findings would be a statement about a different document.
+              nodeIssues={runsMode ? undefined : previewNodeIssues}
               onLocateParameter={runsMode ? undefined : locateSummaryField}
-              onNodeAction={runsMode || !firstApprovalNode ? undefined : handlePreviewNodeAction}
+              // §6.12: a suspended approval card is the dialog's entry in both
+              // modes. The replay is read-only for the graph, not for decisions.
+              onNodeAction={!firstApprovalNode ? undefined : handlePreviewNodeAction}
               // Preview mode keeps the browser's own menu: the editor has
               // nothing to offer there.
               onNodeContextMenu={editMode ? openNodeContextMenu : undefined}
@@ -4515,64 +5659,38 @@ export function XFlowEditor({
               onAutoLayout={editMode ? autoLayoutWorkflow : undefined}
               canvasFloat={runsMode ? (
                 <div className="xflow-editor-canvas-mode" data-replay="true" role="status">
-                  <EyeOutlined />
+                  <EyeIcon />
                   <strong>只读回放</strong>
                   <span>· 节点不可拖动、不可连线</span>
                 </div>
               ) : editMode ? (
-                <>
-                  <Tooltip classNames={editorTooltipClassNames} title="添加节点 (A)">
-                    <Button
-                      aria-label="添加节点 (A)"
-                      className="xflow-editor-canvas-add"
-                      icon={<PlusOutlined />}
-                      size="small"
-                      type="text"
-                      onClick={openNodeLibrary}
-                    >
-                      添加节点
-                    </Button>
-                  </Tooltip>
-                  <Tooltip classNames={editorTooltipClassNames} title="定位节点 ⌘K">
-                    <Button
-                      aria-label="定位节点 ⌘K"
-                      className="xflow-editor-canvas-locate"
-                      icon={<SearchOutlined />}
-                      size="small"
-                      type="text"
-                      onClick={(event) => openNodeSearch(event.currentTarget)}
-                    />
-                  </Tooltip>
-                </>
-              ) : (
-                <>
-                  {/* The 只读 banner already says it; the preview notice would repeat it. */}
-                  {readOnly ? null : (
-                    <div className="xflow-editor-canvas-mode" role="status">
-                      <EyeOutlined />
-                      <strong>预览模式</strong>
-                      <span>画布为只读；切换到编辑模式后才能修改工作流</span>
-                    </div>
-                  )}
-                  {/* Read-only still needs locate: the magnifier follows the notice. */}
-                  <Tooltip classNames={editorTooltipClassNames} title="定位节点 ⌘K">
-                    <Button
-                      aria-label="定位节点 ⌘K"
-                      className="xflow-editor-canvas-locate"
-                      icon={<SearchOutlined />}
-                      size="small"
-                      type="text"
-                      onClick={(event) => openNodeSearch(event.currentTarget)}
-                    />
-                  </Tooltip>
-                </>
+                <Tooltip classNames={editorTooltipClassNames} title="添加节点 (A)">
+                  <Button
+                    aria-label="添加节点 (A)"
+                    className="xflow-editor-canvas-add"
+                    icon={<PlusIcon />}
+                    size="small"
+                    type="text"
+                    onClick={openNodeLibrary}
+                  >
+                    添加节点
+                  </Button>
+                </Tooltip>
+              ) : readOnly ? undefined : (
+                // The 只读 banner already says it; the preview notice would repeat it.
+                <div className="xflow-editor-canvas-mode" role="status">
+                  <EyeIcon />
+                  <strong>预览模式</strong>
+                  <span>画布为只读；切换到编辑模式后才能修改工作流</span>
+                </div>
               )}
+              canvasFloatEndCompact
               canvasFloatEnd={desktopRightCollapsed ? (
-                <Tooltip classNames={editorTooltipClassNames} title="展开属性面板（⌥⌘B / Ctrl + Alt + B）">
+                <Tooltip classNames={editorTooltipClassNames} title="展开属性面板 ⌥⌘B">
                   <Button
                     aria-label="展开属性面板"
                     className="xflow-editor-canvas-reopen"
-                    icon={<MenuUnfoldOutlined />}
+                    icon={<SideRightIcon />}
                     size="small"
                     type="text"
                     onClick={() => setRightCollapsed(false)}
@@ -4587,7 +5705,11 @@ export function XFlowEditor({
                   <p className="xflow-editor-empty-canvas__text">选中后在这里回放当次运行的画布与节点状态。</p>
                 </div>
               ) : (
-                <EmptyCanvasCard editable={editMode} onPickTrigger={openNodeLibrary} />
+                <EmptyCanvasCard
+                  editable={editMode}
+                  onPickTemplate={pickStarterTemplate}
+                  onPickTrigger={openNodeLibrary}
+                />
               )}
             />
           </div>
@@ -4602,7 +5724,7 @@ export function XFlowEditor({
                 {/* §6.0: the collapse entry lives in the panel title bar in
                     every mode, so the preview notice keeps one too. */}
                 <div className="xflow-editor-preview-inspector__header">
-                  <EyeOutlined />
+                  <EyeIcon />
                   <strong>{readOnly ? "只读" : "预览模式"}</strong>
                   {collapseRightAction}
                 </div>
@@ -4619,7 +5741,7 @@ export function XFlowEditor({
             focusable={{ trap: true, focusTriggerAfterClose: true }}
             afterOpenChange={(open) => {
               if (open && leftDrawerTab === "library" && editMode) {
-                focusNodeLibrarySearch();
+                focusNodeLibrarySearchControl();
               }
             }}
             getContainer={false}
@@ -4645,7 +5767,7 @@ export function XFlowEditor({
                 onSelect={onSelectExecution}
               />
             ) : leftDrawerSection === "library" ? (
-              renderNodeZones(undefined, true)
+              renderNodeZones(undefined)
             ) : (
               <VariablesPanel
                 readOnly={!editMode}
@@ -4679,7 +5801,7 @@ export function XFlowEditor({
             inspectorElement
           ) : (
             <section className="xflow-editor-preview-inspector" aria-label="预览模式说明">
-              <EyeOutlined />
+              <EyeIcon />
               <strong>{readOnly ? "只读" : "预览模式"}</strong>
               <p>{readOnly ? "画布、节点属性和工作流定义均保持只读。" : "画布、节点属性和工作流定义均保持只读。切换到编辑模式后可继续修改。"}</p>
             </section>
@@ -4727,9 +5849,14 @@ export function XFlowEditor({
           diagnostics={diagnostics}
           blockedDraftNodes={operationError ? blockedDraftNodes : undefined}
           nodeCategories={nodeCategories}
+          latestExecution={execution}
           onRevealJson={revealParameterJson}
           onLocateField={locateParameterField}
           operationError={operationError}
+          selectedNode={selectedNode}
+          selectedNodeName={selectedName}
+          traceHref={traceHref}
+          unsavedCount={unsavedChanges}
           versionLabel={versionChip.label}
           controllerRef={dockControllerRef}
           dock={dock}
@@ -4767,6 +5894,19 @@ export function XFlowEditor({
           }}
         />
       </Modal>
+      <Modal
+        cancelText="取消"
+        centered
+        getContainer={() => editorRootRef.current ?? document.body}
+        okButtonProps={{ danger: true }}
+        okText="删除"
+        open={sectionPendingDelete !== undefined}
+        title={`删除分区${sectionPendingDeleteTitle ? `「${sectionPendingDeleteTitle}」` : ""}？`}
+        onCancel={() => setSectionPendingDelete(undefined)}
+        onOk={confirmSectionDelete}
+      >
+        只移除分区框，分区内的节点保持原样。分区编辑不进入撤销历史，因此需要确认。
+      </Modal>
       <PublishDialog
         changes={changes}
         error={publishError}
@@ -4798,11 +5938,11 @@ export function XFlowEditor({
         currentUserSubject={currentUserSubject}
         executionId={approvalTarget?.executionId ?? ""}
         executionNode={approvalExecutionNode}
-        executionStatus={execution?.status ?? "running"}
+        executionStatus={trackedExecution?.status ?? "running"}
         getContainer={() => editorRootRef.current ?? document.body}
         key={`${approvalTarget?.executionId ?? ""}:${approvalTarget?.nodeName ?? ""}`}
         node={approvalDefinitionNode}
-        open={Boolean(approvalTarget && execution && approvalTarget.executionId === execution.executionId)}
+        open={Boolean(approvalTarget && trackedExecution && approvalTarget.executionId === trackedExecution.executionId)}
         onClose={() => setApprovalTarget(undefined)}
         onRevokeSignal={onRevokeSignal}
         onSignal={onSignal}

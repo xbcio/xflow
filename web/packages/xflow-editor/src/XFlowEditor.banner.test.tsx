@@ -182,10 +182,12 @@ describe("save conflict banner", () => {
     }
   });
 
-  it("draws the clean version chip with the baseline's plain check, not a check-circle", () => {
+  it("draws the clean version chip as plain text, like the baseline top-bar chip", () => {
     render(<XFlowEditor value={workflow} />);
-    const icon = document.querySelector(".xflow-editor-chip__icon .anticon");
-    expect(icon?.getAttribute("aria-label")).toBe("check");
+    const chip = document.querySelector(".xflow-editor-title .xflow-editor-chip");
+    expect(chip?.textContent).toBe("线上 v1.0.0");
+    expect(chip?.getAttribute("data-tone")).toBe("success");
+    expect(chip?.querySelector(".xflow-editor-chip__icon")).toBeNull();
   });
 
   it("keeps the local edits and the unsaved count while the banner is up", async () => {
@@ -379,6 +381,52 @@ describe("read-only banner", () => {
     fireEvent.click(within(runs.container).getByRole("radio", { name: /运行记录/ }));
     expect(within(runs.container).getByText("只读回放")).toBeTruthy();
     expect(runs.container.querySelectorAll(".xflow-editor-banner")).toHaveLength(0);
+  });
+});
+
+describe("archived-view banner", () => {
+  const archived: WorkflowDef = { ...workflow, version: "1.1.4" };
+
+  it("is neutral, a status, and takes the read-only banner's place", () => {
+    render(
+      <XFlowEditor
+        historicalVersion="v1.1.4"
+        readOnlyReason="你在当前命名空间只有查看权限。"
+        value={archived}
+      />
+    );
+
+    const banner = bannerWith("历史版本 v1.1.4");
+    expect(banner.getAttribute("data-tone")).toBe("neutral");
+    expect(banner.getAttribute("role")).toBe("status");
+    expect(banner.textContent).toContain("正在查看归档版本，编辑器只读。回滚或退出历史后可继续编辑。");
+    // The archived view owns the explanation, so the read-only banner is
+    // replaced rather than stacked underneath it.
+    expect(banners()).toHaveLength(1);
+    expect(banners().some((item) => item.querySelector("strong")?.textContent === "只读")).toBe(false);
+    // 查看 must never edit history.
+    expect(screen.queryByRole("button", { name: "保存" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "发布" })).toBeNull();
+    // No host handler, no way out drawn.
+    expect(within(banner).queryByRole("button")).toBeNull();
+  });
+
+  it("stacks under the degraded-node-types warning and offers 退出历史 only with a handler", () => {
+    const exit = vi.fn();
+    const { rerender } = render(<XFlowEditor historicalVersion="v1.1.4" nodeTypesError={{}} value={archived} />);
+
+    const stack = document.querySelector(".xflow-editor-banners") as HTMLElement;
+    expect(Array.from(stack.querySelectorAll("strong")).map((strong) => strong.textContent)).toEqual([
+      "节点类型加载失败",
+      "历史版本 v1.1.4"
+    ]);
+    expect(within(bannerWith("历史版本 v1.1.4")).queryByRole("button")).toBeNull();
+
+    rerender(
+      <XFlowEditor historicalVersion="v1.1.4" nodeTypesError={{}} onExitHistory={exit} value={archived} />
+    );
+    fireEvent.click(within(bannerWith("历史版本 v1.1.4")).getByRole("button", { name: "退出历史" }));
+    expect(exit).toHaveBeenCalledTimes(1);
   });
 });
 

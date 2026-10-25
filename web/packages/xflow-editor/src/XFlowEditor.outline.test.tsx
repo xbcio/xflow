@@ -1,10 +1,10 @@
 import * as React from "react";
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { nodeStatusMeta } from "@xflow/core";
-import type { RuntimeSnapshot, WorkflowDef } from "@xflow/core";
+import type { RuntimeSnapshot, WorkflowDef, WorkflowEditorSection } from "@xflow/core";
 import type { XFlowPreview as RealXFlowPreview } from "@xflow/preview";
-import { XFlowEditor } from "./index";
+import { XFlowEditor, type XFlowEditorSaveContext } from "./index";
 
 // E5b (spec §6.0.1): the outline tree in the left column's lower zone. The
 // builder's ordering rules are covered in panels/outline.test.ts; here the tree
@@ -223,7 +223,7 @@ describe("outline keyboard (§6.0.1)", () => {
     expect(document.activeElement?.getAttribute("role")).toBe("treeitem");
   });
 
-  it("hands focus to the library search when Delete removes the last row", () => {
+  it("hands focus to the library search key when Delete removes the last row", () => {
     const single: WorkflowDef = { id: "wf-one", name: "One", nodes: [{ name: "only", type: "xflow.http" }], connections: {} };
     const handleChange = vi.fn();
     render(<XFlowEditor value={single} onChange={handleChange} />);
@@ -236,9 +236,11 @@ describe("outline keyboard (§6.0.1)", () => {
     expect(handleChange).toHaveBeenCalled();
     expect(within(outlineRegion()).queryByRole("tree")).toBeNull();
     // No row is left to take focus and the empty note cannot hold it: it must
-    // not drop to <body>, it goes to the library search.
+    // not drop to <body>, it goes to the library's search key.
     expect(document.activeElement).not.toBe(document.body);
-    expect(document.activeElement).toBe(screen.getByPlaceholderText(/搜索 Webhook/));
+    expect(document.activeElement).toBe(
+      within(screen.getByRole("region", { name: "节点" })).getByRole("button", { name: "搜索节点" })
+    );
   });
 
   it("hands focus to the rail's 节点与大纲 key when the last row goes away and no library is on screen", () => {
@@ -360,5 +362,77 @@ describe("outline empty state", () => {
     expect(within(outlineRegion()).queryByRole("tree")).toBeNull();
     expect(within(outlineRegion()).getByText("添加节点后，这里按执行顺序列出。")).toBeTruthy();
     expect(outlineRegion().querySelector(".xflow-editor-panel-title__count")?.textContent).toBe("0");
+  });
+});
+
+// §6.2 / WB-02: editor_metadata.sections is read-only input here. The editor
+// forwards it to the canvas and the outline, and echoes it back through the
+// save context so a host rebuild of editor_metadata cannot drop it.
+describe("visual sections (§6.2 / WB-02)", () => {
+  const sections: WorkflowEditorSection[] = [
+    { id: "sec-vip", title: "VIP 审批", node_keys: ["vip"], x: 900, y: 40, width: 400, height: 200 }
+  ];
+  const sectionBox = (): HTMLElement | null =>
+    document.querySelector<HTMLElement>('.xflow-preview-section[data-section-id="sec-vip"]');
+
+  it("draws the section box on the canvas and groups the outline under its title", () => {
+    render(<XFlowEditor sections={sections} value={workflow} />);
+
+    const box = sectionBox();
+    expect(box).toBeTruthy();
+    expect(box?.querySelector(".xflow-preview-section__title")?.textContent).toBe("VIP 审批");
+    expect(box?.style.left).toBe("900px");
+    expect(box?.style.width).toBe("400px");
+
+    const groups = within(tree()).getAllByRole("group");
+    expect(groups.map((group) => group.querySelector(".xflow-editor-outline__heading")?.textContent)).toEqual([
+      "入口1",
+      "流程2",
+      "VIP 审批1",
+      "结束1"
+    ]);
+    // The covered node moved out of 流程; no row was duplicated or lost.
+    expect(items().map(rowName)).toEqual(["start", "check", "normal", "vip", "finish"]);
+    expect(within(tree()).getByRole("group", { name: /VIP 审批/ }).getAttribute("data-section-id")).toBe("sec-vip");
+  });
+
+  it("keeps the canvas and outline exactly as before when no sections are supplied", () => {
+    render(<XFlowEditor value={workflow} />);
+
+    expect(document.querySelector(".xflow-preview-section")).toBeNull();
+    const groups = within(tree()).getAllByRole("group");
+    expect(groups.map((group) => group.querySelector(".xflow-editor-outline__heading")?.textContent)).toEqual([
+      "入口1",
+      "流程3",
+      "结束1"
+    ]);
+    expect(items().map(rowName)).toEqual(["start", "check", "vip", "normal", "finish"]);
+  });
+
+  it("hands the sections to onSave so a save cannot silently drop them", async () => {
+    const handleSave = vi.fn(async (next: WorkflowDef, _context?: XFlowEditorSaveContext) => next);
+    // A draft (no persisted id) opens with 保存 enabled; the point here is the
+    // arguments, not the clean/dirty gate.
+    const draft: WorkflowDef = { ...workflow, id: undefined };
+    render(<XFlowEditor onSave={handleSave} sections={sections} value={draft} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(handleSave).toHaveBeenCalledTimes(1));
+    expect(handleSave.mock.calls[0]?.[0]).toMatchObject({ name: workflow.name });
+    expect(handleSave.mock.calls[0]?.[1]).toEqual({ sections });
+    // The editor kept drawing them: a save does not consume its editor metadata.
+    expect(sectionBox()).toBeTruthy();
+  });
+
+  it("keeps the old one-argument save call when the workflow has no sections", async () => {
+    const handleSave = vi.fn(async (next: WorkflowDef, _context?: XFlowEditorSaveContext) => next);
+    const draft: WorkflowDef = { ...workflow, id: undefined };
+    render(<XFlowEditor onSave={handleSave} value={draft} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(handleSave).toHaveBeenCalledTimes(1));
+    expect(handleSave.mock.calls[0]).toHaveLength(1);
   });
 });

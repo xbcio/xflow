@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { WorkflowDef } from "@xflow/core";
+import type { RuntimeSnapshot, WorkflowDef } from "@xflow/core";
 import { XFlowEditor } from "./index";
 
 /** The canvas node's own select button: the canvas cards stay a selectable list beside the outline tree. */
@@ -221,5 +221,50 @@ describe("XFlowEditor state commits", () => {
     expect(parametersText()).not.toBe("{ broken");
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
     await waitFor(() => expect(handleSave).toHaveBeenCalledTimes(1));
+  });
+});
+
+// WB-14: the 28px strip with warnings and a recent run at once. The audit
+// fixture had zero warnings and no execution, so neither segment ever rendered.
+describe("status strip warnings and the last run (WB-14)", () => {
+  const warned: WorkflowDef = {
+    id: "wf-status",
+    name: "Status",
+    nodes: [
+      { name: "start", type: "xflow.start", kind: "trigger" },
+      { name: "worker", type: "xflow.function" }
+    ],
+    connections: { start: { main: [{ node: "worker" }] } },
+    // Two warnings, no errors: no credential declared, and a Pin Data entry
+    // that names no node in the graph.
+    pin_data: { ghost: { main: [{ json: {} }] } }
+  };
+  const runtime: RuntimeSnapshot = { status: "failed", nodes: { start: { status: "success" } } };
+  const strip = () => screen.getByRole("button", { name: "展开诊断台" });
+
+  it("renders 校验通过, the warning count, the last run and the graph counts together", () => {
+    const { rerender } = render(<XFlowEditor value={warned} />);
+    expect(strip().textContent).toContain("校验通过");
+    expect(strip().textContent).toContain("2 警告");
+    // No run yet: the segment is absent rather than an empty label.
+    expect(strip().textContent).not.toContain("最近运行");
+
+    rerender(<XFlowEditor value={warned} runtime={runtime} />);
+
+    const items = Array.from(strip().querySelectorAll<HTMLElement>(".xflow-editor-statusbar__item"));
+    const warnings = items.filter((item) => item.textContent?.includes("警告"));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].textContent).toBe("2 警告");
+    expect(warnings[0].getAttribute("data-tone")).toBe("warning");
+    // A warning never drops the pass mark; only errors do.
+    expect(strip().textContent).toContain("校验通过");
+    expect(strip().textContent).not.toContain("错误");
+
+    // The run segment reads the shared status table's label, and the counts
+    // stay alongside it rather than being pushed out by the new segments.
+    expect(strip().querySelector(".xflow-editor-statusbar__run")?.textContent).toBe("失败");
+    expect(strip().textContent).toContain("最近运行 失败");
+    expect(strip().querySelector(".xflow-editor-statusbar__sep")).not.toBeNull();
+    expect(strip().querySelector("[data-graph-stats]")?.textContent).toBe("2 节点 · 1 连线");
   });
 });

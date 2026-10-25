@@ -89,6 +89,13 @@ describe("xflow.editor cascade frame", () => {
     ]) {
       expect(css, hook).toMatch(new RegExp(`\\.${hook}\\b[^{}]*\\{[^{}]*height:\\s*var\\(--xflow-control-height-sm\\)`));
     }
+    // The collapse keys are the baseline's 32×24 ghost IconButton (6px
+    // radius, 8px inline padding), so the title-bar actions line up with the
+    // mock's `.btn--icon.btn--sm`.
+    const collapse = css.match(/\.xflow-editor button\.xflow-editor-panel-collapse\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(collapse).toMatch(/min-width:\s*var\(--xflow-control-height\)\s*;/);
+    expect(collapse).toMatch(/border-radius:\s*var\(--xflow-radius-sm\)\s*;/);
+    expect(collapse).toMatch(/padding-inline:\s*var\(--xflow-space-2\)\s*;/);
   });
 
   it("leaves composer's scale to core instead of re-declaring it", () => {
@@ -97,23 +104,28 @@ describe("xflow.editor cascade frame", () => {
 });
 
 describe("xflow.editor panel title bar (§6.0)", () => {
-  it("is a 40px bar with the baseline padding, gap and bottom border", () => {
+  it("is a 40px bar with the baseline padding and gap; the rule is opt-in", () => {
     expect(css).toMatch(/\.xflow-editor\s*\{[^}]*--xflow-editor-panel-title-height:\s*40px\s*;/);
     expect(css).toMatch(/\.xflow-editor-panel-title\s*\{[^}]*height:\s*var\(--xflow-editor-panel-title-height\)\s*;/);
-    expect(css).toMatch(/\.xflow-editor-panel-title\s*\{[^}]*gap:\s*8px\s*;/);
-    expect(css).toMatch(/\.xflow-editor-panel-title\s*\{[^}]*padding:\s*0 8px 0 12px\s*;/);
-    expect(css).toMatch(/\.xflow-editor-panel-title\s*\{[^}]*border-bottom:\s*1px solid var\(--xflow-border\)\s*;/);
+    expect(css).toMatch(/\.xflow-editor-panel-title\s*\{[^}]*gap:\s*var\(--xflow-space-2\)\s*;/);
+    expect(css).toMatch(
+      /\.xflow-editor-panel-title\s*\{[^}]*padding:\s*0 var\(--xflow-space-2\) 0 var\(--xflow-space-3\)\s*;/
+    );
+    // The left column's two zones have no rule under their bars (mock `.panel-title`);
+    // only the property panel asks for the `--divider` variant.
+    expect(css).not.toMatch(/(?:^|\n)\.xflow-editor-panel-title\s*\{[^}]*border-bottom/);
+    expect(css).toMatch(/\.xflow-editor-panel-title--divider\s*\{[^}]*border-bottom:\s*1px solid var\(--xflow-border-subtle\)\s*;/);
   });
 
   it("keeps the heading 14/600, the count 12 tertiary and the icon bare 16px", () => {
     expect(css).toMatch(
-      /\.xflow-editor-panel-title__heading\s*\{[^}]*font-size:\s*var\(--xflow-font-lg\)\s*;[^}]*font-weight:\s*600\s*;/
+      /\.xflow-editor-panel-title__heading\s*\{[^}]*font-size:\s*var\(--xflow-font-lg\)\s*;[^}]*font-weight:\s*var\(--xflow-font-weight-semibold\)\s*;/
     );
     expect(css).toMatch(
       /\.xflow-editor-panel-title__count\s*\{[^}]*color:\s*var\(--xflow-text-tertiary\)\s*;[^}]*font-size:\s*var\(--xflow-font-sm\)\s*;/
     );
     expect(css).toMatch(/\.xflow-editor-panel-title__icon\s*\{[^}]*font-size:\s*var\(--xflow-font-xl\)\s*;/);
-    expect(css).toMatch(/\.xflow-editor-panel-title__actions\s*\{[^}]*gap:\s*2px\s*;[^}]*margin-left:\s*auto\s*;/);
+    expect(css).toMatch(/\.xflow-editor-panel-title__actions\s*\{[^}]*gap:\s*var\(--xflow-space-0-5\)\s*;[^}]*margin-left:\s*auto\s*;/);
   });
 });
 
@@ -121,9 +133,9 @@ describe("xflow.editor top bar (§6.3)", () => {
   it("is a 52px bar with the baseline padding and gap", () => {
     expect(css).toMatch(/\.xflow-editor\s*\{[^}]*--xflow-editor-toolbar-height:\s*52px\s*;/);
     expect(css).toMatch(/\.xflow-editor-toolbar\s*\{[^}]*flex:\s*0 0 var\(--xflow-editor-toolbar-height\)\s*;/);
-    expect(css).toMatch(/\.xflow-editor-toolbar\s*\{[^}]*gap:\s*8px\s*;/);
-    expect(css).toMatch(/\.xflow-editor-toolbar\s*\{[^}]*padding:\s*0 12px\s*;/);
-    expect(css).toMatch(/\.xflow-editor-toolbar\s*\{[^}]*border-bottom:\s*1px solid var\(--xflow-border\)\s*;/);
+    expect(css).toMatch(/\.xflow-editor-toolbar\s*\{[^}]*gap:\s*var\(--xflow-space-2\)\s*;/);
+    expect(css).toMatch(/\.xflow-editor-toolbar\s*\{[^}]*padding:\s*0 var\(--xflow-space-3\)\s*;/);
+    expect(css).toMatch(/\.xflow-editor-toolbar\s*\{[^}]*border-bottom:\s*1px solid var\(--xflow-border-subtle\)\s*;/);
   });
 
   it("lets the title absorb the bar's negative space and keeps the right cluster fixed", () => {
@@ -136,13 +148,13 @@ describe("xflow.editor top bar (§6.3)", () => {
     expect(css).toMatch(/\.xflow-editor-title\s*\{[^}]*min-width:\s*160px\s*;/);
     expect(css).toMatch(/\.xflow-editor-title strong\s*\{[^}]*text-overflow:\s*ellipsis\s*;/);
     expect(css).toMatch(/\.xflow-editor-chip\s*\{[^}]*flex:\s*none\s*;/);
-    expect(css).toMatch(/\.xflow-editor-history-group\s*\{[^}]*gap:\s*8px\s*;/);
+    expect(css).toMatch(/\.xflow-editor-history-group\s*\{[^}]*gap:\s*var\(--xflow-space-2\)\s*;/);
   });
 
-  it("keeps one nowrap 52px row below 1280 so the right cluster is never clipped", () => {
+  it("keeps one nowrap 52px row at compact width so the right cluster is never clipped", () => {
     // E0 legacy: the wrapped second row pushed 运行 outside the root at 802-925.
     // The bar never wraps again; the title pays for a long name, not the actions.
-    const compact = css.match(/@container xflow-editor \(width < 1280px\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
+    const compact = css.match(/@container xflow-editor \(width <= 1280px\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
     expect(compact).toMatch(/\.xflow-editor-toolbar\s*\{[^}]*flex:\s*0 0 var\(--xflow-editor-toolbar-height\)\s*;/);
     expect(compact).toMatch(/\.xflow-editor-toolbar\s*\{[^}]*flex-wrap:\s*nowrap\s*;/);
     expect(compact).toMatch(/\.xflow-editor-toolbar-actions\s*\{[^}]*flex:\s*0 0 auto\s*;/);
@@ -157,9 +169,9 @@ describe("xflow.editor top bar (§6.3)", () => {
     );
   });
 
-  it("keeps top-bar icon buttons secondary and save/publish at weight 500", () => {
-    expect(css).toMatch(/\.xflow-editor-icon-button\s*\{[^}]*color:\s*var\(--xflow-text-secondary\)\s*;/);
-    expect(css).toMatch(/\.xflow-editor-save-button,\s*\.xflow-editor-publish-button\s*\{[^}]*font-weight:\s*500\s*;/);
+  it("keeps top-bar icon buttons in the body colour and save/publish at weight 500", () => {
+    expect(css).toMatch(/\.xflow-editor-icon-button\s*\{[^}]*color:\s*var\(--xflow-text\)\s*;/);
+    expect(css).toMatch(/\.xflow-editor-save-button,\s*\.xflow-editor-publish-button\s*\{[^}]*font-weight:\s*var\(--xflow-font-weight-medium\)\s*;/);
   });
 
   it("draws the mode switch without the border that made it 34px", () => {
@@ -167,9 +179,9 @@ describe("xflow.editor top bar (§6.3)", () => {
   });
 
   it("chains the version chip through the tone tokens like the baseline chip", () => {
-    expect(css).toMatch(/\.xflow-editor-chip\s*\{[^}]*border-radius:\s*var\(--xflow-radius-pill\)\s*;/);
+    expect(css).toMatch(/\.xflow-editor-chip\s*\{[^}]*border-radius:\s*var\(--xflow-radius-full\)\s*;/);
     expect(css).toMatch(/\.xflow-editor-chip\s*\{[^}]*font-size:\s*var\(--xflow-font-xs\)\s*;/);
-    expect(css).toMatch(/\.xflow-editor-chip\s*\{[^}]*font-weight:\s*500\s*;/);
+    expect(css).toMatch(/\.xflow-editor-chip\s*\{[^}]*font-weight:\s*var\(--xflow-font-weight-medium\)\s*;/);
     expect(css).toMatch(/\.xflow-editor-chip\s*\{[^}]*height:\s*20px\s*;/);
     expect(css).toMatch(/\.xflow-editor-chip\[data-tone="warning"\]\s*\{[^}]*--xflow-editor-chip-tone:\s*var\(--xflow-warning\)/);
     expect(css).toMatch(/\.xflow-editor-chip\[data-tone="success"\]\s*\{[^}]*--xflow-editor-chip-tone:\s*var\(--xflow-success\)/);
@@ -184,6 +196,8 @@ describe("xflow.editor top bar (§6.3)", () => {
 
   it("draws the run split seam from on-primary", () => {
     expect(css).toMatch(/\.xflow-editor-run-split__options\s*\{[^}]*border-inline-start:\s*1px solid color-mix\(in srgb, var\(--xflow-on-primary\)/);
+    // The options half is the baseline's 34px key, not AntD's 32px icon button.
+    expect(css).toMatch(/\.xflow-editor-run-split__options\s*\{[^}]*min-width:\s*34px\s*;/);
   });
 });
 
@@ -218,12 +232,13 @@ describe("xflow.editor responsive rules (§7.1 breakpoints)", () => {
     // Two compact blocks read xflow-core's breakpoints.compact (the locate
     // panel removed the third), so a single drift back to the old 1120 turns
     // this red; 560 is an editor-only density tier retained from the viewport
-    // rules.
-    expect(thresholds).toEqual([560, breakpoints.compact, breakpoints.compact]);
-    // `compact` keeps the exclusive comparison the JS tier uses; 560/801 keep
-    // the inclusive `max-width` semantics they replaced.
+    // rules, and 1440 is the snug desktop tier that narrows both columns.
+    expect(thresholds).toEqual([560, breakpoints.compact, breakpoints.compact, 1440]);
+    // Every tier is inclusive: the JS layout tier uses `<= compact`, so 1280 is
+    // compact in CSS and in JS alike. 560 keeps the `max-width` semantics it
+    // replaced, and 1440 is an upper bound.
     for (const [, operator, value] of queries) {
-      expect(operator, value).toBe(Number(value) === breakpoints.compact ? "<" : "<=");
+      expect(operator, value).toBe("<=");
     }
   });
 });
@@ -263,9 +278,9 @@ describe("xflow.editor type and corner scale (§3.1, §3.2)", () => {
 });
 
 describe("xflow.editor panel collapse motion (§6.0)", () => {
-  it("animates the column track for 160ms and drops the transition under reduced motion", () => {
+  it("animates the column track on the slow motion token and drops it under reduced motion", () => {
     expect(css, "collapse/expand eases the column widths").toMatch(
-      /\.xflow-editor-main\s*\{[^}]*transition:\s*grid-template-columns\s+160ms\s+ease\s*;/
+      /\.xflow-editor-main\s*\{[^}]*transition:\s*grid-template-columns\s+var\(--xflow-motion-duration-slow\)\s+var\(--xflow-motion-ease-emphasized\)\s*;/
     );
     expect(css, "reduced motion removes the animation").toMatch(
       /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{\s*\.xflow-editor-main\s*\{[^}]*transition:\s*none\s*;/
@@ -294,15 +309,16 @@ describe("xflow.editor inspector tabs (§6.4)", () => {
   it("styles AntD Tabs through the semantic hooks, not the retired hand-made button row", () => {
     expect(css).not.toMatch(/\.xflow-editor-inspector-tabs\s+button/);
     expect(css).not.toContain(".xflow-editor-inspector-panel");
-    expect(ruleBody(".xflow-editor-inspector-tabs__header")).toMatch(/padding-inline:\s*12px\s*;/);
+    expect(ruleBody(".xflow-editor-inspector-tabs__header")).toMatch(/padding-inline:\s*var\(--xflow-space-3\)\s*;/);
     const body = ruleBody(".xflow-editor-inspector-tabs__body");
     expect(body).toMatch(/height:\s*100%\s*;/);
     expect(body).toMatch(/overflow:\s*auto\s*;/);
   });
 
-  it("keeps the tab row on the panel surface and the content flush under it, as the baseline does", () => {
+  it("keeps the tab row on the panel surface and gives the content the 12px body frame", () => {
     expect(ruleBody(".xflow-editor-inspector-tabs__header")).not.toMatch(/background/);
-    expect(ruleBody(".xflow-editor-inspector-tabs__content")).toMatch(/padding:\s*0 12px\s*;/);
+    expect(ruleBody(".xflow-editor-inspector-tabs__header")).toMatch(/padding-bottom:\s*1px\s*;/);
+    expect(ruleBody(".xflow-editor-inspector-tabs__content")).toMatch(/padding:\s*var\(--xflow-space-3\)\s*;/);
   });
 
   it("draws the failed-run dot as a 6px danger circle", () => {
@@ -310,6 +326,15 @@ describe("xflow.editor inspector tabs (§6.4)", () => {
     expect(dot).toMatch(/background:\s*var\(--xflow-danger\)\s*;/);
     expect(dot).toMatch(/height:\s*6px\s*;/);
     expect(dot).toMatch(/width:\s*6px\s*;/);
+  });
+
+  it("sets the tab label to 13/20/500 and keeps the active text in the main colour", () => {
+    expect(css).toMatch(
+      /\.xflow-editor \.xflow-editor-inspector-tabs \[role="tab"\]\s*\{[^}]*font-weight:\s*var\(--xflow-font-weight-medium\)\s*;[^}]*line-height:\s*var\(--xflow-line-height-md\)\s*;/
+    );
+    expect(css).toMatch(
+      /\.xflow-editor \.xflow-editor-inspector-tabs \[role="tab"\]\[aria-selected="true"\]\s*\{[^}]*color:\s*var\(--xflow-text\)\s*;/
+    );
   });
 });
 
@@ -329,8 +354,8 @@ describe("xflow.editor diagnostics dock (§6.5)", () => {
     expect(strip).toMatch(/width:\s*100%\s*;/);
   });
 
-  it("sizes the drawer from one 256px variable over a 40px head and a 360px summary column", () => {
-    expect(css).toMatch(/\.xflow-editor\s*\{[^}]*--xflow-editor-drawer-height:\s*256px\s*;/);
+  it("sizes the drawer from one 280px variable over a 40px head and a 300px summary column", () => {
+    expect(css).toMatch(/\.xflow-editor\s*\{[^}]*--xflow-editor-drawer-height:\s*280px\s*;/);
     const drawer = rule(".xflow-editor-drawer");
     // The variable is the ceiling; a host shorter than bar + strip + drawer wins, so
     // the open drawer never rides up over the toolbar (tier a has no viewport clamp).
@@ -340,28 +365,28 @@ describe("xflow.editor diagnostics dock (§6.5)", () => {
     expect(css).toMatch(
       /\.xflow-editor-bottom\[data-dock="expanded"\]\s*\{[^}]*max-height:\s*calc\(100% - var\(--xflow-editor-toolbar-height\)\)\s*;/
     );
-    expect(drawer).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\) 360px\s*;/);
+    expect(drawer).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\) 300px\s*;/);
     expect(drawer).toMatch(/grid-template-rows:\s*var\(--xflow-editor-panel-title-height\) minmax\(0, 1fr\)\s*;/);
   });
 
-  it("clamps the drawer on the compact tiers so the canvas keeps a floor", () => {
+  it("clamps the drawer on the compact tier so the canvas keeps a floor", () => {
     expect(css).toMatch(
-      /\.xflow-editor\[data-layout="b"\],\s*\.xflow-editor\[data-layout="c"\]\s*\{[^}]*--xflow-editor-drawer-height:\s*min\(256px, calc\(100dvh - var\(--xflow-editor-toolbar-height\) - 28px - 120px\)\)\s*;/
+      /\.xflow-editor\[data-layout="c"\]\s*\{[^}]*--xflow-editor-drawer-height:\s*min\(280px, calc\(100dvh - var\(--xflow-editor-toolbar-height\) - 28px - 120px\)\)\s*;/
     );
   });
 
-  it("folds the summary under the issue list below 1280 by container query, not media query", () => {
-    const folded = css.match(/@container xflow-editor \(width < 1280px\)\s*\{\s*\.xflow-editor-drawer\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)\s*;[^}]*\}\s*\.xflow-editor-drawer__side\s*\{([^}]*)\}/);
+  it("folds the summary under the issue list at compact width by container query, not media query", () => {
+    const folded = css.match(/@container xflow-editor \(width <= 1280px\)\s*\{\s*\.xflow-editor-drawer\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)\s*;[^}]*\}\s*\.xflow-editor-drawer__side\s*\{([^}]*)\}/);
     expect(folded, "the single-column drawer rule").not.toBeNull();
     // Still reachable: folded, never hidden.
     expect(folded?.[1]).not.toMatch(/display:\s*none/);
     expect(folded?.[1]).toMatch(/flex-direction:\s*row\s*;/);
-    expect(folded?.[1]).toMatch(/border-top:\s*1px solid var\(--xflow-border\)\s*;/);
+    expect(folded?.[1]).toMatch(/border-top:\s*1px solid var\(--xflow-border-subtle\)\s*;/);
   });
 
   it("sets the drawer title group 8px apart inside a 16px head", () => {
-    expect(rule(".xflow-editor .xflow-editor-drawer__head")).toMatch(/gap:\s*16px\s*;/);
-    expect(rule(".xflow-editor-drawer__title")).toMatch(/gap:\s*8px\s*;/);
+    expect(rule(".xflow-editor .xflow-editor-drawer__head")).toMatch(/gap:\s*var\(--xflow-space-4\)\s*;/);
+    expect(rule(".xflow-editor-drawer__title")).toMatch(/gap:\s*var\(--xflow-space-2\)\s*;/);
   });
 
   it("keeps the dock's footprint equal docked and expanded, so the canvas row never moves", () => {
@@ -390,8 +415,13 @@ describe("xflow.editor diagnostics dock (§6.5)", () => {
     expect(z).toBeLessThan(contextMenu);
   });
 
-  it("animates the drawer height for 160ms and switches it off under reduced motion", () => {
-    expect(rule(".xflow-editor-drawer")).toMatch(/transition:\s*height 160ms ease, box-shadow 160ms ease\s*;/);
+  it("eases only the drawer's elevation, never its height, and drops it under reduced motion", () => {
+    // E-C: height is layout, so docked ↔ expanded resizes instantly; the shadow
+    // is the one animated property and reads the fast token.
+    expect(rule(".xflow-editor-drawer")).toMatch(
+      /transition:\s*box-shadow var\(--xflow-motion-duration-fast\) var\(--xflow-motion-ease-standard\)\s*;/
+    );
+    expect(rule(".xflow-editor-drawer")).not.toMatch(/transition:[^;]*\bheight\b/);
     expect(css).toMatch(
       /@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.xflow-editor-drawer\s*\{\s*transition:\s*none\s*;/
     );
@@ -422,8 +452,8 @@ describe("xflow.editor banners (§6.5.1 / §6.10)", () => {
 
   it("draws the baseline shell from tokens: 8/12 padding, 6px radius, panel ground, 12px secondary text", () => {
     const shell = body(".xflow-editor-banner");
-    expect(shell).toMatch(/padding:\s*8px 12px\s*;/);
-    expect(shell).toMatch(/gap:\s*8px\s*;/);
+    expect(shell).toMatch(/padding:\s*var\(--xflow-space-2\) var\(--xflow-space-3\)\s*;/);
+    expect(shell).toMatch(/gap:\s*var\(--xflow-space-2\)\s*;/);
     expect(shell).toMatch(/border:\s*1px solid var\(--xflow-editor-banner-tone\)\s*;/);
     expect(shell).toMatch(/border-radius:\s*var\(--xflow-radius-sm\)\s*;/);
     expect(shell).toMatch(/background:\s*var\(--xflow-panel\)\s*;/);
@@ -436,14 +466,14 @@ describe("xflow.editor banners (§6.5.1 / §6.10)", () => {
     expect(css).toMatch(/\.xflow-editor-banner\[data-tone="danger"\]\s*\{[^}]*border-color:\s*color-mix\(in srgb, var\(--xflow-danger\) 40%, transparent\)/);
     // No border-color override: the shell's `1px solid <tone>` is the neutral grey.
     expect(body('.xflow-editor-banner[data-tone="neutral"]')).not.toMatch(/border/);
-    expect(body(".xflow-editor-banner")).toMatch(/line-height:\s*20px\s*;/);
+    expect(body(".xflow-editor-banner")).toMatch(/line-height:\s*var\(--xflow-line-height-md\)\s*;/);
   });
 
   it("keeps the icon on the tone, the lead at 600 and the actions 6px apart", () => {
     expect(body(".xflow-editor-banner__icon")).toMatch(/color:\s*var\(--xflow-editor-banner-tone\)\s*;/);
-    expect(body(".xflow-editor-banner__strong")).toMatch(/font-weight:\s*600\s*;/);
+    expect(body(".xflow-editor-banner__strong")).toMatch(/font-weight:\s*var\(--xflow-font-weight-semibold\)\s*;/);
     expect(body(".xflow-editor-banner__text")).toMatch(/min-width:\s*0\s*;/);
-    expect(body(".xflow-editor-banner__actions")).toMatch(/gap:\s*6px\s*;/);
+    expect(body(".xflow-editor-banner__actions")).toMatch(/gap:\s*var\(--xflow-space-1-5\)\s*;/);
   });
 
   it("follows the preview's rulers: the top offset drops the ruler term when none are drawn", () => {
@@ -453,7 +483,7 @@ describe("xflow.editor banners (§6.5.1 / §6.10)", () => {
 
   it("gives the read-only / preview notice a base inset and body size at every width", () => {
     const notice = body(".xflow-editor-preview-inspector");
-    expect(notice).toMatch(/padding:\s*16px\s*;/);
+    expect(notice).toMatch(/padding:\s*var\(--xflow-space-4\)\s*;/);
     expect(notice).toMatch(/font-size:\s*var\(--xflow-font-md\)\s*;/);
   });
 });
@@ -475,10 +505,28 @@ describe("xflow.editor left column (§6.0.1, §6.5)", () => {
 
   it("draws the 1px rule between the zones on a rule that follows the panel border reset", () => {
     const divider = rule('.xflow-editor .xflow-editor-lib[data-zones="dual"] > .xflow-editor-outline');
-    expect(divider).toMatch(/border-top:\s*1px solid var\(--xflow-border\)\s*;/);
+    expect(divider).toMatch(/border-top:\s*1px solid var\(--xflow-border-subtle\)\s*;/);
     expect(css.indexOf('.xflow-editor-lib[data-zones="dual"] > .xflow-editor-outline')).toBeGreaterThan(
       css.indexOf(".xflow-editor .xflow-editor-panel {")
     );
+  });
+
+  it("sizes the outline to its tree up to half the column, then scrolls it", () => {
+    // A fixed 3:2 split left the eight-node outline ~287px at 900 high and cut
+    // the last section mid-row. The outline now takes its content height, capped
+    // at half the column, so anything longer is reached through its own list.
+    expect(rule(".xflow-editor-lib")).toMatch(
+      /grid-template-rows:\s*minmax\(0, 1fr\) fit-content\(50%\)\s*;/
+    );
+    expect(rule(".xflow-editor-lib[data-zones=\"single\"]")).toMatch(
+      /grid-template-rows:\s*minmax\(0, 1fr\)\s*;/
+    );
+    // The overflow chain that makes the cap a scroll cutoff rather than a clip:
+    // panel body hidden → column flex → tree list auto. The library and outline
+    // bodies share one rule, so this cannot use the first-rule helper.
+    expect(css).toMatch(/\.xflow-editor \.xflow-editor-outline__body\s*\{[^}]*overflow:\s*hidden\s*;/);
+    expect(rule(".xflow-editor-outline__list")).toMatch(/overflow:\s*auto\s*;/);
+    expect(rule(".xflow-editor-outline__list")).toMatch(/min-height:\s*0\s*;/);
   });
 
   it("draws every key cap on a normal line box, as the baseline's font shorthand does", () => {
@@ -491,7 +539,7 @@ describe("xflow.editor left column (§6.0.1, §6.5)", () => {
   it("weighs the library group row 600 as a whole, so its count is as heavy as its label", () => {
     // The baseline sets the weight on the row; a 400 count beside a 600 label
     // was the browser-measured difference.
-    expect(rule(".xflow-editor-node-group__title")).toMatch(/font-weight:\s*600\s*;/);
+    expect(rule(".xflow-editor-node-group__title")).toMatch(/font-weight:\s*var\(--xflow-font-weight-semibold\)\s*;/);
     expect(rule(".xflow-editor-node-group__count")).not.toMatch(/font-weight/);
   });
 
@@ -503,11 +551,12 @@ describe("xflow.editor left column (§6.0.1, §6.5)", () => {
 
   it("shows the draggable library rows with the grab cursor", () => {
     expect(rule(".xflow-editor-node-tile")).toMatch(/cursor:\s*grab\s*;/);
-    // The baseline row is a text Button: its 1px transparent border makes the row 58px.
-    expect(rule(".xflow-editor-node-tile")).toMatch(/border:\s*1px solid transparent\s*;/);
+    // The baseline row is flush: no border, 6/8 padding, 52px total.
+    expect(rule(".xflow-editor-node-tile")).toMatch(/border:\s*0\s*;/);
+    expect(rule(".xflow-editor-node-tile")).toMatch(/padding:\s*var\(--xflow-space-1-5\) var\(--xflow-space-2\)\s*;/);
   });
 
-  it("draws the library row icon as the baseline 28px block, the outline one as the 20px --sm", () => {
+  it("draws the library row icon as the baseline 28px block with a 15px glyph", () => {
     const rule = (selector: string): string => {
       const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       return css.match(new RegExp(`(?:^|\\})\\s*${escaped}\\s*\\{([^}]*)\\}`))?.[1] ?? "";
@@ -516,6 +565,11 @@ describe("xflow.editor left column (§6.0.1, §6.5)", () => {
     expect(base).toMatch(/width:\s*28px\s*;/);
     expect(base).toMatch(/height:\s*28px\s*;/);
     expect(base).toMatch(/border-radius:\s*var\(--xflow-radius-sm\)\s*;/);
+    // 15px is the mock's glyph box; the type scale has no 15 step, so the icon
+    // is sized by width/height instead of a bare font-size.
+    const glyph = rule(".xflow-editor-category-icon:not(.xflow-editor-category-icon--sm) .xflow-icon");
+    expect(glyph).toMatch(/width:\s*15px\s*;/);
+    expect(glyph).toMatch(/height:\s*15px\s*;/);
     const sm = rule(".xflow-editor-category-icon--sm");
     expect(sm).toMatch(/width:\s*20px\s*;/);
     expect(sm).toMatch(/border-radius:\s*var\(--xflow-radius-xs\)\s*;/);
@@ -524,25 +578,26 @@ describe("xflow.editor left column (§6.0.1, §6.5)", () => {
   it("draws an outline row as the baseline 30px line: 0 8px padding, 8px gap, 13px, small radius", () => {
     const row = rule(".xflow-editor-outline__item");
     expect(row).toMatch(/height:\s*30px\s*;/);
-    expect(row).toMatch(/padding:\s*0 8px\s*;/);
-    expect(row).toMatch(/gap:\s*8px\s*;/);
+    expect(row).toMatch(/padding:\s*0 var\(--xflow-space-2\)\s*;/);
+    expect(row).toMatch(/gap:\s*var\(--xflow-space-2\)\s*;/);
     expect(row).toMatch(/font-size:\s*var\(--xflow-font-md\)\s*;/);
     expect(row).toMatch(/border-radius:\s*var\(--xflow-radius-sm\)\s*;/);
   });
 
-  it("indents a branch row and a port heading by the one 26px step", () => {
+  it("indents a branch row and a port heading by the one 24px step", () => {
     expect(rule(".xflow-editor-outline__port[data-indent],\n.xflow-editor-outline__item[data-indent]")).toMatch(
-      /padding-inline-start:\s*26px\s*;/
+      /padding-inline-start:\s*var\(--xflow-space-6\)\s*;/
     );
   });
 
-  it("marks the current row with a 12% primary ground and a 600 primary name", () => {
+  it("marks the current row with a 12% primary ground and a 600 primary-fg name", () => {
     expect(rule('.xflow-editor-outline__item[aria-current="true"]')).toMatch(
       /background:\s*color-mix\(in srgb, var\(--xflow-primary\) 12%, transparent\)\s*;/
     );
     const name = rule('.xflow-editor-outline__item[aria-current="true"] .xflow-editor-outline__name');
-    expect(name).toMatch(/color:\s*var\(--xflow-primary\)\s*;/);
-    expect(name).toMatch(/font-weight:\s*600\s*;/);
+    // The raw brand blue is 3.85:1 on the row's tint; the text alias is AA.
+    expect(name).toMatch(/color:\s*var\(--xflow-primary-fg\)\s*;/);
+    expect(name).toMatch(/font-weight:\s*var\(--xflow-font-weight-semibold\)\s*;/);
   });
 
   it("draws the status dot 8px from the tone token, pending as a dashed ring, skipped names tertiary", () => {
@@ -568,12 +623,12 @@ describe("xflow.editor left column (§6.0.1, §6.5)", () => {
     }
   });
 
-  it("draws the section heading 11/600 tertiary on a 20px line with a 3x10 colour bar, and the node name 11 mono", () => {
+  it("draws the section heading 11/600 tertiary on the paired 16px line with a 3x10 colour bar, and the node name 11 mono", () => {
     const heading = rule(".xflow-editor-outline__heading");
     expect(heading).toMatch(/font-size:\s*var\(--xflow-font-xs\)\s*;/);
-    expect(heading).toMatch(/line-height:\s*20px\s*;/);
+    expect(heading).toMatch(/line-height:\s*var\(--xflow-line-height-xs\)\s*;/);
     expect(rule(".xflow-editor-outline__sub")).toMatch(/font-size:\s*var\(--xflow-font-xs\)\s*;/);
-    expect(heading).toMatch(/font-weight:\s*600\s*;/);
+    expect(heading).toMatch(/font-weight:\s*var\(--xflow-font-weight-semibold\)\s*;/);
     expect(heading).toMatch(/color:\s*var\(--xflow-text-tertiary\)\s*;/);
     const bar = rule(".xflow-editor-outline__bar");
     expect(bar).toMatch(/height:\s*10px\s*;/);
@@ -589,43 +644,82 @@ describe("xflow.editor browser-measured baseline fixes (E6)", () => {
     return match?.[1] ?? "";
   };
 
-  it("keeps the 32px top-bar buttons at the 6px radius step, with an 8px gap in 保存", () => {
+  it("keeps the 32px top-bar buttons at the 6px radius step, with a 6px gap in 保存", () => {
     expect(rule(".xflow-editor-icon-button")).toMatch(/border-radius:\s*var\(--xflow-radius-sm\)\s*;/);
     expect(rule(".xflow-editor .xflow-editor-theme-trigger")).toMatch(/border-radius:\s*var\(--xflow-radius-sm\)\s*;/);
-    expect(rule(".xflow-editor-save-button")).toMatch(/gap:\s*8px\s*;/);
+    expect(rule(".xflow-editor-save-button")).toMatch(/gap:\s*var\(--xflow-space-1-5\)\s*;/);
   });
 
   it("makes the right column 360px wide", () => {
     expect(css).toMatch(/--xflow-editor-panel-right-width:\s*360px\s*;/);
   });
 
-  it("leaves the library rows flush: the 58px row is the whole pitch", () => {
+  it("narrows both docked columns at snug desktop widths (EL-02)", () => {
+    // 1440: 360+280+rail left the canvas at ~51%; the snug tier takes 40px off
+    // the left content and 40px off the right inspector. The override lives on
+    // `.xflow-editor-main`: a container query cannot style its own container,
+    // and the root's calc() is already resolved when it inherits.
+    const snug = css.match(/@container xflow-editor \(width <= 1440px\)\s*\{\s*\.xflow-editor-main\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(snug).toMatch(/--xflow-editor-panel-left-width:\s*calc\(var\(--xflow-editor-panel-rail-width\) \+ 240px\)\s*;/);
+    expect(snug).toMatch(/--xflow-editor-panel-right-width:\s*320px\s*;/);
+  });
+
+  it("leaves the library rows flush: the 52px row is the whole pitch", () => {
     expect(rule(".xflow-editor-node-list")).toMatch(/gap:\s*0\s*;/);
   });
 
-  it("draws a pressed title-bar action at 14% and the search prefix in the text colour", () => {
+  it("draws a pressed title-bar action at 14% and the search prefix 16px tertiary", () => {
+    // The diagnostics' one-button toggle keeps a pressed state; the collapse
+    // keys use aria-expanded and never match this rule.
     expect(rule('.xflow-editor .xflow-editor-panel-collapse[aria-pressed="true"]')).toMatch(
       /color-mix\(in srgb, var\(--xflow-primary\) 14%, transparent\)/
     );
-    expect(rule(".xflow-editor .xflow-editor-library-search__prefix")).toMatch(/color:\s*var\(--xflow-text\)\s*;/);
+    // The library's search disclosure carries the same pressed fill while open.
+    expect(rule('.xflow-editor .xflow-editor-panel-collapse[data-active="true"]')).toMatch(
+      /color-mix\(in srgb, var\(--xflow-primary\) 14%, transparent\)/
+    );
+    const prefix = rule(".xflow-editor .xflow-editor-library-search__prefix");
+    expect(prefix).toMatch(/color:\s*var\(--xflow-text-tertiary\)\s*;/);
+    expect(prefix).toMatch(/font-size:\s*var\(--xflow-font-xl\)\s*;/);
   });
 
-  it("gives the outline rows the 1px transparent border and a 4px sub gap", () => {
-    expect(rule(".xflow-editor-outline__item")).toMatch(/border:\s*1px solid transparent\s*;/);
-    expect(rule(".xflow-editor-outline__sub")).toMatch(/margin-inline-start:\s*4px\s*;/);
+  it("draws the outline rows flush, with no border narrowing the 30px line", () => {
+    expect(rule(".xflow-editor-outline__item")).not.toMatch(/border:\s*1px solid transparent\s*;/);
+    expect(rule(".xflow-editor-outline__item")).toMatch(/height:\s*30px\s*;/);
+    expect(rule(".xflow-editor-outline__sub")).toMatch(/margin-inline-start:\s*var\(--xflow-space-1\)\s*;/);
   });
 
-  it("sets the canvas float colours and the 16px locate glyph", () => {
-    expect(rule(".xflow-editor-canvas-add")).toMatch(/color:\s*var\(--xflow-text\)\s*;/);
-    expect(rule(".xflow-editor-canvas-reopen")).toMatch(/color:\s*var\(--xflow-text\)\s*;/);
-    expect(css).toMatch(/\.xflow-editor-canvas-locate\s*\{[^}]*font-size:\s*var\(--xflow-font-xl\)\s*;/);
+  it("sets the canvas float colours; the add glyph is the package's 16px default", () => {
+    expect(rule(".xflow-editor .xflow-editor-canvas-add")).toMatch(/color:\s*var\(--xflow-text\)\s*;/);
+    const reopen = rule(".xflow-editor button.xflow-editor-canvas-reopen");
+    expect(reopen).toMatch(/color:\s*var\(--xflow-text-secondary\)\s*;/);
+    expect(reopen).toMatch(/font-size:\s*var\(--xflow-font-sm\)\s*;/);
+    expect(reopen).toMatch(/gap:\s*var\(--xflow-space-1-5\)\s*;/);
+    expect(reopen).toMatch(/padding:\s*0 var\(--xflow-space-2-5\)\s*;/);
+    // The sprite glyph carries its own 16px box; no AntD-icon sizing rule remains.
+    expect(css).not.toContain("xflow-editor-canvas-add .anticon");
+    // The reopen chip draws the ported #i-side-right glyph, so no AntD-icon
+    // rule may outlive the swap.
+    expect(css).not.toContain("xflow-editor-canvas-reopen .anticon");
+    // The magnifier was removed from the float (user ruling 2026-10-21); ⌘K
+    // is the only locate entry, so no rule may outlive the button.
+    expect(css).not.toContain("xflow-editor-canvas-locate");
   });
 
   it("pins the inspector footer under the scrolling tabs", () => {
     const foot = rule(".xflow-editor .xflow-editor-inspector-foot");
-    expect(foot).toMatch(/border-top:\s*1px solid var\(--xflow-border\)\s*;/);
-    expect(foot).toMatch(/padding:\s*22px 12px 12px\s*;/);
+    expect(foot).toMatch(/border-top:\s*1px solid var\(--xflow-border-subtle\)\s*;/);
+    expect(foot).toMatch(/padding:\s*var\(--xflow-space-2-5\) var\(--xflow-space-3\)\s*;/);
     expect(foot).toMatch(/flex:\s*0 0 auto\s*;/);
+  });
+
+  it("draws the inspector's run key as the baseline button: 12px padding, 6px gap, 16px glyph", () => {
+    const runButton = rule(".xflow-editor .xflow-editor-inspector-run-button");
+    expect(runButton).toMatch(/font-weight:\s*var\(--xflow-font-weight-medium\)\s*;/);
+    expect(runButton).toMatch(/gap:\s*var\(--xflow-space-1-5\)\s*;/);
+    expect(runButton).toMatch(/padding-inline:\s*var\(--xflow-space-3\)\s*;/);
+    // The sprite glyph carries its own 16px box; no AntD-icon sizing rule remains.
+    expect(css).not.toContain("xflow-editor-inspector-run-button .anticon");
   });
 
   it("keeps the 保存 / 发布 label in the body colour on hover, as the baseline top-text button does", () => {
@@ -638,18 +732,27 @@ describe("xflow.editor browser-measured baseline fixes (E6)", () => {
 
   it("draws the library group head with the count last and a 4px side margin", () => {
     const title = rule(".xflow-editor-node-group__title");
-    expect(title).toMatch(/margin:\s*0 4px 4px\s*;/);
+    expect(title).toMatch(/margin:\s*0 var\(--xflow-space-1\) var\(--xflow-space-1\)\s*;/);
     expect(title).toMatch(/width:\s*calc\(100% - 8px\)\s*;/);
     expect(rule(".xflow-editor-node-group__count")).toMatch(/margin-left:\s*auto\s*;/);
   });
 
-  it("lifts the compact drawers with elev-3 and a divider on the canvas side", () => {
-    expect(rule(".xflow-editor .xflow-editor-compact-drawer__wrapper")).toMatch(/box-shadow:\s*var\(--xflow-elev-3\)\s*;/);
+  it("reveals the group chevron on hover/focus and keeps it visible while collapsed", () => {
+    expect(rule(".xflow-editor-node-group__chevron")).toMatch(/opacity:\s*0\s*;/);
+    expect(css).toMatch(
+      /\.xflow-editor-node-group__title:hover \.xflow-editor-node-group__chevron,[\s\S]*?\{[^}]*opacity:\s*1\s*;/
+    );
+    expect(css).toMatch(/\.xflow-editor-node-group__title:focus-visible \.xflow-editor-node-group__chevron/);
+    expect(css).toMatch(/\.xflow-editor-node-group__chevron\.is-collapsed\s*\{[^}]*opacity:\s*1\s*;/);
+  });
+
+  it("lifts the compact drawers with elev-4 and a divider on the canvas side", () => {
+    expect(rule(".xflow-editor .xflow-editor-compact-drawer__wrapper")).toMatch(/box-shadow:\s*var\(--xflow-elev-4\)\s*;/);
     expect(rule(".xflow-editor .xflow-editor-compact-drawer__wrapper--start")).toMatch(
-      /border-right:\s*1px solid var\(--xflow-border\)\s*;/
+      /border-right:\s*1px solid var\(--xflow-border-subtle\)\s*;/
     );
     expect(rule(".xflow-editor .xflow-editor-compact-drawer__wrapper--end")).toMatch(
-      /border-left:\s*1px solid var\(--xflow-border\)\s*;/
+      /border-left:\s*1px solid var\(--xflow-border-subtle\)\s*;/
     );
   });
 
@@ -657,22 +760,26 @@ describe("xflow.editor browser-measured baseline fixes (E6)", () => {
     const run = rule(".xflow-editor-statusbar__run");
     expect(run).toMatch(/color:\s*inherit\s*;/);
     expect(run).toMatch(/font-family:\s*var\(--xflow-font-mono\)\s*;/);
+    // The separators match the 20px top-bar rule, not the old 14px stub.
+    expect(rule(".xflow-editor-statusbar__sep")).toMatch(/height:\s*20px\s*;/);
   });
 
   it("draws the workflow-settings stack at the baseline figure 6 values", () => {
     const root = rule(".xflow-editor-workflow-settings");
     expect(root).toMatch(/--xflow-editor-section-card-radius:\s*var\(--xflow-radius-md\)\s*;/);
-    expect(root).toMatch(/--xflow-editor-section-card-bg:\s*var\(--xflow-panel-raised\)\s*;/);
-    expect(root).toMatch(/gap:\s*8px\s*;/);
+    expect(root).toMatch(/--xflow-editor-section-card-bg:\s*var\(--xflow-surface-raised\)\s*;/);
+    expect(root).toMatch(/gap:\s*var\(--xflow-space-2\)\s*;/);
     const head = rule(".xflow-editor-workflow-settings .xflow-editor-section-card__header");
     // The baseline head is 35px tall at every width of content (an action key
     // or not), so the height is a floor rather than the padding around a line.
     expect(head).toMatch(/min-height:\s*35px\s*;/);
-    expect(head).toMatch(/padding:\s*0 12px\s*;/);
+    expect(head).toMatch(/padding:\s*0 var\(--xflow-space-3\)\s*;/);
     expect(rule(".xflow-editor-workflow-settings .xflow-editor-section-card__title")).toMatch(
       /font-size:\s*var\(--xflow-font-md\)\s*;/
     );
-    expect(rule(".xflow-editor-workflow-settings .xflow-editor-section-card__body")).toMatch(/padding:\s*2px 12px 8px\s*;/);
+    expect(rule(".xflow-editor-workflow-settings .xflow-editor-section-card__body")).toMatch(
+      /padding:\s*var\(--xflow-space-0-5\) var\(--xflow-space-3\) var\(--xflow-space-2\)\s*;/
+    );
   });
 
   it("stacks a workflow-settings row label-over-control with the baseline 12px/500 label", () => {
@@ -681,9 +788,9 @@ describe("xflow.editor browser-measured baseline fixes (E6)", () => {
     expect(row).not.toMatch(/grid-template-columns/);
     const label = rule(".xflow-editor-workflow-settings .xflow-editor-form-row > span");
     expect(label).toMatch(/font-size:\s*var\(--xflow-font-sm\)\s*;/);
-    expect(label).toMatch(/font-weight:\s*500\s*;/);
+    expect(label).toMatch(/font-weight:\s*var\(--xflow-font-weight-medium\)\s*;/);
     expect(label).toMatch(/color:\s*var\(--xflow-text-secondary\)\s*;/);
-    expect(label).toMatch(/margin-bottom:\s*2px\s*;/);
+    expect(label).toMatch(/margin-bottom:\s*var\(--xflow-space-0-5\)\s*;/);
   });
 
   it("draws the inspector head tile as the shared category block, with no private tone table", () => {
@@ -699,5 +806,54 @@ describe("xflow.editor browser-measured baseline fixes (E6)", () => {
   it("sets the preview canvas in the shared sans stack", () => {
     const preview = readFileSync(`${import.meta.dirname}/../../xflow-preview/src/styles.css`, "utf8");
     expect(preview.replace(/\/\*[\s\S]*?\*\//g, "")).toMatch(/\.xflow-preview\s*\{[^}]*font-family:\s*var\(--xflow-font-sans\)\s*;/);
+  });
+});
+
+describe("round-2 visual audit fixes", () => {
+  const rule = (selector: string): string => {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = css.match(new RegExp(`(?:^|\\})\\s*${escaped}\\s*\\{([^}]*)\\}`));
+    expect(match, `${selector} has a rule`).not.toBeNull();
+    return match?.[1] ?? "";
+  };
+
+  it("draws the inspector form controls as the baseline .ctl: 6px radius, 10px inline padding, 3px/18% focus ring", () => {
+    expect(rule(".xflow-editor .xflow-editor-field")).toMatch(/padding-inline:\s*var\(--xflow-space-2-5\)\s*;/);
+    expect(rule(".xflow-editor .xflow-editor-textarea")).toMatch(/min-height:\s*64px\s*;/);
+    expect(rule(".xflow-editor .xflow-editor-textarea")).toMatch(
+      /padding:\s*var\(--xflow-space-1-5\) var\(--xflow-space-2-5\)\s*;/
+    );
+    expect(css).toMatch(
+      /\.xflow-editor \.xflow-editor-field,[\s\S]*?\.xflow-editor \.xflow-editor-select__root\s*\{[^}]*border-radius:\s*var\(--xflow-radius-sm\)\s*;/
+    );
+    expect(rule(".xflow-editor .xflow-editor-field:focus,\n.xflow-editor .xflow-editor-textarea:focus,\n.xflow-editor .xflow-editor-select__root.ant-select-focused")).toMatch(
+      /box-shadow:\s*0 0 0 3px var\(--xflow-editor-control-ring\)\s*;/
+    );
+    expect(css).toMatch(/--xflow-editor-control-ring:\s*color-mix\(in srgb, var\(--xflow-primary\) 18%, transparent\)\s*;/);
+  });
+
+  it("draws the section-card stack at the baseline 12px gap on the raised surface", () => {
+    expect(rule(".xflow-editor .xflow-editor-config")).toMatch(/gap:\s*var\(--xflow-space-3\)\s*;/);
+    expect(css).toMatch(/--xflow-editor-section-card-bg:\s*var\(--xflow-surface-raised\)\s*;/);
+  });
+});
+
+// E-C: once the wildcard `!important` reduced-motion fallback is gone, every
+// duration must come from tokens.css. This is the grep guard over the three
+// sheets that paint inside the xflow roots; token definitions and comments are
+// not durations a component owns.
+describe("motion durations come from tokens", () => {
+  const sheets = [
+    `${import.meta.dirname}/styles.css`,
+    `${import.meta.dirname}/../../xflow-preview/src/styles.css`,
+    `${import.meta.dirname}/../../../apps/xflow-admin/src/layouts/admin.css`,
+    `${import.meta.dirname}/../../../apps/xflow-admin/src/pages/ui-preview/ui-preview.css`
+  ];
+
+  it("has no bare ms/s duration outside tokens.css", () => {
+    for (const sheet of sheets) {
+      const text = readFileSync(sheet, "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+      expect(text.match(/(?<![\w.-])\d+(?:\.\d+)?m?s\b/g) ?? [], sheet).toEqual([]);
+    }
   });
 });

@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NodeTypesResponse, WorkflowDef } from "@xflow/core";
 import type { XFlowPreview as RealXFlowPreview } from "@xflow/preview";
+import { READABLE_FIT_ZOOM } from "@xflow/preview";
 import { XFlowEditor } from "./index";
 import { RailKey } from "./panels/rail";
 
@@ -99,6 +100,13 @@ const railNames = (rail: HTMLElement) => within(rail).getAllByRole("button").map
 const desktopRail = () => screen.getByRole("navigation", { name: "工作台导航" });
 const zones = () => screen.getByRole("complementary", { name: "节点与大纲" });
 const countOf = (region: HTMLElement) => region.querySelector(".xflow-editor-panel-title__count")?.textContent;
+/** ED-14 folds every group but the first by default; row tests open the rest. */
+const expandAllGroups = () => {
+  const library = screen.getByRole("region", { name: "节点" });
+  for (const group of library.querySelectorAll<HTMLButtonElement>(".xflow-editor-node-group__title[aria-expanded='false']")) {
+    fireEvent.click(group);
+  }
+};
 const canvasNode = (name: string): HTMLElement => {
   const node = document.querySelector<HTMLElement>(`.xflow-preview-node__select[aria-label^="${name} node "]`);
   if (!node) throw new Error(`canvas node ${name} not found`);
@@ -297,9 +305,9 @@ describe("left rail (§6.5)", () => {
     render(<XFlowEditor value={workflow} />);
     const run = within(desktopRail()).getByRole("button", { name: "执行记录" });
 
-    // The caption is the one span that is not the AntD icon, so the 11px rule
-    // can no longer reach the glyph (jsdom has no cascade; the class is the hook).
-    expect(run.querySelector(".anticon")?.classList.contains("xflow-editor-rail__text")).toBe(false);
+    // The caption is the one span that is not the glyph, so the 11px rule can
+    // no longer reach the icon (jsdom has no cascade; the class is the hook).
+    expect(run.querySelector("svg[data-xflow-icon]")?.classList.contains("xflow-editor-rail__text")).toBe(false);
     expect(run.querySelector(".xflow-editor-rail__text")?.textContent).toBe("执行");
     expect(run.querySelectorAll(".xflow-editor-rail__text")).toHaveLength(1);
   });
@@ -350,16 +358,16 @@ describe("left rail (§6.5)", () => {
     expect(document.activeElement).toBe(within(desktopRail()).getByRole("button", { name: "节点与大纲" }));
   });
 
-  it("puts 属性 between the spacer and 帮助 only in the band with no docked inspector", () => {
+  it("puts 属性 between the spacer and 帮助 at every compact width", () => {
     const container = mockEditorWidth();
     render(<XFlowEditor value={workflow} />);
     const compactRail = () => screen.getByRole("complementary", { name: "紧凑导航" });
 
-    // 1024-1280: the inspector keeps its column, so the rail has no 属性 key.
+    // <1280 (§6.0): no docked inspector, so the rail carries the 属性 key.
     act(() => container.setWidth(1279));
-    expect(railNames(compactRail())).toEqual(["节点与大纲", "执行记录", "变量", "快捷键与帮助"]);
+    expect(railNames(compactRail())).toEqual(["节点与大纲", "执行记录", "变量", "属性面板", "快捷键与帮助"]);
 
-    // Below 1024 the inspector is a drawer, so the one rail opens it.
+    // The same single rail below 1024.
     act(() => container.setWidth(1023));
     expect(railNames(compactRail())).toEqual(["节点与大纲", "执行记录", "变量", "属性面板", "快捷键与帮助"]);
     const run = within(compactRail()).getByRole("button", { name: "执行记录" });
@@ -372,6 +380,7 @@ describe("left rail (§6.5)", () => {
 describe("dual-zone left column (§6.0.1)", () => {
   it("is one aside named 节点与大纲 holding the 节点 and 大纲 regions with their counts", () => {
     render(<XFlowEditor value={workflow} />);
+    expandAllGroups();
 
     const aside = zones();
     const library = within(aside).getByRole("region", { name: "节点" });
@@ -389,6 +398,30 @@ describe("dual-zone left column (§6.0.1)", () => {
     // The title-bar keys: the collapse action stays on the upper zone only.
     expect(within(library).getByRole("button", { name: "收起左栏" })).toBeTruthy();
     expect(within(outline).queryByRole("button", { name: "收起左栏" })).toBeNull();
+  });
+
+  it("draws the baseline's side-left sprite glyph on the 收起左栏 key", () => {
+    render(<XFlowEditor value={workflow} />);
+    const collapse = within(screen.getByRole("region", { name: "节点" })).getByRole("button", { name: "收起左栏" });
+    // The title-bar key hook the stylesheet sizes (32x24, 6px radius).
+    expect(collapse.classList.contains("xflow-editor-panel-collapse")).toBe(true);
+    expect(collapse.getAttribute("aria-expanded")).toBe("true");
+
+    // The sprite's own geometry, ported verbatim: panel frame plus the divider
+    // near the left edge (#i-side-left in the baseline mockup).
+    const glyph = collapse.querySelector<SVGSVGElement>('[data-xflow-icon="side-left"]');
+    expect(glyph).toBeTruthy();
+    expect(glyph?.getAttribute("aria-hidden")).toBe("true");
+    expect(glyph?.getAttribute("viewBox")).toBe("0 0 24 24");
+    expect(glyph?.getAttribute("width")).toBe("16");
+    expect(glyph?.getAttribute("height")).toBe("16");
+    expect(glyph?.getAttribute("fill")).toBe("none");
+    expect(glyph?.getAttribute("stroke")).toBe("currentColor");
+    expect(glyph?.getAttribute("stroke-width")).toBe("1.75");
+    expect(glyph?.querySelector("rect")?.getAttribute("x")).toBe("3.5");
+    expect(glyph?.querySelector("path")?.getAttribute("d")).toBe("M9.5 5v14");
+    // The AntD menu glyph this replaced is gone.
+    expect(collapse.querySelector(".anticon")).toBeNull();
   });
 
   it("locates the selected node on the canvas, and is disabled with nothing selected", () => {
@@ -574,6 +607,7 @@ describe("node-library rows (§6.0.1)", () => {
 
   it("puts the type's description on the second line, ellipsised with a title", () => {
     render(<XFlowEditor nodeTypes={nodeTypes} value={workflow} />);
+    expandAllGroups();
 
     expect(hint("xflow.http")?.textContent).toBe("调用 HTTP 接口并返回响应");
     expect(hint("xflow.http")?.getAttribute("title")).toBe("调用 HTTP 接口并返回响应");
@@ -582,11 +616,13 @@ describe("node-library rows (§6.0.1)", () => {
 
   it("falls back to the type id when there is no description, and keeps the id searchable", () => {
     render(<XFlowEditor nodeTypes={nodeTypes} value={workflow} />);
+    expandAllGroups();
 
     expect(hint("acme.plain")?.textContent).toBe("acme.plain");
     expect(hint("acme.plain")?.getAttribute("title")).toBe("acme.plain");
 
     const library = screen.getByRole("region", { name: "节点" });
+    fireEvent.click(within(library).getByRole("button", { name: "搜索节点" }));
     fireEvent.change(within(library).getByPlaceholderText("搜索 Webhook / If / HTTP…"), { target: { value: "acme." } });
     expect(library.querySelector('button[data-node-type="acme.plain"]')).toBeTruthy();
     expect(library.querySelector('button[data-node-type="xflow.http"]')).toBeNull();
@@ -594,6 +630,7 @@ describe("node-library rows (§6.0.1)", () => {
 
   it("draws a category icon block whose data-cat comes from the type", () => {
     render(<XFlowEditor nodeTypes={nodeTypes} value={workflow} />);
+    expandAllGroups();
 
     const cat = (type: string) => tile(type).querySelector(".xflow-editor-category-icon")?.getAttribute("data-cat");
     expect(cat("xflow.http")).toBe("action");
@@ -606,15 +643,114 @@ describe("node-library rows (§6.0.1)", () => {
     expect(tile("xflow.http").textContent).not.toContain("＋");
   });
 
-  it("keeps the search box always on screen with a / hint, and / focuses it", () => {
+  it("hides the search box by default and opens it from the title-bar key", () => {
     render(<XFlowEditor value={workflow} />);
-    const search = within(screen.getByRole("region", { name: "节点" })).getByPlaceholderText("搜索 Webhook / If / HTTP…");
+    const library = screen.getByRole("region", { name: "节点" });
+    const key = within(library).getByRole("button", { name: "搜索节点" });
 
+    // Hidden and out of the layout until asked for; the key points at the box.
+    expect(within(library).queryByPlaceholderText("搜索 Webhook / If / HTTP…")).toBeNull();
+    expect(library.querySelector(".xflow-editor-library__search")?.hasAttribute("hidden")).toBe(true);
+    expect(key.getAttribute("aria-expanded")).toBe("false");
+    expect(key.getAttribute("aria-controls")).toBe(library.querySelector(".xflow-editor-library__search")?.id);
+    expect(key.hasAttribute("data-active")).toBe(false);
+    // 32x24 ghost, the same title-bar action as the outline's search.
+    expect(key.classList.contains("xflow-editor-panel-collapse")).toBe(true);
+
+    fireEvent.click(key);
+
+    const search = within(library).getByPlaceholderText("搜索 Webhook / If / HTTP…");
+    expect(document.activeElement).toBe(search);
+    expect(key.getAttribute("aria-expanded")).toBe("true");
+    expect(key.getAttribute("data-active")).toBe("true");
     expect(search.closest(".xflow-editor-library-search")?.querySelector("kbd")?.textContent).toBe("/");
-    expect(document.activeElement).not.toBe(search);
+  });
+
+  it("opens the search from / and keeps the key pressed while a filter is set", () => {
+    render(<XFlowEditor value={workflow} />);
+    const library = screen.getByRole("region", { name: "节点" });
+    const key = within(library).getByRole("button", { name: "搜索节点" });
+    expect(document.activeElement).not.toBe(key);
 
     fireEvent.keyDown(window, { key: "/" });
+    const search = within(library).getByPlaceholderText("搜索 Webhook / If / HTTP…");
     expect(document.activeElement).toBe(search);
+
+    fireEvent.change(search, { target: { value: "http" } });
+    expect(key.getAttribute("data-active")).toBe("true");
+    // The filter narrows the list.
+    expect(within(library).getByRole("button", { name: "HTTP" })).toBeTruthy();
+    expect(within(library).queryByRole("button", { name: "Kafka" })).toBeNull();
+  });
+
+  it("closes the search on Esc, clearing the query and returning focus to the key", () => {
+    render(<XFlowEditor value={workflow} />);
+    const library = screen.getByRole("region", { name: "节点" });
+    const key = within(library).getByRole("button", { name: "搜索节点" });
+
+    fireEvent.click(key);
+    const search = within(library).getByPlaceholderText("搜索 Webhook / If / HTTP…");
+    fireEvent.change(search, { target: { value: "http" } });
+    fireEvent.keyDown(search, { key: "Escape" });
+
+    expect(within(library).queryByPlaceholderText("搜索 Webhook / If / HTTP…")).toBeNull();
+    expect(document.activeElement).toBe(key);
+    expect(key.getAttribute("aria-expanded")).toBe("false");
+
+    // Reopening starts from an empty filter.
+    fireEvent.click(key);
+    expect((within(library).getByPlaceholderText("搜索 Webhook / If / HTTP…") as HTMLInputElement).value).toBe("");
+  });
+
+  it("folds an empty search away on blur but keeps a keyword on screen", () => {
+    render(<XFlowEditor value={workflow} />);
+    const library = screen.getByRole("region", { name: "节点" });
+    const key = within(library).getByRole("button", { name: "搜索节点" });
+    const open = () => {
+      fireEvent.click(key);
+      return within(library).getByPlaceholderText("搜索 Webhook / If / HTTP…");
+    };
+
+    fireEvent.blur(open());
+    expect(within(library).queryByPlaceholderText("搜索 Webhook / If / HTTP…")).toBeNull();
+
+    const filtered = open();
+    fireEvent.change(filtered, { target: { value: "http" } });
+    fireEvent.blur(filtered);
+    // The list stays filtered, so its filter must stay visible.
+    expect(within(library).getByPlaceholderText("搜索 Webhook / If / HTTP…")).toBeTruthy();
+    expect(key.getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("closes and clears the search when its key is clicked again", () => {
+    render(<XFlowEditor value={workflow} />);
+    const library = screen.getByRole("region", { name: "节点" });
+    const key = within(library).getByRole("button", { name: "搜索节点" });
+
+    fireEvent.click(key);
+    fireEvent.change(within(library).getByPlaceholderText("搜索 Webhook / If / HTTP…"), { target: { value: "http" } });
+    fireEvent.click(key);
+
+    expect(within(library).queryByPlaceholderText("搜索 Webhook / If / HTTP…")).toBeNull();
+    expect(key.getAttribute("aria-expanded")).toBe("false");
+    expect(key.hasAttribute("data-active")).toBe(false);
+  });
+
+  it("advertises / on the search key and closes the search from the key itself", () => {
+    render(<XFlowEditor value={workflow} />);
+    const library = screen.getByRole("region", { name: "节点" });
+    const key = within(library).getByRole("button", { name: "搜索节点" });
+    expect(key.getAttribute("aria-keyshortcuts")).toBe("/");
+
+    fireEvent.keyDown(window, { key: "/" });
+    expect(within(library).getByPlaceholderText("搜索 Webhook / If / HTTP…")).toBeTruthy();
+    expect(key.getAttribute("aria-expanded")).toBe("true");
+
+    // Esc from anywhere (here: the key, not the input) closes and restores focus.
+    key.focus();
+    fireEvent.keyDown(key, { key: "Escape" });
+    expect(within(library).queryByPlaceholderText("搜索 Webhook / If / HTTP…")).toBeNull();
+    expect(document.activeElement).toBe(key);
   });
 
   it("reopens a collapsed column and focuses the search on /", async () => {
@@ -628,5 +764,17 @@ describe("node-library rows (§6.0.1)", () => {
       const search = within(screen.getByRole("region", { name: "节点" })).getByPlaceholderText("搜索 Webhook / If / HTTP…");
       expect(document.activeElement).toBe(search);
     });
+  });
+});
+
+describe("canvas fit (§6.2, ED-15)", () => {
+  it("fits the whole graph at the readable floor from the pane menu", () => {
+    const { container } = render(<XFlowEditor value={workflow} />);
+    preview.handle.fitView.mockClear();
+
+    fireEvent.contextMenu(container.querySelector(".react-flow__pane") as Element, { clientX: 640, clientY: 380 });
+    fireEvent.click(screen.getByRole("menuitem", { name: /适应视图/ }));
+
+    expect(preview.handle.fitView).toHaveBeenCalledWith({ minZoom: READABLE_FIT_ZOOM });
   });
 });
