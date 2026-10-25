@@ -9,14 +9,17 @@
      */
 
     /* Surfaces / canvas */
-    --xflow-preview-surface-app: var(--xflow-app);
-    --xflow-preview-surface-toolbar: var(--xflow-panel);
-    --xflow-preview-surface-panel: var(--xflow-panel);
-    --xflow-preview-surface-panel-raised: var(--xflow-panel-raised);
+    --xflow-preview-surface-app: var(--xflow-surface-app);
+    --xflow-preview-surface-toolbar: var(--xflow-surface-overlay);
+    --xflow-preview-surface-panel: var(--xflow-surface-panel);
+    --xflow-preview-surface-panel-raised: var(--xflow-surface-sunken);
     --xflow-preview-surface-canvas: var(--xflow-canvas);
     --xflow-preview-surface-control: var(--xflow-field);
-    --xflow-preview-surface-hover: var(--xflow-hover);
-    --xflow-preview-minimap-mask: var(--xflow-minimap-mask);
+    --xflow-preview-surface-hover: var(--xflow-surface-hover);
+    /* xyflow's mask can only shade the area *outside* the viewport; the
+       baseline (`#wb .minimap`) shades nothing there, so the default mask is
+       transparent. The viewport frame itself is the 1.5px primary outline. */
+    --xflow-preview-minimap-mask: transparent;
     /* The viewport frame on the minimap: the baseline's 1.5px primary outline. */
     --xflow-preview-minimap-view: var(--xflow-primary);
 
@@ -27,26 +30,29 @@
     --xflow-preview-text-pill: var(--xflow-text-secondary);
     --xflow-preview-border: var(--xflow-border);
     --xflow-preview-focus-subtle: var(--xflow-primary-bg-subtle);
-    --xflow-preview-focus-ring: var(--xflow-primary-ring);
+    --xflow-preview-focus-ring: var(--xflow-focus-ring);
 
     /* Runtime status */
     --xflow-preview-status-running: var(--xflow-info);
     --xflow-preview-status-warning: var(--xflow-warning);
     --xflow-preview-status-error: var(--xflow-danger);
 
+    /* Motion comes straight from the shared --xflow-motion-* tokens (stage 1);
+       the preview keeps no local duration scale. */
     /* Nodes / ports / edges */
-    --xflow-preview-node-bg: var(--xflow-panel);
+    --xflow-preview-node-bg: var(--xflow-surface-raised);
     --xflow-preview-node-border: var(--xflow-border);
     --xflow-preview-node-shadow: var(--xflow-elev-1);
-    --xflow-preview-node-meta-bg: var(--xflow-panel-raised);
+    --xflow-preview-node-meta-bg: var(--xflow-surface-sunken);
     --xflow-preview-node-width: var(--xflow-node-width);
     /* Defaults for values index.tsx writes at runtime: the category colour is set
-       inline on each card, the zoom divisor on the canvas (see LodScaleVariables). */
+       inline on each card, the capped low-detail scale on the canvas (see
+       LodScaleVariables). */
     --xflow-preview-node-category: var(--xflow-neutral);
-    --xflow-preview-lod: 1;
+    --xflow-preview-lod-scale: 1;
     --xflow-preview-node-selected-border: var(--xflow-primary);
     --xflow-preview-node-selected-ring: var(--xflow-primary-ring);
-    --xflow-preview-port: var(--xflow-panel);
+    --xflow-preview-port: var(--xflow-surface-panel);
     --xflow-preview-port-border: var(--xflow-border-strong);
     --xflow-preview-port-chip-bg: var(--xflow-primary-bg-subtle);
     --xflow-preview-port-chip-border: var(--xflow-primary-border);
@@ -59,7 +65,7 @@
     /* An edge whose source port no longer exists (danglingPorts prop). */
     --xflow-preview-edge-dangling: var(--xflow-warning);
     --xflow-preview-edge-dangling-label: var(--xflow-warning-fg);
-    --xflow-preview-edge-label-bg: var(--xflow-canvas);
+    --xflow-preview-edge-label-bg: var(--xflow-surface-panel);
 
     background: var(--xflow-preview-surface-app);
     border: 1px solid var(--xflow-preview-border);
@@ -77,11 +83,11 @@
   .xflow-preview-toolbar {
     align-items: center;
     background: var(--xflow-preview-surface-toolbar);
-    border-bottom: 1px solid var(--xflow-preview-border);
+    border-bottom: 1px solid var(--xflow-border-subtle);
     display: flex;
     justify-content: space-between;
     min-height: 48px;
-    padding: 8px 14px;
+    padding: var(--xflow-space-2) var(--xflow-space-4);
   }
 
   .xflow-preview-toolbar p,
@@ -91,12 +97,12 @@
 
   .xflow-preview-toolbar p {
     color: var(--xflow-preview-text-muted);
-    font-size: 11px;
+    font-size: var(--xflow-font-xs);
   }
 
   .xflow-preview-toolbar h2 {
-    font-size: 14px;
-    font-weight: 650;
+    font-size: var(--xflow-font-lg);
+    font-weight: var(--xflow-font-weight-semibold);
   }
 
   /* Same shape as the baseline chip (.xflow-pv-chip) and the node's status chip:
@@ -104,13 +110,13 @@
   .xflow-preview-status {
     align-items: center;
     border: 1px solid var(--xflow-preview-border);
-    border-radius: var(--xflow-radius-pill);
+    border-radius: var(--xflow-radius-full);
     color: var(--xflow-preview-text-muted);
     display: inline-flex;
     font-size: var(--xflow-font-xs);
-    font-weight: 500;
+    font-weight: var(--xflow-font-weight-medium);
     height: 20px;
-    padding: 0 8px;
+    padding: 0 var(--xflow-space-2);
     white-space: nowrap;
   }
 
@@ -135,30 +141,30 @@
     background: var(--xflow-preview-surface-panel);
     border-color: var(--xflow-preview-border);
     color: var(--xflow-preview-text-muted);
-    font-size: 12px;
-    padding: 14px;
+    font-size: var(--xflow-font-sm);
+    padding: var(--xflow-space-4);
   }
 
   .xflow-preview-sidebar {
-    border-right: 1px solid var(--xflow-preview-border);
+    border-right: 1px solid var(--xflow-border-subtle);
   }
 
   .xflow-preview-sidebar strong {
     color: var(--xflow-preview-text);
     display: block;
-    font-size: 24px;
-    margin-top: 8px;
+    font-size: calc(var(--xflow-font-xl) * 1.5);
+    margin-top: var(--xflow-space-2);
   }
 
   .xflow-preview-panel {
-    border-left: 1px solid var(--xflow-preview-border);
+    border-left: 1px solid var(--xflow-border-subtle);
   }
 
   .xflow-preview-panel > span {
     color: var(--xflow-preview-text);
     display: block;
-    font-weight: 650;
-    margin-bottom: 10px;
+    font-weight: var(--xflow-font-weight-semibold);
+    margin-bottom: var(--xflow-space-2-5);
   }
 
   .xflow-preview-canvas {
@@ -185,6 +191,178 @@
     --xy-edge-label-background-color: var(--xflow-preview-edge-label-bg);
     --xy-edge-label-color: var(--xflow-preview-edge-label);
     background: var(--xflow-preview-surface-canvas);
+  }
+
+  /* ---- Canvas sections (§6.2): dashed grouping boxes behind the cards ----
+     A section is purely visual; it may not take a click, a drag or a pinch
+     away from the canvas. Flow coordinates come from the ViewportPortal, which
+     is inside the transformed viewport. */
+  .xflow-preview-section-layer {
+    inset: 0;
+    pointer-events: none;
+    position: absolute;
+    /* The portal mounts after the node layer, so DOM order alone would paint
+       these boxes on top; one negative level puts them behind every card (and
+       edge) in this stacking context. */
+    z-index: -1;
+  }
+
+  .xflow-preview-section {
+    --xflow-preview-section-category: var(--xflow-neutral);
+    background: color-mix(in srgb, var(--xflow-preview-section-category) 5%, transparent);
+    border: 1px dashed color-mix(in srgb, var(--xflow-preview-section-category) 55%, transparent);
+    border-radius: var(--xflow-radius-md);
+    position: absolute;
+  }
+
+  /* The title chip: the baseline `.frame > span`, 22px tall, straddling the
+     box's top edge with the panel behind it so the dashed line is cut cleanly.
+     The category colour stays on the border, the 5% ground and the bar; the
+     13px label itself mixes it toward body text (orange measured 3.91:1 raw). */
+  .xflow-preview-section__title {
+    align-items: center;
+    background: var(--xflow-panel);
+    border: 1px solid color-mix(in srgb, var(--xflow-preview-section-category) 55%, transparent);
+    border-radius: var(--xflow-radius-xs);
+    color: color-mix(in srgb, var(--xflow-preview-section-category) 70%, var(--xflow-text));
+    display: inline-flex;
+    font-size: var(--xflow-font-md);
+    font-weight: var(--xflow-font-weight-semibold);
+    gap: var(--xflow-space-1-5);
+    height: 22px;
+    left: 12px;
+    padding: 0 var(--xflow-space-2);
+    position: absolute;
+    top: -11px;
+    white-space: nowrap;
+  }
+
+  /* The section's colour bar, the same 3x10 pill as the outline heading's.
+     It keeps the raw category colour; only the label text above is mixed. */
+  .xflow-preview-section__title::before {
+    background: var(--xflow-preview-section-category);
+    border-radius: var(--xflow-radius-full);
+    content: "";
+    flex: none;
+    height: 10px;
+    width: 3px;
+  }
+
+  /* Editing handles (the editor's writing surface). The layer stays
+     pointer-transparent and read-only hosts render no handles, so the boxes
+     remain pure decoration for them; each handle re-enables pointer events for
+     itself only. A geometry-enabled box (the move surface) is the exception:
+     it takes events over its own rectangle, but the cards painted above it
+     keep theirs, so a node drag never lands on the box. */
+  .xflow-preview-section--interactive {
+    cursor: move;
+    pointer-events: auto;
+  }
+
+  /* The overhanging title chip would otherwise be dead space above the box. */
+  .xflow-preview-section--interactive .xflow-preview-section__title {
+    cursor: move;
+    pointer-events: auto;
+  }
+
+  /* Bottom-right resize grip: a corner bracket in the section's accent. */
+  .xflow-preview-section__resize {
+    border-bottom: 2px solid color-mix(in srgb, var(--xflow-preview-section-category) 70%, transparent);
+    border-radius: 0 0 var(--xflow-radius-xs) 0;
+    border-right: 2px solid color-mix(in srgb, var(--xflow-preview-section-category) 70%, transparent);
+    bottom: 3px;
+    cursor: nwse-resize;
+    height: 10px;
+    pointer-events: auto;
+    position: absolute;
+    right: 3px;
+    width: 10px;
+  }
+
+  .xflow-preview-section__resize:hover {
+    background: color-mix(in srgb, var(--xflow-preview-section-category) 12%, transparent);
+  }
+
+  .xflow-preview-section__title-action {
+    background: none;
+    border: 0;
+    color: inherit;
+    cursor: text;
+    font: inherit;
+    padding: 0;
+    pointer-events: auto;
+    position: relative;
+  }
+
+  /* WCAG 2.5.8: the title chip's text stays its visual size, while a transparent
+     pseudo-element grows the target to 24 screen px. --xflow-preview-inverse-zoom
+     is 1/zoom (capped at 3), written from JS; min() keeps a wider title's own
+     width and only pads the axis that falls short. */
+  .xflow-preview-section__title-action::after {
+    content: "";
+    height: max(100%, calc(24px * var(--xflow-preview-inverse-zoom, 1)));
+    left: min(0px, calc((100% - 24px * var(--xflow-preview-inverse-zoom, 1)) / 2));
+    position: absolute;
+    top: min(0px, calc((100% - 24px * var(--xflow-preview-inverse-zoom, 1)) / 2));
+    width: max(100%, calc(24px * var(--xflow-preview-inverse-zoom, 1)));
+  }
+
+  .xflow-preview-section__title-action:focus-visible {
+    outline: 2px solid var(--xflow-focus-ring);
+    outline-offset: 2px;
+  }
+
+  .xflow-preview-section__title--input {
+    font: inherit;
+    min-width: 96px;
+    padding: 0 var(--xflow-space-1-5);
+    pointer-events: auto;
+  }
+
+  .xflow-preview-section__title--input:focus {
+    border-color: var(--xflow-preview-section-category);
+    outline: none;
+  }
+
+  .xflow-preview-section__delete {
+    align-items: center;
+    background: transparent;
+    border: 0;
+    border-radius: var(--xflow-radius-xs);
+    color: var(--xflow-text-tertiary);
+    cursor: pointer;
+    display: inline-flex;
+    height: 16px;
+    justify-content: center;
+    padding: 0;
+    pointer-events: auto;
+    position: relative;
+    width: 16px;
+  }
+
+  /* The 16px × keeps its visual size; the transparent pseudo-element carries the
+     24 screen-px target. Symmetric expansion is the only way both axes reach 24
+     at the 62% default zoom, and the section delete asks for confirmation. */
+  .xflow-preview-section__delete::after {
+    border-radius: var(--xflow-radius-xs);
+    content: "";
+    inset: min(0px, calc((100% - 24px * var(--xflow-preview-inverse-zoom, 1)) / 2));
+    position: absolute;
+  }
+
+  .xflow-preview-section__delete:hover {
+    background: var(--xflow-danger-bg-subtle);
+    color: var(--xflow-danger-fg);
+  }
+
+  .xflow-preview-section__delete:focus-visible {
+    outline: 2px solid var(--xflow-focus-ring);
+    outline-offset: 2px;
+  }
+
+  .xflow-preview-section__delete svg {
+    height: 12px;
+    width: 12px;
   }
 
   /* ---- Canvas chrome (§6.2): rulers, zoom bar, minimap ----
@@ -220,7 +398,7 @@
     background-position: var(--xflow-preview-ruler-origin, 0px) 0, var(--xflow-preview-ruler-origin, 0px) 100%;
     background-repeat: repeat-x;
     background-size: var(--xflow-preview-ruler-major, 100px) 100%, var(--xflow-preview-ruler-minor, 10px) 5px;
-    border-bottom: 1px solid var(--xflow-border);
+    border-bottom: 1px solid var(--xflow-border-subtle);
     height: var(--xflow-ruler);
     left: var(--xflow-ruler);
     right: 0;
@@ -234,7 +412,7 @@
     background-position: 0 var(--xflow-preview-ruler-origin, 0px), 100% var(--xflow-preview-ruler-origin, 0px);
     background-repeat: repeat-y;
     background-size: 100% var(--xflow-preview-ruler-major, 100px), 5px var(--xflow-preview-ruler-minor, 10px);
-    border-right: 1px solid var(--xflow-border);
+    border-right: 1px solid var(--xflow-border-subtle);
     bottom: 0;
     left: 0;
     top: var(--xflow-ruler);
@@ -247,13 +425,13 @@
   }
 
   .xflow-preview-ruler--x .xflow-preview-ruler__tick {
-    padding-left: 3px;
+    padding-left: var(--xflow-space-1);
     top: 3px;
   }
 
   .xflow-preview-ruler--y .xflow-preview-ruler__tick {
     left: 3px;
-    padding-top: 3px;
+    padding-top: var(--xflow-space-1);
     transform: rotate(180deg);
     writing-mode: vertical-rl;
   }
@@ -273,8 +451,8 @@
   }
 
   .xflow-preview-ruler__corner {
-    border-bottom: 1px solid var(--xflow-border);
-    border-right: 1px solid var(--xflow-border);
+    border-bottom: 1px solid var(--xflow-border-subtle);
+    border-right: 1px solid var(--xflow-border-subtle);
     height: var(--xflow-ruler);
     left: 0;
     top: 0;
@@ -284,27 +462,30 @@
   /* The shared floating-bar shell: 34px, 1px border, 4px padding, radius-md, elev-2. */
   .xflow-preview-zoombar {
     align-items: center;
-    background: var(--xflow-panel);
+    background: var(--xflow-surface-overlay);
     border: 1px solid var(--xflow-border);
     border-radius: var(--xflow-radius-md);
     bottom: var(--xflow-preview-float-inset);
     box-shadow: var(--xflow-elev-2);
     display: flex;
-    gap: 4px;
+    gap: var(--xflow-space-0-5);
     height: var(--xflow-float-height);
     left: calc(var(--xflow-preview-ruler-inset) + var(--xflow-preview-float-inset));
-    padding: 4px;
+    padding: var(--xflow-space-1);
     position: absolute;
     white-space: nowrap;
     z-index: 5;
   }
 
+  /* The baseline's `.btn--ghost.btn--icon.btn--sm`: 32x24 at the 6px radius,
+     with the body text colour and a 16px glyph. */
   .xflow-preview-zoombar__button {
-    color: var(--xflow-text-secondary);
-    font-size: 16px;
+    border-radius: var(--xflow-radius-sm);
+    color: var(--xflow-text);
+    font-size: var(--xflow-font-xl);
     height: var(--xflow-control-height-sm);
     padding: 0;
-    width: var(--xflow-control-height-sm);
+    width: var(--xflow-control-height);
   }
 
   .xflow-preview-zoombar__button[data-active="true"] {
@@ -312,9 +493,29 @@
     color: var(--xflow-primary);
   }
 
+  /* The baseline's native range: a 96px track at the primary accent colour. */
   .xflow-preview-zoombar__slider {
-    margin: 0 4px;
+    accent-color: var(--xflow-primary);
+    background: transparent;
+    height: 16px;
+    margin: 0 var(--xflow-space-1);
+    padding: 0;
     width: 96px;
+  }
+
+  /* A native range otherwise falls back to the UA's 1px auto ring. */
+  .xflow-preview-zoombar__slider:focus-visible {
+    outline: 2px solid var(--xflow-focus-ring);
+    outline-offset: 2px;
+  }
+
+  /* @xflow/icons ships a 16px box of its own; inside the preview an icon sizes
+     from the surrounding font-size (12px in chips, 16px in tools), exactly as
+     the font glyphs it replaced did. Colour is the inherited currentColor. */
+  .xflow-icon {
+    flex: none;
+    height: 1em;
+    width: 1em;
   }
 
   .xflow-preview-zoombar__value {
@@ -333,22 +534,22 @@
   /* The owner's top-left float (§6.2: 添加节点), in the zoom bar's float chrome. */
   .xflow-preview-canvas-float {
     align-items: center;
-    background: var(--xflow-panel);
+    background: var(--xflow-surface-overlay);
     border: 1px solid var(--xflow-border);
     border-radius: var(--xflow-radius-md);
     box-shadow: var(--xflow-elev-2);
     display: flex;
-    gap: 4px;
+    gap: var(--xflow-space-0-5);
     height: var(--xflow-float-height);
     left: calc(var(--xflow-preview-ruler-inset) + var(--xflow-preview-float-inset));
-    padding: 4px;
+    padding: var(--xflow-space-1);
     position: absolute;
     top: calc(var(--xflow-preview-ruler-inset) + 12px);
     white-space: nowrap;
     z-index: 5;
   }
 
-  /* §6.2: 200x100, smaller than xyflow's 200x150 default, tucked under the canvas
+  /* §6.2: 200x124, smaller than xyflow's 200x150 default, tucked under the canvas
      rule's floating layers. */
   /* The right-hand float (inspector reopen): same chrome, one float inset in from
      the canvas edge, like the minimap and ZoomBar. Rulers are drawn top/left
@@ -358,13 +559,25 @@
     right: var(--xflow-preview-float-inset);
   }
 
+  /* The compact end chip (baseline `.panel-reopen`): 28px tall, 6px radius,
+   * 12px in from the canvas edge, its key filling the border box. */
+  .xflow-preview-canvas-float--compact {
+    border-radius: var(--xflow-radius-sm);
+    height: 28px;
+    padding: 0;
+  }
+
+  .xflow-preview-canvas-float--end.xflow-preview-canvas-float--compact {
+    right: 12px;
+  }
+
   .xflow-preview-canvas .react-flow__minimap {
-    background: var(--xflow-preview-surface-panel);
+    background: var(--xflow-surface-overlay);
     border: 1px solid var(--xflow-preview-border);
     border-radius: var(--xflow-radius-md);
     bottom: var(--xflow-preview-float-inset);
     box-shadow: var(--xflow-elev-2);
-    height: 100px;
+    height: 124px;
     margin: 0;
     overflow: hidden;
     right: var(--xflow-preview-float-inset);
@@ -374,6 +587,10 @@
   .xflow-preview-canvas .react-flow__edge-path {
     stroke-linecap: round;
     stroke-width: 1.5;
+    /* EL-06: hover widens 1.5 → 2 and turns primary over the fast step. */
+    transition:
+      stroke var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard),
+      stroke-width var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard);
   }
 
   /* §6.2: hovering an edge draws it 2px primary, as the baseline's hover sample.
@@ -408,12 +625,15 @@
 
   .xflow-preview-canvas .react-flow__edge-textbg {
     fill: var(--xflow-preview-edge-label-bg);
+    /* The baseline .edge-label carries a 1px border on the panel surface. */
+    stroke: var(--xflow-border);
+    stroke-width: 1;
   }
 
   .xflow-preview-canvas .react-flow__edge-text {
     fill: var(--xflow-preview-edge-label);
-    font-size: 11px;
-    font-weight: 700;
+    font-size: var(--xflow-font-xs);
+    font-weight: var(--xflow-font-weight-regular);
   }
 
   /* Port-semantic labels are styled here, not inline: selection has to outrank
@@ -438,11 +658,83 @@
     border: 1px solid var(--xflow-preview-node-border);
     border-radius: var(--xflow-radius-md);
     box-shadow: var(--xflow-preview-node-shadow);
+    /* Column layout so the bottom strip can pin to the card's lower edge even
+       when a card has no summary rows; every full/compact card then shares one
+       height instead of following its content. */
+    display: flex;
+    flex-direction: column;
     /* The card states its own type scale (the baseline sets it on its root); inheriting
        from the host made the title row 2px taller inside the editor. */
     font: 400 var(--xflow-font-md) / 20px var(--xflow-font-sans);
+    /* The selection ring's resting state: painted transparent so its colour can
+       fade in (EL-03). An outline never affects layout. */
+    outline: 2px solid transparent;
+    outline-offset: 2px;
     position: relative;
+    /* Feedback only: shadow and border on hover, the ring on selection. `all`
+       would also animate the card's own geometry on every re-render. */
+    transition:
+      box-shadow var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard),
+      border-color var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard),
+      outline-color var(--xflow-motion-duration-base) var(--xflow-motion-ease-standard);
     width: var(--xflow-preview-node-width);
+  }
+
+  /* Per-row fixed heights (E-A): a full card draws only the summary rows it
+     has, and each row count owns one height, so a short node no longer carries
+     three empty rows while two cards with the same count still match. The row
+     is 30 flow px, the worst case at the 1.25 glyph cap: a 24 screen-px
+     interactive target at the 0.8 full-detail floor (WCAG 2.5.8) and a line box
+     that holds the scaled 11px rows. It is deliberately independent of
+     `--xflow-preview-inverse-zoom`: a row that grew in flow units as the canvas
+     zoomed out resized every card on every zoom step, and xyflow re-measured
+     all of them (P2-2). The 84px base is the header (56), the bottom strip (26)
+     and the card's own 2px border. `data-summary-rows` is written by index.tsx
+     from exactly the rows it renders, so 0 never reserves an empty line.
+     Compact drops the summary: 56 + 26 + 2 = 84. Low detail keeps its own
+     inverse-scaled box. */
+  .xflow-preview-node[data-lod="full"] {
+    --xflow-preview-summary-row-h: 30px;
+    min-height: 84px;
+  }
+
+  .xflow-preview-node[data-lod="full"][data-summary-rows="1"] {
+    min-height: calc(84px + var(--xflow-preview-summary-row-h) + var(--xflow-space-2-5));
+  }
+
+  .xflow-preview-node[data-lod="full"][data-summary-rows="2"] {
+    min-height: calc(84px + 2 * var(--xflow-preview-summary-row-h) + var(--xflow-space-1) + var(--xflow-space-2-5));
+  }
+
+  .xflow-preview-node[data-lod="full"][data-summary-rows="3"] {
+    min-height: calc(84px + 3 * var(--xflow-preview-summary-row-h) + 2 * var(--xflow-space-1) + var(--xflow-space-2-5));
+  }
+
+  .xflow-preview-node[data-lod="compact"] {
+    min-height: 84px;
+  }
+
+  /* Full and compact cards keep their small type at the same screen size down
+     to 0.8 (and 0.75 in compact): every glyph is multiplied by the canvas's
+     inverse zoom, capped at 1.25 so the 0.75 compact band does not inflate the
+     text past an 11 screen-px floor. Only glyph sizes grow; line boxes and the
+     fixed row heights stay in flow units, so the card's geometry (and xyflow's
+     measured bounds) does not move with a zoom step. Port labels take the same
+     scale through their own rule below. Low detail defines no such variable and
+     keeps its own lod-scale rules. */
+  .xflow-preview-node[data-lod="full"],
+  .xflow-preview-node[data-lod="compact"] {
+    --xflow-preview-card-text-scale: clamp(1, var(--xflow-preview-inverse-zoom, 1), 1.25);
+  }
+
+  /* Hover lifts the card one elevation step. A toned card keeps its status
+     border: the tone is information and must not be repainted by hover. */
+  .xflow-preview-node:hover {
+    box-shadow: var(--xflow-elev-2);
+  }
+
+  .xflow-preview-node:not([data-tone]):hover {
+    border-color: var(--xflow-border-strong);
   }
 
   /* A card with runtime status takes the tone's border; the tone variables are
@@ -451,7 +743,10 @@
     border-color: var(--xflow-preview-t-border);
   }
 
+  /* A selected card takes the hover step too: elev2 plus the outline ring;
+     the ring alone is easy to miss at low zoom. */
   .xflow-preview-node[data-selected="true"] {
+    box-shadow: var(--xflow-elev-2);
     outline: 2px solid var(--xflow-preview-node-selected-border);
     outline-offset: 2px;
   }
@@ -460,19 +755,26 @@
   .xflow-preview-node__select {
     border-radius: inherit;
     cursor: pointer;
+    flex: none;
     outline: none;
   }
 
   .xflow-preview-node:has(.xflow-preview-node__select:focus-visible) {
     outline: 2px solid var(--xflow-preview-focus-ring);
     outline-offset: 2px;
+    /* Keyboard focus paints at once. EL-03's 180ms fade belongs to selection,
+       which a user holds; a Tab pass through the canvas does not, and the
+       transition would leave most focused cards reading as unringed. */
+    transition:
+      box-shadow var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard),
+      border-color var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard);
   }
 
   .xflow-preview-node__header {
     align-items: center;
     display: flex;
-    gap: 10px;
-    padding: 10px 12px;
+    gap: var(--xflow-space-2-5);
+    padding: var(--xflow-space-2-5) var(--xflow-space-3);
   }
 
   /* The block's colour is one variable, written inline by index.tsx from core's
@@ -483,10 +785,19 @@
     color: var(--xflow-preview-node-category);
     display: grid;
     flex: none;
-    font-size: 15px;
-    height: 28px;
+    font-size: var(--xflow-font-lg);
+    height: 24px;
     place-items: center;
-    width: 28px;
+    width: 24px;
+  }
+
+  /* EL-21: dark cards keep the category hue on the glyph only. The fill is the
+     raised surface with a 10% tint instead of a 14% wash of the raw colour, and
+     the glyph is mixed toward the secondary text colour, so orange/teal/purple
+     side by side read as accented icons rather than as a colour block. */
+  [data-theme="dark"] .xflow-preview-node__icon {
+    background: color-mix(in srgb, var(--xflow-preview-node-category) 10%, var(--xflow-panel-raised));
+    color: color-mix(in srgb, var(--xflow-preview-node-category) 72%, var(--xflow-text-secondary));
   }
 
   .xflow-preview-node__title {
@@ -496,32 +807,48 @@
 
   .xflow-preview-node__title strong {
     display: block;
-    font-weight: 600;
+    font-size: calc(var(--xflow-font-md) * var(--xflow-preview-card-text-scale, 1));
+    font-weight: var(--xflow-font-weight-medium);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
+  /* The descriptor's display name, not the raw id: sans, 11/16 (EL-18), with
+     the raw id in the element's title. */
   .xflow-preview-node__type {
     color: var(--xflow-text-tertiary);
     display: block;
-    font: 400 var(--xflow-font-xs) / 16px var(--xflow-font-mono);
+    font-family: var(--xflow-font-sans);
+    font-size: calc(var(--xflow-font-xs) * var(--xflow-preview-card-text-scale, 1));
+    font-weight: var(--xflow-font-weight-regular);
+    line-height: var(--xflow-line-height-xs);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+
+  /* Monospace only when the card prints an expression or an id-like value, not
+     for the type name above. */
 
   /* ---- Node card: configuration summary (spec §6.1.1) ---- */
   /* 标签 · 值 rows, max three lines (the +n row is the third). Values are
      single-line and ellipsize; the full value stays reachable via the field. */
   .xflow-preview-node__summary {
+    align-content: start;
+    align-items: center;
     display: grid;
-    font-size: var(--xflow-font-xs);
-    gap: 3px 10px;
+    font-size: calc(var(--xflow-font-xs) * var(--xflow-preview-card-text-scale, 1));
+    gap: var(--xflow-space-1) var(--xflow-space-2-5);
+    grid-auto-rows: var(--xflow-preview-summary-row-h, 30px);
     grid-template-columns: auto minmax(0, 1fr);
-    line-height: 18px;
+    line-height: var(--xflow-line-height-sm);
     margin: 0;
-    padding: 0 12px 10px;
+    /* The card's own height already covers this block (see `data-summary-rows`);
+       every row keeps the same 30px flow height, so a plain row and a pressable
+       one in the same stack measure the same. Extra rows fold into "+n 项", so
+       the stack never outgrows its three-row height. */
+    padding: 0 var(--xflow-space-3) var(--xflow-space-2-5);
   }
 
   .xflow-preview-node__summary dt {
@@ -543,8 +870,10 @@
     font-family: var(--xflow-font-mono);
   }
 
+  /* 11px on the card's panel ground: the raw accent measures 3.93:1, the -fg
+     mix keeps the teal hue above 6:1. */
   .xflow-preview-node__summary dd[data-kind="expr"] {
-    color: var(--xflow-accent);
+    color: var(--xflow-accent-fg);
   }
 
   /* The baseline's fx badge: a small italic tag ahead of an expression. */
@@ -553,11 +882,11 @@
     border-radius: var(--xflow-radius-xs);
     content: "fx";
     font-family: var(--xflow-font-sans);
-    font-size: var(--xflow-font-xs);
+    font-size: calc(var(--xflow-font-xs) * var(--xflow-preview-card-text-scale, 1));
     font-style: italic;
-    font-weight: 600;
-    margin-right: 4px;
-    padding: 0 3px;
+    font-weight: var(--xflow-font-weight-semibold);
+    margin-right: var(--xflow-space-1);
+    padding: 0 var(--xflow-space-1);
   }
 
   .xflow-preview-node__summary dd[data-kind="secret"] {
@@ -577,18 +906,31 @@
   }
 
   .xflow-preview-node__summary-expr {
-    color: var(--xflow-accent);
+    color: var(--xflow-accent-fg);
   }
 
+  /* An interactive row keeps a 24 screen-px target (WCAG 2.5.8) at the 0.8
+     full-detail floor: the row is a fixed 30 flow px, so 0.8 renders it at 24
+     screen px. The height stays in flow units and never multiplies the inverse
+     zoom, which keeps the card's measured bounds stable across a zoom step. */
   .xflow-preview-node__summary dd[role="button"] {
     cursor: pointer;
+    line-height: var(--xflow-preview-summary-row-h, 30px);
+    min-height: var(--xflow-preview-summary-row-h, 30px);
+  }
+
+  /* A summary row that opens the inspector is a button in all but tag name; it
+     had the UA's 1px auto ring, which the opaque shared ring replaces. */
+  .xflow-preview-node__summary dd[role="button"]:focus-visible {
+    outline: 2px solid var(--xflow-focus-ring);
+    outline-offset: 2px;
   }
 
   .xflow-preview-node__summary-ref {
     color: var(--xflow-text-tertiary);
     display: inline-flex;
     font-size: var(--xflow-font-sm);
-    margin-right: 4px;
+    margin-right: var(--xflow-space-1);
   }
 
   .xflow-preview-node__summary-more {
@@ -606,57 +948,62 @@
     --xflow-preview-t-border: color-mix(in srgb, var(--xflow-preview-t) 55%, transparent);
   }
 
-  /* Text foreground reads core's -fg (semantic colour 70% + text 30%) so the chip clears
-     4.5:1 on a light surface; fill and border keep reading the raw semantic colour. */
+  /* Text foreground is the semantic colour itself, as in the design's --t-fg
+     (`color: var(--t)`): the chip text is the raw tone, not core's darkened -fg. */
   :is(.xflow-preview-node, .xflow-preview-node__status, .xflow-preview-status)[data-tone="info"] {
     --xflow-preview-t: var(--xflow-info);
-    --xflow-preview-t-fg: var(--xflow-info-fg);
+    --xflow-preview-t-fg: var(--xflow-info);
   }
 
   :is(.xflow-preview-node, .xflow-preview-node__status, .xflow-preview-status)[data-tone="success"] {
     --xflow-preview-t: var(--xflow-success);
-    --xflow-preview-t-fg: var(--xflow-success-fg);
+    --xflow-preview-t-fg: var(--xflow-success);
   }
 
   :is(.xflow-preview-node, .xflow-preview-node__status, .xflow-preview-status)[data-tone="warning"] {
     --xflow-preview-t: var(--xflow-warning);
-    --xflow-preview-t-fg: var(--xflow-warning-fg);
+    --xflow-preview-t-fg: var(--xflow-warning);
   }
 
   :is(.xflow-preview-node, .xflow-preview-node__status, .xflow-preview-status)[data-tone="danger"] {
     --xflow-preview-t: var(--xflow-danger);
-    --xflow-preview-t-fg: var(--xflow-danger-fg);
+    --xflow-preview-t-fg: var(--xflow-danger);
   }
 
   :is(.xflow-preview-node, .xflow-preview-node__status, .xflow-preview-status)[data-tone="suspend"] {
     --xflow-preview-t: var(--xflow-suspend);
-    --xflow-preview-t-fg: var(--xflow-suspend-fg);
+    --xflow-preview-t-fg: var(--xflow-suspend);
   }
 
   :is(.xflow-preview-node, .xflow-preview-node__status, .xflow-preview-status)[data-tone="neutral"] {
     --xflow-preview-t: var(--xflow-neutral);
-    --xflow-preview-t-fg: var(--xflow-neutral-fg);
+    --xflow-preview-t-fg: var(--xflow-neutral);
   }
 
   .xflow-preview-node__status {
     align-items: center;
     background: var(--xflow-preview-t-bg);
     border: 1px solid var(--xflow-preview-t-border);
-    border-radius: var(--xflow-radius-pill);
+    border-radius: var(--xflow-radius-full);
     color: var(--xflow-preview-t-fg);
     display: inline-flex;
     flex: none;
-    font-size: var(--xflow-font-xs);
-    font-weight: 500;
-    gap: 4px;
+    font-size: calc(var(--xflow-font-xs) * var(--xflow-preview-card-text-scale, 1));
+    font-weight: var(--xflow-font-weight-medium);
+    gap: var(--xflow-space-1);
     height: 20px;
-    padding: 0 8px;
+    padding: 0 var(--xflow-space-2);
+    /* EL-05: a status change interpolates its colours instead of popping. */
+    transition:
+      background-color var(--xflow-motion-duration-base) var(--xflow-motion-ease-standard),
+      border-color var(--xflow-motion-duration-base) var(--xflow-motion-ease-standard),
+      color var(--xflow-motion-duration-base) var(--xflow-motion-ease-standard);
     white-space: nowrap;
   }
 
   .xflow-preview-node__status-icon {
     display: inline-flex;
-    font-size: 12px;
+    font-size: var(--xflow-font-sm);
   }
 
   /* ---- Node card: state shapes (dashed / stripes / pulse) ---- */
@@ -694,48 +1041,117 @@
   }
 
   /* Only `running` pulses, as in the baseline (ui-preview). `committing` keeps its tone
-     border like any other status; the baseline draws no shared pulse for it. */
+     border like any other status; the baseline draws no shared pulse for it. The
+     pulse is a static ring whose opacity and scale animate (E-C: no shadow
+     animation, no geometry), at the low 1.6s period. */
   .xflow-preview-node[data-status="running"] {
-    animation: xflow-preview-pulse 1.6s ease-in-out infinite;
     border-color: var(--xflow-preview-status-running);
+  }
+
+  .xflow-preview-node[data-status="running"]::after {
+    animation: xflow-preview-pulse calc(var(--xflow-motion-duration-instant) * 20) var(--xflow-motion-ease-standard) infinite;
+    border: 2px solid color-mix(in srgb, var(--xflow-info) 40%, transparent);
+    border-radius: inherit;
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--xflow-info) 18%, transparent);
+    content: "";
+    inset: calc(var(--xflow-space-0-5) * -1);
+    pointer-events: none;
+    position: absolute;
   }
 
   @keyframes xflow-preview-pulse {
     0%,
     100% {
-      box-shadow:
-        0 0 0 0 color-mix(in srgb, var(--xflow-info) 40%, transparent),
-        var(--xflow-preview-node-shadow);
+      opacity: 0.35;
+      transform: scale(1);
     }
 
     50% {
-      box-shadow:
-        0 0 0 4px color-mix(in srgb, var(--xflow-info) 18%, transparent),
-        var(--xflow-preview-node-shadow);
+      opacity: 0;
+      transform: scale(1.02);
     }
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .xflow-preview-node[data-status="running"] {
+    .xflow-preview-node {
+      transition: none;
+    }
+
+    .xflow-preview-node[data-status="running"]::after {
       animation: none;
+      opacity: 0.35;
     }
   }
 
-  /* ---- Node card: port row ---- */
+  /* ---- Node card: bottom strip (badges + branch port labels) ---- */
+  /* One strip for everything that used to sit in the run-meta and port rows
+     (E-A): config/run badges on the left, branch labels hugging the right edge.
+     `margin-top: auto` pins it to the card's bottom edge when a card has no
+     summary rows to fill the fixed height. */
+  .xflow-preview-node__meta {
+    align-items: center;
+    border-top: 1px solid var(--xflow-border-subtle);
+    display: flex;
+    gap: var(--xflow-space-2);
+    justify-content: space-between;
+    margin-top: auto;
+    min-height: 26px;
+    padding: var(--xflow-space-1) var(--xflow-space-3) var(--xflow-space-1-5);
+  }
+
+  .xflow-preview-node__badges {
+    align-items: center;
+    display: flex;
+    gap: var(--xflow-space-1);
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .xflow-preview-node__badge {
+    align-items: center;
+    background: color-mix(in srgb, currentColor 10%, transparent);
+    border-radius: var(--xflow-radius-full);
+    color: var(--xflow-preview-text-secondary);
+    display: inline-flex;
+    flex: none;
+    font-size: calc(var(--xflow-font-xs) * var(--xflow-preview-card-text-scale, 1));
+    gap: var(--xflow-space-1);
+    height: 16px;
+    line-height: var(--xflow-line-height-xs);
+    padding: 0 var(--xflow-space-1-5);
+    white-space: nowrap;
+  }
+
+  .xflow-preview-node__badge-icon {
+    display: inline-flex;
+  }
+
+  .xflow-preview-node__badge-icon svg {
+    display: block;
+    height: 12px;
+    width: 12px;
+  }
+
+  .xflow-preview-node__badge[data-badge="disabled"] {
+    color: var(--xflow-text-tertiary);
+  }
+
+  /* A pinned node keeps its success-toned pin, now in the badge strip. */
+  .xflow-preview-node__pin {
+    color: var(--xflow-success);
+  }
+
+  /* Branch labels sit at the strip's right end, each with its own handle on the
+     label's bottom edge: the label is attached to the port and an edge leaving
+     downwards cannot cross it. */
   .xflow-preview-node__ports {
     display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    padding: 0 12px 10px;
+    flex: none;
+    gap: var(--xflow-space-1);
+    margin-left: auto;
     position: relative;
   }
 
-  /* After a suspended card's note the row needs a little more air above it. */
-  .xflow-preview-node__note + .xflow-preview-node__ports {
-    padding-top: 8px;
-  }
-
-  /* Positioned so each chip's own bottom handle anchors to the chip. */
   .xflow-preview-node__port {
     align-items: center;
     background: var(--xflow-preview-surface-panel-raised);
@@ -744,16 +1160,37 @@
     color: var(--xflow-preview-text-secondary);
     display: inline-flex;
     font-size: var(--xflow-font-xs);
-    height: 18px;
-    line-height: 16px;
-    padding: 0 6px;
+    height: 16px;
+    line-height: 14px;
+    padding: 0 calc(var(--xflow-space-1-5) - 1px);
     position: relative;
   }
 
+  /* The pill's width is measured from an unscaled copy; the visible glyphs are
+     painted on top at the card's inverse scale (P3-2). Scaling the font in flow
+     widened the pill, shifted the centred handle and left every edge anchored to
+     the old spot until xyflow re-measured. The hidden copy keeps the layout and
+     the handle fixed while the painted text reaches 11 screen px at 0.8. */
+  .xflow-preview-node__port::before {
+    content: attr(data-port);
+    font-size: var(--xflow-font-xs);
+    visibility: hidden;
+  }
+
+  .xflow-preview-node__port-text {
+    align-items: center;
+    display: flex;
+    font-size: calc(var(--xflow-font-xs) * var(--xflow-preview-card-text-scale, 1));
+    inset: 0;
+    justify-content: center;
+    pointer-events: none;
+    position: absolute;
+  }
+
   /* The error outlet is danger whatever tone the card is in, as in the baseline: the
-     border is the same 55% danger mix a danger card draws, not the card's own variable. */
+     border is the same 45% danger mix the baseline draws, not the card's own variable. */
   .xflow-preview-node__port--error {
-    border-color: color-mix(in srgb, var(--xflow-danger) 55%, transparent);
+    border-color: color-mix(in srgb, var(--xflow-danger) 45%, transparent);
     color: var(--xflow-preview-status-error);
   }
 
@@ -765,15 +1202,45 @@
     height: 10px;
     width: 10px;
     z-index: 2;
+    /* EL-06: the snap target grows and takes the primary stroke. `scale` is the
+       individual transform property, so xyflow's inline translate still
+       positions the dot. */
+    transition:
+      background-color var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard),
+      border-color var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard),
+      scale var(--xflow-motion-duration-fast) var(--xflow-motion-ease-emphasized);
   }
 
-  /* 10px dot, 24px hit target. The pseudo-element belongs to the handle, so a press
-     on it starts the connection. Inset = (24 - 6px padding box) / 2. */
+  /* xyflow marks the handle under a live connection with `connectingto` (and
+     `valid` when the pair is legal): 1 → 1.4 and primary. */
+  .xflow-preview-node__handle.connectingto,
+  .xflow-preview-node__handle.valid {
+    background: var(--xflow-preview-focus-subtle);
+    border-color: var(--xflow-preview-edge-selected);
+    scale: 1.4;
+  }
+
+  /* 10px dot, 24 screen-px hit target. The pseudo-element belongs to the handle,
+     so a press on it starts the connection. The inset resolves against the 6px
+     padding box: at 100% it is the old -9px, and zoomed out the inverse factor
+     keeps the target at 24 screen px. */
   .xflow-preview-node__handle::after {
     border-radius: 50%;
     content: "";
-    inset: -9px;
+    inset: calc((100% - 24px * var(--xflow-preview-inverse-zoom, 1)) / 2);
     position: absolute;
+  }
+
+  /* The branch labels sit 6px above the card's inner bottom, so a target centred
+     on the dot spills 5px past the card at 1.0 and 8px at 0.8 and becomes the
+     card's scrollable overflow (P2-3). Pin its bottom inside the card instead:
+     the target keeps its 24 screen-px height, still covers the dot, and the card
+     no longer reports content taller than its box. */
+  .xflow-preview-node__port .xflow-preview-node__handle::after {
+    height: calc(24px * var(--xflow-preview-inverse-zoom, 1));
+    inset: auto auto -4px 50%;
+    transform: translateX(-50%);
+    width: calc(24px * var(--xflow-preview-inverse-zoom, 1));
   }
 
   /* Single main handles are placed as in the baseline: the 10px dot's centre sits 30px
@@ -794,11 +1261,11 @@
     right: -1px;
   }
 
-  /* The error exit lives in the port row, level with the error chip:
-     10px row padding + (18px chip - 10px handle) / 2 = 14px from the bottom. */
+  /* The error exit lives in the bottom strip, level with the error chip:
+     6px strip padding + (16px chip - 10px handle) / 2 = 9px from the bottom. */
   .xflow-preview-node__handle--error {
     border-color: var(--xflow-preview-edge-error);
-    bottom: 14px;
+    bottom: 9px;
     right: -6px;
     top: auto;
     transform: none;
@@ -811,29 +1278,50 @@
   }
 
   .xflow-preview-node__handle:focus-visible {
-    box-shadow: 0 0 0 3px var(--xflow-preview-focus-ring);
-    outline: none;
+    outline: 2px solid var(--xflow-focus-ring);
+    outline-offset: 2px;
   }
 
-  /* ---- Node card: run-meta, error, suspended note, pin ---- */
-  .xflow-preview-node__run-meta {
-    border-top: 1px solid var(--xflow-preview-border);
-    color: var(--xflow-preview-text-secondary);
-    display: flex;
-    font-size: var(--xflow-font-xs);
-    gap: 8px;
-    justify-content: space-between;
-    padding: 6px 12px;
+  /* ---- Node card: error, suspended note, pin ---- */
+  /* CP-01: the node's own form findings, first in the badge strip. The fill is
+     derived from the tone colour, so both appearances come from the semantic
+     tokens and no value is hard-coded here. */
+  .xflow-preview-node__issues {
+    align-items: center;
+    background: color-mix(in srgb, currentColor 12%, transparent);
+    border-radius: var(--xflow-radius-full);
+    display: inline-flex;
+    flex: none;
+    font-size: calc(var(--xflow-font-xs) * var(--xflow-preview-card-text-scale, 1));
+    font-weight: var(--xflow-font-weight-semibold);
+    gap: var(--xflow-space-1);
+    height: 16px;
+    line-height: var(--xflow-line-height-xs);
+    padding: 0 var(--xflow-space-1-5);
+  }
+
+  .xflow-preview-node__issues svg {
+    display: block;
+    height: 12px;
+    width: 12px;
+  }
+
+  .xflow-preview-node__issues[data-tone="danger"] {
+    color: var(--xflow-danger);
+  }
+
+  .xflow-preview-node__issues[data-tone="warning"] {
+    color: var(--xflow-warning);
   }
 
   /* Scoped to the card: the details panel reuses the class on a plain paragraph. */
   .xflow-preview-node > .xflow-preview-node__error {
     border-top: 1px solid color-mix(in srgb, var(--xflow-danger) 25%, transparent);
     color: var(--xflow-preview-status-error);
-    font-size: var(--xflow-font-sm);
+    font-size: calc(var(--xflow-font-sm) * var(--xflow-preview-card-text-scale, 1));
     margin: 0;
     overflow: hidden;
-    padding: 6px 12px 8px;
+    padding: var(--xflow-space-1-5) var(--xflow-space-3) var(--xflow-space-2);
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -843,10 +1331,10 @@
     border-top: 1px solid color-mix(in srgb, var(--xflow-suspend) 25%, transparent);
     color: var(--xflow-suspend);
     display: flex;
-    font-size: var(--xflow-font-sm);
-    gap: 8px;
+    font-size: calc(var(--xflow-font-sm) * var(--xflow-preview-card-text-scale, 1));
+    gap: var(--xflow-space-2);
     justify-content: space-between;
-    padding: 6px 12px 8px;
+    padding: var(--xflow-space-1-5) var(--xflow-space-3) var(--xflow-space-2);
   }
 
   /* The note's 处理 action, when the owner supplies one (§6.12). */
@@ -858,9 +1346,13 @@
     cursor: pointer;
     flex: none;
     font: inherit;
-    font-size: var(--xflow-font-xs);
+    font-size: calc(var(--xflow-font-xs) * var(--xflow-preview-card-text-scale, 1));
     line-height: var(--xflow-control-height-sm);
-    padding: 0 8px;
+    padding: 0 var(--xflow-space-2);
+    /* A replay canvas is non-interactive, so xyflow switches the node layer to
+       pointer-events: none. The owner-supplied note action is the one control
+       that must stay clickable there; a descendant can opt back in. */
+    pointer-events: auto;
   }
 
   .xflow-preview-node__note-action:hover {
@@ -869,63 +1361,44 @@
   }
 
   .xflow-preview-node__note-action:focus-visible {
-    outline: 2px solid var(--xflow-primary);
+    outline: 2px solid var(--xflow-focus-ring);
     outline-offset: 1px;
   }
 
-  .xflow-preview-node__pin {
-    background: var(--xflow-success);
-    border-radius: 50%;
-    color: var(--xflow-on-primary);
-    display: grid;
-    font-size: 11px;
-    height: 18px;
-    place-items: center;
-    position: absolute;
-    right: -7px;
-    top: -7px;
-    width: 18px;
-  }
-
-  /* ---- Node card: level of detail (zoom < 0.5) ---- */
-  /* index.tsx already drops the type id, run-meta, error, note and chip text at low
-     detail; what is left is sized against --xflow-preview-lod so it stays readable
-     once the viewport's transform shrinks it again. The chip keeps only its icon and
-     leaves the flow, pinned to the card corner, so the name keeps the width. */
+  /* ---- Node card: level of detail (zoom < 0.75) ---- */
+  /* index.tsx already drops the type name, summary, error, note, badges and port
+     labels at low detail; what is left is multiplied by
+     --xflow-preview-lod-scale, the capped
+     inverse of the viewport zoom (at most 1.6, see lod.ts). Without the cap the
+     factor reached 7x at 14%, so the card outgrew its layout slot and same-column
+     cards overlapped. The threshold keeps 1/zoom above the cap throughout low
+     detail, so the card has one stable flow-space size there. */
   .xflow-preview-node[data-lod="low"] .xflow-preview-node__header {
-    gap: calc(8px / var(--xflow-preview-lod));
-    padding: calc(10px / var(--xflow-preview-lod));
-    position: relative;
+    gap: calc(var(--xflow-space-2) * var(--xflow-preview-lod-scale));
+    padding: calc(var(--xflow-space-2-5) * var(--xflow-preview-lod-scale));
   }
 
   .xflow-preview-node[data-lod="low"] .xflow-preview-node__title strong {
-    font-size: calc(var(--xflow-font-md) / var(--xflow-preview-lod));
-    line-height: calc(20px / var(--xflow-preview-lod));
+    font-size: calc(var(--xflow-font-md) * var(--xflow-preview-lod-scale));
+    line-height: calc(var(--xflow-line-height-md) * var(--xflow-preview-lod-scale));
   }
 
   .xflow-preview-node[data-lod="low"] .xflow-preview-node__icon {
-    font-size: calc(16px / var(--xflow-preview-lod));
-    height: calc(28px / var(--xflow-preview-lod));
-    width: calc(28px / var(--xflow-preview-lod));
+    font-size: calc(var(--xflow-font-xl) * var(--xflow-preview-lod-scale));
+    height: calc(28px * var(--xflow-preview-lod-scale));
+    width: calc(28px * var(--xflow-preview-lod-scale));
   }
 
+  /* The icon-only chip stays in the header's flex flow (as in the design's #edge
+     state): absolute positioning let it cover the name, and at 14% it consumed
+     the title's whole width. */
   .xflow-preview-node[data-lod="low"] .xflow-preview-node__status {
-    background: transparent;
-    border-color: transparent;
-    font-size: calc(12px / var(--xflow-preview-lod));
-    height: calc(20px / var(--xflow-preview-lod));
-    padding: 0 calc(4px / var(--xflow-preview-lod));
-    position: absolute;
-    right: 0;
-    top: 0;
+    font-size: calc(var(--xflow-font-sm) * var(--xflow-preview-lod-scale));
+    height: calc(20px * var(--xflow-preview-lod-scale));
+    padding: 0 calc(var(--xflow-space-1) * var(--xflow-preview-lod-scale));
   }
 
-  .xflow-preview-node[data-lod="low"] .xflow-preview-node__handle {
-    height: calc(10px / var(--xflow-preview-lod));
-    width: calc(10px / var(--xflow-preview-lod));
-  }
-
-  /* The spread handles that replace the port row hang on the card's bottom edge. */
+  /* The spread handles that replace the port row sit on the card's bottom edge. */
   .xflow-preview-node__ports--handles {
     height: 0;
     left: 0;
@@ -935,13 +1408,34 @@
     top: 100%;
   }
 
+  /* xyflow's bottom placement puts the dot's centre on the padding-box edge, so
+     half of it hung 4 flow px past the card at low detail (P3-a). Sit the dot's
+     lower edge on that same padding-box line instead: it stays fully inside the
+     card, touches its bottom edge and leaves nothing to scroll. The hit target
+     grows with the canvas's inverse zoom to stay 24 screen px, and its bottom is
+     pinned to the same line so it does not become the card's scrollable
+     overflow the way the old centred target did. */
+  .xflow-preview-node__ports--handles .xflow-preview-node__handle {
+    bottom: 0;
+    transform: translate(-50%, 0);
+  }
+
+  .xflow-preview-node__ports--handles .xflow-preview-node__handle::after {
+    height: calc(24px * var(--xflow-preview-inverse-zoom, 1));
+    inset: auto auto 0 50%;
+    transform: translateX(-50%);
+    width: calc(24px * var(--xflow-preview-inverse-zoom, 1));
+  }
+
   /* ---- Incoming edges, by the target node's status (edgeVariant) ---- */
   /* xyflow puts the className on the edge group. `default` (pending, failed) has no
      rule of its own: it is the resting stroke above. `error` and `dangling` are
      port-semantic: their strokes are inline from index.tsx, their labels are the
      two rules above. */
   .xflow-preview-canvas {
-    --xflow-preview-flow-period: 0.8s;
+    /* 800ms, derived from the instant token so no hand-written duration lives
+       outside tokens.css (the dashed edge is a loop, not a UI transition). */
+    --xflow-preview-flow-period: calc(var(--xflow-motion-duration-instant) * 10);
     --xflow-preview-flow-slow-factor: 2.5;
   }
 
@@ -967,7 +1461,7 @@
 
   .xflow-preview-canvas .xflow-preview-edge--skipped .react-flow__edge-path {
     opacity: 0.5;
-    stroke-dasharray: 2 4;
+    stroke-dasharray: 3 4;
   }
 
   @keyframes xflow-preview-dash {
@@ -985,60 +1479,60 @@
 
   .xflow-preview-summary,
   .xflow-preview-details {
-    border-bottom: 1px solid var(--xflow-preview-border);
-    margin-bottom: 12px;
-    padding-bottom: 12px;
+    border-bottom: 1px solid var(--xflow-border-subtle);
+    margin-bottom: var(--xflow-space-3);
+    padding-bottom: var(--xflow-space-3);
   }
 
   .xflow-preview-summary > span,
   .xflow-preview-details > span {
     color: var(--xflow-preview-text);
     display: block;
-    font-weight: 650;
-    margin-bottom: 10px;
+    font-weight: var(--xflow-font-weight-semibold);
+    margin-bottom: var(--xflow-space-2-5);
   }
 
   .xflow-preview-summary > div {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
+    gap: var(--xflow-space-1-5);
   }
 
   .xflow-preview-summary__pill {
     background: var(--xflow-preview-surface-panel-raised);
     border: 1px solid var(--xflow-preview-border);
-    border-radius: 4px;
+    border-radius: var(--xflow-radius-xs);
     color: var(--xflow-preview-text-pill);
-    font-size: 11px;
-    padding: 4px 7px;
+    font-size: var(--xflow-font-xs);
+    padding: var(--xflow-space-1) calc(var(--xflow-space-2) - 1px);
   }
 
   .xflow-preview-details strong,
   .xflow-preview-details code,
   .xflow-preview-details p {
     display: block;
-    margin: 0 0 7px;
+    margin: 0 0 var(--xflow-space-2);
   }
 
   .xflow-preview-details strong {
     color: var(--xflow-preview-text);
-    font-size: 13px;
+    font-size: var(--xflow-font-md);
   }
 
   .xflow-preview-details code {
     color: var(--xflow-preview-text-secondary);
     font-family: "SFMono-Regular", Consolas, monospace;
-    font-size: 11px;
+    font-size: var(--xflow-font-xs);
   }
 
   .xflow-preview-details p {
     color: var(--xflow-preview-text-muted);
-    font-size: 12px;
+    font-size: var(--xflow-font-sm);
   }
 
   .xflow-preview-edges {
     display: grid;
-    gap: 8px;
+    gap: var(--xflow-space-2);
     list-style: none;
     margin: 0;
     padding: 0;
@@ -1047,11 +1541,11 @@
   .xflow-preview-edges li {
     background: var(--xflow-preview-surface-panel-raised);
     border: 1px solid var(--xflow-preview-border);
-    border-radius: 4px;
+    border-radius: var(--xflow-radius-xs);
     display: grid;
-    gap: 5px;
+    gap: var(--xflow-space-1-5);
     grid-template-columns: minmax(0, 1fr) auto auto minmax(0, 1fr) auto;
-    padding: 8px;
+    padding: var(--xflow-space-2);
   }
 
   .xflow-preview-edges span {
@@ -1068,7 +1562,7 @@
 
   .xflow-preview-empty {
     color: var(--xflow-preview-text-muted);
-    font-size: 13px;
+    font-size: var(--xflow-font-md);
     margin: 0;
     /* The empty canvas stays a drop target, so the note may not swallow the
        pointer; it only needs to be readable above the mounted React Flow. */
@@ -1094,7 +1588,7 @@
     .xflow-preview-sidebar,
     .xflow-preview-panel {
       border: 0;
-      border-top: 1px solid var(--xflow-preview-border);
+      border-top: 1px solid var(--xflow-border-subtle);
     }
   }
 }

@@ -9,9 +9,11 @@ import {
   type NodeStatus,
   type RuntimeSnapshot,
   type WorkflowDef,
+  type WorkflowEditorSection,
   type WorkflowStatus
 } from "@xflow/core";
-import { XFlowPreview } from "./index";
+import { XFlowPreview, READABLE_FIT_ZOOM, readableNodeType } from "./index";
+import { LOD_ZOOM } from "./lod";
 
 const reactFlowMock = vi.hoisted(() => {
   // A stand-in for xyflow's store: just the transform the card reads, a way to
@@ -23,9 +25,13 @@ const reactFlowMock = vi.hoisted(() => {
     width?: number;
     height?: number;
     nodeLookup?: Map<string, unknown>;
+    multiSelectionActive?: boolean;
+    nodesSelectionActive?: boolean;
+    /** The store action a pane click runs after the owner callback. */
+    resetSelectedElements?: () => void;
   };
   const flowStore = {
-    state: { transform: [0, 0, 1] } as FlowState,
+    state: { transform: [0, 0, 1], resetSelectedElements: vi.fn() } as FlowState,
     listeners: new Set<() => void>(),
     cardRenders: 0,
     setZoom(zoom: number): void {
@@ -37,7 +43,7 @@ const reactFlowMock = vi.hoisted(() => {
       flowStore.listeners.forEach((listener) => listener());
     },
     reset(): void {
-      flowStore.state = { transform: [0, 0, 1] };
+      flowStore.state = { transform: [0, 0, 1], resetSelectedElements: vi.fn() };
       flowStore.cardRenders = 0;
     }
   };
@@ -65,6 +71,7 @@ vi.mock("@xyflow/react", async () => {
   // Stable object, like xyflow's: effects keyed on it must not re-subscribe.
   const flowStoreApi = {
     getState: () => flowStore.state,
+    setState: (partial: Partial<typeof flowStore.state>) => flowStore.setState(partial),
     subscribe: (listener: (state: typeof flowStore.state) => void): (() => void) => {
       const notify = (): void => listener(flowStore.state);
       flowStore.listeners.add(notify);
@@ -109,25 +116,31 @@ vi.mock("@xyflow/react", async () => {
       className: "react-flow",
       "aria-label": flowProps["aria-label"]
     }, [
-      ...flowNodes.map((node) => {
-        const NodeComponent = flowNodeTypes[node.type as string];
-        return NodeComponent ? React.createElement(NodeComponent, { key: node.id as string, ...node }) : null;
-      }),
-      ...flowEdges.map((edge) => React.createElement("button", {
-        key: edge.id as string,
-        type: "button",
-        "aria-label": edge.ariaLabel as string | undefined,
-        "data-edge-id": edge.id as string,
-        tabIndex: edge.focusable ? 0 : -1,
-        onClick: () => flowProps.onEdgesChange?.([{ id: edge.id as string, type: "select", selected: true }]),
-        onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => {
-          const deleteKeyCode = flowProps.deleteKeyCode;
-          const deleteKeys = Array.isArray(deleteKeyCode) ? deleteKeyCode : [deleteKeyCode];
-          if (edge.selected && deleteKeys.includes(event.key)) {
-            flowProps.onEdgesDelete?.([edge]);
+      // The real canvas renders cards and connections inside its pane; the
+      // wrapper's empty-canvas click replay keys on that target. Panels and the
+      // owner's floats stay outside it, as in xyflow.
+      React.createElement("div", { className: "react-flow__pane", key: "pane" }, [
+        ...flowNodes.map((node) => {
+          const NodeComponent = flowNodeTypes[node.type as string];
+          return NodeComponent ? React.createElement(NodeComponent, { key: node.id as string, ...node }) : null;
+        }),
+        ...flowEdges.map((edge) => React.createElement("button", {
+          key: edge.id as string,
+          type: "button",
+          role: edge.focusable ? "button" : "img",
+          "aria-label": edge.ariaLabel as string | undefined,
+          "data-edge-id": edge.id as string,
+          tabIndex: edge.focusable ? 0 : undefined,
+          onClick: () => flowProps.onEdgesChange?.([{ id: edge.id as string, type: "select", selected: true }]),
+          onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => {
+            const deleteKeyCode = flowProps.deleteKeyCode;
+            const deleteKeys = Array.isArray(deleteKeyCode) ? deleteKeyCode : [deleteKeyCode];
+            if (edge.selected && deleteKeys.includes(event.key)) {
+              flowProps.onEdgesDelete?.([edge]);
+            }
           }
-        }
-      })),
+        }))
+      ]),
       children as React.ReactNode
     ]);
   };
@@ -151,7 +164,10 @@ vi.mock("@xyflow/react", async () => {
       return React.createElement("div", { className: "react-flow__minimap" });
     },
     Position: { Left: "left", Right: "right" },
+    SelectionMode: { Partial: "partial", Full: "full" },
     ReactFlow,
+    ViewportPortal: ({ children }: { children?: React.ReactNode }) =>
+      React.createElement("div", { className: "react-flow__viewport-portal" }, children),
     useReactFlow: () => ({
       fitBounds: reactFlowMock.fitBounds,
       getNodes: () => [{ id: "source-id" }],
@@ -201,6 +217,11 @@ interface MockFlowProps extends Record<string, unknown> {
   elementsSelectable?: boolean;
   connectOnClick?: boolean;
   deleteKeyCode?: string[] | null;
+  selectionOnDrag?: boolean;
+  selectionMode?: string;
+  multiSelectionKeyCode?: string[];
+  panOnDrag?: boolean | number[];
+  onNodesChange?: (changes: Array<{ id: string; type: "select"; selected: boolean }>) => void;
   onInit?: (instance: MockFlowInstance) => void;
   onConnect?: (connection: {
     source: string;
@@ -211,6 +232,11 @@ interface MockFlowProps extends Record<string, unknown> {
   onEdgesChange?: (changes: Array<{ id: string; type: "select"; selected: boolean }>) => void;
   onEdgesDelete?: (edges: MockFlowEdge[]) => void;
   onNodeContextMenu?: (event: MockMouseEvent, node: { id: string }) => void;
+  onNodeDragStop?: (
+    event: MockMouseEvent,
+    node: { id: string; position: { x: number; y: number } },
+    nodes: Array<{ id: string; position: { x: number; y: number } }>
+  ) => void;
   onPaneContextMenu?: (event: MockMouseEvent) => void;
   onBeforeDelete?: (elements: {
     nodes: Array<Record<string, unknown>>;
@@ -535,16 +561,15 @@ describe("XFlowPreview", () => {
     expect(screen.getByText(nodeStatusMeta.success.label)).toBeTruthy();
     expect(screen.getAllByText("charge")).toHaveLength(3);
     expect(screen.getByLabelText("xflow.http icon")).toBeTruthy();
-    expect(container.querySelector('[data-node-id="charge"] .xflow-preview-node__type')?.textContent).toBe("xflow.http");
+    expect(container.querySelector('[data-node-id="charge"] .xflow-preview-node__type')?.textContent).toBe("HTTP");
     expect(container.querySelector('[data-node-id="approval"]')?.getAttribute("data-disabled")).toBe("true");
-    // A disabled node has no badge of its own: it speaks through its status chip
-    // (here the run's "skipped"), and the stripes/55% are CSS on data-disabled.
-    expect(container.querySelector('[data-node-id="approval"] .xflow-preview-node__badge')).toBeNull();
+    // A disabled node speaks through its status chip and its own badge.
+    expect(container.querySelector('[data-node-id="approval"] [data-badge="disabled"]')?.textContent).toContain("已禁用");
     expect(container.querySelector('[data-node-id="approval"] .xflow-preview-node__status')?.textContent)
       .toBe(nodeStatusMeta.skipped.label);
-    // The attempt count rides in the card's run-meta row, after the duration.
-    expect(container.querySelector('[data-node-id="charge"] .xflow-preview-node__run-meta')?.textContent)
-      .toContain("2");
+    // The attempt count rides in the card's badge strip.
+    expect(container.querySelector('[data-node-id="charge"] [data-badge="attempts"]')?.textContent)
+      .toBe("第 2 次");
     expect(screen.getByLabelText("start main to charge main")).toBeTruthy();
 
     const chargeNode = container.querySelector('[aria-label="charge node running"]');
@@ -1042,7 +1067,7 @@ describe("XFlowPreview", () => {
     expect(canvas).toBeTruthy();
     fireCanvasDrop(canvas!, dragTransferStub("xflow.function"), 300, 400);
 
-    expect(screenToFlowPosition).toHaveBeenCalledWith({ x: 300, y: 400 });
+    expect(screenToFlowPosition).toHaveBeenCalledWith({ x: 300, y: 400 }, { snapToGrid: false });
     expect(onDropNode).toHaveBeenCalledWith("xflow.function", { x: 260, y: 340 });
   });
 
@@ -1216,19 +1241,22 @@ describe("XFlowPreview", () => {
     render(<XFlowPreview workflow={portWorkflow} editable onDeleteConnection={onDeleteConnection} />);
 
     const flow = latestFlowProps();
-    expect(flow.edgesFocusable).toBe(true);
+    // ED-08: the canvas tab order belongs to nodes; edges stay click-selectable.
+    expect(flow.edgesFocusable).toBe(false);
     expect(flow.elementsSelectable).toBe(true);
     expect(flow.deleteKeyCode).toEqual(["Backspace", "Delete"]);
     expect(flow.onEdgesDelete).toEqual(expect.any(Function));
     expect(flow.edges).toHaveLength(1);
+    expect(flow.edges[0]).toMatchObject({ focusable: false, selectable: true, deletable: true });
 
-    const edge = screen.getByRole("button", {
-      name: "Connection from source success to target payload; press Enter to select, then Delete or Backspace to remove"
+    const edge = screen.getByRole("img", {
+      name: "Connection from source success to target payload"
     });
-    expect(edge.getAttribute("tabindex")).toBe("0");
+    expect(edge.hasAttribute("tabindex")).toBe(false);
     fireEvent.click(edge);
     expect(latestFlowProps().edges[0].selected).toBe(true);
-    fireEvent.keyDown(screen.getByRole("button", { name: /Connection from source success/ }), { key: "Delete" });
+    // Re-query: the mock edge carries last render's `selected`, like xyflow's.
+    fireEvent.keyDown(screen.getByRole("img", { name: "Connection from source success to target payload" }), { key: "Delete" });
 
     expect(onDeleteConnection).toHaveBeenCalledTimes(1);
     expect(onDeleteConnection).toHaveBeenCalledWith({
@@ -1279,9 +1307,9 @@ describe("XFlowPreview", () => {
       />
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /Connection from source success/ }));
-    fireEvent.keyDown(screen.getByRole("button", { name: /Connection from source success/ }), { key: "Delete" });
-
+    const edge = () => screen.getByRole("img", { name: /Connection from source success/ });
+    fireEvent.click(edge());
+    fireEvent.keyDown(edge(), { key: "Delete" });
     // One press removes the connection the user selected, not the node behind it.
     expect(onDeleteConnection).toHaveBeenCalledTimes(1);
     expect(onDeleteNode).not.toHaveBeenCalled();
@@ -1563,7 +1591,7 @@ describe("XFlowPreview", () => {
     });
 
     expect(event.preventDefault).toHaveBeenCalled();
-    expect(screenToFlowPosition).toHaveBeenCalledWith({ x: 300, y: 500 });
+    expect(screenToFlowPosition).toHaveBeenCalledWith({ x: 300, y: 500 }, { snapToGrid: false });
     expect(onPaneContextMenu).toHaveBeenCalledWith({ clientX: 300, clientY: 500, flowX: 150, flowY: 250 });
   });
 
@@ -1782,6 +1810,12 @@ describe("XFlowPreview canvas surface", () => {
     expect(background?.getAttribute("data-gap")).toBe("16");
     // The dot stays 1px; only the pitch and the colour moved.
     expect(background?.getAttribute("data-size")).toBe("1");
+
+    // The same 16px pitch is what a node drag quantizes to, so a dropped card
+    // never lands between two dots.
+    const flow = latestFlowProps();
+    expect(flow.snapToGrid).toBe(true);
+    expect(flow.snapGrid).toEqual([16, 16]);
   });
 
   it("keeps the minimap off the canvas until the owner turns it on", () => {
@@ -1796,12 +1830,19 @@ describe("XFlowPreview canvas surface", () => {
       pannable: true,
       zoomable: true,
       nodeColor: expect.any(Function),
-      // xyflow sizes the svg viewBox from style, so the 200x100 box is passed in,
+      // xyflow sizes the svg viewBox from style, so the 200x124 box is passed in,
       // not left to CSS (which would crop a 200x150 map).
-      style: { width: 200, height: 100 },
-      // §6.2's viewport frame: the baseline's 1.5px primary outline.
+      style: { width: 200, height: 124 },
+      // §6.2's viewport frame: the baseline's 1.5px primary outline. The mask
+      // fill only shades outside the viewport, which the baseline does not do.
+      maskColor: "var(--xflow-preview-minimap-mask)",
       maskStrokeColor: "var(--xflow-preview-minimap-view)",
-      maskStrokeWidth: 1.5
+      maskStrokeWidth: 1.5,
+      // The baseline swatch is a 2px-radius block with no outline.
+      nodeBorderRadius: 2,
+      nodeStrokeWidth: 0,
+      // The accessible name of the baseline `role="img"` minimap.
+      ariaLabel: "缩略图"
     });
   });
 
@@ -1828,6 +1869,13 @@ describe("XFlowPreview canvas surface", () => {
     render(<XFlowPreview workflow={surfaceWorkflow} />);
     expect(latestFlowProps().minZoom).toBe(0.1);
     expect(latestFlowProps().maxZoom).toBe(2);
+  });
+
+  it("opens automatic fits at or above the LOD threshold, so the first screen is full detail", () => {
+    // EL-01: a fit floor below LOD_ZOOM made every workflow open as icon+title
+    // only. The floor and the threshold are separate knobs; only the ordered
+    // pair is the contract.
+    expect(READABLE_FIT_ZOOM).toBeGreaterThanOrEqual(LOD_ZOOM);
   });
 });
 
@@ -1903,50 +1951,163 @@ describe("XFlowPreview level of detail", () => {
   const shown = (container: HTMLElement) => ({
     lod: [...container.querySelectorAll(".xflow-preview-node")].map((card) => card.getAttribute("data-lod")),
     types: container.querySelectorAll(".xflow-preview-node__type").length,
-    runMeta: container.querySelectorAll(".xflow-preview-node__run-meta").length,
+    badges: container.querySelectorAll(".xflow-preview-node__meta").length,
+    summaries: container.querySelectorAll(".xflow-preview-node__summary").length,
     errors: container.querySelectorAll(".xflow-preview-node__error").length,
     chipLabels: [...container.querySelectorAll(".xflow-preview-node__status")].map((chip) => chip.textContent)
   });
 
-  it("drops type, run meta, error and chip text below 50% zoom and restores them above", () => {
+  it("renders full, compact and low detail at the two thresholds", () => {
     const { container } = render(<XFlowPreview workflow={lodWorkflow} runtime={lodRuntime} />);
     const full = shown(container);
-    expect(full).toMatchObject({ lod: [null, null], types: 2, runMeta: 1, errors: 1 });
+    expect(full).toMatchObject({ lod: ["full", "full"], types: 2, badges: 2, summaries: 0, errors: 1 });
     expect(full.chipLabels.every((label) => label)).toBe(true);
 
-    act(() => flowStore.setZoom(0.4));
+    // 0.75–0.8: title, type and badges stay; summary, error line and chip text go.
+    act(() => flowStore.setZoom(0.78));
+    expect(shown(container)).toMatchObject({ lod: ["compact", "compact"], types: 2, badges: 2, summaries: 0, errors: 0 });
+    expect(shown(container).chipLabels.every((label) => label)).toBe(true);
+
+    // The workbench's default 62% view is already low detail (ED-20).
+    act(() => flowStore.setZoom(0.62));
     expect(shown(container)).toEqual({
       lod: ["low", "low"],
       types: 0,
-      runMeta: 0,
+      badges: 0,
+      summaries: 0,
       errors: 0,
       chipLabels: ["", ""]
     });
 
-    act(() => flowStore.setZoom(0.5));
+    act(() => flowStore.setZoom(0.75));
+    expect(shown(container).lod).toEqual(["compact", "compact"]);
+    act(() => flowStore.setZoom(0.8));
     expect(shown(container)).toEqual(full);
   });
 
-  it("re-renders no card while the zoom moves above 50%", () => {
+  it("re-renders no card while the zoom moves inside one level", () => {
     render(<XFlowPreview workflow={lodWorkflow} runtime={lodRuntime} />);
     expect(flowStore.cardRenders).toBeGreaterThan(0);
 
     flowStore.cardRenders = 0;
-    for (const zoom of [0.9, 1.4, 0.7, 2, 0.5]) {
+    for (const zoom of [0.9, 1.4, 1.0, 2, 0.8]) {
       act(() => flowStore.setZoom(zoom));
     }
     expect(flowStore.cardRenders).toBe(0);
 
-    // Crossing the threshold is the one thing that re-renders: once per card.
-    act(() => flowStore.setZoom(0.3));
+    // Crossing a threshold is the one thing that re-renders: once per card.
+    act(() => flowStore.setZoom(0.79));
     expect(flowStore.cardRenders).toBe(2);
+    flowStore.cardRenders = 0;
+    act(() => flowStore.setZoom(0.76));
+    expect(flowStore.cardRenders).toBe(0);
+    act(() => flowStore.setZoom(0.74));
+    expect(flowStore.cardRenders).toBe(2);
+  });
+});
+
+describe("readableNodeType", () => {
+  it("names a type by its last segment, with acronyms left upper-case", () => {
+    expect(readableNodeType("xflow.http")).toBe("HTTP");
+    expect(readableNodeType("xflow.trigger.timer")).toBe("Timer");
+    expect(readableNodeType("xflow.trigger.webhook")).toBe("Webhook");
+    expect(readableNodeType("xflow.ai")).toBe("AI");
+  });
+
+  it("splits a snake_case or kebab-case tail into words", () => {
+    expect(readableNodeType("acme.custom_approval")).toBe("Custom Approval");
+    expect(readableNodeType("acme.http-request")).toBe("HTTP Request");
+  });
+
+  it("stays total on an empty or trailing-separator id", () => {
+    expect(readableNodeType("")).toBe("");
+    expect(readableNodeType("xflow.")).toBe("Xflow");
+  });
+});
+
+describe("XFlowPreview card type name (E-A)", () => {
+  const typeWorkflow = {
+    name: "Type flow",
+    nodes: [
+      { id: "a-id", name: "a", type: "xflow.http" },
+      { id: "b-id", name: "b", type: "xflow.trigger.timer" }
+    ]
+  } satisfies WorkflowDef;
+  const typeOf = (container: HTMLElement, id: string) =>
+    container.querySelector(`[data-node-id="${id}"] .xflow-preview-node__type`);
+
+  it("prints a readable name, never the raw id as visible text", () => {
+    const { container } = render(<XFlowPreview workflow={typeWorkflow} />);
+    expect(typeOf(container, "a-id")?.textContent).toBe("HTTP");
+    expect(typeOf(container, "b-id")?.textContent).toBe("Timer");
+    // The raw id stays available on hover; the line itself never reads it.
+    expect(typeOf(container, "a-id")?.getAttribute("title")).toBe("xflow.http");
+  });
+
+  it("lets the owner's descriptor display name win over the fallback", () => {
+    const { container } = render(
+      <XFlowPreview nodeTypeLabels={{ "xflow.http": "HTTP 请求" }} workflow={typeWorkflow} />
+    );
+    expect(typeOf(container, "a-id")?.textContent).toBe("HTTP 请求");
+    expect(typeOf(container, "b-id")?.textContent).toBe("Timer");
+  });
+});
+
+describe("XFlowPreview card policy badges (E-A)", () => {
+  const policyWorkflow = {
+    name: "Policy flow",
+    nodes: [
+      {
+        id: "both-id",
+        name: "both",
+        type: "xflow.http",
+        retry: { max_attempts: 3 },
+        timeout: 90_000_000_000
+      },
+      { id: "continue-id", name: "cont", type: "xflow.http", on_error: "continue" },
+      { id: "error-out-id", name: "errout", type: "xflow.http", on_error: "error_output" },
+      { id: "stop-id", name: "stop", type: "xflow.http", on_error: "stop" },
+      {
+        id: "off-id",
+        name: "off",
+        type: "xflow.http",
+        retry: { enabled: false, max_attempts: 5 },
+        timeout: 120_000_000_000
+      }
+    ]
+  } satisfies WorkflowDef;
+  const badges = (container: HTMLElement, id: string) =>
+    [...container.querySelectorAll(`[data-node-id="${id}"] .xflow-preview-node__badges [data-badge]`)]
+      .map((badge) => badge.getAttribute("data-badge"));
+  const badge = (container: HTMLElement, id: string, kind: string) =>
+    container.querySelector<HTMLElement>(`[data-node-id="${id}"] [data-badge="${kind}"]`);
+
+  it("badges the node's own retry and timeout, never the workflow defaults", () => {
+    const { container } = render(<XFlowPreview workflow={policyWorkflow} />);
+    expect(badges(container, "both-id")).toEqual(["retry", "timeout"]);
+    expect(badge(container, "both-id", "retry")?.textContent).toBe("重试 3");
+    expect(badge(container, "both-id", "timeout")?.textContent).toBe("超时 90s");
+    expect(badges(container, "stop-id")).toEqual([]);
+
+    // A disabled retry is not configured retry; the timeout still speaks.
+    expect(badges(container, "off-id")).toEqual(["timeout"]);
+  });
+
+  it("badges a non-default failure route only", () => {
+    const { container } = render(<XFlowPreview workflow={policyWorkflow} />);
+    expect(badges(container, "continue-id")).toEqual(["error-policy"]);
+    expect(badge(container, "continue-id", "error-policy")?.textContent).toBe("继续");
+    expect(badges(container, "error-out-id")).toEqual(["error-policy"]);
+    expect(badge(container, "error-out-id", "error-policy")?.textContent).toBe("错误出口");
+    // `stop` is the engine default and earns no badge.
+    expect(badges(container, "stop-id")).toEqual([]);
   });
 });
 
 describe("XFlowPreview card layout", () => {
   // An `xflow.http` node under an `error_output` policy declares a main and an error
-  // outlet, so its card draws the port row; the run reports a duration, an attempt count and an error, so the
-  // run-meta row and the error line are drawn too. One card carries all three.
+  // outlet; the run reports a duration, an attempt count and an error. One card
+  // carries the badges, the error line and the port labels.
   const lastLineWorkflow = {
     name: "Last line flow",
     nodes: [{ id: "charge-id", name: "charge", type: "xflow.http", on_error: "error_output" }]
@@ -1956,23 +2117,30 @@ describe("XFlowPreview card layout", () => {
     nodes: { charge: { status: "failed", durationMs: 40, attempts: 2, error: "boom" } }
   } as const;
 
-  it("draws the port row as the card's last line, under run meta and the error", () => {
+  it("draws one bottom strip last, with badges and the branch port labels together", () => {
     const { container } = render(<XFlowPreview workflow={lastLineWorkflow} runtime={lastLineRuntime} />);
     const card = container.querySelector('[data-node-id="charge-id"]');
     const kids = [...(card?.children ?? [])];
     const at = (name: string) => kids.findIndex((kid) => kid.classList.contains(name));
 
-    const meta = at("xflow-preview-node__run-meta");
     const error = at("xflow-preview-node__error");
-    const ports = at("xflow-preview-node__ports");
-    // Guard: each row must actually be drawn, or the order below proves nothing.
-    expect([meta, error, ports].every((index) => index >= 0), `run-meta ${meta}, error ${error}, ports ${ports}`).toBe(true);
+    const meta = at("xflow-preview-node__meta");
+    // Guard: both rows must actually be drawn, or the order below proves nothing.
+    expect([error, meta].every((index) => index >= 0), `error ${error}, meta ${meta}`).toBe(true);
 
-    expect(error).toBeGreaterThan(meta);
-    expect(ports).toBeGreaterThan(error);
-    expect(ports).toBe(kids.length - 1);
-    // The error outlet's handle rides in the port row, not in the error line.
-    expect(kids[ports]?.querySelector('.xflow-preview-node__handle[data-handle-id="error"]')).not.toBeNull();
+    expect(meta).toBeGreaterThan(error);
+    expect(meta).toBe(kids.length - 1);
+    // Badges and ports share the strip; the port labels hug its right end.
+    expect(kids[meta]?.querySelector(".xflow-preview-node__badges [data-badge=\"error-policy\"]")).not.toBeNull();
+    expect(kids[meta]?.querySelector(".xflow-preview-node__ports .xflow-preview-node__port")?.textContent).toBe("main");
+    // The error outlet's handle rides in the port group, not in the error line.
+    expect(kids[meta]?.querySelector('.xflow-preview-node__ports .xflow-preview-node__handle[data-handle-id="error"]')).not.toBeNull();
+    // The branch label is attached to its own handle: the handle lives inside
+    // the label's box, on the label's bottom edge, so an edge leaving it cannot
+    // cross the text (E-A).
+    const mainPort = kids[meta]?.querySelector(".xflow-preview-node__ports .xflow-preview-node__port");
+    expect(mainPort?.textContent).toBe("main");
+    expect(mainPort?.querySelector('.xflow-preview-node__handle[data-handle-id="main"]')).not.toBeNull();
   });
 });
 
@@ -2125,7 +2293,7 @@ describe("XFlowPreview canvas chrome", () => {
       });
     });
     reactFlowMock.fitBounds.mockClear();
-    const button = screen.getByRole("button", { name: "缩略图 (⇧M)" });
+    const button = screen.getByRole("button", { name: "显示缩略图" });
     expect(button.getAttribute("aria-pressed")).toBe("false");
 
     pressShift("M");
@@ -2145,7 +2313,7 @@ describe("XFlowPreview canvas chrome", () => {
 
   it("lets a new prop value override the local toggle", () => {
     const { container, rerender } = render(<XFlowPreview workflow={chromeWorkflow} minimap />);
-    fireEvent.click(screen.getByRole("button", { name: "缩略图 (⇧M)" }));
+    fireEvent.click(screen.getByRole("button", { name: "显示缩略图" }));
     expect(container.querySelector(".react-flow__minimap")).toBeNull();
     // The same value again is not a new instruction.
     rerender(<XFlowPreview workflow={chromeWorkflow} minimap />);
@@ -2177,9 +2345,12 @@ describe("XFlowPreview canvas chrome", () => {
     fireEvent.click(screen.getByRole("button", { name: "放大" }));
     expect(reactFlowMock.zoomTo).toHaveBeenLastCalledWith(2);
 
+    // The baseline's native range carries the domain as min/max (a native
+    // slider exposes those as aria-valuemin/aria-valuemax to AT).
     const slider = screen.getByRole("slider", { name: "缩放比例" });
-    expect(slider.getAttribute("aria-valuemin")).toBe("10");
-    expect(slider.getAttribute("aria-valuemax")).toBe("200");
+    expect(slider.tagName).toBe("INPUT");
+    expect(slider.getAttribute("min")).toBe("10");
+    expect(slider.getAttribute("max")).toBe("200");
   });
 
   it("offers 自动布局 only when the owner can lay the graph out", () => {
@@ -2337,6 +2508,20 @@ describe("XFlowPreview node categories and card summaries (§6.13 / §6.1.1)", (
     expect(nodeColor?.({ data: latestFlowProps().nodes[0].data })).toBe("var(--xflow-warning)");
   });
 
+  it("keeps the category glyph by default and lets the owner swap it per node", () => {
+    const { container, rerender } = render(<XFlowPreview workflow={categoryFlow} />);
+    expect(icon(container).querySelector('[data-xflow-icon="grid"]')).toBeTruthy();
+
+    rerender(
+      <XFlowPreview
+        nodeIcon={(node) => <span data-own-icon={node.type} />}
+        workflow={categoryFlow}
+      />
+    );
+    expect(icon(container).querySelector('[data-own-icon="acme.review"]')).toBeTruthy();
+    expect(icon(container).querySelector('[data-xflow-icon="grid"]')).toBeNull();
+  });
+
   it("draws the summary rows it was handed, with expression and credential kinds", () => {
     const rows = [
       { label: "审批人", value: "ops-lead → cfo", kind: "plain" as const },
@@ -2350,6 +2535,12 @@ describe("XFlowPreview node categories and card summaries (§6.13 / §6.1.1)", (
     const values = [...summary!.querySelectorAll("dd")];
     expect(values.map((cell) => cell.textContent)).toEqual(["ops-lead → cfo", "$json.tier == \"vip\"", "crm_token"]);
     expect(values.map((cell) => cell.dataset.kind)).toEqual(["plain", "expr", "ref"]);
+    // A line clips at the card's fixed width; its title keeps the whole value (E-A).
+    expect(values.map((cell) => cell.getAttribute("title"))).toEqual([
+      "ops-lead → cfo",
+      "$json.tier == \"vip\"",
+      "crm_token"
+    ]);
     // The credential row carries the key glyph; its value is the reference name.
     expect(values[2].querySelector(".xflow-preview-node__summary-ref")).toBeTruthy();
   });
@@ -2360,11 +2551,15 @@ describe("XFlowPreview node categories and card summaries (§6.13 / §6.1.1)", (
     const summary = container.querySelector<HTMLElement>(".xflow-preview-node__summary");
     expect([...summary!.querySelectorAll("dt")].map((cell) => cell.textContent)).toEqual(["a", "b", "更多"]);
     expect([...summary!.querySelectorAll("dd")].map((cell) => cell.textContent)).toEqual(["a-value", "b-value", "+3 项"]);
+    // The "+n" fold is the third row, so the card sizes itself to three lines
+    // instead of keeping the old fixed reserve.
+    expect(summary!.closest(".xflow-preview-node")?.getAttribute("data-summary-rows")).toBe("3");
   });
 
   it("draws no summary without rows, and drops it below the level-of-detail threshold", () => {
     const { container, rerender } = render(<XFlowPreview workflow={categoryFlow} />);
     expect(container.querySelector(".xflow-preview-node__summary")).toBeNull();
+    expect(container.querySelector(".xflow-preview-node")?.getAttribute("data-summary-rows")).toBe("0");
 
     rerender(
       <XFlowPreview
@@ -2373,6 +2568,7 @@ describe("XFlowPreview node categories and card summaries (§6.13 / §6.1.1)", (
       />
     );
     expect(container.querySelector(".xflow-preview-node__summary")).toBeTruthy();
+    expect(container.querySelector(".xflow-preview-node")?.getAttribute("data-summary-rows")).toBe("1");
 
     act(() => reactFlowMock.flowStore.setZoom(0.4));
     expect(container.querySelector(".xflow-preview-node__summary")).toBeNull();
@@ -2425,5 +2621,854 @@ describe("XFlowPreview node categories and card summaries (§6.13 / §6.1.1)", (
     expect(onLocateParameter).toHaveBeenCalledWith("review-id", "/parameters/url");
     fireEvent.keyDown(row as HTMLElement, { key: "Enter" });
     expect(onLocateParameter).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("XFlowPreview node issue badges (CP-01)", () => {
+  const issueFlow = {
+    id: "wf-issues",
+    name: "Issue flow",
+    nodes: [{ id: "api-id", name: "api", type: "xflow.http" }],
+    connections: {}
+  } satisfies WorkflowDef;
+  const card = (container: HTMLElement): HTMLElement => {
+    const element = container.querySelector<HTMLElement>('[data-node-id="api-id"]');
+    if (!element) throw new Error("issue card not found");
+    return element;
+  };
+  const badge = (container: HTMLElement) => card(container).querySelector<HTMLElement>(".xflow-preview-node__issues");
+
+  it("draws the error count in the danger tone, named and titled for assistive tech", () => {
+    const { container } = render(
+      <XFlowPreview
+        nodeIssues={() => ({ errors: 2, warnings: 1, message: "必填" })}
+        workflow={issueFlow}
+      />
+    );
+
+    const found = badge(container);
+    expect(found?.textContent).toBe("2");
+    expect(found?.dataset.tone).toBe("danger");
+    expect(found?.getAttribute("aria-label")).toBe("2 个参数错误");
+    expect(found?.getAttribute("title")).toBe("必填");
+    // It rides first in the card's badge strip.
+    expect(found?.closest(".xflow-preview-node__badges")).toBeTruthy();
+    expect(card(container).querySelectorAll(".xflow-preview-node__badges")).toHaveLength(1);
+  });
+
+  it("shows the warning count in the warning tone when there is no error", () => {
+    const { container } = render(
+      <XFlowPreview nodeIssues={() => ({ errors: 0, warnings: 3 })} workflow={issueFlow} />
+    );
+
+    const found = badge(container);
+    expect(found?.textContent).toBe("3");
+    expect(found?.dataset.tone).toBe("warning");
+    expect(found?.getAttribute("aria-label")).toBe("3 个参数警告");
+    // No message to show: the title attribute is simply absent.
+    expect(found?.hasAttribute("title")).toBe(false);
+  });
+
+  it("draws no badge when the owner reports nothing, or supplies no callback", () => {
+    const { container, rerender } = render(<XFlowPreview workflow={issueFlow} />);
+    expect(badge(container)).toBeNull();
+    // E-A: the bottom strip is part of the fixed-height card even when empty;
+    // what it must not carry is a badge.
+    expect(card(container).querySelector(".xflow-preview-node__meta [data-badge]")).toBeNull();
+
+    rerender(<XFlowPreview nodeIssues={() => undefined} workflow={issueFlow} />);
+    expect(badge(container)).toBeNull();
+    expect(card(container).querySelector(".xflow-preview-node__meta [data-badge]")).toBeNull();
+
+    // A summary that exists but counts nothing is not a badge either.
+    rerender(<XFlowPreview nodeIssues={() => ({ errors: 0, warnings: 0 })} workflow={issueFlow} />);
+    expect(badge(container)).toBeNull();
+  });
+
+  it("hands the callback the canvas node, so the owner can key findings by name or id", () => {
+    const seen: string[] = [];
+    render(
+      <XFlowPreview
+        nodeIssues={(node) => {
+          seen.push(`${node.id}/${node.name}`);
+          return undefined;
+        }}
+        workflow={issueFlow}
+      />
+    );
+    expect(seen).toEqual(["api-id/api"]);
+  });
+});
+
+// §6.2 / ADR-D4 §2.3: the visual grouping boxes from editor_metadata.sections.
+// They are read-only decoration: nothing here selects, drags or opens a menu.
+describe("XFlowPreview canvas sections (§6.2)", () => {
+  const sectionWorkflow = {
+    id: "wf-sections",
+    name: "Section flow",
+    nodes: [
+      { id: "start-id", name: "start", type: "xflow.start" },
+      { id: "fetch-id", name: "fetch", type: "xflow.http" },
+      { id: "approve-id", name: "approve", type: "xflow.approval" },
+      { id: "end-id", name: "done", type: "xflow.end" }
+    ],
+    connections: {}
+  } satisfies WorkflowDef;
+
+  const boxes = (): HTMLElement[] => [...document.querySelectorAll<HTMLElement>(".xflow-preview-section")];
+
+  it("draws one box per section, with its title, id and canvas geometry", () => {
+    const sections: WorkflowEditorSection[] = [
+      { id: "sec-vip", title: "VIP 审批", node_keys: ["approve-id"], x: 640, y: 40, width: 520, height: 240 },
+      { id: "sec-normal", title: "普通客户", node_keys: ["fetch-id"], x: 640, y: 330, width: 520, height: 200 }
+    ];
+    render(<XFlowPreview sections={sections} workflow={sectionWorkflow} />);
+
+    expect(boxes()).toHaveLength(2);
+    expect(boxes().map((box) => box.dataset.sectionId)).toEqual(["sec-vip", "sec-normal"]);
+    expect(boxes().map((box) => box.querySelector(".xflow-preview-section__title")?.textContent)).toEqual([
+      "VIP 审批",
+      "普通客户"
+    ]);
+    expect(boxes()[0]?.style.left).toBe("640px");
+    expect(boxes()[0]?.style.top).toBe("40px");
+    expect(boxes()[0]?.style.width).toBe("520px");
+    expect(boxes()[0]?.style.height).toBe("240px");
+    // Flow coordinates require the viewport portal: panning/zooming the canvas
+    // moves the boxes with the cards, not with the screen.
+    expect(boxes()[0]?.closest(".react-flow__viewport-portal")).toBeTruthy();
+  });
+
+  it("derives the accent from the dominant member category, never from a stored colour", () => {
+    const sections: WorkflowEditorSection[] = [
+      { id: "sec-action", title: "动作", node_keys: ["fetch-id", "fetch-id", "approve-id"], x: 0, y: 0, width: 300, height: 200 },
+      { id: "sec-human", title: "审批", node_keys: ["approve-id"], x: 0, y: 300, width: 300, height: 200 }
+    ];
+    render(<XFlowPreview sections={sections} workflow={sectionWorkflow} />);
+
+    // Two api cards outvote one approval -> action (primary); one approval alone -> human (warning).
+    expect(boxes()[0]?.style.getPropertyValue("--xflow-preview-section-category")).toBe("var(--xflow-primary)");
+    expect(boxes()[1]?.style.getPropertyValue("--xflow-preview-section-category")).toBe("var(--xflow-warning)");
+  });
+
+  it("skips a section that covers no node, has no keys, or has no positive box", () => {
+    const sections: WorkflowEditorSection[] = [
+      { id: "sec-empty-keys", title: "空", node_keys: [], x: 0, y: 0, width: 300, height: 200 },
+      { id: "sec-unknown", title: "已删除", node_keys: ["gone", "also-gone"], x: 0, y: 0, width: 300, height: 200 },
+      { id: "sec-no-size", title: "没有尺寸", node_keys: ["fetch-id"], x: 10, y: 10, width: 0, height: 200 },
+      { id: "sec-no-keys-field", title: "缺字段", x: 0, y: 0, width: 300, height: 200 },
+      { id: "sec-ok", title: "有效", node_keys: ["fetch-id"], x: 10, y: 10, width: 300, height: 200 }
+    ];
+    render(<XFlowPreview sections={sections} workflow={sectionWorkflow} />);
+
+    expect(boxes()).toHaveLength(1);
+    expect(boxes()[0]?.dataset.sectionId).toBe("sec-ok");
+  });
+
+  it("renders nothing extra when sections are absent or empty", () => {
+    const { rerender } = render(<XFlowPreview workflow={sectionWorkflow} />);
+    expect(document.querySelector(".xflow-preview-section-layer")).toBeNull();
+    expect(boxes()).toHaveLength(0);
+
+    rerender(<XFlowPreview sections={[]} workflow={sectionWorkflow} />);
+    expect(document.querySelector(".xflow-preview-section-layer")).toBeNull();
+    expect(boxes()).toHaveLength(0);
+  });
+
+  it("keeps a section with no title drawn as a plain frame", () => {
+    render(
+      <XFlowPreview
+        sections={[{ id: "sec-untitled", node_keys: ["fetch-id"], x: 0, y: 0, width: 200, height: 120 }]}
+        workflow={sectionWorkflow}
+      />
+    );
+
+    expect(boxes()).toHaveLength(1);
+    expect(boxes()[0]?.querySelector(".xflow-preview-section__title")).toBeNull();
+  });
+
+  // WB-01: the editor supplies these optional callbacks to turn the title chip
+  // into its writing surface. Standalone hosts get the read-only decoration.
+  describe("editable section handles", () => {
+    const sections: WorkflowEditorSection[] = [
+      { id: "sec-vip", title: "VIP 审批", node_keys: ["approve-id"], x: 0, y: 0, width: 300, height: 200 }
+    ];
+    const titleChip = (): HTMLElement => {
+      const chip = boxes()[0]?.querySelector<HTMLElement>(".xflow-preview-section__title-action");
+      if (!chip) throw new Error("section title is not editable");
+      return chip;
+    };
+
+    it("draws no handles without the owner callbacks", () => {
+      render(<XFlowPreview sections={sections} workflow={sectionWorkflow} />);
+
+      expect(boxes()[0]?.querySelector(".xflow-preview-section__title-action")).toBeNull();
+      expect(boxes()[0]?.querySelector(".xflow-preview-section__delete")).toBeNull();
+      expect(document.querySelector(".xflow-preview-section-layer")?.getAttribute("aria-hidden")).toBe("true");
+    });
+
+    it("reports a renamed title on Enter and closes the editor", () => {
+      const onSectionTitleChange = vi.fn();
+      render(
+        <XFlowPreview
+          editable
+          sections={sections}
+          workflow={sectionWorkflow}
+          onSectionTitleChange={onSectionTitleChange}
+        />
+      );
+
+      fireEvent.doubleClick(titleChip());
+      const input = within(boxes()[0] as HTMLElement).getByLabelText(/分区标题/);
+      fireEvent.change(input, { target: { value: "  重点客户  " } });
+      fireEvent.keyDown(input, { key: "Enter" });
+
+      expect(onSectionTitleChange).toHaveBeenCalledTimes(1);
+      expect(onSectionTitleChange).toHaveBeenCalledWith("sec-vip", "重点客户");
+      expect(boxes()[0]?.querySelector(".xflow-preview-section__title-action")).toBeTruthy();
+      // The preview only reports the gesture; the owner's next `sections` prop
+      // is what actually renames the box.
+      expect(boxes()[0]?.querySelector(".xflow-preview-section__title")?.textContent).toBe("VIP 审批");
+    });
+
+    it("reports a rename on blur and drops it on Escape", () => {
+      const onSectionTitleChange = vi.fn();
+      render(
+        <XFlowPreview editable sections={sections} workflow={sectionWorkflow} onSectionTitleChange={onSectionTitleChange} />
+      );
+
+      fireEvent.doubleClick(titleChip());
+      let input = within(boxes()[0] as HTMLElement).getByLabelText(/分区标题/);
+      fireEvent.change(input, { target: { value: "失焦提交" } });
+      fireEvent.blur(input);
+      expect(onSectionTitleChange).toHaveBeenLastCalledWith("sec-vip", "失焦提交");
+
+      fireEvent.doubleClick(titleChip());
+      input = within(boxes()[0] as HTMLElement).getByLabelText(/分区标题/);
+      fireEvent.change(input, { target: { value: "不要提交" } });
+      fireEvent.keyDown(input, { key: "Escape" });
+      expect(onSectionTitleChange).toHaveBeenCalledTimes(1);
+      expect(boxes()[0]?.querySelector(".xflow-preview-section__title-action")).toBeTruthy();
+    });
+
+    it("reports a delete request with the section id and removes nothing itself", () => {
+      const onSectionDelete = vi.fn();
+      render(
+        <XFlowPreview editable sections={sections} workflow={sectionWorkflow} onSectionDelete={onSectionDelete} />
+      );
+
+      fireEvent.click(within(boxes()[0] as HTMLElement).getByRole("button", { name: "删除分区 VIP 审批" }));
+
+      expect(onSectionDelete).toHaveBeenCalledWith("sec-vip");
+      expect(boxes()).toHaveLength(1);
+    });
+
+    it("leaves an id-less section without handles", () => {
+      render(
+        <XFlowPreview
+          editable
+          sections={[{ title: "无 id", node_keys: ["approve-id"], x: 0, y: 0, width: 300, height: 200 }]}
+          workflow={sectionWorkflow}
+          onSectionDelete={vi.fn()}
+          onSectionTitleChange={vi.fn()}
+        />
+      );
+
+      expect(boxes()).toHaveLength(1);
+      expect(boxes()[0]?.querySelector(".xflow-preview-section__title-action")).toBeNull();
+      expect(boxes()[0]?.querySelector(".xflow-preview-section__delete")).toBeNull();
+    });
+  });
+
+  // WB-01 step 2: moving and resizing. jsdom ships no PointerEvent, so each
+  // gesture is mouse-shaped and dispatched under the pointer* names React
+  // listens for; the handlers only read clientX/clientY, button and target.
+  describe("section move and resize (WB-01 step 2)", () => {
+    const firePointer = (
+      target: Element,
+      type: "pointerdown" | "pointermove" | "pointerup" | "pointercancel",
+      clientX: number,
+      clientY: number
+    ): void => {
+      fireEvent(target, new window.MouseEvent(type, { bubbles: true, cancelable: true, button: 0, clientX, clientY }));
+    };
+    const sections: WorkflowEditorSection[] = [
+      { id: "sec-move", title: "VIP 审批", node_keys: ["approve-id"], x: 100, y: 50, width: 300, height: 200 }
+    ];
+    const positions = (): Record<string, { x: number; y: number }> =>
+      Object.fromEntries(
+        (reactFlowMock.latestProps?.nodes ?? []).map((node) => {
+          const flowNode = node as { id: string; position: { x: number; y: number } };
+          return [flowNode.id, { ...flowNode.position }];
+        })
+      );
+
+    it("moves by the pointer delta, follows locally and commits once on release", () => {
+      const onSectionGeometryChange = vi.fn();
+      render(
+        <XFlowPreview
+          editable
+          onSectionGeometryChange={onSectionGeometryChange}
+          sections={sections}
+          workflow={sectionWorkflow}
+        />
+      );
+      const box = boxes()[0] as HTMLElement;
+      const chip = box.querySelector<HTMLElement>(".xflow-preview-section__title") as HTMLElement;
+
+      firePointer(chip, "pointerdown", 120, 70);
+      firePointer(box, "pointermove", 150, 100);
+      // The box follows the pointer on the canvas's 16px lattice: 130/80
+      // quantizes to 128/80.
+      expect(box.style.left).toBe("128px");
+      expect(box.style.top).toBe("80px");
+      firePointer(box, "pointermove", 180, 130);
+      // 160/110 quantizes to 160/112, still without notifying the owner.
+      expect(box.style.left).toBe("160px");
+      expect(box.style.top).toBe("112px");
+      expect(box.style.width).toBe("300px");
+      expect(onSectionGeometryChange).not.toHaveBeenCalled();
+
+      firePointer(box, "pointerup", 180, 130);
+
+      expect(onSectionGeometryChange).toHaveBeenCalledTimes(1);
+      expect(onSectionGeometryChange).toHaveBeenCalledWith("sec-move", { x: 160, y: 112, width: 300, height: 200 });
+      // The preview only reports; the owner's echoed `sections` prop moves it.
+      expect(box.style.left).toBe("100px");
+      expect(box.style.top).toBe("50px");
+    });
+
+    it("captures the pointer only after the drag crosses the threshold", () => {
+      // Real browsers retarget the click/dblclick that follows a captured
+      // pointer to the capture element. Capturing on pointerdown therefore
+      // stole the title chip's rename double-click; jsdom has no pointer
+      // capture at all, so the call is stubbed to prove when it happens.
+      const proto = HTMLElement.prototype as unknown as {
+        setPointerCapture?: (pointerId: number) => void;
+        releasePointerCapture?: (pointerId: number) => void;
+      };
+      const originalCapture = proto.setPointerCapture;
+      const originalRelease = proto.releasePointerCapture;
+      const setPointerCapture = vi.fn();
+      const releasePointerCapture = vi.fn();
+      proto.setPointerCapture = setPointerCapture;
+      proto.releasePointerCapture = releasePointerCapture;
+      try {
+        // jsdom's MouseEvent has no pointerId; the handlers only read the
+        // coordinates, but releasePointerCapture is skipped without one.
+        const firePointerEvent = (
+          target: Element,
+          type: "pointerdown" | "pointermove" | "pointerup",
+          clientX: number,
+          clientY: number
+        ): void => {
+          const event = new window.MouseEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            clientX,
+            clientY
+          });
+          Object.defineProperty(event, "pointerId", { value: 7 });
+          fireEvent(target, event);
+        };
+        const onSectionGeometryChange = vi.fn();
+        render(
+          <XFlowPreview
+            editable
+            onSectionGeometryChange={onSectionGeometryChange}
+            onSectionTitleChange={vi.fn()}
+            sections={sections}
+            workflow={sectionWorkflow}
+          />
+        );
+        const box = boxes()[0] as HTMLElement;
+        const chip = within(box).getByRole("button", { name: "重命名分区 VIP 审批" });
+
+        // A press/release that never travels is a plain click: the pointer is
+        // never captured, so the browser targets the chip and its double-click
+        // opens the title editor.
+        firePointerEvent(chip, "pointerdown", 120, 70);
+        expect(setPointerCapture).not.toHaveBeenCalled();
+        firePointerEvent(chip, "pointerup", 120, 70);
+        fireEvent.click(chip);
+        fireEvent.doubleClick(chip);
+        expect(setPointerCapture).not.toHaveBeenCalled();
+        const input = within(box).getByLabelText(/分区标题/);
+        expect(input).toBeTruthy();
+
+        // Cancel the rename, then press the chip again and travel less than
+        // 4px: the pending press stays uncaptured.
+        fireEvent.keyDown(input, { key: "Escape" });
+        const chipAgain = within(box).getByRole("button", { name: "重命名分区 VIP 审批" });
+        firePointerEvent(chipAgain, "pointerdown", 120, 70);
+        firePointerEvent(box, "pointermove", 123, 72);
+        expect(setPointerCapture).not.toHaveBeenCalled();
+        expect(releasePointerCapture).not.toHaveBeenCalled();
+        expect(onSectionGeometryChange).not.toHaveBeenCalled();
+
+        // Past the threshold the gesture becomes a drag and takes capture.
+        firePointerEvent(box, "pointermove", 160, 100);
+        expect(setPointerCapture).toHaveBeenCalledWith(7);
+        firePointerEvent(box, "pointerup", 160, 100);
+        expect(releasePointerCapture).toHaveBeenCalledTimes(1);
+        expect(onSectionGeometryChange).toHaveBeenCalledWith("sec-move", {
+          x: 144,
+          y: 80,
+          width: 300,
+          height: 200
+        });
+      } finally {
+        if (originalCapture === undefined) delete proto.setPointerCapture;
+        else proto.setPointerCapture = originalCapture;
+        if (originalRelease === undefined) delete proto.releasePointerCapture;
+        else proto.releasePointerCapture = originalRelease;
+      }
+    });
+
+    it("leaves every member card exactly where it was", () => {
+      const onSectionGeometryChange = vi.fn();
+      render(
+        <XFlowPreview
+          editable
+          onSectionGeometryChange={onSectionGeometryChange}
+          sections={sections}
+          workflow={sectionWorkflow}
+        />
+      );
+      const before = positions();
+      const box = boxes()[0] as HTMLElement;
+
+      firePointer(box.querySelector<HTMLElement>(".xflow-preview-section__title") as HTMLElement, "pointerdown", 120, 70);
+      firePointer(box, "pointermove", 220, 170);
+      firePointer(box, "pointerup", 220, 170);
+
+      expect(onSectionGeometryChange).toHaveBeenCalledTimes(1);
+      expect(positions()).toEqual(before);
+    });
+
+    it("converts screen pixels to flow pixels at the current zoom", () => {
+      const onSectionGeometryChange = vi.fn();
+      render(
+        <XFlowPreview
+          editable
+          onSectionGeometryChange={onSectionGeometryChange}
+          sections={sections}
+          workflow={sectionWorkflow}
+        />
+      );
+      act(() => reactFlowMock.flowStore.setZoom(2));
+      const box = boxes()[0] as HTMLElement;
+
+      firePointer(box.querySelector<HTMLElement>(".xflow-preview-section__title") as HTMLElement, "pointerdown", 100, 100);
+      firePointer(box, "pointermove", 160, 140);
+      firePointer(box, "pointerup", 160, 140);
+
+      // 60x40 screen pixels are 30x20 flow pixels at 200%; the canvas grid then
+      // quantizes 130/70 to 128/64.
+      expect(onSectionGeometryChange).toHaveBeenCalledWith("sec-move", { x: 128, y: 64, width: 300, height: 200 });
+    });
+
+    it("resizes from the bottom-right handle and never below the minimum", () => {
+      const onSectionGeometryChange = vi.fn();
+      render(
+        <XFlowPreview
+          editable
+          onSectionGeometryChange={onSectionGeometryChange}
+          sections={sections}
+          workflow={sectionWorkflow}
+        />
+      );
+      const box = boxes()[0] as HTMLElement;
+      const grip = box.querySelector<HTMLElement>(".xflow-preview-section__resize") as HTMLElement;
+      expect(grip).toBeTruthy();
+
+      firePointer(grip, "pointerdown", 400, 250);
+      firePointer(box, "pointermove", 430, 270);
+      firePointer(box, "pointermove", 450, 280);
+      firePointer(box, "pointerup", 450, 280);
+
+      expect(onSectionGeometryChange).toHaveBeenCalledTimes(1);
+      // 300x200 grows by the 50x30 delta, then snaps to 352x224.
+      expect(onSectionGeometryChange).toHaveBeenCalledWith("sec-move", { x: 100, y: 50, width: 352, height: 224 });
+
+      // A second drag far past the top-left corner clamps instead of vanishing.
+      firePointer(grip, "pointerdown", 400, 250);
+      firePointer(box, "pointermove", -200, -200);
+      firePointer(box, "pointerup", -200, -200);
+
+      expect(onSectionGeometryChange).toHaveBeenCalledTimes(2);
+      expect(onSectionGeometryChange).toHaveBeenLastCalledWith("sec-move", {
+        x: 100,
+        y: 50,
+        width: 120,
+        height: 80
+      });
+    });
+
+    it("leaves a press on a card inside the box to the card", () => {
+      const onSectionGeometryChange = vi.fn();
+      render(
+        <XFlowPreview
+          editable
+          onSectionGeometryChange={onSectionGeometryChange}
+          sections={sections}
+          workflow={sectionWorkflow}
+        />
+      );
+      const box = boxes()[0] as HTMLElement;
+      const card = screen.getByRole("button", { name: /^approve node / });
+      // The box is drawn behind the cards, not around them: its handler can
+      // never see a press that starts on a card.
+      expect(box.contains(card)).toBe(false);
+
+      firePointer(card, "pointerdown", 120, 70);
+      firePointer(card, "pointermove", 220, 170);
+      firePointer(card, "pointerup", 220, 170);
+
+      expect(onSectionGeometryChange).not.toHaveBeenCalled();
+      expect(box.style.left).toBe("100px");
+    });
+
+    it("draws no move or resize surface without the geometry callback", () => {
+      render(
+        <XFlowPreview
+          editable
+          onSectionDelete={vi.fn()}
+          onSectionTitleChange={vi.fn()}
+          sections={sections}
+          workflow={sectionWorkflow}
+        />
+      );
+
+      expect(boxes()[0]?.querySelector(".xflow-preview-section__resize")).toBeNull();
+      expect(boxes()[0]?.classList.contains("xflow-preview-section--interactive")).toBe(false);
+    });
+
+    it("keeps a press on the delete button out of the move gesture", () => {
+      const onSectionDelete = vi.fn();
+      const onSectionGeometryChange = vi.fn();
+      render(
+        <XFlowPreview
+          editable
+          onSectionDelete={onSectionDelete}
+          onSectionGeometryChange={onSectionGeometryChange}
+          sections={sections}
+          workflow={sectionWorkflow}
+        />
+      );
+      const box = boxes()[0] as HTMLElement;
+      const remove = within(box).getByRole("button", { name: "删除分区 VIP 审批" });
+
+      firePointer(remove, "pointerdown", 120, 70);
+      firePointer(box, "pointermove", 220, 170);
+      firePointer(box, "pointerup", 220, 170);
+
+      expect(onSectionGeometryChange).not.toHaveBeenCalled();
+      fireEvent.click(remove);
+      expect(onSectionDelete).toHaveBeenCalledWith("sec-move");
+    });
+  });
+});
+
+// §6.2 canvas gestures: the editor's multi-select surface. The ReactFlow mock
+// never runs xyflow's internal selection, so the marquee is exercised through
+// the `onNodesChange` deltas xyflow would emit; the prop assertions pin the
+// gesture configuration that produces them.
+describe("XFlowPreview multi-selection (§6.2)", () => {
+  const multiWorkflow = {
+    id: "wf-multi",
+    name: "Multi flow",
+    nodes: [
+      { id: "a-id", name: "a", type: "xflow.start" },
+      { id: "b-id", name: "b", type: "xflow.function" },
+      { id: "c-id", name: "c", type: "xflow.http" }
+    ],
+    connections: {
+      a: { main: [{ node: "b" }] },
+      b: { main: [{ node: "c" }] }
+    }
+  } satisfies WorkflowDef;
+
+  const card = (name: string): HTMLElement =>
+    screen.getByRole("button", { name: new RegExp(`^${name} node `) });
+
+  it("configures a marquee on the left button while leaving pan and the context menu reachable", () => {
+    render(
+      <XFlowPreview
+        workflow={multiWorkflow}
+        editable
+        selectedNodeIds={["a-id", "c-id"]}
+        onSelectionChange={vi.fn()}
+      />
+    );
+
+    const flow = latestFlowProps();
+    expect(flow.selectionOnDrag).toBe(true);
+    // Partial: a marquee that touches a card selects it.
+    expect(flow.selectionMode).toBe("partial");
+    // selectionOnDrag only takes effect when panOnDrag !== true; the middle
+    // button pans, and xyflow's default Space activation key still works (it is
+    // not overridden here), while the right button stays the context menu.
+    expect(flow.panOnDrag).toEqual([1]);
+    expect(flow.panActivationKeyCode).toBeUndefined();
+    expect(flow.multiSelectionKeyCode).toEqual(["Meta", "Control"]);
+    expect(flow.elementsSelectable).toBe(true);
+    expect(flow.onNodesChange).toEqual(expect.any(Function));
+
+    // Selection is drawn from the owner's set: both cards carry their flag.
+    expect(flow.nodes.find((node) => node.id === "a-id")).toMatchObject({ selectable: true, selected: true });
+    expect(flow.nodes.find((node) => node.id === "b-id")).toMatchObject({ selectable: true, selected: false });
+    expect(flow.nodes.find((node) => node.id === "c-id")).toMatchObject({ selectable: true, selected: true });
+  });
+
+  it("keeps the legacy single-selection contract when no owner set is supplied", () => {
+    render(<XFlowPreview workflow={multiWorkflow} editable selectedNodeId="a-id" onSelectNode={vi.fn()} />);
+
+    const flow = latestFlowProps();
+    expect(flow.selectionOnDrag).toBe(false);
+    expect(flow.panOnDrag).toBe(true);
+    expect(flow.multiSelectionKeyCode).toBeUndefined();
+    expect(flow.nodes.find((node) => node.id === "a-id")).toMatchObject({ selectable: false, selected: true });
+  });
+
+  it("reports every node a finished drag moved in one batch, or the one node on the legacy path", () => {
+    const dragged = [
+      { id: "a-id", position: { x: 10, y: 20 } },
+      { id: "c-id", position: { x: 210, y: 20 } }
+    ];
+    const onPositions = vi.fn();
+    const onPosition = vi.fn();
+    const first = render(
+      <XFlowPreview
+        workflow={multiWorkflow}
+        editable
+        selectedNodeIds={["a-id", "c-id"]}
+        onSelectionChange={vi.fn()}
+        onNodePositionsChange={onPositions}
+        onNodePositionChange={onPosition}
+      />
+    );
+
+    // xyflow hands the grabbed node plus every node the gesture moved; the
+    // batch callback gets all of them at once.
+    act(() => { latestFlowProps().onNodeDragStop?.(mouseEventStub(0, 0), dragged[0], dragged); });
+    expect(onPositions).toHaveBeenCalledWith(dragged);
+    expect(onPosition).not.toHaveBeenCalled();
+    first.unmount();
+
+    // Without the batch callback the package keeps its original contract.
+    const legacy = vi.fn();
+    render(
+      <XFlowPreview
+        workflow={multiWorkflow}
+        editable
+        selectedNodeIds={["a-id"]}
+        onSelectionChange={vi.fn()}
+        onNodePositionChange={legacy}
+      />
+    );
+    act(() => { latestFlowProps().onNodeDragStop?.(mouseEventStub(0, 0), dragged[0], dragged); });
+    expect(legacy).toHaveBeenCalledWith("a-id", { x: 10, y: 20 });
+  });
+
+  it("composes marquee deltas into graph order and names the primary only when one node was picked", () => {
+    const onSelectionChange = vi.fn();
+    render(
+      <XFlowPreview
+        workflow={multiWorkflow}
+        editable
+        selectedNodeIds={[]}
+        onSelectionChange={onSelectionChange}
+      />
+    );
+    const flow = latestFlowProps();
+
+    act(() => {
+      flow.onNodesChange?.([
+        { id: "c-id", type: "select", selected: true },
+        { id: "a-id", type: "select", selected: true }
+      ]);
+    });
+    // Two nodes picked at once: a marquee, so the owner keeps its primary.
+    expect(onSelectionChange).toHaveBeenLastCalledWith(["a-id", "c-id"], undefined);
+
+    act(() => {
+      flow.onNodesChange?.([{ id: "b-id", type: "select", selected: true }]);
+    });
+    expect(onSelectionChange).toHaveBeenLastCalledWith(["a-id", "b-id", "c-id"], "b-id");
+
+    act(() => {
+      flow.onNodesChange?.([{ id: "a-id", type: "select", selected: false }]);
+    });
+    expect(onSelectionChange).toHaveBeenLastCalledWith(["b-id", "c-id"], undefined);
+  });
+
+  it("toggles a card in and out of the owner's set while the multi-selection key is held", () => {
+    const onSelectNode = vi.fn();
+    const onSelectionChange = vi.fn();
+    render(
+      <XFlowPreview
+        workflow={multiWorkflow}
+        editable
+        selectedNodeIds={["a-id"]}
+        selectedNodeId="a-id"
+        onSelectNode={onSelectNode}
+        onSelectionChange={onSelectionChange}
+      />
+    );
+    act(() => reactFlowMock.flowStore.setState({ multiSelectionActive: true }));
+
+    fireEvent.click(card("b"));
+    expect(onSelectionChange).toHaveBeenLastCalledWith(["a-id", "b-id"], "b-id");
+    // The card's own selection path handled it; the plain-click owner callback
+    // must not also fire for the same press.
+    expect(onSelectNode).not.toHaveBeenCalled();
+
+    fireEvent.click(card("b"));
+    expect(onSelectionChange).toHaveBeenLastCalledWith(["a-id"], undefined);
+  });
+
+  it("replaces the whole selection on a plain click", () => {
+    const onSelectNode = vi.fn();
+    render(
+      <XFlowPreview
+        workflow={multiWorkflow}
+        editable
+        selectedNodeIds={["a-id", "b-id"]}
+        selectedNodeId="b-id"
+        onSelectNode={onSelectNode}
+        onSelectionChange={vi.fn()}
+      />
+    );
+
+    fireEvent.click(card("c"));
+    expect(onSelectNode).toHaveBeenCalledWith("c-id");
+  });
+
+  it("asks the owner to delete the whole selection in one call", async () => {
+    const onDeleteNodes = vi.fn();
+    render(
+      <XFlowPreview
+        workflow={multiWorkflow}
+        editable
+        selectedNodeIds={["a-id", "b-id", "c-id"]}
+        onSelectionChange={vi.fn()}
+        onDeleteConnection={vi.fn()}
+        onDeleteNodes={onDeleteNodes}
+      />
+    );
+
+    fireEvent.keyDown(window, { key: "Delete" });
+    expect(onDeleteNodes).toHaveBeenCalledTimes(1);
+    expect(onDeleteNodes).toHaveBeenCalledWith(["a-id", "b-id", "c-id"]);
+
+    // The library's delete handler must not also remove the marquee-selected
+    // edges: the owner removes them together with the nodes in one write.
+    const permitted = await latestFlowProps().onBeforeDelete?.({
+      nodes: [{ id: "a-id" }],
+      edges: latestFlowProps().edges
+    });
+    expect(permitted?.nodes).toEqual([]);
+    expect(permitted?.edges).toEqual([]);
+
+    // With no node selected the press still means "remove the selected edge",
+    // which stays xyflow's job.
+    const edgeOnly = latestFlowProps().onBeforeDelete;
+    const edgePermitted = await edgeOnly?.({ nodes: [], edges: latestFlowProps().edges });
+    expect(edgePermitted?.edges.map((edge) => edge.id)).toEqual(["a:main->b:main", "b:main->c:main"]);
+  });
+});
+
+// React Flow suppresses the pane's own onClick while `selectionOnDrag` owns the
+// left button and answers a real gesture from pointerup instead. The canvas
+// wrapper replays only a click that no pointer produced, so a plain click still
+// clears, while the click trailing a marquee cannot undo what it selected.
+describe("XFlowPreview empty-canvas click under the marquee gesture", () => {
+  const paneOf = (container: HTMLElement): HTMLElement => {
+    const pane = container.querySelector<HTMLElement>(".react-flow__pane");
+    if (!pane) throw new Error("pane missing");
+    return pane;
+  };
+
+  const renderEditable = (
+    onPaneClick = vi.fn(),
+    extra: Partial<React.ComponentProps<typeof XFlowPreview>> = {}
+  ) => render(
+    <XFlowPreview
+      workflow={contextMenuWorkflow}
+      editable
+      selectedNodeIds={["http-id"]}
+      onSelectionChange={vi.fn()}
+      onPaneClick={onPaneClick}
+      {...extra}
+    />
+  );
+
+  it("replays a pane click that no pointer gesture produced", () => {
+    const onPaneClick = vi.fn();
+    const { container } = renderEditable(onPaneClick);
+
+    fireEvent.click(paneOf(container));
+
+    expect(onPaneClick).toHaveBeenCalledTimes(1);
+    // The store reset a real pane click performs, so an owner listening only
+    // for onSelectionChange clears too.
+    expect(reactFlowMock.flowStore.state.resetSelectedElements).toHaveBeenCalledTimes(1);
+    expect(reactFlowMock.flowStore.state.nodesSelectionActive).toBe(false);
+  });
+
+  it("leaves the click that follows a real press to React Flow", () => {
+    const onPaneClick = vi.fn();
+    const { container } = renderEditable(onPaneClick);
+    const pane = paneOf(container);
+
+    fireEvent.pointerDown(pane, { button: 0, pointerId: 1 });
+    fireEvent.pointerUp(pane, { pointerId: 1 });
+    fireEvent.click(pane, { detail: 1 });
+
+    // xyflow answers the no-move press from pointerup itself; replaying the
+    // trailing click would call the owner twice.
+    expect(onPaneClick).not.toHaveBeenCalled();
+  });
+
+  it("keeps the marquee's selection when the release's click follows it", () => {
+    const onPaneClick = vi.fn();
+    const { container } = renderEditable(onPaneClick);
+    const pane = paneOf(container);
+
+    fireEvent.pointerDown(pane, { button: 0, clientX: 10, clientY: 10, pointerId: 1 });
+    fireEvent.pointerMove(pane, { clientX: 220, clientY: 180, pointerId: 1 });
+    fireEvent.pointerUp(pane, { clientX: 220, clientY: 180, pointerId: 1 });
+    fireEvent.click(pane, { detail: 1 });
+
+    expect(onPaneClick).not.toHaveBeenCalled();
+    expect(reactFlowMock.flowStore.state.resetSelectedElements).not.toHaveBeenCalled();
+  });
+
+  it("ignores clicks on a card and on a connection", () => {
+    const onPaneClick = vi.fn();
+    const { container } = renderEditable(onPaneClick);
+
+    fireEvent.click(screen.getByRole("button", { name: /^http_1 node / }));
+    fireEvent.click(container.querySelector<HTMLElement>("[data-edge-id]")!);
+
+    expect(onPaneClick).not.toHaveBeenCalled();
+  });
+
+  it("keeps the pane context menu path untouched", () => {
+    const onPaneClick = vi.fn();
+    const onPaneContextMenu = vi.fn();
+    renderEditable(onPaneClick, { onPaneContextMenu });
+
+    // The mock pane does not wire xyflow's contextmenu handler; invoke the
+    // prop xyflow would call, as the context-menu tests do.
+    act(() => {
+      latestFlowProps().onPaneContextMenu?.(mouseEventStub(30, 40));
+    });
+
+    expect(onPaneContextMenu).toHaveBeenCalledTimes(1);
+    expect(onPaneClick).not.toHaveBeenCalled();
+    expect(reactFlowMock.flowStore.state.resetSelectedElements).not.toHaveBeenCalled();
   });
 });

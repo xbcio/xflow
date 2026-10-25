@@ -92,6 +92,27 @@ const declarationsOf = (selector: string): Record<string, string> => {
 
 // jsdom computes no cascade from styles.css, so the shapes the baseline fixes are
 // pinned against the stylesheet text (ui-preview.css is the reference).
+describe("xflow-preview typography tokens (ED-16 / ED-17)", () => {
+  it("sizes every font from the shared --xflow-font-* scale", () => {
+    const sizes = [...css.matchAll(/font-size:\s*([^;]+);/g)].map((match) => match[1].trim());
+    expect(sizes.length).toBeGreaterThan(10);
+    for (const value of sizes) {
+      // A glyph may scale a token with calc(); a literal px size may not appear.
+      expect(value, value).toMatch(/^(?:calc\()?var\(--xflow-font-(?:xs|sm|md|lg|xl)\)/);
+    }
+  });
+
+  it("keeps every font weight on the 400/500/600 scale", () => {
+    const weights = [...css.matchAll(/font-weight:\s*([^;]+);/g)].map((match) => match[1].trim());
+    expect(weights.length).toBeGreaterThan(5);
+    expect([...new Set(weights)].sort()).toEqual([
+      "var(--xflow-font-weight-medium)",
+      "var(--xflow-font-weight-regular)",
+      "var(--xflow-font-weight-semibold)",
+    ]);
+  });
+});
+
 describe("xflow-preview shapes against the baseline", () => {
   it("draws a read-only handle as the same hollow ring, differing only by cursor", () => {
     expect(declarationsOf('.xflow-preview-node__handle[aria-disabled="true"]')).toEqual({ cursor: "not-allowed" });
@@ -128,7 +149,7 @@ describe("xflow-preview shapes against the baseline", () => {
     const slow = declarationsOf(".xflow-preview-canvas .xflow-preview-edge--flow-slow .react-flow__edge-path");
     expect(slow.animation).toContain("calc(var(--xflow-preview-flow-period) * var(--xflow-preview-flow-slow-factor))");
     // `.xflow-preview-canvas` has more than one rule; the period variables sit in the edge section.
-    expect(css).toMatch(/--xflow-preview-flow-period:\s*0\.8s;/);
+    expect(css).toMatch(/--xflow-preview-flow-period:\s*calc\(var\(--xflow-motion-duration-instant\) \* 10\);/);
     expect(css).toMatch(/--xflow-preview-flow-slow-factor:\s*2\.5;/);
     // Same stroke and dash pattern as `flow`: the two share one rule.
     const shared = declarationsOf(
@@ -141,25 +162,49 @@ describe("xflow-preview shapes against the baseline", () => {
 
   it("draws the error port border as a fixed danger mix, whatever the card tone", () => {
     const port = declarationsOf(".xflow-preview-node__port--error");
-    expect(port["border-color"]).toBe("color-mix(in srgb, var(--xflow-danger) 55%, transparent)");
+    expect(port["border-color"]).toBe("color-mix(in srgb, var(--xflow-danger) 45%, transparent)");
     expect(port["border-color"]).not.toContain("preview-t-border");
   });
 
-  it("reads the tone foreground from core's -fg, one tone at a time", () => {
+  it("draws the skipped edge with the baseline 3/4 dash, apart from the dangling 2/4", () => {
+    expect(declarationsOf(".xflow-preview-canvas .xflow-preview-edge--skipped .react-flow__edge-path")).toMatchObject({
+      opacity: "0.5",
+      "stroke-dasharray": "3 4"
+    });
+  });
+
+  it("draws the edge label as the baseline pill: panel fill, 1px border, 6px corner, 11/400", () => {
+    expect(css).toMatch(/--xflow-preview-edge-label-bg:\s*var\(--xflow-surface-panel\)\s*;/);
+    expect(declarationsOf(".xflow-preview-canvas .react-flow__edge-textbg")).toMatchObject({
+      fill: "var(--xflow-preview-edge-label-bg)",
+      stroke: "var(--xflow-border)",
+      "stroke-width": "1"
+    });
+    expect(declarationsOf(".xflow-preview-canvas .react-flow__edge-text")).toMatchObject({
+      fill: "var(--xflow-preview-edge-label)",
+      "font-size": "var(--xflow-font-xs)",
+      "font-weight": "var(--xflow-font-weight-regular)"
+    });
+    // React Flow owns the pill corner and padding; both are per-edge props.
+    expect(source).toContain("labelBgPadding: [6, 1.75]");
+    expect(source).toContain("labelBgBorderRadius: 6");
+  });
+
+  it("reads the tone foreground from the raw semantic colour, one tone at a time", () => {
     for (const tone of ["info", "success", "warning", "danger", "suspend", "neutral"]) {
       const rule = declarationsOf(
         `:is(.xflow-preview-node, .xflow-preview-node__status, .xflow-preview-status)[data-tone="${tone}"]`
       );
-      expect(rule["--xflow-preview-t-fg"], tone).toBe(`var(--xflow-${tone}-fg)`);
+      expect(rule["--xflow-preview-t-fg"], tone).toBe(`var(--xflow-${tone})`);
     }
   });
 
   it("shapes the toolbar status pill like the baseline chip", () => {
     expect(declarationsOf(".xflow-preview-status")).toMatchObject({
-      "border-radius": "var(--xflow-radius-pill)",
+      "border-radius": "var(--xflow-radius-full)",
       "font-size": "var(--xflow-font-xs)",
       height: "20px",
-      padding: "0 8px"
+      padding: "0 var(--xflow-space-2)"
     });
   });
 
@@ -223,10 +268,10 @@ describe("xflow-preview shapes against the baseline", () => {
     expect(css).not.toContain("--xy-background-pattern-color");
   });
 
-  it("shapes the §6.2 minimap 200x100 at the container radius", () => {
+  it("shapes the §6.2 minimap 200x124 at the container radius", () => {
     expect(declarationsOf(".xflow-preview-canvas .react-flow__minimap")).toMatchObject({
       "border-radius": "var(--xflow-radius-md)",
-      height: "100px",
+      height: "124px",
       width: "200px"
     });
   });
@@ -264,7 +309,7 @@ describe("xflow-preview canvas chrome against styles.css", () => {
       border: "1px solid var(--xflow-border)",
       "border-radius": "var(--xflow-radius-md)",
       "box-shadow": "var(--xflow-elev-2)",
-      padding: "4px",
+      padding: "var(--xflow-space-1)",
       left: "calc(var(--xflow-preview-ruler-inset) + var(--xflow-preview-float-inset))",
       bottom: "var(--xflow-preview-float-inset)"
     });
@@ -281,7 +326,7 @@ describe("xflow-preview canvas chrome against styles.css", () => {
       border: "1px solid var(--xflow-border)",
       "border-radius": "var(--xflow-radius-md)",
       "box-shadow": "var(--xflow-elev-2)",
-      padding: "4px",
+      padding: "var(--xflow-space-1)",
       left: "calc(var(--xflow-preview-ruler-inset) + var(--xflow-preview-float-inset))",
       top: "calc(var(--xflow-preview-ruler-inset) + 12px)",
       "z-index": "5"
@@ -315,5 +360,252 @@ describe("xflow-preview canvas chrome against styles.css", () => {
     const chromeRules = css.slice(css.indexOf(".xflow-preview-ruler,"), css.indexOf(".xflow-preview-canvas .react-flow__minimap"));
     expect(chromeRules.length).toBeGreaterThan(0);
     expect(chromeRules).not.toMatch(/#[0-9a-f]{3,8}\b|rgba?\(|hsla?\(/i);
+  });
+});
+
+// EL-03: the card's hover/selection feedback is a transition, not an instant
+// repaint, and every duration comes from the shared stage-1 motion tokens.
+describe("xflow-preview node card motion (EL-03)", () => {
+  it("reads the shared motion tokens instead of a local scale", () => {
+    expect(css).not.toMatch(/--xflow-preview-motion-/);
+    expect(css).toMatch(/--xflow-motion-duration-fast/);
+    expect(css).toMatch(/--xflow-motion-duration-base/);
+    expect(css).toMatch(/--xflow-motion-ease-standard/);
+  });
+
+  it("transitions only shadow, border and the selection ring colour", () => {
+    const node = declarationsOf(".xflow-preview-node");
+    expect(node.transition).toContain("box-shadow var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard)");
+    expect(node.transition).toContain("border-color var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard)");
+    expect(node.transition).toContain("outline-color var(--xflow-motion-duration-base) var(--xflow-motion-ease-standard)");
+    // `all` would animate geometry on every re-render, not just feedback.
+    expect(node.transition).not.toMatch(/\ball\b/);
+    // The ring fades in from transparent instead of popping at 2px.
+    expect(node.outline).toBe("2px solid transparent");
+  });
+
+  it("lifts the card one elevation step on hover and keeps a toned status border", () => {
+    expect(declarationsOf(".xflow-preview-node:hover")).toEqual({ "box-shadow": "var(--xflow-elev-2)" });
+    expect(declarationsOf(".xflow-preview-node:not([data-tone]):hover")).toEqual({
+      "border-color": "var(--xflow-border-strong)"
+    });
+  });
+
+  it("still renders the selected ring and turns the motion off under reduced motion", () => {
+    expect(declarationsOf('.xflow-preview-node[data-selected="true"]')).toMatchObject({
+      outline: "2px solid var(--xflow-preview-node-selected-border)"
+    });
+    expect(css).toMatch(
+      /@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.xflow-preview-node\s*\{\s*transition:\s*none;\s*\}\s*\.xflow-preview-node\[data-status="running"\]::after\s*\{\s*animation:\s*none;/
+    );
+  });
+});
+
+// E-A: the card's information architecture is three fixed levels. jsdom measures
+// no layout, so the reserved sizes are pinned against the stylesheet text.
+describe("xflow-preview card information architecture (E-A)", () => {
+  it("fixes the card width and one height per summary-row count", () => {
+    expect(declarationsOf(".xflow-preview-node")["width"]).toBe("var(--xflow-preview-node-width)");
+    expect(css).toMatch(/--xflow-preview-node-width:\s*var\(--xflow-node-width\);/);
+    // Header 56 + bottom strip 26 + card border 2 = 84. A full card then adds
+    // exactly the rows it draws (data-summary-rows, written by index.tsx): one
+    // 30px row plus its 10px bottom padding, two or three rows plus 4px gaps.
+    // 30 flow px is the worst case at the 1.25 glyph cap and still 24 screen px
+    // at the 0.8 full-detail floor; it never multiplies the inverse zoom.
+    expect(declarationsOf('.xflow-preview-node[data-lod="full"]')).toMatchObject({
+      "--xflow-preview-summary-row-h": "30px",
+      "min-height": "84px"
+    });
+    expect(declarationsOf('.xflow-preview-node[data-lod="full"][data-summary-rows="1"]')["min-height"]).toBe(
+      "calc(84px + var(--xflow-preview-summary-row-h) + var(--xflow-space-2-5))"
+    );
+    expect(declarationsOf('.xflow-preview-node[data-lod="full"][data-summary-rows="2"]')["min-height"]).toBe(
+      "calc(84px + 2 * var(--xflow-preview-summary-row-h) + var(--xflow-space-1) + var(--xflow-space-2-5))"
+    );
+    expect(declarationsOf('.xflow-preview-node[data-lod="full"][data-summary-rows="3"]')["min-height"]).toBe(
+      "calc(84px + 3 * var(--xflow-preview-summary-row-h) + 2 * var(--xflow-space-1) + var(--xflow-space-2-5))"
+    );
+    // 56 header + 26 bottom strip + 2 border: compact keeps the type line and
+    // badges but drops the summary.
+    expect(declarationsOf('.xflow-preview-node[data-lod="compact"]')).toEqual({ "min-height": "84px" });
+  });
+
+  it("keeps the low-detail spread handles inside the card's bottom edge (P3-a)", () => {
+    expect(declarationsOf(".xflow-preview-node__ports--handles")).toMatchObject({
+      top: "100%",
+      height: "0"
+    });
+    // The dot's lower edge sits on the padding-box line instead of half a dot
+    // below it, so nothing protrudes and the card has no scroll overflow.
+    expect(declarationsOf(".xflow-preview-node__ports--handles .xflow-preview-node__handle")).toEqual({
+      bottom: "0",
+      transform: "translate(-50%, 0)"
+    });
+    // The hit target stays 24 screen px and is pinned to that same edge, so it
+    // cannot make the card scroll.
+    expect(declarationsOf(".xflow-preview-node__ports--handles .xflow-preview-node__handle::after")).toEqual({
+      height: "calc(24px * var(--xflow-preview-inverse-zoom, 1))",
+      inset: "auto auto 0 50%",
+      transform: "translateX(-50%)",
+      width: "calc(24px * var(--xflow-preview-inverse-zoom, 1))"
+    });
+  });
+
+  it("gives every summary row the same height and ellipsizes a long value", () => {
+    expect(declarationsOf(".xflow-preview-node__summary")).toMatchObject({
+      "grid-template-columns": "auto minmax(0, 1fr)",
+      "grid-auto-rows": "var(--xflow-preview-summary-row-h, 30px)"
+    });
+    // The old 70px three-line reserve is gone: a one-row node no longer carries
+    // two empty line boxes.
+    expect(declarationsOf(".xflow-preview-node__summary")["min-height"]).toBeUndefined();
+    expect(declarationsOf(".xflow-preview-node__summary dd")).toMatchObject({
+      "min-width": "0",
+      overflow: "hidden",
+      "text-overflow": "ellipsis",
+      "white-space": "nowrap"
+    });
+    expect(declarationsOf(".xflow-preview-node__type")).toMatchObject({
+      overflow: "hidden",
+      "text-overflow": "ellipsis",
+      "white-space": "nowrap"
+    });
+  });
+
+  it("keeps the card's measured geometry independent of the zoom (P2-2)", () => {
+    // A row measured as 24px * 1/zoom grew on every step the canvas zoomed out,
+    // so xyflow re-measured all nodes per wheel notch. The row height is now one
+    // flow value; only the glyphs follow the inverse zoom.
+    const button = declarationsOf('.xflow-preview-node__summary dd[role="button"]');
+    for (const value of [
+      button["line-height"],
+      button["min-height"],
+      declarationsOf(".xflow-preview-node__summary")["grid-auto-rows"]
+    ]) {
+      expect(value).toBe("var(--xflow-preview-summary-row-h, 30px)");
+    }
+  });
+
+  it("scales the card's small type by the inverse zoom instead of shrinking it", () => {
+    // At 80% the 11px rows used to render at 8.8 screen px. Full and compact
+    // cards multiply their glyphs by the canvas's inverse zoom, capped at 1.25
+    // so 75% still lands at 10.3 screen px (see lod.test.ts for the arithmetic).
+    expect(css).toContain("--xflow-preview-card-text-scale: clamp(1, var(--xflow-preview-inverse-zoom, 1), 1.25);");
+    const scale = "var(--xflow-preview-card-text-scale, 1)";
+    for (const selector of [
+      ".xflow-preview-node__title strong",
+      ".xflow-preview-node__type",
+      ".xflow-preview-node__summary",
+      ".xflow-preview-node__badge",
+      ".xflow-preview-node__status",
+      ".xflow-preview-node__port-text"
+    ]) {
+      expect(declarationsOf(selector)["font-size"], `${selector} scales its type`).toContain(scale);
+    }
+  });
+
+  it("draws every card glyph from the @xflow/icons set at 12 or 14px", () => {
+    // Badge and issue glyphs are 12px; the category block is 14px; the status
+    // chip takes the same 12px face. No local pixel size outside those two.
+    expect(declarationsOf(".xflow-preview-node__badge-icon svg")).toEqual({
+      display: "block",
+      height: "12px",
+      width: "12px"
+    });
+    expect(declarationsOf(".xflow-preview-node__issues svg")).toMatchObject({ height: "12px", width: "12px" });
+    expect(declarationsOf(".xflow-preview-node__status-icon")["font-size"]).toBe("var(--xflow-font-sm)");
+    expect(declarationsOf(".xflow-preview-node__icon")["font-size"]).toBe("var(--xflow-font-lg)");
+  });
+
+  it("desaturates the category colour on dark cards (EL-21)", () => {
+    // The raw category colour never fills a dark icon: it tints the raised
+    // surface and mixes into the glyph, so orange/teal/purple do not clash.
+    expect(declarationsOf('[data-theme="dark"] .xflow-preview-node__icon')).toEqual({
+      background: "color-mix(in srgb, var(--xflow-preview-node-category) 10%, var(--xflow-panel-raised))",
+      color: "color-mix(in srgb, var(--xflow-preview-node-category) 72%, var(--xflow-text-secondary))"
+    });
+  });
+
+  it("puts the branch port labels and their handles in the bottom strip", () => {
+    expect(declarationsOf(".xflow-preview-node__meta")).toMatchObject({
+      "justify-content": "space-between",
+      "margin-top": "auto",
+      "min-height": "26px"
+    });
+    expect(declarationsOf(".xflow-preview-node__ports")).toMatchObject({
+      "margin-left": "auto",
+      position: "relative"
+    });
+    // Each label is the handle's containing block, so the 10px dot hangs on the
+    // label's bottom edge instead of floating in the card body.
+    expect(declarationsOf(".xflow-preview-node__port")).toMatchObject({
+      position: "relative",
+      "font-size": "var(--xflow-font-xs)"
+    });
+    // P3-2: the width keeper is an unscaled hidden copy, and the painted glyphs
+    // sit on top at the card's inverse scale. The pill (and its centred handle)
+    // therefore keep their layout position while the text reaches 11 screen px.
+    expect(declarationsOf(".xflow-preview-node__port::before")).toMatchObject({
+      content: "attr(data-port)",
+      "font-size": "var(--xflow-font-xs)",
+      visibility: "hidden"
+    });
+    expect(declarationsOf(".xflow-preview-node__port-text")).toMatchObject({
+      position: "absolute",
+      "pointer-events": "none",
+      "font-size": "calc(var(--xflow-font-xs) * var(--xflow-preview-card-text-scale, 1))"
+    });
+    // P2-3: the target is pinned inside the card instead of centred on a dot
+    // that hangs 6px above the card's bottom edge.
+    expect(declarationsOf(".xflow-preview-node__port .xflow-preview-node__handle::after")).toMatchObject({
+      inset: "auto auto -4px 50%",
+      transform: "translateX(-50%)",
+      height: "calc(24px * var(--xflow-preview-inverse-zoom, 1))",
+      width: "calc(24px * var(--xflow-preview-inverse-zoom, 1))"
+    });
+  });
+});
+
+// §6.2: the visual section boxes are decoration. They must sit behind the
+// cards and never take a gesture away from the canvas.
+describe("xflow-preview canvas sections against styles.css", () => {
+  it("puts the section layer behind the cards and outside the pointer's reach", () => {
+    expect(declarationsOf(".xflow-preview-section-layer")).toEqual({
+      inset: "0",
+      "pointer-events": "none",
+      position: "absolute",
+      "z-index": "-1"
+    });
+  });
+
+  it("draws the baseline frame: dashed category-coloured border, md corner, title chip", () => {
+    expect(declarationsOf(".xflow-preview-section")).toMatchObject({
+      "border-radius": "var(--xflow-radius-md)",
+      position: "absolute"
+    });
+    const frame = declarationsOf(".xflow-preview-section");
+    expect(frame.border).toContain("dashed");
+    expect(frame.border).toContain("var(--xflow-preview-section-category)");
+    expect(frame.background).toContain("var(--xflow-preview-section-category) 5%");
+
+    expect(declarationsOf(".xflow-preview-section__title")).toMatchObject({
+      "border-radius": "var(--xflow-radius-xs)",
+      "font-size": "var(--xflow-font-md)",
+      "font-weight": "var(--xflow-font-weight-semibold)",
+      height: "22px",
+      left: "12px",
+      position: "absolute",
+      top: "-11px"
+    });
+  });
+
+  it("states no colour literal for the section palette", () => {
+    const start = css.indexOf(".xflow-preview-section-layer");
+    const end = css.indexOf(".xflow-preview-ruler,", start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const rules = css.slice(start, end);
+    expect(rules.length).toBeGreaterThan(0);
+    expect(rules).not.toMatch(/#[0-9a-f]{3,8}\b|rgba?\(|hsla?\(/i);
   });
 });

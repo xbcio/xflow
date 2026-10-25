@@ -1,26 +1,26 @@
 import * as React from "react";
 import {
-  AppstoreOutlined,
-  BranchesOutlined,
-  CheckOutlined,
-  ClockCircleOutlined,
-  CloseOutlined,
-  CodeOutlined,
-  FieldTimeOutlined,
-  FilterOutlined,
-  FlagOutlined,
-  GlobalOutlined,
-  HourglassOutlined,
-  InboxOutlined,
-  LoadingOutlined,
-  MinusCircleOutlined,
-  PauseCircleOutlined,
-  PushpinOutlined,
-  StepForwardOutlined,
-  StopOutlined,
-  UserOutlined,
-  WarningOutlined
-} from "@ant-design/icons";
+  ArchiveIcon,
+  BanIcon,
+  BranchIcon,
+  CheckIcon,
+  ClockIcon,
+  CodeIcon,
+  FilterIcon,
+  FlagIcon,
+  GlobeIcon,
+  GridIcon,
+  HourglassIcon,
+  PauseIcon,
+  PinIcon,
+  SkipIcon,
+  SpinIcon,
+  StopIcon,
+  TimeoutIcon,
+  UserIcon,
+  WarnIcon,
+  XMarkIcon
+} from "@xflow/icons";
 import type { CategoryIconKey, StatusIconKey } from "@xflow/core";
 
 /**
@@ -30,27 +30,27 @@ import type { CategoryIconKey, StatusIconKey } from "@xflow/core";
  * Mirrors the glyphs of the admin `/ui-preview` page (`meta.tsx`).
  */
 export const statusGlyph: Record<StatusIconKey, React.ReactNode> = {
-  clock: <ClockCircleOutlined />,
-  loading: <LoadingOutlined />,
-  hourglass: <HourglassOutlined />,
-  pause: <PauseCircleOutlined />,
-  check: <CheckOutlined />,
-  pin: <PushpinOutlined />,
-  warning: <WarningOutlined />,
-  close: <CloseOutlined />,
-  skip: <StepForwardOutlined />,
-  stop: <StopOutlined />,
-  archive: <InboxOutlined />,
-  disabled: <MinusCircleOutlined />,
-  "clock-close": <FieldTimeOutlined />
+  clock: <ClockIcon />,
+  loading: <SpinIcon />,
+  hourglass: <HourglassIcon />,
+  pause: <PauseIcon />,
+  check: <CheckIcon />,
+  pin: <PinIcon />,
+  warning: <WarnIcon />,
+  close: <XMarkIcon />,
+  skip: <SkipIcon />,
+  stop: <StopIcon />,
+  archive: <ArchiveIcon />,
+  disabled: <BanIcon />,
+  "clock-close": <TimeoutIcon />
 };
 
 export const categoryGlyph: Record<CategoryIconKey, React.ReactNode> = {
-  flag: <FlagOutlined />,
-  branch: <BranchesOutlined />,
-  globe: <GlobalOutlined />,
-  code: <CodeOutlined />,
-  filter: <FilterOutlined />,
-  user: <UserOutlined />,
-  grid: <AppstoreOutlined />
+  flag: <FlagIcon />,
+  branch: <BranchIcon />,
+  globe: <GlobeIcon />,
+  code: <CodeIcon />,
+  filter: <FilterIcon />,
+  user: <UserIcon />,
+  grid: <GridIcon />
 };

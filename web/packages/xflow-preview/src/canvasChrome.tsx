@@ -1,15 +1,8 @@
 import * as React from "react";
-import {
-  ApartmentOutlined,
-  ColumnWidthOutlined,
-  ExpandOutlined,
-  MinusOutlined,
-  PictureOutlined,
-  PlusOutlined
-} from "@ant-design/icons";
+import { FitIcon, LayoutIcon, MapIcon, MinusIcon, PlusIcon, RulerIcon } from "@xflow/icons";
 import { type ReactFlowState, useReactFlow, useStoreApi } from "@xyflow/react";
 import { foundationTokens } from "@xflow/core";
-import { Button, Divider, Slider, Tooltip } from "antd";
+import { Button, Divider, Tooltip } from "antd";
 import type { FitRect } from "./fit";
 
 /** Ruler thickness in px; the stylesheet reads the same value as `--xflow-ruler`. */
@@ -22,9 +15,10 @@ export const MAX_ZOOM = 2;
 /**
  * §6.2 minimap size. Handed to MiniMap as its style, not only set in CSS: xyflow
  * sizes the svg and its viewBox from `style.width/height` (200x150 when absent),
- * so a box shrunk by CSS alone would crop the map's lower third.
+ * so a box shrunk by CSS alone would crop the map's lower third. The baseline's
+ * `.minimap` is 200x124 (preview mock, "Additions vs. earlier drafts").
  */
-export const MINIMAP_SIZE = { width: 200, height: 100 } as const;
+export const MINIMAP_SIZE = { width: 200, height: 124 } as const;
 
 /**
  * Marks an element as a floating layer the fit has to keep content clear of. The
@@ -189,8 +183,14 @@ export function CanvasRulers({ selectedNodeId }: { selectedNodeId?: string }): R
   );
 }
 
-function ChromeButton({ label, active, ...rest }: React.ComponentProps<typeof Button> & {
+/**
+ * The zoom bar's controls reuse the package glyphs the design's sprite draws:
+ * ruler and minimap included, so no chrome icon is hand-drawn here.
+ */
+function ChromeButton({ label, ariaLabel, active, ...rest }: React.ComponentProps<typeof Button> & {
   label: string;
+  /** The accessible name when the baseline gives the key one that differs from its tooltip. */
+  ariaLabel?: string;
   active?: boolean;
 }): React.ReactElement {
   return (
@@ -198,7 +198,7 @@ function ChromeButton({ label, active, ...rest }: React.ComponentProps<typeof Bu
       <Button
         type="text"
         size="small"
-        aria-label={label}
+        aria-label={ariaLabel ?? label}
         aria-pressed={active}
         data-active={active === undefined ? undefined : String(active)}
         className="xflow-preview-zoombar__button"
@@ -237,30 +237,33 @@ export function ZoomBar({ onFit, onAutoLayout, ruler, onRulerChange, minimap, on
   };
   return (
     <div className="xflow-preview-zoombar" role="toolbar" aria-label="画布缩放" {...{ [FLOAT_ATTRIBUTE]: "" }}>
-      <ChromeButton label="缩小" icon={<MinusOutlined />} onClick={() => zoomTo(steppedZoom(zoom, -1))} />
-      <Slider
+      <ChromeButton label="缩小" icon={<MinusIcon />} onClick={() => zoomTo(steppedZoom(zoom, -1))} />
+      {/* The baseline's `.zoom-slider` is a native range, not AntD's rail/handle:
+          same 96px track, accent-coloured by the primary token. */}
+      <input
+        aria-label="缩放比例"
         className="xflow-preview-zoombar__slider"
-        min={MIN_ZOOM * 100}
         max={MAX_ZOOM * 100}
+        min={MIN_ZOOM * 100}
+        type="range"
         value={percent}
-        ariaLabelForHandle="缩放比例"
-        onChange={(value) => zoomTo(value / 100)}
-        tooltip={{ formatter: (value) => `${value}%` }}
+        onChange={(event) => zoomTo(Number(event.target.value) / 100)}
       />
       <span className="xflow-preview-zoombar__value">{percent}%</span>
-      <ChromeButton label="放大" icon={<PlusOutlined />} onClick={() => zoomTo(steppedZoom(zoom, 1))} />
+      <ChromeButton label="放大" icon={<PlusIcon />} onClick={() => zoomTo(steppedZoom(zoom, 1))} />
       <Divider orientation="vertical" className="xflow-preview-zoombar__separator" />
-      <ChromeButton label="适应画布" icon={<ExpandOutlined />} onClick={onFit} />
-      {onAutoLayout ? <ChromeButton label="自动布局" icon={<ApartmentOutlined />} onClick={onAutoLayout} /> : null}
+      <ChromeButton label="适应画布" icon={<FitIcon />} onClick={onFit} />
+      {onAutoLayout ? <ChromeButton label="自动布局" icon={<LayoutIcon />} onClick={onAutoLayout} /> : null}
       <ChromeButton
         label="标尺 (⇧R)"
-        icon={<ColumnWidthOutlined />}
+        icon={<RulerIcon />}
         active={ruler}
         onClick={() => onRulerChange(!ruler)}
       />
       <ChromeButton
+        ariaLabel="显示缩略图"
         label="缩略图 (⇧M)"
-        icon={<PictureOutlined />}
+        icon={<MapIcon />}
         active={minimap}
         onClick={() => onMinimapChange(!minimap)}
       />
