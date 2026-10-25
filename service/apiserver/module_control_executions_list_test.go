@@ -418,7 +418,7 @@ func TestListExecutionsResponseShapeIsSummaryInCollectionEnvelope(t *testing.T) 
 	// runtime blob to a list row would be a payload regression
 	// (O(page × workflow size) on the wire), and this makes that a test failure
 	// rather than a quiet widening.
-	wantKeys := []string{"created_at", "error", "execution_id", "namespace", "status", "updated_at", "workflow_id", "workflow_name"}
+	wantKeys := []string{"created_at", "duration_ms", "error", "execution_id", "namespace", "status", "updated_at", "workflow_id", "workflow_name"}
 	if got := execListRowKeys(t, body); strings.Join(got, ",") != strings.Join(wantKeys, ",") {
 		t.Fatalf("list row keys = %v, want %v", got, wantKeys)
 	}
@@ -751,6 +751,80 @@ func TestListExecutionsFiltersByWorkflowID(t *testing.T) {
 	}
 }
 
+// TestListExecutionsQueryMatchesExecutionOrWorkflowIDPrefix pins ?q= end to
+// end: the execution-center search is a literal prefix on the execution id OR
+// the workflow id the execution was submitted under. Both identities are
+// opaque, so one box must answer either without the caller knowing which they
+// hold; the old execution-id-only behaviour returned an empty page for a
+// workflow id that had runs.
+func TestListExecutionsQueryMatchesExecutionOrWorkflowIDPrefix(t *testing.T) {
+	st := memstore.New()
+	base := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+	seedExecutionWorkflow(t, st, "namespaceA", "a990eb56-1111-4000-8000-000000000001", "wf-1", "exec-a1", types.ExecutionStatusSuccess, base)
+	seedExecutionWorkflow(t, st, "namespaceA", "a990eb56-1111-4000-8000-000000000001", "wf-1", "exec-a2", types.ExecutionStatusFailed, base.Add(time.Hour))
+	seedExecutionWorkflow(t, st, "namespaceA", "b770cc66-2222-4000-8000-000000000002", "wf-2", "exec-a3", types.ExecutionStatusSuccess, base.Add(2*time.Hour))
+	seedExecution(t, st, "namespaceA", "wf-3", "exec-unattributed", types.ExecutionStatusSuccess, base.Add(3*time.Hour))
+	seedExecutionWorkflow(t, st, "namespaceB", "a990eb56-1111-4000-8000-000000000001", "wf-1", "exec-b1", types.ExecutionStatusSuccess, base.Add(4*time.Hour))
+
+	srv := newExecutionListServer(t, st)
+	for _, tc := range []struct {
+		name, token, query string
+		wantTotal          int
+		wantIDs            []string
+	}{
+		{"workflow-id prefix matches every run of that workflow", "tok-exec-a", "?q=a990&page_size=100", 2, []string{"exec-a2", "exec-a1"}},
+		{"another workflow-id prefix", "tok-exec-a", "?q=b770&page_size=100", 1, []string{"exec-a3"}},
+		{"execution-id prefix still matches", "tok-exec-a", "?q=exec-a&page_size=100", 3, []string{"exec-a3", "exec-a2", "exec-a1"}},
+		{"q composes with the other filters", "tok-exec-a", "?q=a990&status=success&page_size=100", 1, []string{"exec-a1"}},
+		{"unknown prefix is an empty page, not an error", "tok-exec-a", "?q=zzz", 0, nil},
+		{"empty q is unfiltered", "tok-exec-a", "?q=&page_size=100", 4, []string{"exec-unattributed", "exec-a3", "exec-a2", "exec-a1"}},
+		{"query never crosses the namespace", "tok-exec-b", "?q=a990&page_size=100", 1, []string{"exec-b1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body := getExecutionList(t, srv.URL, tc.token, tc.query)
+			if status != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (body=%s)", status, body)
+			}
+			env := decodeExecListEnvelope(t, body)
+			if env.Data == nil || env.Data.Total != tc.wantTotal {
+				t.Fatalf("data = %+v, want total %d (body=%s)", env.Data, tc.wantTotal, body)
+			}
+			got := make([]string, 0, len(env.Data.List))
+			for _, row := range env.Data.List {
+				got = append(got, row.ExecutionID)
+			}
+			if strings.Join(got, ",") != strings.Join(tc.wantIDs, ",") {
+				t.Fatalf("page = %v, want %v (query %q)", got, tc.wantIDs, tc.query)
+			}
+			if tc.token == "tok-exec-a" && bytes.Contains(body, []byte("exec-b1")) {
+				t.Errorf("response body contains namespaceB's execution (query %q)", tc.query)
+			}
+		})
+	}
+
+	// The query string -> filter translation is pinned independently of the
+	// store's matching: both the page read and the count read must carry it,
+	// including when q is a workflow-id prefix.
+	rec := newRecordingExecutionStore()
+	mux := newUnitExecutionListMux(rec)
+	if status, body := doRaw(t, mux, http.MethodGet, PathExecutions+"?q=a990"); status != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", status, body)
+	}
+	if len(rec.lists()) == 0 || len(rec.counts()) == 0 {
+		t.Fatalf("list/count calls = %d/%d, want at least one of each", len(rec.lists()), len(rec.counts()))
+	}
+	for _, call := range rec.lists() {
+		if call.filter.Query != "a990" {
+			t.Fatalf("ListExecutions filter.Query = %q, want a990", call.filter.Query)
+		}
+	}
+	for _, call := range rec.counts() {
+		if call.filter.Query != "a990" {
+			t.Fatalf("CountExecutions filter.Query = %q, want a990", call.filter.Query)
+		}
+	}
+}
+
 // TestListExecutionsRejectsUnusableFilters pins the refusal half of the filter
 // contract: an unknown status and an unparsable time bound are 400s with stable
 // snake_case codes.
@@ -782,6 +856,22 @@ func TestListExecutionsRejectsUnusableFilters(t *testing.T) {
 			name:     "overlong workflow_id",
 			query:    "?workflow_id=" + strings.Repeat("w", store.MaxExecutionWorkflowIDLen+1),
 			wantCode: "execution_workflow_id_invalid",
+		},
+		{
+			// '%' is a LIKE wildcard, not part of the id alphabet. Interpreting
+			// it would turn a one-character query into a match-all; it must be
+			// a documented 400 instead. %25 is the URL encoding of a literal
+			// '%' — an unencoded trailing '%' is not a valid escape.
+			name:     "q LIKE wildcard",
+			query:    "?q=a%25",
+			wantCode: "execution_query_invalid",
+		},
+		{
+			// A query longer than either identity column can never be a prefix
+			// of a stored id.
+			name:     "overlong q",
+			query:    "?q=" + strings.Repeat("a", store.MaxExecutionIDQueryLen+1),
+			wantCode: "execution_query_invalid",
 		},
 	}
 
@@ -821,6 +911,85 @@ func TestListExecutionsRejectsUnusableFilters(t *testing.T) {
 			t.Fatalf("status=%s status = %d, want 200 (body=%s)", status, code, body)
 		}
 	}
+}
+
+// TestListExecutionsStatusFilterDeduplicatesAndIsBounded pins the
+// anti-amplification rule for the repeatable `status` parameter: the same
+// status repeated any number of times must collapse to one selected value, and
+// a request naming more distinct values than the status enum holds is a 400.
+//
+// Without the collapse, the handler forwards one IN placeholder per supplied
+// value, so a caller controls the size of the SQL parameter list from the URL.
+func TestListExecutionsStatusFilterDeduplicatesAndIsBounded(t *testing.T) {
+	t.Run("parse collapses duplicates across both spellings", func(t *testing.T) {
+		got, ok := executionListStatuses([]string{"failed,success", "failed", "success,", "failed"})
+		if !ok {
+			t.Fatal("executionListStatuses rejected a valid repeated set")
+		}
+		want := []types.ExecutionStatus{types.ExecutionStatusFailed, types.ExecutionStatusSuccess}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("executionListStatuses = %v, want %v (first-seen order, no duplicates)", got, want)
+		}
+	})
+
+	t.Run("parse accepts many repetitions of one value", func(t *testing.T) {
+		values := make([]string, 500)
+		for i := range values {
+			values[i] = "failed"
+		}
+		got, ok := executionListStatuses(values)
+		if !ok || len(got) != 1 || got[0] != types.ExecutionStatusFailed {
+			t.Fatalf("executionListStatuses(500x failed) = %v, %v; want exactly one value", got, ok)
+		}
+	})
+
+	t.Run("parse accepts the whole enum and rejects one value beyond it", func(t *testing.T) {
+		all := []string{"pending", "queued", "paused", "running", "success", "failed", "canceling", "canceled", "timeout"}
+		if got, ok := executionListStatuses(all); !ok || len(got) != maxExecutionListStatuses {
+			t.Fatalf("executionListStatuses(all %d known statuses) = %v, %v; want the whole enum", len(all), got, ok)
+		}
+		if _, ok := executionListStatuses(append(all, "surprise")); ok {
+			t.Fatal("executionListStatuses accepted more distinct values than the enum holds")
+		}
+	})
+
+	t.Run("handler forwards the deduplicated set to the store", func(t *testing.T) {
+		rec := newRecordingExecutionStore()
+		mux := newUnitExecutionListMux(rec)
+		base := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+		seedExecution(t, rec, string(namespace.Default), "wf-1", "exec-1", types.ExecutionStatusFailed, base)
+
+		query := "?" + strings.Repeat("status=failed&", 200) + "status=failed&status=failed,success&page_size=100"
+		status, body := doRaw(t, mux, http.MethodGet, PathExecutions+query)
+		if status != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body=%s)", status, body)
+		}
+		lists := rec.lists()
+		if len(lists) != 1 {
+			t.Fatalf("ListExecutions calls = %d, want 1", len(lists))
+		}
+		want := []types.ExecutionStatus{types.ExecutionStatusFailed, types.ExecutionStatusSuccess}
+		if !reflect.DeepEqual(lists[0].filter.Statuses, want) || lists[0].filter.Status != "" {
+			t.Fatalf("store filter statuses = %v (single %q), want %v; the handler must not forward 200 duplicates",
+				lists[0].filter.Statuses, lists[0].filter.Status, want)
+		}
+	})
+
+	t.Run("handler rejects more distinct statuses than the enum holds", func(t *testing.T) {
+		rec := newRecordingExecutionStore()
+		mux := newUnitExecutionListMux(rec)
+		query := "?status=pending,queued,paused,running,success,failed,canceling,canceled,timeout,surprise&page_size=100"
+		status, body := doRaw(t, mux, http.MethodGet, PathExecutions+query)
+		if status != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 (body=%s)", status, body)
+		}
+		if code := decodeExecListEnvelope(t, body).Code; code != "execution_status_invalid" {
+			t.Fatalf("code = %q, want execution_status_invalid", code)
+		}
+		if calls := rec.lists(); len(calls) != 0 {
+			t.Fatalf("a refused status set reached the store: %+v", calls)
+		}
+	})
 }
 
 // TestListExecutionsRefusesUnauthenticatedAndUnderScoped pins that the route is
@@ -926,15 +1095,18 @@ func TestListExecutionsFailsClosedWithoutStoreOrScope(t *testing.T) {
 	t.Run("no store configured", func(t *testing.T) {
 		mux := newUnitExecutionListMux(nil)
 		status, body := doRaw(t, mux, http.MethodGet, PathExecutions)
-		if status != http.StatusInternalServerError {
-			t.Fatalf("status = %d, want 500 (body=%s)", status, body)
+		if status != http.StatusNotImplemented {
+			t.Fatalf("status = %d, want 501 (body=%s)", status, body)
 		}
 		env := decodeExecListEnvelope(t, body)
 		if env.Success || env.Data != nil {
 			t.Fatalf("envelope = %+v, want a failure with no data", env)
 		}
-		if env.Code != "internal_error" {
-			t.Fatalf("code = %q, want internal_error (body=%s)", env.Code, body)
+		// The stable code is what lets a client render "execution storage is
+		// not configured" instead of an error; 501 alone would also be returned
+		// by an unimplemented route.
+		if env.Code != "execution_listing_unsupported" {
+			t.Fatalf("code = %q, want execution_listing_unsupported (body=%s)", env.Code, body)
 		}
 	})
 
@@ -1066,7 +1238,7 @@ func TestExecutionListContractBindsToHandler(t *testing.T) {
 			params[ref.Value.Name] = ref.Value
 		}
 	}
-	for _, name := range []string{"page", "page_size", "status", "created_after", "created_before"} {
+	for _, name := range []string{"page", "page_size", "status", "q", "created_after", "created_before"} {
 		if params[name] == nil {
 			t.Fatalf("query parameter %q is missing from the contract", name)
 		}
@@ -1096,8 +1268,19 @@ func TestExecutionListContractBindsToHandler(t *testing.T) {
 	if size.Max == nil || *size.Max != maxPageSize {
 		t.Errorf("page_size maximum = %v, want the server cap %d", size.Max, maxPageSize)
 	}
-	if statusParam := params["status"]; statusParam.Schema.Value.Enum == nil {
-		t.Error("status parameter publishes no enum; an unknown value is a 400 the client should be able to avoid")
+	// status is the repeatable multi-select form: the enum lives on the array's
+	// items, and an unknown member is the same documented 400 a scalar typo is.
+	if statusParam := params["status"]; statusParam.Schema == nil || statusParam.Schema.Value == nil ||
+		statusParam.Schema.Value.Items == nil || statusParam.Schema.Value.Items.Value == nil ||
+		statusParam.Schema.Value.Items.Value.Enum == nil {
+		t.Error("status parameter publishes no item enum; an unknown value is a 400 the client should be able to avoid")
+	}
+	// q is the execution/workflow-id prefix search; its alphabet/length bound is
+	// what makes an out-of-alphabet value a documented 400 rather than an empty
+	// page.
+	if q := params["q"]; q == nil || q.Schema == nil || q.Schema.Value == nil ||
+		q.Schema.Value.MaxLength == nil || *q.Schema.Value.MaxLength != store.MaxExecutionIDQueryLen {
+		t.Errorf("q parameter publishes no %d-character maximum; an over-long prefix is a documented 400", store.MaxExecutionIDQueryLen)
 	}
 
 	// The 200 response must carry the collection envelope, not a bare array.
@@ -1294,6 +1477,26 @@ func TestListExecutionsEndToEndOverHTTP(t *testing.T) {
 		t.Fatalf("status=failed page = %v, want [exec-a5 exec-a2]", got)
 	}
 	t.Logf("GET %s?status=failed&page_size=100 (tok-exec-a) -> %d %s", PathExecutions, status, body)
+
+	// Multi-status has two equivalent spellings: the parameter repeated, and one
+	// comma-separated value. Both must answer the OR of the selected statuses.
+	for _, query := range []string{
+		"?status=failed,success&page_size=100",
+		"?status=failed&status=success&page_size=100",
+	} {
+		status, body = getExecutionList(t, srv.URL, "tok-exec-a", query)
+		if status != http.StatusOK {
+			t.Fatalf("GET %s status = %d, want 200 (body=%s)", query, status, body)
+		}
+		env = decodeExecListEnvelope(t, body)
+		if env.Data == nil || env.Data.Total != 4 {
+			t.Fatalf("GET %s data = %+v, want total 4 (2 failed + 2 success)", query, env.Data)
+		}
+		if got := ids(env.Data); strings.Join(got, ",") != "exec-a5,exec-a4,exec-a2,exec-a1" {
+			t.Fatalf("GET %s page = %v, want [exec-a5 exec-a4 exec-a2 exec-a1]", query, got)
+		}
+	}
+	t.Logf("GET %s?status=failed,success&page_size=100 (tok-exec-a) -> %d %s", PathExecutions, status, body)
 
 	// The refusal, over the wire: a 400 carrying the stable code.
 	status, body = getExecutionList(t, srv.URL, "tok-exec-a", "?status=not-a-status")

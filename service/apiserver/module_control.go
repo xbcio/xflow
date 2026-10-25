@@ -1909,6 +1909,34 @@ type executionListItem struct {
 	// status-only projection that does not walk the graph. 0 / absent means
 	// UNKNOWN, never "head of the line": the head is 1.
 	QueuePosition int `json:"queue_position,omitempty"`
+	// DurationMS is the run's wall-clock duration in whole milliseconds for a
+	// TERMINAL row. It is exact when the row carries finished_at and the
+	// documented estimate (updated_at − created_at) for rows written before
+	// that column existed. Omitted for a live row: absent is "not finished",
+	// not zero.
+	DurationMS *int64 `json:"duration_ms,omitempty"`
+	// FinishedAt is the exact write-once completion instant; omitted when the
+	// row is live or predates the column (unknown, not zero).
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
+	// TriggerKind is the server-derived path that started the run
+	// (api/rerun/subworkflow/timer/cron/webhook/kafka/redis). Omitted when
+	// unknown (a row written before the column existed).
+	TriggerKind string `json:"trigger_kind,omitempty"`
+	// Retries / NodeProgress are the node aggregate: extra attempts consumed
+	// and terminal nodes over the graph's size. Both are omitted when the
+	// configured store cannot answer the batch read; NodeProgress is also
+	// omitted when node_total is UNKNOWN (0).
+	Retries      *int                   `json:"retries,omitempty"`
+	NodeProgress *executionNodeProgress `json:"node_progress,omitempty"`
+}
+
+// executionNodeProgress is the list row's node-progress object: how many of
+// the execution's nodes reached a terminal status, out of the graph's size at
+// creation. Total comes from the execution row (0 = unknown, in which case the
+// whole object is omitted); done comes from the batch node aggregate.
+type executionNodeProgress struct {
+	Done  int `json:"done"`
+	Total int `json:"total"`
 }
 
 // executionListFilterFrom parses and validates everything about a list request
@@ -1950,14 +1978,40 @@ func executionListFilterFrom(w http.ResponseWriter, r *http.Request) (store.Exec
 	q := r.URL.Query()
 
 	var filter store.ExecutionFilter
-	if raw := q.Get("status"); raw != "" {
-		status := types.ExecutionStatus(raw)
-		if !knownExecutionListStatus(status) {
-			writeFail(w, r, http.StatusBadRequest, "execution_status_invalid",
-				"status must be one of pending, queued, running, success, failed, canceling, canceled, timeout")
+	// status is repeatable (?status=failed&status=timeout) and each value may
+	// also be a comma-separated list (?status=failed,timeout); the two spellings
+	// are equivalent and both are ORed. One value uses the single-status form
+	// and several use the IN form. Duplicates are collapsed while parsing: the
+	// parameter is attacker-controlled and unbounded, and forwarding it
+	// verbatim to the store would let one request mint an IN list with as many
+	// placeholders as the URL allowed. A request selecting more distinct values
+	// than the status enum holds is a 400 for the same reason.
+	statuses, ok := executionListStatuses(q["status"])
+	if !ok {
+		writeFail(w, r, http.StatusBadRequest, "execution_status_invalid",
+			"status must be one of pending, queued, paused, running, success, failed, canceling, canceled, timeout, with at most 9 distinct values")
+		return store.ExecutionFilter{}, false
+	}
+	switch len(statuses) {
+	case 0:
+	case 1:
+		filter.Status = statuses[0]
+	default:
+		filter.Statuses = statuses
+	}
+
+	// q is the execution-center search prefix: it matches the execution id OR
+	// the workflow id the execution was submitted under. It is validated here
+	// (length + id alphabet) so a malformed value is a stable 400 instead of an
+	// empty page that reads as "nothing matches"; the store re-validates and
+	// binds it with LIKE metacharacters escaped.
+	if raw := q.Get("q"); raw != "" {
+		if err := store.ValidateExecutionQuery(raw); err != nil {
+			writeFail(w, r, http.StatusBadRequest, "execution_query_invalid",
+				"q must be at most 64 characters drawn from letters, digits, '_' and '-'")
 			return store.ExecutionFilter{}, false
 		}
-		filter.Status = status
+		filter.Query = raw
 	}
 
 	// Empty means "no workflow narrowing", the same convention status uses. A
@@ -1991,6 +2045,43 @@ func executionListFilterFrom(w http.ResponseWriter, r *http.Request) (store.Exec
 	// indistinguishable from "no executions in this window", and that is the
 	// truth in both cases.
 	return filter, true
+}
+
+// maxExecutionListStatuses is the size of the lifecycle status enum: the most
+// distinct values a `status` filter can name. It bounds the parsed set rather
+// than the raw parameter count, so repeating one value (or a comma list that
+// repeats values) is free while the store's IN list can never grow beyond the
+// enum.
+const maxExecutionListStatuses = 9
+
+// executionListStatuses flattens the repeatable, comma-capable `status`
+// parameter into a deduplicated status set, order-preserving. It returns
+// ok=false when the caller named more distinct values than the enum holds or
+// named a value outside the enum; both are the handler's 400. Empty members
+// mean "not supplied" and are skipped, matching the previous convention.
+func executionListStatuses(values []string) ([]types.ExecutionStatus, bool) {
+	statuses := make([]types.ExecutionStatus, 0, maxExecutionListStatuses)
+	seen := make(map[types.ExecutionStatus]struct{}, maxExecutionListStatuses)
+	for _, raw := range values {
+		for _, part := range strings.Split(raw, ",") {
+			if part == "" {
+				continue
+			}
+			status := types.ExecutionStatus(part)
+			if _, dup := seen[status]; dup {
+				continue
+			}
+			if len(statuses) == maxExecutionListStatuses {
+				return nil, false
+			}
+			if !knownExecutionListStatus(status) {
+				return nil, false
+			}
+			seen[status] = struct{}{}
+			statuses = append(statuses, status)
+		}
+	}
+	return statuses, true
 }
 
 // knownExecutionListStatus reports whether s is one of the lifecycle statuses
@@ -2057,6 +2148,12 @@ func parseExecutionListTime(w http.ResponseWriter, r *http.Request, raw, param s
 //     are unreachable from every scope × filter combination, deliberately, so a
 //     pre-migration row is never shown to a tenant that merely might own it.
 //
+// Availability: a server with no execution store (Config.Store nil, the
+// embedded/dev storeless posture) answers 501 execution_listing_unsupported,
+// not 500 and not an empty page. "This deployment did not configure execution
+// storage" is a stable property a client can render, and it is the same
+// distinction the runner roster draws with runner_listing_unsupported.
+//
 // Queue position: a queued row carries its live place in line (1-based) in
 // `queue_position`, read back per row from the queue owner rather than stored.
 // The cost is bounded by the page: at most pageSize status reads, issued only
@@ -2086,10 +2183,17 @@ func (m *workflowControlModule) handleListExecutions(w http.ResponseWriter, r *h
 	}
 	st := m.executions
 	if st == nil {
+		// Not "no executions" — "this deployment cannot answer the question".
+		// The storeless posture is a supported one (embedded / dev servers
+		// without Config.Store), and 501 is what lets a client render "execution
+		// storage is not configured" instead of an error. It mirrors the runner
+		// roster's runner_listing_unsupported: an empty list and an unsupported
+		// backend must stay visibly distinct.
 		if m.log != nil {
 			m.log.Error("list_executions_no_store")
 		}
-		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
+		writeFail(w, r, http.StatusNotImplemented, "execution_listing_unsupported",
+			"the configured execution store does not support listing executions")
 		return
 	}
 	ns := namespace.FromContext(r.Context())
@@ -2138,6 +2242,10 @@ func (m *workflowControlModule) handleListExecutions(w http.ResponseWriter, r *h
 		return
 	}
 	items := make([]executionListItem, 0, len(recs))
+	// pageRecs carries the record each item was built from, so the node
+	// aggregate below can address the rows that actually reached the page
+	// (foreign rows are skipped above and would otherwise shift the indexes).
+	pageRecs := make([]*store.ExecutionRecord, 0, len(recs))
 	// queueReadFailures counts the queued rows whose place in line could not
 	// be read. It is reported once for the page, below: a queue owner that is
 	// down would otherwise turn one page into pageSize identical log lines,
@@ -2166,6 +2274,11 @@ func (m *workflowControlModule) handleListExecutions(w http.ResponseWriter, r *h
 			Error:        rec.Error,
 			CreatedAt:    rec.CreatedAt,
 			UpdatedAt:    rec.UpdatedAt,
+			FinishedAt:   rec.FinishedAt,
+			TriggerKind:  rec.TriggerKind,
+		}
+		if ms, _ := store.ExecutionDurationMS(rec.Status, rec.CreatedAt, rec.UpdatedAt, rec.FinishedAt); ms != nil {
+			item.DurationMS = ms
 		}
 		// The place in line is the one column of a row that is not stored: it
 		// belongs to the live queue, so it is read back per queued row. The
@@ -2185,12 +2298,49 @@ func (m *workflowControlModule) handleListExecutions(w http.ResponseWriter, r *h
 			}
 		}
 		items = append(items, item)
+		pageRecs = append(pageRecs, rec)
 	}
 	if queueReadFailures > 0 && m.log != nil {
 		m.log.Error("list_executions_queue_position_unavailable",
 			"failed_rows", queueReadFailures, "page_rows", len(recs))
 	}
+	m.attachExecutionNodeProgress(r.Context(), ns, items, pageRecs)
 	writeList(w, r, items, executionListTotal(total))
+}
+
+// attachExecutionNodeProgress fills the per-row retries / node_progress
+// aggregate from ONE batch store read. The capability is optional
+// (store.ExecutionStatsReader): a store that cannot answer leaves both fields
+// absent, which the row documents as UNKNOWN rather than zero. A failed read is
+// logged once and omits the fields; it never fails the page, because the
+// executions themselves were read successfully.
+func (m *workflowControlModule) attachExecutionNodeProgress(ctx context.Context, ns namespace.Namespace, items []executionListItem, recs []*store.ExecutionRecord) {
+	if len(items) == 0 {
+		return
+	}
+	reader, ok := m.executions.(store.ExecutionStatsReader)
+	if !ok {
+		return
+	}
+	ids := make([]types.ExecutionID, 0, len(items))
+	for _, rec := range recs {
+		ids = append(ids, rec.ExecutionID)
+	}
+	progress, err := reader.ExecutionNodeProgress(ctx, ns, ids)
+	if err != nil {
+		if m.log != nil {
+			m.log.Error("list_executions_node_progress_failed", "err", err)
+		}
+		return
+	}
+	for i, rec := range recs {
+		p := progress[rec.ExecutionID]
+		retries := p.Retries
+		items[i].Retries = &retries
+		if rec.NodeTotal > 0 {
+			items[i].NodeProgress = &executionNodeProgress{Done: p.Done, Total: rec.NodeTotal}
+		}
+	}
 }
 
 // executionListTotal narrows the store's int64 count to the envelope's int.
