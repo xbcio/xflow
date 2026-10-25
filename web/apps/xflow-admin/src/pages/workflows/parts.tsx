@@ -1,40 +1,41 @@
 import {
-  CheckOutlined,
-  ClockCircleOutlined,
-  CloseOutlined,
-  FieldTimeOutlined,
-  HourglassOutlined,
-  InboxOutlined,
-  LoadingOutlined,
-  MinusCircleOutlined,
-  PauseCircleOutlined,
-  PushpinOutlined,
-  StepForwardOutlined,
-  StopOutlined,
-  WarningOutlined,
-} from '@ant-design/icons';
+  ArchiveIcon,
+  BanIcon,
+  CheckIcon,
+  ClockIcon,
+  HourglassIcon,
+  PauseIcon,
+  PinIcon,
+  SkipIcon,
+  SpinIcon,
+  StopIcon,
+  TimeoutIcon,
+  WarnIcon,
+  XMarkIcon,
+} from '@xflow/icons';
 import { workflowStatusMeta, type ExecutionStatusKey, type StatusIconKey } from '@xflow/core';
+import { Skeleton } from 'antd';
 import type { ReactNode } from 'react';
 
 /**
- * StatusIconKey → AntD glyph. Core carries string keys (it stays framework
- * free); every admin chip, and later the execution list, maps them here so a
- * state can only be drawn one way.
+ * StatusIconKey → glyph. Core carries string keys (it stays framework free);
+ * every admin chip, and later the execution list, maps them here so a state can
+ * only be drawn one way.
  */
 const statusIcon: Record<StatusIconKey, ReactNode> = {
-  clock: <ClockCircleOutlined />,
-  loading: <LoadingOutlined />,
-  hourglass: <HourglassOutlined />,
-  pause: <PauseCircleOutlined />,
-  check: <CheckOutlined />,
-  pin: <PushpinOutlined />,
-  warning: <WarningOutlined />,
-  close: <CloseOutlined />,
-  skip: <StepForwardOutlined />,
-  stop: <StopOutlined />,
-  archive: <InboxOutlined />,
-  disabled: <MinusCircleOutlined />,
-  'clock-close': <FieldTimeOutlined />,
+  clock: <ClockIcon />,
+  loading: <SpinIcon />,
+  hourglass: <HourglassIcon />,
+  pause: <PauseIcon />,
+  check: <CheckIcon />,
+  pin: <PinIcon />,
+  warning: <WarnIcon />,
+  close: <XMarkIcon />,
+  skip: <SkipIcon />,
+  stop: <StopIcon />,
+  archive: <ArchiveIcon />,
+  disabled: <BanIcon />,
+  'clock-close': <TimeoutIcon />,
 };
 
 /** §4 status pill: tone colour + glyph + the label from `workflowStatusMeta`. */
@@ -85,5 +86,40 @@ export function NewFieldMark({ title, children }: { title: string; children: Rea
         需新字段
       </span>
     </span>
+  );
+}
+
+/** Row clicks never steal a click that belongs to a control inside the row. */
+export function isRowControl(target: EventTarget | null): boolean {
+  return target instanceof Element && Boolean(target.closest('button, a, input, textarea, select, [role="button"]'));
+}
+
+/**
+ * First-load skeleton rows. Fixed row count and a row height matching the real
+ * table keep the table from jumping when the server page arrives; the header is
+ * drawn by the surrounding Table, only the body is replaced.
+ */
+export function TableSkeleton({
+  rows,
+  density,
+  label = '加载中…',
+}: {
+  rows: number;
+  density: 'compact' | 'two-line';
+  label?: string;
+}) {
+  return (
+    <div
+      className="xflow-admin-table-skeleton"
+      data-density={density}
+      role="status"
+      aria-label={label}
+    >
+      {Array.from({ length: rows }, (_value, index) => (
+        <div className="xflow-admin-skeleton-row" key={index}>
+          <Skeleton.Input active size="small" block />
+        </div>
+      ))}
+    </div>
   );
 }
