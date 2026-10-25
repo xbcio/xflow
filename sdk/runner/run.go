@@ -94,18 +94,6 @@ type runnerConfig struct {
 	// empty slice is an explicit empty list from YAML, env, or CLI.
 	httpHostPolicyAllow []string
 	httpHostPolicyDeny  []string
-	// httpBlockPrivateIPs enables the dial-time address guard shared by
-	// xflow.http and xflow.grpc: destinations resolving to loopback, private,
-	// link-local, unspecified, multicast, or otherwise non-public addresses are
-	// refused. Defaults to true; http_host_policy.block_private_ips=false
-	// restores the historical unfiltered dial behavior.
-	httpBlockPrivateIPs bool
-	// httpBlockPrivateIPsAllow is the address guard's own exemption list
-	// (http_host_policy.block_private_ips_allow). It is deliberately separate
-	// from httpHostPolicyAllow: the name-level allow list also switches the
-	// policy into allowlist-only mode, so reusing it here would make one
-	// private-host exemption break every public destination not listed.
-	httpBlockPrivateIPsAllow []string
 	// supplyPullAllowedHosts is the runner-level allowlist for supply pull
 	// sources (xflow.supply.http). Non-empty means only matching hosts may be
 	// pulled and whatever addresses they resolve to are permitted (private
@@ -214,8 +202,6 @@ func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
 	cmd.Flags().StringVar(&cfg.browserCDPConnectTimeout, "browser-cdp-connect-timeout", cfg.browserCDPConnectTimeout, "Browser CDP endpoint connect timeout")
 	cmd.Flags().StringArrayVar(&cfg.httpHostPolicyAllow, "http-host-allow", cfg.httpHostPolicyAllow, "Allowlisted navigation/HTTP host rule: exact host, .suffix (apex + descendants), or *.wildcard (descendants only); repeatable")
 	cmd.Flags().StringArrayVar(&cfg.httpHostPolicyDeny, "http-host-deny", cfg.httpHostPolicyDeny, "Denied navigation/HTTP host rule: exact host, .suffix (apex + descendants), or *.wildcard (descendants only); repeatable")
-	cmd.Flags().StringArrayVar(&cfg.httpBlockPrivateIPsAllow, "http-block-private-ips-allow", cfg.httpBlockPrivateIPsAllow, "Host exempt from the dial-time private-IP guard (xflow.http and xflow.grpc): exact host, .suffix (apex + descendants), or *.wildcard (descendants only); repeatable, independent of --http-host-allow")
-	cmd.Flags().BoolVar(&cfg.httpBlockPrivateIPs, "http-block-private-ips", cfg.httpBlockPrivateIPs, "Refuse xflow.http and xflow.grpc dials to loopback, private, link-local, or otherwise non-public addresses (default true)")
 	cmd.Flags().StringVar(&cfg.token, "token", cfg.token, "Runner bearer token (prefer XFLOW_RUNNER_TOKEN env)")
 	cmd.Flags().StringVar(&cfg.tlsServerCA, "tls-server-ca", cfg.tlsServerCA, "Path to server CA bundle (enables TLS)")
 	cmd.Flags().StringVar(&cfg.tlsClientCert, "tls-client-cert", cfg.tlsClientCert, "Path to client TLS certificate (enables mTLS)")
@@ -492,18 +478,10 @@ const standaloneBrowserCDPCapability = "xflow.browser.cdp"
 // points at node.SetHTTPHostPolicy.
 var setRunnerHTTPHostPolicy = xnode.SetHTTPHostPolicy
 
-// setRunnerHTTPPrivateIPBlocking is a seam for lifecycle tests. Production
-// always points at node.SetHTTPPrivateIPBlocking.
-var setRunnerHTTPPrivateIPBlocking = xnode.SetHTTPPrivateIPBlocking
-
 // installRunnerHTTPHostPolicy installs one process-wide policy for both stock
-// HTTP nodes and Browser CDP navigation, plus the dial-time address guard when
-// the runner is configured to block private destinations. Browser-capable
-// runners fail closed when no lists are configured; ordinary runners retain the
-// historical no-name-filtering behavior unless an operator explicitly
-// configures a list. The address guard is independent of the name lists and
-// defaults to enabled, so an ordinary runner refuses non-public destinations
-// even with no allow/deny list configured.
+// HTTP nodes and Browser CDP navigation. Browser-capable runners fail closed
+// when no lists are configured; ordinary runners retain the historical
+// no-name-filtering behavior unless an operator explicitly configures a list.
 func installRunnerHTTPHostPolicy(cfg runnerConfig) func() {
 	configured := cfg.httpHostPolicyAllow != nil || cfg.httpHostPolicyDeny != nil
 	browserCapable := runnerConfigHasCapability(cfg, standaloneBrowserCDPCapability)
@@ -521,14 +499,6 @@ func installRunnerHTTPHostPolicy(cfg runnerConfig) func() {
 		}
 		setRunnerHTTPHostPolicy(policy)
 		restores = append(restores, func() { setRunnerHTTPHostPolicy(nil) })
-	}
-	if cfg.httpBlockPrivateIPs {
-		// The dedicated exemption list, NOT httpHostPolicyAllow: the name-level
-		// allow list also turns the host policy into allowlist-only mode, so
-		// reusing it here would break every public destination the operator did
-		// not list just to let one internal host resolve privately.
-		setRunnerHTTPPrivateIPBlocking(true, copyTrimmedHosts(cfg.httpBlockPrivateIPsAllow))
-		restores = append(restores, func() { setRunnerHTTPPrivateIPBlocking(false, nil) })
 	}
 	return func() {
 		for i := len(restores) - 1; i >= 0; i-- {
