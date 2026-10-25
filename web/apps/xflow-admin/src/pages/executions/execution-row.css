@@ -1,0 +1,158 @@
+/* Execution-centre row (P3): copyable id, trigger source, node progress,
+   duration, retry badge and the two relative timestamps. Every visual value
+   comes from the --xflow-* tokens so light/dark stay aligned; selectors are
+   scoped to the execution table, never to generated AntD hashes. */
+
+.xflow-exec-toolbar .xflow-exec-search {
+  width: 220px;
+  min-width: 150px;
+}
+
+/* From 1280 the toolbar has room to show the full placeholder. */
+@media (min-width: 1280px) {
+  .xflow-exec-toolbar .xflow-exec-search {
+    width: 260px;
+  }
+}
+
+.xflow-exec-toolbar .xflow-exec-status-select {
+  width: 150px;
+}
+
+/* ---------- Copyable execution id ---------- */
+
+.xflow-exec-id {
+  display: flex;
+  align-items: center;
+  gap: var(--xflow-space-1);
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.xflow-exec-id .xflow-admin-ellipsis {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.xflow-exec-id__copy {
+  display: inline-flex;
+  flex: none;
+  color: var(--xflow-text-tertiary);
+  opacity: 0;
+  transition:
+    color var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard),
+    opacity var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard);
+}
+
+.xflow-exec-id:hover .xflow-exec-id__copy,
+.xflow-exec-id:focus-visible .xflow-exec-id__copy {
+  opacity: 1;
+}
+
+.xflow-exec-id:hover .xflow-exec-id__copy {
+  color: var(--xflow-primary);
+}
+
+.xflow-exec-id:focus-visible {
+  outline: 2px solid var(--xflow-focus-ring);
+  outline-offset: 1px;
+}
+
+/* Below 1280 the id column is 84px: the row is still click-to-copy, the icon
+   would only crowd the prefix. */
+@media (max-width: 1279px) {
+  .xflow-exec-id__copy {
+    display: none;
+  }
+}
+
+/* ---------- Trigger source, node progress, duration, retries ---------- */
+
+.xflow-exec-trigger {
+  display: flex;
+  align-items: center;
+  gap: var(--xflow-space-1);
+  min-width: 0;
+  color: var(--xflow-text-secondary);
+  font-size: var(--xflow-font-xs);
+  line-height: var(--xflow-line-height-xs);
+  white-space: nowrap;
+}
+
+.xflow-exec-trigger__icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--xflow-text-tertiary);
+}
+
+.xflow-exec-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--xflow-space-1-5);
+  min-width: 0;
+}
+
+.xflow-exec-progress__track {
+  flex: none;
+  width: 36px;
+  height: 4px;
+  overflow: hidden;
+  border-radius: var(--xflow-radius-full);
+  background: var(--xflow-neutral-bg-subtle);
+}
+
+.xflow-exec-progress__fill {
+  display: block;
+  height: 100%;
+  border-radius: var(--xflow-radius-full);
+  background: var(--xflow-primary);
+  transition: width var(--xflow-motion-duration-base) var(--xflow-motion-ease-standard);
+}
+
+.xflow-exec-progress__text,
+.xflow-exec-duration,
+.xflow-exec-time {
+  font-size: var(--xflow-font-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.xflow-exec-progress__text {
+  color: var(--xflow-text-secondary);
+}
+
+.xflow-exec-duration {
+  color: var(--xflow-text);
+}
+
+.xflow-exec-time {
+  color: var(--xflow-text-secondary);
+}
+
+.xflow-exec-retry {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 var(--xflow-space-1-5);
+  border-radius: var(--xflow-radius-full);
+  background: var(--xflow-warning-bg-subtle);
+  color: var(--xflow-warning);
+  font-size: var(--xflow-font-xs);
+  font-weight: var(--xflow-font-weight-medium);
+  line-height: var(--xflow-line-height-xs);
+}
+
+/* The execution table needs two 2-character ops in a 92px column: 4px inline
+   padding keeps both labels readable without widening the table. */
+.xflow-exec-table .xflow-admin-op {
+  padding: 0 var(--xflow-space-1);
+}
