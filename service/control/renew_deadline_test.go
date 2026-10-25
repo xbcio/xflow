@@ -148,6 +148,79 @@ func TestRenewCommitsTimeoutTerminal(t *testing.T) {
 	}
 }
 
+// TestRenewTimeoutCausePinsNodeTimeoutCode pins the error the backstop hands to
+// CommitTaskTimeout. The code is asserted against the literal wire value, not
+// types.NodeTimeoutErrorCode, so the test holds the production string on its own:
+// the execution-level timeout split recognises a node timeout by this code, and
+// the cause must be permanent so the engine does not retry it.
+func TestRenewTimeoutCausePinsNodeTimeoutCode(t *testing.T) {
+	ctx := context.Background()
+	dir := NewMemoryRunnerDirectory()
+	session, err := dir.Register(ctx, RegisterRunnerRequest{
+		RunnerID:     "runner-cause",
+		Capacity:     2,
+		Capabilities: []protocol.Capability{{NodeType: "xflow.function"}},
+		Policy:       RunnerPolicy{AllowedNodeTypes: []string{"*"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	task := engine.Task{
+		ExecutionID: "exec-cause-1",
+		NodeName:    "step1",
+		NodeIdx:     0,
+		Type:        engine.TaskTypeNodeExec,
+	}
+	assignment := Assignment{
+		AssignmentID: BuildAssignmentID(&task),
+		Task:         task,
+		Routing:      engine.TaskRouting{NodeType: "xflow.function"},
+	}
+	mustEnqueueAssignment(t, ctx, dir, assignment)
+	claim := mustClaimAssignment(t, ctx, dir, session)
+	lease := &engine.TaskLease{
+		LeaseID:           "lease-cause-1",
+		LeaseToken:        "token-cause-1",
+		Task:              task,
+		Attempt:           1,
+		NodeType:          "xflow.function",
+		IssuedAt:          time.Now().Add(-10 * time.Minute),
+		TTL:               60 * time.Second,
+		ExecutionDeadline: time.Now().Add(-5 * time.Minute),
+	}
+	if err := dir.FinalizeClaim(ctx, claim.ClaimID, lease); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &deadlineTestEngine{}
+	core := &Core{engine: fake, runners: dir, pollWait: time.Second}
+
+	if _, err := core.renewLease(ctx, protocol.RenewLeaseRequest{
+		RunnerID:   session.RunnerID,
+		SessionID:  session.SessionID,
+		LeaseID:    "lease-cause-1",
+		LeaseToken: "token-cause-1",
+		Extend:     30000,
+	}, TransportInfo{}); err != nil {
+		t.Fatalf("renewLease() error = %v", err)
+	}
+	if !fake.commitTimeoutCalled {
+		t.Fatal("CommitTaskTimeout was NOT called; the backstop must commit the terminal")
+	}
+
+	var ce *types.ClassifiedError
+	if !errors.As(fake.commitTimeoutCause, &ce) {
+		t.Fatalf("CommitTaskTimeout cause = %v (%T), want a *types.ClassifiedError", fake.commitTimeoutCause, fake.commitTimeoutCause)
+	}
+	if ce.Code != "node.timeout" {
+		t.Fatalf("CommitTaskTimeout cause Code = %q, want %q", ce.Code, "node.timeout")
+	}
+	if !types.IsPermanent(fake.commitTimeoutCause) {
+		t.Fatalf("CommitTaskTimeout cause %v is not permanent; the engine would retry a timeout", fake.commitTimeoutCause)
+	}
+}
+
 // TestRenewUnaffectedBeforeDeadline: a lease with time left renews normally.
 func TestRenewUnaffectedBeforeDeadline(t *testing.T) {
 	ctx := context.Background()
@@ -372,6 +445,7 @@ type deadlineTestEngine struct {
 	groupRenewResult    bool
 	commitTimeoutCalled bool
 	commitTimeoutLease  *engine.TaskLease
+	commitTimeoutCause  error
 	commitTimeoutErr    error
 }
 
@@ -399,9 +473,10 @@ func (d *deadlineTestEngine) CommitGroupResult(_ context.Context, lease *engine.
 	return engine.CommitOutcomeAccepted, nil
 }
 
-func (d *deadlineTestEngine) CommitTaskTimeout(_ context.Context, lease *engine.TaskLease, _ error) error {
+func (d *deadlineTestEngine) CommitTaskTimeout(_ context.Context, lease *engine.TaskLease, cause error) error {
 	d.commitTimeoutCalled = true
 	d.commitTimeoutLease = lease
+	d.commitTimeoutCause = cause
 	return d.commitTimeoutErr
 }
 

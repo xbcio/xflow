@@ -41,6 +41,11 @@ const (
 	ErrorKindErrorPort ErrorKind = "error_port"
 )
 
+// NodeTimeoutErrorCode is the ClassifiedError.Code of the permanent error a node
+// fails with when its execution deadline elapses. It is an externally visible
+// wire value (persisted and sent over the Runner Protocol) and must not change.
+const NodeTimeoutErrorCode = "node.timeout"
+
 // ClassifiedError is the stable wire error DTO for the Runner Protocol. It
 // preserves retry/permanent classification across the process boundary so the
 // server can apply retry/on-error policy without inferring it from error text.
