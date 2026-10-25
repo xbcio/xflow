@@ -64,7 +64,10 @@ func (e *Engine) subWorkflowParentCanceling(ctx context.Context, id types.Execut
 // parent's: the execution is still marked canceled, and the child's own
 // wait/lease machinery remains in charge of it. ExpireExecution returns it,
 // because its deadline entry may only be withdrawn once the children are
-// stopped, and the replay that follows finds the child canceling or concluded.
+// stopped. The replay that follows repeats the cascade and finds each failed
+// child in whatever state the failure left it: still running when the link or
+// the child could not be read, canceling when its own cancel failed half way,
+// or concluded when it finished on its own meanwhile.
 // A failure inside a grandchild's cancel is not seen here: the child's own
 // Cancel discards it by the same rule.
 func (e *Engine) cancelSubWorkflowChildren(ctx context.Context, id types.ExecutionID, g *graph.Graph) error {
@@ -99,8 +102,9 @@ func (e *Engine) cancelSubWorkflowChildren(ctx context.Context, id types.Executi
 // cancelSubWorkflowChild cancels one child execution, tolerating the benign
 // answers: a child that already concluded or is gone (inactive) is exactly the
 // state this wants, and a child already canceling or canceled is the same answer
-// reached twice. Any other failure is logged and returned; callers that treat
-// the cancel as best-effort (the dispatch paths, Cancel) discard it.
+// reached twice. Any other failure is logged and returned. The dispatch paths
+// call it directly and discard the result; Cancel reaches it through
+// cancelSubWorkflowChildren and discards that function's joined result.
 func (e *Engine) cancelSubWorkflowChild(ctx context.Context, childID types.ExecutionID) error {
 	if childID == "" {
 		return nil
