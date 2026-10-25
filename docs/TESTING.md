@@ -2,8 +2,8 @@
 
 ## Toolchain baseline
 
-The repository Go contract is **module and toolchain `go1.26.10`**. Make exports
-`GOTOOLCHAIN=go1.26.10` by default, so local and CI verification select that exact
+The repository Go contract is **module and toolchain `go1.26.0`**. Make exports
+`GOTOOLCHAIN=go1.26.0` by default, so local and CI verification select that exact
 toolchain even when the host `go` launcher is newer. Override it only for an
 explicit toolchain-upgrade investigation; such a run is not release evidence.
 
@@ -12,7 +12,7 @@ make check-go
 ```
 
 `make check-go` verifies the `go.mod` directive, active `go env GOVERSION`, and
-`GOTOOLCHAIN` are all exactly `1.26.10` / `go1.26.10`.
+`GOTOOLCHAIN` are all exactly `1.26.0` / `go1.26.0`.
 
 ## Commands
 

@@ -338,13 +338,13 @@ set -eu
 printf '%s\n' "$*" >> "$FAKE_GO_LOG"
 case "$*" in
   "list -m -f {{.GoVersion}}")
-    printf '%s\n' '1.26.10'
+    printf '%s\n' '1.26.0'
     ;;
   "env GOVERSION")
-    printf '%s\n' 'go1.26.10'
+    printf '%s\n' 'go1.26.0'
     ;;
   "env GOTOOLCHAIN")
-    printf '%s\n' 'go1.26.10'
+    printf '%s\n' 'go1.26.0'
     ;;
   test\ -c\ *)
     rc="${FAKE_GO_BUILD_EXIT:-0}"

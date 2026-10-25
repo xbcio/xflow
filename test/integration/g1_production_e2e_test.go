@@ -71,7 +71,7 @@ import (
 
 const (
 	g1ArtifactSchemaVersion = 1
-	g1RequiredGoVersion     = "go1.26.10"
+	g1RequiredGoVersion     = "go1.26.0"
 	g1RunIDEnv              = "XFLOW_G1_RUN_ID"
 	g1CandidateSHAEnv       = "XFLOW_G1_CANDIDATE_SHA"
 
