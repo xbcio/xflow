@@ -1,6 +1,8 @@
 package exprx
 
 import (
+	"errors"
+	"math"
 	"testing"
 
 	"github.com/xbcio/xflow/types"
@@ -178,5 +180,56 @@ func TestEvalExprAgainstBuiltEnv(t *testing.T) {
 	}
 	if got != 8 {
 		t.Fatalf("got %v, want 8", got)
+	}
+}
+
+func TestCheckFinite(t *testing.T) {
+	cases := []struct {
+		name  string
+		value any
+		want  bool // true => ErrNonFinite
+	}{
+		{"nil", nil, false},
+		{"string", "x", false},
+		{"finite float", 1.25, false},
+		{"zero", 0.0, false},
+		{"float32 finite", float32(2), false},
+		{"nan scalar", math.NaN(), true},
+		{"positive inf scalar", math.Inf(1), true},
+		{"negative inf scalar", math.Inf(-1), true},
+		{"float32 nan", float32(math.NaN()), true},
+		{"slice with inf", []any{1.0, math.Inf(1)}, true},
+		{"slice float64 with nan", []float64{1, math.NaN()}, true},
+		{"map with inf", map[string]any{"a": 1.0, "b": math.Inf(-1)}, true},
+		{"nested map", map[string]any{"outer": map[string]any{"inner": []any{math.NaN()}}}, true},
+		{"nested finite", map[string]any{"outer": []any{1.0, "x", map[string]any{"n": 2.5}}}, false},
+		{"int slice", []int{1, 2}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := CheckFinite(c.value)
+			if c.want {
+				if !errors.Is(err, ErrNonFinite) {
+					t.Fatalf("CheckFinite(%v) = %v, want ErrNonFinite", c.value, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CheckFinite(%v) = %v, want nil", c.value, err)
+			}
+		})
+	}
+}
+
+func TestCheckFiniteEvaluatedDivisionByZero(t *testing.T) {
+	env := map[string]any{"zero": 0}
+	for _, code := range []string{"1 / zero", "0 / zero"} {
+		got, err := EvalExpr(code, env, false)
+		if err != nil {
+			t.Fatalf("EvalExpr(%q): %v", code, err)
+		}
+		if err := CheckFinite(got); !errors.Is(err, ErrNonFinite) {
+			t.Fatalf("CheckFinite(EvalExpr(%q)) = %v, want ErrNonFinite (value %v)", code, err, got)
+		}
 	}
 }

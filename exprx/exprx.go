@@ -9,7 +9,10 @@
 package exprx
 
 import (
+	"errors"
 	"fmt"
+	"math"
+	"reflect"
 
 	"github.com/expr-lang/expr"
 	"github.com/expr-lang/expr/vm"
@@ -131,6 +134,57 @@ func EvalExpr(code string, env map[string]any, asBool bool) (any, error) {
 		return nil, fmt.Errorf("evaluate expression: %w", err)
 	}
 	return result, nil
+}
+
+// ErrNonFinite is returned by CheckFinite for a value that cannot cross the
+// runner protocol: JSON has no NaN or ±Inf literal, so encoding a node result
+// that holds one fails at report time and surfaces as an opaque transport
+// error. Handlers reject it where the expression is evaluated instead.
+var ErrNonFinite = errors.New("expression result contains a non-finite number (NaN or Inf), e.g. division by zero")
+
+// CheckFinite returns ErrNonFinite when v is a NaN or infinite float, or
+// contains one anywhere inside a nested map, slice or array.
+//
+// Expression engines return these values happily — 1 / 0 is +Inf, 0 / 0 is
+// NaN — and they are valid Go float64 values, but they are not valid JSON.
+// Checking the evaluated result (not the serialized bytes) keeps the failure
+// attached to the node and expression that produced it.
+func CheckFinite(v any) error {
+	if hasNonFinite(v) {
+		return ErrNonFinite
+	}
+	return nil
+}
+
+// hasNonFinite walks maps, slices and arrays looking for a non-finite float.
+// It is deliberately reflection-based so concrete containers such as
+// []float64 and map[string]float64 are covered, not just the interface-typed
+// shapes expr itself produces. Structs are not descended into: they are not an
+// expression result shape.
+func hasNonFinite(v any) bool {
+	switch value := v.(type) {
+	case float64:
+		return math.IsNaN(value) || math.IsInf(value, 0)
+	case float32:
+		return math.IsNaN(float64(value)) || math.IsInf(float64(value), 0)
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Map:
+		iter := rv.MapRange()
+		for iter.Next() {
+			if hasNonFinite(iter.Value().Interface()) {
+				return true
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < rv.Len(); i++ {
+			if hasNonFinite(rv.Index(i).Interface()) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // BuildExprEnv constructs the expression evaluation environment from node input.
