@@ -436,12 +436,14 @@ type ReportResultResponse struct {
 // MarshalTaskResult encodes a task result to JSON. It is the single source of
 // truth for result serialization shared by the HTTP and gRPC transports.
 //
-// Error classification is preserved across the wire: when result.Error is a
-// *types.ClassifiedError (or is marked permanent via types.ErrPermanent), the
-// structured DTO is emitted in error_detail alongside the legacy error string.
-// This lets new servers apply retry/on-error policy without parsing error text
-// while old peers still read the string. Unmarked errors serialize as the
-// legacy string only, preserving the pre-DTO behavior.
+// Error classification is preserved across the wire: when a
+// *types.ClassifiedError is reachable through result.Error's %w/join chain (or
+// the error is merely marked permanent via types.ErrPermanent), the structured
+// DTO is emitted in error_detail alongside the legacy error string. Wrapped
+// classified errors keep their Code and their own Message; the wrappers never
+// become part of the DTO. This lets new servers apply retry/on-error policy
+// without parsing error text while old peers still read the string. Unmarked
+// errors serialize as the legacy string only, preserving the pre-DTO behavior.
 func MarshalTaskResult(result engine.TaskResult) ([]byte, error) {
 	out := taskResultJSON{
 		Output:  result.Output,
@@ -449,18 +451,27 @@ func MarshalTaskResult(result engine.TaskResult) ([]byte, error) {
 	}
 	if result.Error != nil {
 		out.Error = result.Error.Error()
-		switch err := result.Error.(type) {
-		case *types.ClassifiedError:
-			out.ErrorDetail = err
+		// errors.As, not a type switch: a handler's classified error is
+		// routinely %w-wrapped (node context, executor failure, errors.Join)
+		// before the runner reports it, and a type switch only matches the bare
+		// *types.ClassifiedError. Losing the match dropped the code and left
+		// only the permanent bit, so an Admin summary degraded to a generic
+		// "permanent error". The DTO carries the classified error's own Code
+		// and Message — the pair already designed for the wire — never the
+		// wrapper text (which can hold internal node/executor detail).
+		var classified *types.ClassifiedError
+		switch {
+		case errors.As(result.Error, &classified):
+			out.ErrorDetail = classified
 		default:
 			// An error stamped permanent via errors.Join(ErrPermanent, ...)
 			// (e.g. the dispatcher's PermanentConfiguration failure) is not a
 			// *ClassifiedError, but its classification must still survive the
 			// wire: synthesize a permanent DTO from it.
-			if types.IsPermanent(err) {
+			if types.IsPermanent(result.Error) {
 				out.ErrorDetail = &types.ClassifiedError{
 					Kind:      types.ErrorKindPermanent,
-					Message:   err.Error(),
+					Message:   result.Error.Error(),
 					Permanent: true,
 				}
 			}
