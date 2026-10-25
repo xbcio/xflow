@@ -30,6 +30,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -51,8 +52,10 @@ import (
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/crypto/supplyenc"
 	"github.com/xbcio/xflow/store"
+	"github.com/xbcio/xflow/store/memstore"
 	"github.com/xbcio/xflow/store/sqlstore"
 	"github.com/xbcio/xflow/store/sqlstore/mysqlstore"
+	"github.com/xbcio/xflow/store/sqlstore/sqlitestore"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -210,6 +213,14 @@ type serverConfig struct {
 	// token path is NOT allowed in production: production requires a token→
 	// principal/scopes registry so one token cannot self-grant all scopes.
 	mode string
+	// devStore selects the execution store a --mode=dev server uses when
+	// --mysql-dsn is unset. "" is the dev default: SQLite at
+	// <UserCacheDir>/xflow/dev.sqlite. "sqlite" is the same default, spelled
+	// explicitly; "sqlite:<path>" opens that file; "memory" uses the in-memory
+	// store; "none" keeps the storeless posture (GET /v1/executions answers
+	// 501). It is rejected in production, where --mysql-dsn is the only
+	// durable execution store, and alongside an explicit --mysql-dsn.
+	devStore string
 }
 
 func main() {
@@ -296,6 +307,8 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	fs.BoolVar(&cfg.traceBaggage, "trace-baggage", false, "Propagate W3C baggage in addition to tracecontext (opt-in; bound accepted keys)")
 	fs.StringVar(&cfg.mysqlDSN, "mysql-dsn", "", "MySQL DSN for durable execution state + durable SQL audit sink (parseTime=true required). Empty = in-memory store + in-memory audit (dev only)")
 	fs.StringVar(&cfg.mode, "mode", "production", "Runtime posture: dev|production. Production (default, fail-closed) requires --auth-tokens-file + --mysql-dsn + reconciler. Dev allows in-memory audit + single-token with a stderr warning.")
+	fs.StringVar(&cfg.devStore, "dev-store", "",
+		"Dev-mode execution store when --mysql-dsn is unset: sqlite (default; <UserCacheDir>/xflow/dev.sqlite), sqlite:<path>, memory, or none. Only valid with --mode=dev.")
 	if args == nil {
 		args = os.Args[1:]
 	}
@@ -318,6 +331,18 @@ func parseServerConfig(args []string) (serverConfig, error) {
 		// valid
 	default:
 		return serverConfig{}, fmt.Errorf("--mode must be one of: dev|production")
+	}
+	// --dev-store is a dev-posture flag. Production keeps exactly one durable
+	// execution-store path (--mysql-dsn) so the fail-closed posture gate cannot
+	// be satisfied by a file in someone's cache directory.
+	if cfg.mode != "dev" && cfg.devStore != "" {
+		return serverConfig{}, fmt.Errorf("--dev-store is only valid with --mode=dev; production uses --mysql-dsn")
+	}
+	if cfg.mysqlDSN != "" && cfg.devStore != "" {
+		return serverConfig{}, fmt.Errorf("--dev-store and --mysql-dsn are mutually exclusive")
+	}
+	if _, err := parseDevStoreSpec(cfg.devStore); err != nil {
+		return serverConfig{}, err
 	}
 	switch cfg.traceMode {
 	case "disabled", "stdout", "otlp":
@@ -419,6 +444,164 @@ func validateAPILimitFlags(l apiserver.APILimits) error {
 	default:
 		return fmt.Errorf("--api-rate-limit-mode must be one of: local|redis")
 	}
+	return nil
+}
+
+// devStoreKind is the execution-store family a --dev-store value names.
+type devStoreKind int
+
+const (
+	// devStoreSQLite is the dev default. path is empty for the default file.
+	devStoreSQLite devStoreKind = iota
+	devStoreMemory
+	devStoreNone
+)
+
+// devStoreSpec is the parsed form of --dev-store. It is resolved once during
+// flag validation and again when the store is opened; both go through
+// parseDevStoreSpec so an invalid value can never reach startup.
+type devStoreSpec struct {
+	kind devStoreKind
+	// path is the SQLite file, empty meaning the dev default path.
+	path string
+}
+
+// parseDevStoreSpec parses --dev-store. "" and "sqlite" select the default
+// SQLite file, "sqlite:<path>" an explicit one, "memory" the in-memory store,
+// and "none" the storeless posture.
+func parseDevStoreSpec(raw string) (devStoreSpec, error) {
+	switch raw {
+	case "", "sqlite":
+		return devStoreSpec{kind: devStoreSQLite}, nil
+	case "memory":
+		return devStoreSpec{kind: devStoreMemory}, nil
+	case "none":
+		return devStoreSpec{kind: devStoreNone}, nil
+	}
+	path, ok := strings.CutPrefix(raw, "sqlite:")
+	if !ok {
+		return devStoreSpec{}, fmt.Errorf("--dev-store must be one of: sqlite, sqlite:<path>, memory, none")
+	}
+	if strings.TrimSpace(path) == "" {
+		return devStoreSpec{}, fmt.Errorf("--dev-store=sqlite:<path> requires a non-empty path")
+	}
+	return devStoreSpec{kind: devStoreSQLite, path: path}, nil
+}
+
+// defaultDevStorePath is the SQLite file a dev server uses when --dev-store
+// does not name one. It lives under the OS user cache directory, never in the
+// working tree: starting a server from a checkout must not create a database
+// file there.
+func defaultDevStorePath() (string, error) {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		return "", fmt.Errorf("--dev-store: resolve user cache directory: %w", err)
+	}
+	return filepath.Join(dir, "xflow", "dev.sqlite"), nil
+}
+
+// openDevExecutionStore builds the execution store a --mode=dev server runs
+// on. Nothing here applies in production: --dev-store is rejected by
+// parseServerConfig, and production builds its store exclusively from
+// --mysql-dsn.
+//
+// The dev store is deliberately the same sqlstore core production uses, so
+// listing, filtering and (later) the statistics aggregates exercise the real
+// SQL on a developer machine. Side effects of a non-nil store are printed
+// rather than hidden — supplies, schedule overlays and audit reconciliation
+// become SQL-backed, which is a behaviour change from the storeless posture.
+func openDevExecutionStore(raw string, supplyAtRest sqlstore.SupplyEncryption) (store.Store, error) {
+	spec, err := parseDevStoreSpec(raw)
+	if err != nil {
+		return nil, err
+	}
+	switch spec.kind {
+	case devStoreNone:
+		log.Println("xflow-server: WARNING --dev-store=none: no execution store; GET /v1/executions answers 501 and latest_execution stays absent")
+		return nil, nil
+	case devStoreMemory:
+		log.Println("xflow-server: dev execution store: in-memory (lost on restart)")
+		return memstore.New(), nil
+	}
+	path := spec.path
+	if path == "" {
+		if path, err = defaultDevStorePath(); err != nil {
+			return nil, err
+		}
+	}
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("--dev-store: create %s: %w", dir, err)
+		}
+	}
+	if err := secureDevStoreFile(path); err != nil {
+		return nil, fmt.Errorf("--dev-store: secure %s: %w", path, err)
+	}
+	p, err := sqlitestore.New(path, sqlitestore.WithAutoMigrate(), sqlitestore.WithSupplyEncryption(supplyAtRest))
+	if err != nil {
+		return nil, fmt.Errorf("--dev-store: open sqlite at %s: %w", path, err)
+	}
+	if err := secureDevStoreSidecars(path); err != nil {
+		return nil, fmt.Errorf("--dev-store: secure sidecars of %s: %w", path, err)
+	}
+	log.Printf("xflow-server: dev execution store: SQLite at %s (also enables SQL supplies, schedule overlays and audit reconciliation; not production)", path)
+	return p, nil
+}
+
+// secureDevStoreFile makes the dev SQLite file owner-only (0600) before the
+// driver opens it. The driver creates a missing file with the process default
+// (typically 0644), and this store holds execution rows, supplies and audit
+// data, so a world-readable file is not acceptable even in dev. Creating the
+// empty file here with O_EXCL makes the driver open an existing file instead
+// of creating one, so the mode is ours from the first byte. An existing file
+// that is wider than 0600 (an older release created it, or it was copied)
+// is tightened in place; only the path and the old mode are logged.
+func secureDevStoreFile(path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	switch {
+	case err == nil:
+		return f.Close()
+	case !errors.Is(err, os.ErrExist):
+		return err
+	}
+	return tightenDevStorePermission(path)
+}
+
+// secureDevStoreSidecars tightens SQLite's -wal and -shm files after the driver
+// has created them. The ncruces/go-sqlite3 VFS opens both with mode 0666, so
+// they follow the umask (typically 0644) instead of the database file's 0600 —
+// measured, not assumed: pre-creating them does not help either, because
+// SQLite replaces the WAL when it opens the database. The WAL holds committed
+// rows, so it must not be readable by other local users. Both files disappear
+// when the last connection closes and are recreated on the next open, which is
+// why the tightening has to run here after every open.
+func secureDevStoreSidecars(path string) error {
+	for _, sidecar := range []string{path + "-wal", path + "-shm"} {
+		if err := tightenDevStorePermission(sidecar); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// tightenDevStorePermission narrows an existing store artifact to 0600. A
+// missing file is fine: not every SQLite mode creates every sidecar.
+func tightenDevStorePermission(path string) error {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	perm := info.Mode().Perm()
+	if perm&^os.FileMode(0o600) == 0 {
+		return nil
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return err
+	}
+	log.Printf("xflow-server: dev execution store: tightened permissions on %s from %04o to 0600", path, perm)
 	return nil
 }
 
@@ -805,7 +988,19 @@ func runServer(ctx context.Context, cfg serverConfig) error {
 		log.Println("xflow-server: durable SQL store + audit sink enabled (MySQL)")
 	} else {
 		audit = apiserver.NewInMemoryAuditSink()
-		log.Println("xflow-server: WARNING --mysql-dsn not set; using in-memory store + in-memory audit (dev only; not production)")
+		if cfg.mode == "dev" {
+			// The dev posture defaults to a SQLite execution store so the
+			// execution collection and the workflow list's latest_execution
+			// actually work without a MySQL instance. --dev-store=none keeps
+			// the old storeless behaviour.
+			st, err := openDevExecutionStore(cfg.devStore, supplyAtRest)
+			if err != nil {
+				return err
+			}
+			sqlStore = st
+		} else {
+			log.Println("xflow-server: WARNING --mysql-dsn not set; using in-memory store + in-memory audit (dev only; not production)")
+		}
 	}
 
 	redisConfig, err := buildRedisConfig(cfg)

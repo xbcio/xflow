@@ -103,6 +103,10 @@ func runServerLifecycleAttempt(t *testing.T, httpAddr string) error {
 		"-mode", "dev",
 		"-memory",
 		"-management",
+		// Keep the lifecycle test hermetic: the dev default would otherwise
+		// create a SQLite file under the user cache directory. The store itself
+		// is covered by the dev-store unit tests.
+		"-dev-store", "none",
 		"-addr", httpAddr,
 		"-grpc-addr", "127.0.0.1:0",
 	})
