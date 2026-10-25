@@ -1548,3 +1548,35 @@ func TestExpireExecutionTimeoutWithoutAReasonIsNotThisMechanisms(t *testing.T) {
 		t.Fatalf("node status = %q, want suspended: nothing may cascade", got)
 	}
 }
+
+// TestExpireExecutionExpiredNotifiesTheParent pins that the call that writes a
+// sub-workflow child's timeout tells the parent, so the parked node concludes
+// at once instead of waiting for its wait lease to expire. The Resumed variant
+// is TestExpireExecutionResumedNotifiesTheParent.
+func TestExpireExecutionExpiredNotifiesTheParent(t *testing.T) {
+	ctx := context.Background()
+	rig := newExpireSubWorkflowRig(t)
+	childID := rig.link.ChildExecutionID
+	rig.state.fakeState.mu.Lock()
+	rig.state.fakeState.executions[childID].Deadline = pastDeadline
+	rig.state.fakeState.mu.Unlock()
+	if got := rig.nodeStatus(t); got != types.NodeStatusWaiting {
+		t.Fatalf("precondition: parked node = %q, want waiting", got)
+	}
+	rig.log.track = childID
+	rig.log.clear()
+
+	rig.expire(t, childID, ExpireOutcomeExpired)
+
+	node, err := rig.state.GetNode(ctx, rig.parentID, "sub")
+	if err != nil || node == nil || node.Status != types.NodeStatusFailed {
+		t.Fatalf("parked node = %+v (err %v), want failed: the expiry must tell the parent its child timed out", node, err)
+	}
+	if !strings.Contains(node.Error, "timed out") || !strings.Contains(node.Error, string(childID)) {
+		t.Fatalf("parked node error = %q, want the child's timeout and identity", node.Error)
+	}
+	if got := rig.hooks.completions(); len(got) != 1 || got[0] != types.ExecutionStatusTimeout {
+		t.Fatalf("completion hooks = %v, want exactly [timeout]", got)
+	}
+	rig.log.requireLast(t, "ack")
+}
