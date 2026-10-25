@@ -138,6 +138,7 @@ type LeaseSweeper struct {
 	passCandidates SweepPassCandidateObserver
 	depthObserver  SweepQueueDepthObserver
 	ageObserver    SweepQueueAgeObserver
+	deadlineObs    ExecutionDeadlineObserver
 	elector        backend.LeaderElector
 	clock          func() time.Time
 	sleepFunc      func(context.Context, time.Duration) error
@@ -320,6 +321,25 @@ type SweepQueueAgeObserver interface {
 	OnAssignmentQueueOldestAge(ctx context.Context, lane string, age time.Duration)
 }
 
+// SweepSourceDeadlinePass is the source the sweeper reports to an
+// ExecutionDeadlineObserver. It is a metric label value, so it is part of the
+// observable surface.
+const SweepSourceDeadlinePass = "sweeper"
+
+// ExecutionDeadlineObserver is an optional extension implemented by
+// observability adapters that count executions timed out by their deadline.
+// LeaseSweeper discovers it from LeaseSweeperConfig.Observer like the other
+// extensions, so every existing observer contract is unchanged.
+//
+// It is separate from the pass counters because they answer a different
+// question: the pass counts work done (and counts a resumed cascade as a
+// release), while this counts the timeout transitions themselves, per tenant.
+type ExecutionDeadlineObserver interface {
+	// OnExecutionDeadlineExpired reports one execution this observer drove into
+	// timeout. ctx carries the execution's own namespace.
+	OnExecutionDeadlineExpired(ctx context.Context, source string)
+}
+
 // LeaseSweeperConfig configures a sweeper.
 type LeaseSweeperConfig struct {
 	// Period is the interval between sweep scans. Defaults to DefaultSweepPeriod.
@@ -482,6 +502,10 @@ func NewLeaseSweeper(state LeaseLister, eng execution.Engine, cfg LeaseSweeperCo
 	if observer, ok := cfg.Observer.(SweepQueueAgeObserver); ok {
 		ageObserver = observer
 	}
+	var deadlineObs ExecutionDeadlineObserver
+	if observer, ok := cfg.Observer.(ExecutionDeadlineObserver); ok {
+		deadlineObs = observer
+	}
 	return &LeaseSweeper{
 		state:            state,
 		engine:           eng,
@@ -495,6 +519,7 @@ func NewLeaseSweeper(state LeaseLister, eng execution.Engine, cfg LeaseSweeperCo
 		passCandidates:   passCandidates,
 		depthObserver:    depthObserver,
 		ageObserver:      ageObserver,
+		deadlineObs:      deadlineObs,
 		elector:          cfg.Elector,
 		clock:            func() time.Time { return time.Now().UTC() },
 		sleepFunc:        sleepWithContext,
@@ -979,6 +1004,11 @@ func (s *LeaseSweeper) ReapExpiredExecutionsOnce(ctx context.Context) int {
 			s.deadlineBackoff.Success(key)
 			if outcome == engine.ExpireOutcomeExpired || outcome == engine.ExpireOutcomeResumed {
 				result.Released++
+			}
+			// Only the call that wrote the timeout counts as the transition; a
+			// resumed cascade is the same expiry finished, not a second one.
+			if outcome == engine.ExpireOutcomeExpired {
+				s.observeDeadlineExpired(execCtx)
 			}
 		case errors.Is(err, engine.ErrExecutionInactive):
 			// The execution concluded between the list and the call.
@@ -1481,6 +1511,17 @@ func (s *LeaseSweeper) observePass(ctx context.Context, pass, outcome string, re
 	}
 	defer func() { _ = recover() }()
 	s.passCandidates.OnSweepPassCandidates(ctx, pass, outcome, result.Inspected)
+}
+
+// observeDeadlineExpired reports one execution timed out by the deadline pass.
+// The adapter is guarded like the pass observers: a panicking one must not stop
+// the pass.
+func (s *LeaseSweeper) observeDeadlineExpired(ctx context.Context) {
+	if s.deadlineObs == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	s.deadlineObs.OnExecutionDeadlineExpired(ctx, SweepSourceDeadlinePass)
 }
 
 // observePassReleased reports one maintenance pass that has no candidate count
