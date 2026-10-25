@@ -13,12 +13,19 @@ const dependencyFields = [
 
 const publicPackagePolicy = new Map([
   ["@xflow/core", new Set(["@xflow/typescript-config"])],
-  ["@xflow/composer", new Set(["@xflow/typescript-config"])],
+  ["@xflow/icons", new Set(["@xflow/typescript-config"])],
+  ["@xflow/composer", new Set(["@xflow/icons", "@xflow/typescript-config"])],
   ["@xflow/api", new Set(["@xflow/core", "@xflow/typescript-config"])],
-  ["@xflow/preview", new Set(["@xflow/core", "@xflow/typescript-config"])],
+  ["@xflow/preview", new Set(["@xflow/core", "@xflow/icons", "@xflow/typescript-config"])],
   [
     "@xflow/editor",
-    new Set(["@xflow/composer", "@xflow/core", "@xflow/preview", "@xflow/typescript-config"])
+    new Set([
+      "@xflow/composer",
+      "@xflow/core",
+      "@xflow/icons",
+      "@xflow/preview",
+      "@xflow/typescript-config"
+    ])
   ]
 ]);
 
@@ -42,7 +49,7 @@ const coreForbiddenPatterns = [
 // kernel dependency) and takes react / react-dom / antd (composer/form) as
 // peers, never as runtime dependencies.
 const composerExactPins = /^@json-render\//;
-const composerPeerOnly = new Set(["react", "react-dom", "antd", "@ant-design/icons"]);
+const composerPeerOnly = new Set(["react", "react-dom", "antd", "@ant-design/icons", "@xflow/icons"]);
 
 function validateComposer(manifest) {
   const violations = [];

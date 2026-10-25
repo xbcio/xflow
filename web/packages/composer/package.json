@@ -41,9 +41,9 @@
     "zod": "4.6.5"
   },
   "devDependencies": {
-    "@ant-design/icons": "6.3.2",
     "@testing-library/react": "16.1.0",
     "@types/react": "19.2.18",
+    "@xflow/icons": "workspace:*",
     "@xflow/typescript-config": "workspace:*",
     "antd": "6.5.2",
     "react": "19.2.8",
@@ -51,17 +51,14 @@
     "vitest": "3.2.0"
   },
   "peerDependencies": {
-    "@ant-design/icons": "^6.3.2",
     "@testing-library/react": "^16.1.0",
+    "@xflow/icons": "workspace:*",
     "antd": "^6.5.2",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "vitest": "^3.2.0"
   },
   "peerDependenciesMeta": {
-    "@ant-design/icons": {
-      "optional": true
-    },
     "@testing-library/react": {
       "optional": true
     },

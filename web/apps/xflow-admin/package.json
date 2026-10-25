@@ -10,18 +10,20 @@
   },
   "dependencies": {
     "@ant-design/cssinjs": "2.1.2",
-    "@ant-design/icons": "6.3.2",
     "@umijs/max": "4.6.82",
     "@xflow/api": "workspace:*",
     "@xflow/core": "workspace:*",
     "@xflow/editor": "workspace:*",
+    "@xflow/icons": "workspace:*",
     "@xyflow/react": "12.5.0",
     "antd": "6.5.2",
+    "js-yaml": "4.3.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
   "devDependencies": {
     "@tailwindcss/webpack": "4.3.3",
+    "@types/js-yaml": "4.0.9",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.7",
     "@xflow/typescript-config": "workspace:*",

@@ -17,8 +17,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@ant-design/icons": "6.3.2",
     "@xflow/core": "workspace:*",
+    "@xflow/icons": "workspace:*",
     "@xyflow/react": "12.5.0",
     "antd": "6.5.2"
   },

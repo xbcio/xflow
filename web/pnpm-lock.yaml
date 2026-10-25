@@ -65,9 +65,6 @@ importers:
       '@ant-design/cssinjs':
         specifier: 2.1.2
         version: 2.1.2(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
-      '@ant-design/icons':
-        specifier: 6.3.2
-        version: 6.3.2(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@umijs/max':
         specifier: 4.6.82
         version: 4.6.82(@babel/core@7.29.7)(@types/node@22.15.0)(@types/react-dom@19.2.7(@types/react@19.2.18))(@types/react@19.2.18)(dva@2.5.0-beta.2(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(lightningcss@1.32.0)(prettier@3.9.6)(rc-field-form@2.7.1(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(rollup@3.30.0)(sass@1.54.0)(styled-jsx@5.1.7(@babel/core@7.29.7)(react@19.2.8))(terser@5.49.0)(type-fest@0.20.2)(typescript@5.8.3)(webpack@5.109.2(lightningcss@1.32.0)(postcss@8.5.22))
@@ -80,12 +77,18 @@ importers:
       '@xflow/editor':
         specifier: workspace:*
         version: link:../../packages/xflow-editor
+      '@xflow/icons':
+        specifier: workspace:*
+        version: link:../../packages/icons
       '@xyflow/react':
         specifier: 12.5.0
         version: 12.5.0(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       antd:
         specifier: 6.5.2
         version: 6.5.2(date-fns@2.30.0)(moment@2.30.1)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      js-yaml:
+        specifier: 4.3.0
+        version: 4.3.0
       react:
         specifier: 19.2.8
         version: 19.2.8
@@ -96,6 +99,9 @@ importers:
       '@tailwindcss/webpack':
         specifier: 4.3.3
         version: 4.3.3(webpack@5.109.2(lightningcss@1.32.0)(postcss@8.5.22))
+      '@types/js-yaml':
+        specifier: 4.0.9
+        version: 4.0.9
       '@types/react':
         specifier: 19.2.18
         version: 19.2.18
@@ -121,15 +127,15 @@ importers:
         specifier: 4.6.5
         version: 4.6.5
     devDependencies:
-      '@ant-design/icons':
-        specifier: 6.3.2
-        version: 6.3.2(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@testing-library/react':
         specifier: 16.1.0
         version: 16.1.0(@testing-library/dom@10.4.1)(@types/react-dom@19.2.7(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@types/react':
         specifier: 19.2.18
         version: 19.2.18
+      '@xflow/icons':
+        specifier: workspace:*
+        version: link:../icons
       '@xflow/typescript-config':
         specifier: workspace:*
         version: link:../../tooling/typescript-config
@@ -145,6 +151,22 @@ importers:
       vitest:
         specifier: 3.2.0
         version: 3.2.0(@types/node@22.15.0)(jiti@2.7.0)(jsdom@26.0.0)(less@4.8.1)(lightningcss@1.32.0)(sass@1.54.0)(terser@5.49.0)
+
+  packages/icons:
+    dependencies:
+      '@ant-design/icons':
+        specifier: 6.3.2
+        version: 6.3.2(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+    devDependencies:
+      '@types/react':
+        specifier: 19.2.18
+        version: 19.2.18
+      '@xflow/typescript-config':
+        specifier: workspace:*
+        version: link:../../tooling/typescript-config
+      react:
+        specifier: 19.2.8
+        version: 19.2.8
 
   packages/xflow-api:
     dependencies:
@@ -164,15 +186,15 @@ importers:
 
   packages/xflow-editor:
     dependencies:
-      '@ant-design/icons':
-        specifier: 6.3.2
-        version: 6.3.2(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@xflow/composer':
         specifier: workspace:*
         version: link:../composer
       '@xflow/core':
         specifier: workspace:*
         version: link:../xflow-core
+      '@xflow/icons':
+        specifier: workspace:*
+        version: link:../icons
       '@xflow/preview':
         specifier: workspace:*
         version: link:../xflow-preview
@@ -195,12 +217,12 @@ importers:
 
   packages/xflow-preview:
     dependencies:
-      '@ant-design/icons':
-        specifier: 6.3.2
-        version: 6.3.2(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@xflow/core':
         specifier: workspace:*
         version: link:../xflow-core
+      '@xflow/icons':
+        specifier: workspace:*
+        version: link:../icons
       '@xyflow/react':
         specifier: 12.5.0
         version: 12.5.0(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -2287,6 +2309,9 @@ packages:
 
   '@types/istanbul-reports@3.0.4':
     resolution: {integrity: sha512-pk2B1NWalF9toCRu6gjBzR69syFjP4Od8WRAX+0mmf9lAjCRicLOWc+ZrxZHx/0XRjotgkF9t6iaMJ+aXcOdZQ==}
+
+  '@types/js-yaml@4.0.9':
+    resolution: {integrity: sha512-k4MGaQl5TGo/iipqb2UDG2UwjXziSWkh0uysQelTlJpX1qGlpUZYm8PnO4DxG1qBomtJUdYJ6qR6xdIah10JLg==}
 
   '@types/json-schema@7.0.15':
     resolution: {integrity: sha512-5+fP8P8MFNC+AyZCDxrB2pkZFPGzqQWUzpSeuuVLvm8VMcorNYavBqoFcxK8bQz4Qsbn4oUEEem4wDLfcysGHA==}
@@ -9810,6 +9835,8 @@ snapshots:
   '@types/istanbul-reports@3.0.4':
     dependencies:
       '@types/istanbul-lib-report': 3.0.3
+
+  '@types/js-yaml@4.0.9': {}
 
   '@types/json-schema@7.0.15': {}
 

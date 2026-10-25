@@ -7,5 +7,5 @@
   },
   "include": ["src"],
   "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"],
-  "references": [{ "path": "../xflow-core" }]
+  "references": [{ "path": "../icons" }, { "path": "../xflow-core" }]
 }
