@@ -34,9 +34,10 @@
 // constructing a Server, then secure that privileged surface with the host's
 // authentication and authorization wiring. Its HTTP contract is maintained in
 // api/openapi/xflow-v1.yaml. To expose Prometheus instrumentation, create a
-// metrics collector with observability/metrics.New or NewWithRegistry and pass
-// it through WithServerMetrics; WithServerMetricsAddr optionally serves that
-// collector from Server.Run when a collector was supplied.
+// metrics collector with observability/metrics.New, NewWithRegistry, or
+// NewWithRegisterer and pass it through WithServerMetrics; WithServerMetricsAddr
+// optionally serves that collector from Server.Run when a collector was
+// supplied.
 //
 // # Remote control client
 //
