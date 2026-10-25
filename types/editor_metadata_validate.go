@@ -6,7 +6,8 @@ import (
 )
 
 // ValidateEditorMetadata checks md's node-keyed maps (Positions, UI, Notes)
-// against def's nodes and returns a sanitized copy plus any diagnostics.
+// and its canvas Sections against def's nodes and returns a sanitized copy
+// plus any diagnostics.
 //
 // A key that matches no node (by ID, or by Name when the node has no ID) is
 // dropped silently from the returned copy; no diagnostic is emitted for a
@@ -21,7 +22,15 @@ import (
 // A key that matches a node BY NAME because that node has no ID at all is
 // kept, and a DiagNodeMetadataKeyedByName warning is emitted naming the node,
 // so hosts can warn authors that renaming or duplicating a node may silently
-// cross-contaminate its metadata.
+// cross-contaminate its metadata. The warning is emitted once per node name,
+// however many node-keyed maps or sections address it.
+//
+// Sections follow the same key rules for their NodeKeys. In addition, a
+// section is dropped when its ID is empty or duplicates the ID of an earlier
+// surviving section (the first section with an ID that survives filtering
+// wins, deterministically), and when every one of its keys was stale -- a box
+// with no nodes to draw is debris, not layout. An empty or fully-filtered
+// Sections list is normalized to nil.
 //
 // A nil md returns (nil, nil).
 func ValidateEditorMetadata(def *WorkflowDef, md *WorkflowEditorMetadata) (*WorkflowEditorMetadata, []string) {
@@ -93,6 +102,36 @@ func ValidateEditorMetadata(def *WorkflowDef, md *WorkflowEditorMetadata) (*Work
 		}
 		if len(out.Notes) == 0 {
 			out.Notes = nil
+		}
+	}
+	if len(md.Sections) > 0 {
+		// Section order is author-controlled layout, so it is preserved; only
+		// dropped sections disappear. seenIDs is populated with the IDs that
+		// survived filtering, so a later section reusing the ID of an already
+		// dropped empty one is not silently lost.
+		seenIDs := make(map[string]struct{}, len(md.Sections))
+		for _, section := range md.Sections {
+			if section.ID == "" {
+				continue
+			}
+			if _, dup := seenIDs[section.ID]; dup {
+				continue
+			}
+			nodeKeys := make([]string, 0, len(section.NodeKeys))
+			for _, key := range section.NodeKeys {
+				if checkKey(key) {
+					nodeKeys = append(nodeKeys, key)
+				}
+			}
+			if len(nodeKeys) == 0 {
+				continue
+			}
+			seenIDs[section.ID] = struct{}{}
+			section.NodeKeys = nodeKeys
+			out.Sections = append(out.Sections, section)
+		}
+		if len(out.Sections) == 0 {
+			out.Sections = nil
 		}
 	}
 

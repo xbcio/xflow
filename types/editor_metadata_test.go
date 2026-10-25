@@ -2,6 +2,7 @@ package types
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 )
 
@@ -11,6 +12,12 @@ func TestWorkflowEditorMetadataJSONRoundTrip(t *testing.T) {
 		Viewport:  &Viewport{X: 10, Y: 20, Zoom: 1.5},
 		UI:        map[string]any{"n1": map[string]any{"color": "blue"}},
 		Notes:     map[string]string{"n1": "a note"},
+		Sections: []CanvasSection{{
+			ID:       "section-1",
+			Title:    "VIP approval",
+			NodeKeys: []string{"n1", "n2"},
+			X:        5, Y: 6, Width: 200, Height: 100,
+		}},
 	}
 	data, err := json.Marshal(md)
 	if err != nil {
@@ -28,6 +35,9 @@ func TestWorkflowEditorMetadataJSONRoundTrip(t *testing.T) {
 	}
 	if got.Notes["n1"] != "a note" {
 		t.Errorf("notes = %+v", got.Notes)
+	}
+	if !reflect.DeepEqual(got.Sections, md.Sections) {
+		t.Errorf("sections = %+v, want %+v", got.Sections, md.Sections)
 	}
 }
 
@@ -47,6 +57,7 @@ func TestWorkflowEditorMetadataJSONTags(t *testing.T) {
 		Viewport:  &Viewport{X: 1},
 		UI:        map[string]any{"n1": "x"},
 		Notes:     map[string]string{"n1": "x"},
+		Sections:  []CanvasSection{{ID: "s1", NodeKeys: []string{"n1"}}},
 	}
 	data, err := json.Marshal(md)
 	if err != nil {
@@ -56,9 +67,21 @@ func TestWorkflowEditorMetadataJSONTags(t *testing.T) {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	for _, key := range []string{"positions", "viewport", "ui", "notes"} {
+	for _, key := range []string{"positions", "viewport", "ui", "notes", "sections"} {
 		if _, ok := raw[key]; !ok {
 			t.Errorf("missing expected JSON key %q in %s", key, data)
+		}
+	}
+	var sections []map[string]json.RawMessage
+	if err := json.Unmarshal(raw["sections"], &sections); err != nil {
+		t.Fatalf("sections is not an array: %v (%s)", err, raw["sections"])
+	}
+	if len(sections) != 1 {
+		t.Fatalf("sections = %v, want one entry", sections)
+	}
+	for _, key := range []string{"id", "node_keys"} {
+		if _, ok := sections[0][key]; !ok {
+			t.Errorf("missing expected section JSON key %q in %s", key, raw["sections"])
 		}
 	}
 }

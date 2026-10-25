@@ -171,6 +171,63 @@ func TestAuditNilAndZeroMetadataDiffer(t *testing.T) {
 	}
 }
 
+func TestAuditIncludesCanvasSectionsButRuntimeDoesNot(t *testing.T) {
+	def := &types.WorkflowDef{Name: "wf", Nodes: []types.NodeDef{{ID: "n1", Name: "a", Type: "xflow.start"}}}
+	positionsOnly := &types.WorkflowEditorMetadata{
+		Positions: map[string]types.Position{"n1": {X: 1}},
+	}
+	withSection := &types.WorkflowEditorMetadata{
+		Positions: map[string]types.Position{"n1": {X: 1}},
+		Sections: []types.CanvasSection{{
+			ID:       "section-1",
+			Title:    "VIP approval",
+			NodeKeys: []string{"n1"},
+			X:        10, Y: 20, Width: 200, Height: 100,
+		}},
+	}
+
+	// Runtime (the registry's DefinitionHash) has no metadata input at all, so
+	// a section-only edit cannot move it. Hash before and after the Audit call
+	// as well, which pins that Audit does not mutate the definition.
+	runtimeBefore := mustRuntime(t, def)
+	if !strings.HasPrefix(runtimeBefore, RuntimePrefixV1) {
+		t.Fatalf("Runtime = %q, want prefix %q", runtimeBefore, RuntimePrefixV1)
+	}
+	a, err := Audit(def, positionsOnly)
+	if err != nil {
+		t.Fatalf("Audit without sections: %v", err)
+	}
+	b, err := Audit(def, withSection)
+	if err != nil {
+		t.Fatalf("Audit with sections: %v", err)
+	}
+	if a == b {
+		t.Fatalf("Audit fingerprints equal despite an added canvas section: %q", a)
+	}
+	if runtimeAfter := mustRuntime(t, def); runtimeAfter != runtimeBefore {
+		t.Fatalf("Runtime changed after a metadata-only section edit: %q != %q", runtimeAfter, runtimeBefore)
+	}
+}
+
+func TestAuditSectionsNilAndEmptySliceAgree(t *testing.T) {
+	// Sections is omitempty: a non-nil empty slice marshals away exactly like
+	// nil, so both inputs fingerprint the same. The nil-metadata vs empty
+	// metadata distinction (null vs {}) remains a separate convention, pinned
+	// by TestAuditNilAndZeroMetadataDiffer.
+	def := &types.WorkflowDef{Name: "wf", Nodes: []types.NodeDef{{Name: "a", Type: "xflow.start"}}}
+	a, err := Audit(def, &types.WorkflowEditorMetadata{Sections: nil})
+	if err != nil {
+		t.Fatalf("Audit nil sections: %v", err)
+	}
+	b, err := Audit(def, &types.WorkflowEditorMetadata{Sections: []types.CanvasSection{}})
+	if err != nil {
+		t.Fatalf("Audit empty sections: %v", err)
+	}
+	if a != b {
+		t.Fatalf("Audit(nil sections) = %q, Audit(empty sections) = %q, want equal", a, b)
+	}
+}
+
 func TestRuntimePayloadOmitsEmptyDependencyEdges(t *testing.T) {
 	b, err := json.Marshal(RuntimePayload{})
 	if err != nil {
