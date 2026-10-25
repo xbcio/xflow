@@ -535,9 +535,12 @@ func (s *Store) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID,
 		// clock for the inspect payload (§6.8 duration = updated − created).
 		s.touchExecutionUpdatedAt(ctx, id)
 	}
-	// Clean up timeout ZSET entries when execution is canceled.
+	// Clean up timeout ZSET entries when execution is canceled or timed out.
 	if applied == 1 && status == types.ExecutionStatusCanceled {
 		s.cleanupOnCancel(ctx, id)
+	}
+	if applied == 1 && status == types.ExecutionStatusTimeout {
+		s.cleanupOnTimeout(ctx, id)
 	}
 	if applied == 1 && types.IsTerminalExecutionStatus(status) {
 		if err := s.shortenTransientCompletionTTL(ctx, id, keys...); err != nil {
