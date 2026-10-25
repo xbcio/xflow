@@ -39,6 +39,53 @@ const (
 	ExecutionStatusPaused ExecutionStatus = "paused"
 )
 
+// Execution trigger kinds record HOW an execution was started. They are stored
+// on the execution row and are always server-derived: a caller never supplies
+// one, so a value on the wire describes the path that actually created the
+// execution.
+//
+// "manual" is deliberately absent. A hand-submitted run and an API-submitted
+// run are indistinguishable server-side (both arrive through the same execute
+// face), so reporting them as different kinds would be a guess.
+const (
+	// TriggerKindAPI is a submission through the execute face (and the
+	// embedded engine's Submit/Invoke, which is its in-process equivalent).
+	TriggerKindAPI = "api"
+	// TriggerKindRerun is a new execution derived from a terminal one.
+	TriggerKindRerun = "rerun"
+	// TriggerKindSubWorkflow is a child execution started by a subworkflow
+	// node of another execution.
+	TriggerKindSubWorkflow = "subworkflow"
+	// TriggerKindTimer and the four after it are entry-unit triggers, named by
+	// the node type that delivered the entry activation.
+	TriggerKindTimer   = "timer"
+	TriggerKindCron    = "cron"
+	TriggerKindWebhook = "webhook"
+	TriggerKindKafka   = "kafka"
+	TriggerKindRedis   = "redis"
+)
+
+// TriggerKindFromNodeType maps an entry unit's builtin trigger node type to the
+// trigger kind recorded on the execution it starts. It returns "" for any type
+// that is not a builtin trigger — a value the caller must treat as UNKNOWN
+// rather than as a kind, because guessing would label the execution with a
+// source it did not come from.
+func TriggerKindFromNodeType(nodeType string) string {
+	switch nodeType {
+	case "xflow.trigger.timer":
+		return TriggerKindTimer
+	case "xflow.trigger.cron":
+		return TriggerKindCron
+	case "xflow.trigger.webhook":
+		return TriggerKindWebhook
+	case "xflow.trigger.kafka":
+		return TriggerKindKafka
+	case "xflow.trigger.redis":
+		return TriggerKindRedis
+	}
+	return ""
+}
+
 // NodeStatus represents the lifecycle state of a workflow node.
 type NodeStatus string
 
