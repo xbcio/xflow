@@ -117,6 +117,7 @@ type expireState struct {
 	faultMu            sync.Mutex
 	listSuspendedErr   error
 	listSuspendedErrBy map[types.ExecutionID]error
+	linkReadErr        error
 	upsertNodeErr      error
 	ackErr             error
 	beforeTimeoutWrite func()
@@ -233,6 +234,25 @@ func (s *expireState) CancelSuspendedNode(_ context.Context, id types.ExecutionI
 	f.nodes[key] = &cp
 	delete(f.suspended, key)
 	return true, nil
+}
+
+// GetSubWorkflowLink answers a one-shot injected error before reading the link,
+// which is how a test breaks the first step of the child cascade.
+func (s *expireState) GetSubWorkflowLink(ctx context.Context, id types.ExecutionID, nodeName string) (SubWorkflowLink, bool, error) {
+	s.faultMu.Lock()
+	err := s.linkReadErr
+	s.linkReadErr = nil
+	s.faultMu.Unlock()
+	if err != nil {
+		return SubWorkflowLink{}, false, err
+	}
+	return s.subWorkflowLinkState.GetSubWorkflowLink(ctx, id, nodeName)
+}
+
+func (s *expireState) failLinkRead(err error) {
+	s.faultMu.Lock()
+	s.linkReadErr = err
+	s.faultMu.Unlock()
 }
 
 func (s *expireState) failListSuspended(err error) {
@@ -1579,4 +1599,41 @@ func TestExpireExecutionExpiredNotifiesTheParent(t *testing.T) {
 		t.Fatalf("completion hooks = %v, want exactly [timeout]", got)
 	}
 	rig.log.requireLast(t, "ack")
+}
+
+// TestExpireExecutionLinkReadFailureIsResumable pins that a sub-workflow link
+// that cannot be read fails the expiry too: the child it names cannot be found,
+// let alone stopped, so acknowledging would strand it. The replay reads the link,
+// stops the child and acknowledges once.
+func TestExpireExecutionLinkReadFailureIsResumable(t *testing.T) {
+	ctx := context.Background()
+	rig := newExpireSubWorkflowRig(t)
+	childID := rig.link.ChildExecutionID
+	injected := errors.New("injected: read sub-workflow link failed")
+	rig.state.failLinkRead(injected)
+
+	got, err := rig.eng.ExpireExecution(ctx, rig.parentID)
+	if !errors.Is(err, injected) {
+		t.Fatalf("ExpireExecution() = (%q, %v), want an error wrapping %v", got, err, injected)
+	}
+	if n := rig.log.count("ack"); n != 0 {
+		t.Fatalf("acked %d times after an unreadable link, want 0: the entry must stay listed", n)
+	}
+	child, err := rig.state.GetExecution(ctx, childID)
+	if err != nil || child == nil || types.IsTerminalExecutionStatus(child.Status) {
+		t.Fatalf("child = %+v (err %v), want it still running: its link could not be read", child, err)
+	}
+
+	rig.expire(t, rig.parentID, ExpireOutcomeResumed)
+
+	child, err = rig.state.GetExecution(ctx, childID)
+	if err != nil || child == nil || child.Status != types.ExecutionStatusCanceled {
+		t.Fatalf("child = %+v (err %v), want canceled by the resumed cascade", child, err)
+	}
+	if n := rig.log.count("ack"); n != 1 {
+		t.Fatalf("acked %d times after the resume, want 1", n)
+	}
+	if got := rig.hooks.completions(); len(got) != 1 {
+		t.Fatalf("completion hooks = %v, want exactly one", got)
+	}
 }
