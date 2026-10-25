@@ -5,6 +5,7 @@ import (
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/node/registry"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/service/protocol"
@@ -197,11 +198,16 @@ func ExampleWaitTimeoutResponse(id types.ExecutionID, status types.ExecutionStat
 // ExampleExecutionListItem builds one row of a GET /v1/executions page (the
 // executionListItem the list handler serializes inside the {list,total}
 // envelope). Every field a settled row carries is non-zero so the contract test
-// validates a populated row rather than a row of omitted keys. queue_position
-// is the one deliberate exception: it exists only while status is queued, so
-// the populated position is covered by ExampleExecutionListItemQueued — a zero
-// position here would be omitted by omitempty and validate nothing.
+// validates a populated row rather than a row of omitted keys — including the
+// statistics-era fields (duration_ms, finished_at, trigger_kind, retries,
+// node_progress). queue_position is the one deliberate exception: it exists
+// only while status is queued, so the populated position is covered by
+// ExampleExecutionListItemQueued — a zero position here would be omitted by
+// omitempty and validate nothing.
 func ExampleExecutionListItem(id types.ExecutionID, ns, workflowID, workflowName string, status types.ExecutionStatus, errMsg string, createdAt, updatedAt time.Time) any {
+	duration := updatedAt.Sub(createdAt).Milliseconds()
+	finished := updatedAt
+	retries := 2
 	return executionListItem{
 		ExecutionID:  string(id),
 		Namespace:    ns,
@@ -211,6 +217,11 @@ func ExampleExecutionListItem(id types.ExecutionID, ns, workflowID, workflowName
 		Error:        errMsg,
 		CreatedAt:    createdAt,
 		UpdatedAt:    updatedAt,
+		DurationMS:   &duration,
+		FinishedAt:   &finished,
+		TriggerKind:  "cron",
+		Retries:      &retries,
+		NodeProgress: &executionNodeProgress{Done: 3, Total: 4},
 	}
 }
 
@@ -237,6 +248,7 @@ func ExampleExecutionListItemQueued(id types.ExecutionID, ns, workflowID, workfl
 // contract test validates the actual roster projection rather than a shadow DTO.
 func ExampleRunnerListItem() any {
 	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	capacity, inFlight := 4, 2
 	return runnerListItem{
 		RunnerID:      "runner-1",
 		Enrolled:      true,
@@ -245,6 +257,12 @@ func ExampleRunnerListItem() any {
 		IssuedAt:      now.Add(-time.Hour),
 		RevokedAt:     now.Add(-30 * time.Minute),
 		DesiredState:  string(control.RunnerDesiredStateDraining),
+		Capacity:      &capacity,
+		InFlight:      &inFlight,
+		Labels:        map[string]string{"zone": "us-east-1"},
+		Namespaces:    []namespace.Namespace{"default"},
+		PoolID:        "pool-01H8XG",
+		PoolName:      "sas-runners",
 	}
 }
 
@@ -430,6 +448,100 @@ func ExampleScheduleListResponse(id string) any {
 	}
 }
 
+// ExampleExecutionStats builds the real data payload of
+// GET /v1/executions/stats with every status key populated (the schema
+// requires all nine) and a two-bucket histogram. Both bucket counts are maps,
+// so a lost zero-fill or a renamed key would surface as a schema mismatch.
+func ExampleExecutionStats() any {
+	start := time.Date(2026, 5, 4, 10, 0, 0, 0, time.UTC)
+	counts := map[types.ExecutionStatus]int64{
+		types.ExecutionStatusPending:   0,
+		types.ExecutionStatusQueued:    1,
+		types.ExecutionStatusPaused:    0,
+		types.ExecutionStatusRunning:   2,
+		types.ExecutionStatusSuccess:   6,
+		types.ExecutionStatusFailed:    2,
+		types.ExecutionStatusCanceling: 0,
+		types.ExecutionStatusCanceled:  1,
+		types.ExecutionStatusTimeout:   1,
+	}
+	return executionStatsResponse{
+		WindowStart:    start,
+		WindowEnd:      start.Add(2 * time.Hour),
+		Total:          13,
+		CountsByStatus: counts,
+		Histogram: []executionStatsBucket{
+			{Start: start, Counts: counts},
+			{Start: start.Add(time.Hour), Counts: map[types.ExecutionStatus]int64{
+				types.ExecutionStatusPending:   0,
+				types.ExecutionStatusQueued:    0,
+				types.ExecutionStatusPaused:    0,
+				types.ExecutionStatusRunning:   0,
+				types.ExecutionStatusSuccess:   0,
+				types.ExecutionStatusFailed:    0,
+				types.ExecutionStatusCanceling: 0,
+				types.ExecutionStatusCanceled:  0,
+				types.ExecutionStatusTimeout:   0,
+			}},
+		},
+	}
+}
+
+// ExampleWorkflowListResponseWithStats builds a real workflow list page whose
+// single row carries BOTH execution-derived projections: stats with every
+// optional percentile set, and a recent_executions array mixing a terminal row
+// (duration present) with a running one (duration absent). That mix is what
+// pins duration_ms as optional: a schema that made it required would reject
+// the running row the handler legitimately emits.
+func ExampleWorkflowListResponseWithStats(id string) any {
+	rate := 0.5
+	p50, p95 := int64(1200), int64(4800)
+	duration := int64(1500)
+	created := time.Date(2026, 5, 4, 10, 0, 0, 0, time.UTC)
+	updated := created.Add(2 * time.Minute)
+	return listPage{
+		List: []workflowListItem{{
+			ID:               id,
+			Name:             "nightly-report",
+			Version:          "v1",
+			DefinitionHash:   "runtime-sha256:9f2c",
+			RegistryRevision: 7,
+			Triggers:         []string{"cron"},
+			UpdatedAt:        &updated,
+			LatestExecution: &workflowLatestExecution{
+				ExecutionID: "exec-01H8XG",
+				Status:      types.ExecutionStatusSuccess,
+				CreatedAt:   created,
+				UpdatedAt:   created.Add(time.Second),
+			},
+			Stats: &workflowExecutionStats{
+				Window:      "24h",
+				Runs:        8,
+				Succeeded:   3,
+				Failed:      3,
+				SuccessRate: &rate,
+				P50MS:       &p50,
+				P95MS:       &p95,
+				SampleSize:  6,
+			},
+			RecentExecutions: []workflowRecentExecution{
+				{
+					ExecutionID: "exec-01H8XG",
+					Status:      types.ExecutionStatusSuccess,
+					CreatedAt:   created,
+					DurationMS:  &duration,
+				},
+				{
+					ExecutionID: "exec-01H8XF",
+					Status:      types.ExecutionStatusRunning,
+					CreatedAt:   created.Add(-time.Minute),
+				},
+			},
+		}},
+		Total: 1,
+	}
+}
+
 // ExampleSchedulePatchRequest builds a decoded PATCH body — the
 // map[string]*string decodeSchedulePatch produces, which is what carries the
 // three states. It names one field with a value and one with an explicit null:
@@ -479,5 +591,102 @@ func ExampleScheduleBackfillResult(id types.ExecutionID) any {
 				Detail:  "engine: workflow concurrency limit reached",
 			},
 		},
+	}
+}
+
+// ExampleOverview builds the real GET /v1/overview payload with every branch
+// populated: non-null percentiles and success rate, all 24 buckets, a failing
+// workflow carrying its newest error, and the cluster segment. The nullable
+// KPI fields are deliberately non-null here; ExampleOverviewEmptyKPI is the
+// branch that pins their null form.
+func ExampleOverview() any {
+	generated := time.Date(2026, 5, 4, 10, 0, 0, 0, time.UTC)
+	rate := 0.75
+	p50, p95 := int64(1200), int64(4800)
+	lastFailed := generated.Add(-47 * time.Minute)
+
+	counts := map[types.ExecutionStatus]int64{
+		types.ExecutionStatusPending:   0,
+		types.ExecutionStatusQueued:    2,
+		types.ExecutionStatusPaused:    0,
+		types.ExecutionStatusRunning:   3,
+		types.ExecutionStatusSuccess:   24,
+		types.ExecutionStatusFailed:    5,
+		types.ExecutionStatusCanceling: 0,
+		types.ExecutionStatusCanceled:  2,
+		types.ExecutionStatusTimeout:   1,
+	}
+	bucket := func(i int) executionStatsBucket {
+		return executionStatsBucket{Start: generated.Add(time.Duration(i-23) * time.Hour), Counts: counts}
+	}
+	histogram := make([]executionStatsBucket, overviewBucketCount)
+	runs := make([]int64, overviewBucketCount)
+	rates := make([]*float64, overviewBucketCount)
+	for i := range histogram {
+		histogram[i] = bucket(i)
+		runs[i] = 4
+		rates[i] = &rate
+	}
+	return overviewResponse{
+		Window:      "24h",
+		GeneratedAt: generated,
+		KPIs: overviewKPIs{
+			Runs:            37,
+			RunsPrevious:    31,
+			FailedPrevious:  3,
+			SuccessRate:     &rate,
+			P50MS:           &p50,
+			P95MS:           &p95,
+			ActiveWorkflows: 6,
+			Sparkline:       overviewSparkline{Runs: runs, SuccessRate: rates},
+		},
+		Histogram: histogram,
+		TopFailing: []overviewFailingRow{{
+			WorkflowID:   "wf-01H8XG",
+			WorkflowName: "nightly-report",
+			Failed:       4,
+			LastError:    "node \"Fetch\" timed out after 30s",
+			LastFailedAt: &lastFailed,
+		}},
+		Cluster: &overviewClusterSegment{
+			IsLeader: true,
+			Runners:  overviewRunnerSummary{Online: 3, Total: 4, Capacity: 12, InFlight: 5},
+		},
+	}
+}
+
+// ExampleOverviewEmptyKPI is the other branch of OverviewKPIs: a window with
+// no terminal run. success_rate, p50_ms and p95_ms must serialize as JSON null
+// (not be omitted, not be 0), which is what the schema's nullable branches
+// validate. The cluster segment is omitted, the shape a caller without
+// management.runner.list receives.
+func ExampleOverviewEmptyKPI() any {
+	start := time.Date(2026, 5, 4, 10, 0, 0, 0, time.UTC)
+	zero := map[types.ExecutionStatus]int64{
+		types.ExecutionStatusPending:   0,
+		types.ExecutionStatusQueued:    0,
+		types.ExecutionStatusPaused:    0,
+		types.ExecutionStatusRunning:   0,
+		types.ExecutionStatusSuccess:   0,
+		types.ExecutionStatusFailed:    0,
+		types.ExecutionStatusCanceling: 0,
+		types.ExecutionStatusCanceled:  0,
+		types.ExecutionStatusTimeout:   0,
+	}
+	histogram := make([]executionStatsBucket, overviewBucketCount)
+	for i := range histogram {
+		histogram[i] = executionStatsBucket{Start: start.Add(time.Duration(i) * 7 * time.Hour), Counts: zero}
+	}
+	return overviewResponse{
+		Window:      "7d",
+		GeneratedAt: start,
+		KPIs: overviewKPIs{
+			Sparkline: overviewSparkline{
+				Runs:        make([]int64, overviewBucketCount),
+				SuccessRate: make([]*float64, overviewBucketCount),
+			},
+		},
+		Histogram:  histogram,
+		TopFailing: []overviewFailingRow{},
 	}
 }

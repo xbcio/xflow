@@ -213,6 +213,8 @@ paths:
                     code: workflow_name_conflict
                     message: another live workflow already holds this namespace and name
                     trace_id: 0123456789abcdef0123456789abcdef
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
         default:
           $ref: "#/components/responses/DefaultError"
     get:
@@ -234,6 +236,11 @@ paths:
         Offset pagination is the page-list default by rule: the
         cursor-paginated endpoints exist only for machine scans, and no
         endpoint carries both.
+
+        `q` is an optional case-insensitive substring filter on the workflow
+        name. It is applied inside the caller's own namespace and BEFORE
+        pagination: `page`, `page_size` and `total` all describe the filtered
+        collection.
       tags: [Workflows]
       parameters:
         - name: page
@@ -264,6 +271,64 @@ paths:
             minimum: 1
             maximum: 200
             default: 20
+        - name: q
+          in: query
+          required: false
+          description: |
+            Case-insensitive substring match on the workflow name. The value is
+            trimmed first; an absent, empty, or whitespace-only value means no
+            filtering. Matching is confined to the caller's own namespace (the
+            namespace is resolved server-side; there is no namespace
+            parameter), and it is applied BEFORE pagination: `page`,
+            `page_size` and the response `total` all describe the filtered
+            collection, whose order remains the registry's enumeration order.
+
+            Applying the filter requires the server to walk the namespace's
+            workflow records, so a request with `q` costs O(N) record reads
+            where N is the number of workflows in the caller's own namespace.
+            Requests without `q` keep the O(page) read cost.
+
+            The maximum length is 128 characters; a longer value is refused
+            with 400 `invalid_argument` rather than silently ignored.
+          schema:
+            type: string
+            maxLength: 128
+        - name: include
+          in: query
+          required: false
+          description: |
+            Comma-separated list of execution-derived fields to attach to each
+            row. `stats` adds `stats` (a per-workflow aggregate over `window`),
+            `recent` adds `recent_executions` (at most 10 newest runs). An
+            unknown member, or an empty member such as `stats,,recent`, is a
+            400 `workflow_include_invalid` rather than being ignored: a member
+            silently dropped would return rows without the fields the caller
+            asked for and read as "no data".
+
+            The fields are execution data, so the server performs a SECOND
+            authorization check for `execution.read`. A caller that may read
+            workflow definitions but not executions still gets the page — the
+            two fields are simply omitted, never a 403. A server with no
+            execution store (or a store without the optional statistics
+            capability) omits them for the same reason.
+
+            When `stats` is requested the page size is tightened to 50, because
+            each row costs one entry in a per-workflow aggregate.
+          schema:
+            type: string
+            example: stats,recent
+        - name: window
+          in: query
+          required: false
+          description: |
+            The window `include=stats` aggregates over: `24h`, `7d` or `30d`
+            (default `7d`). It is echoed back as `stats.window`. Validated even
+            when `include` is absent, so a typo is a 400 `workflow_window_invalid`
+            rather than silently accepted.
+          schema:
+            type: string
+            enum: [24h, 7d, 30d]
+            default: 7d
         - $ref: "#/components/parameters/XRequestId"
       responses:
         "200":
@@ -465,6 +530,8 @@ paths:
                     code: workflow_version_immutable
                     message: workflow version was already published with a different definition
                     trace_id: 0123456789abcdef0123456789abcdef
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
         default:
           $ref: "#/components/responses/DefaultError"
     delete:
@@ -618,6 +685,8 @@ paths:
                     code: idempotency_key_in_progress
                     message: a request with this idempotency key is still in progress
                     trace_id: 0123456789abcdef0123456789abcdef
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
         "429":
           description: |
             The workflow refused the submission because of its own declared
@@ -878,6 +947,8 @@ paths:
                     code: workflow_version_unavailable
                     message: workflow version is not reproducible under the current compiler
                     trace_id: 0123456789abcdef0123456789abcdef
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
         "429":
           description: |
             The workflow refused the submission because of its own declared
@@ -1231,6 +1302,8 @@ paths:
                     code: workflow_conflict
                     message: workflow definition conflicts with an existing registration
                     trace_id: 0123456789abcdef0123456789abcdef
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
         default:
           $ref: "#/components/responses/DefaultError"
 
@@ -1559,6 +1632,8 @@ paths:
                     code: schedule_revision_conflict
                     message: the schedule changed since it was read; re-read it and retry with the current revision
                     trace_id: 0123456789abcdef0123456789abcdef
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
         "501":
           description: This deployment has no schedule overlay store.
           content:
@@ -2051,6 +2126,8 @@ paths:
                     code: schedule_not_found
                     message: schedule not found
                     trace_id: 0123456789abcdef0123456789abcdef
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
         "501":
           description: |
             Two codes share this status. `schedules_unavailable` when this
@@ -2082,6 +2159,119 @@ paths:
           $ref: "#/components/responses/RateLimited"
         "503":
           $ref: "#/components/responses/ServerOverloaded"
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/overview:
+    get:
+      operationId: getOverview
+      summary: Dashboard overview
+      description: |
+        One dashboard read over the executions recorded in the caller's own
+        namespace: a KPI block (runs, previous-window runs, success rate, P50
+        and P95 duration, active workflows, a 24-point sparkline), the
+        24-bucket status histogram behind it, the five workflows with the most
+        failures in the window, and — for a caller that ALSO holds
+        `management.runner.list` — a cluster segment.
+
+        Namespace is resolved server-side from the authenticated principal;
+        there is no `namespace` parameter, and every aggregate is scoped to it.
+        A caller can never aggregate another tenant's rows.
+
+        The `cluster` segment is a second authorization decision, not a field
+        of the dashboard grant: it is OMITTED (never zero-filled) from the
+        response for a caller without `management.runner.list`, because the
+        runner roster is cluster-wide. The response is cached in-process for 30
+        seconds per (namespace, window, cluster permission), so a cached
+        cluster segment is never served to a caller that lacks the grant.
+
+        `generated_at` is when the payload was BUILT. On a cache hit it can be
+        up to 30 seconds older than the response instant, which is how a client
+        learns the numbers are at most that stale.
+      tags: [Executions]
+      parameters:
+        - name: window
+          in: query
+          required: false
+          description: |
+            Aggregation window. `24h` (default) or `7d`; the histogram and
+            sparkline always have 24 buckets (1h or 7h wide respectively). Any
+            other value is a 400 `overview_window_invalid` rather than a
+            silently substituted default: a caller that asked for 30d and got
+            24h would misread every number.
+          schema:
+            type: string
+            enum: [24h, 7d]
+            default: 24h
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: The dashboard payload for the requested window.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/OverviewResponse"
+        "400":
+          description: |
+            The `window` is not one of the published values. The stable code is
+            `overview_window_invalid`.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                invalidWindow:
+                  summary: An unknown window value.
+                  value:
+                    success: false
+                    code: overview_window_invalid
+                    message: window must be one of 24h, 7d
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "403":
+          description: |
+            The authenticated principal carries no usable namespace scope, so
+            there is nothing to aggregate. The stable code is
+            `execution_namespace_invalid`.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "501":
+          description: |
+            This deployment has no execution store configured, or its store
+            does not implement the optional statistics capability the overview
+            is built from. The stable code is `overview_unsupported`; it
+            distinguishes "this backend cannot answer the question" from a
+            server fault (500).
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                unsupported:
+                  summary: The execution store cannot produce the overview.
+                  value:
+                    success: false
+                    code: overview_unsupported
+                    message: the configured execution store does not support the overview
+                    trace_id: 0123456789abcdef0123456789abcdef
         default:
           $ref: "#/components/responses/DefaultError"
 
@@ -2145,15 +2335,52 @@ paths:
         - name: status
           in: query
           required: false
+          style: form
+          explode: true
           description: |
-            Narrows the page to one lifecycle status. Both the page and `total`
-            are narrowed by it, so `total` is the size of the filtered set.
+            Narrows the page to one or more lifecycle statuses. Repeat the
+            parameter to select several (`?status=failed&status=timeout`) or
+            give one comma-separated value (`?status=failed,timeout`); the two
+            spellings are equivalent and the selected statuses are ORed. Both
+            the page and `total` are narrowed by them, so `total` is the size
+            of the filtered set.
 
             An unrecognized value is a 400 `execution_status_invalid`, NOT an
             empty page: a typo served as `list: []` is indistinguishable from
             "no executions have that status".
+
+            Duplicate values are collapsed across both spellings, and a request
+            naming more distinct statuses than the status enum holds (9) is the
+            same 400: the repeated parameter is caller-controlled and must not
+            be able to grow the query's parameter list without bound.
           schema:
-            $ref: "#/components/schemas/ExecutionStatus"
+            type: array
+            items:
+              $ref: "#/components/schemas/ExecutionStatus"
+        - name: q
+          in: query
+          required: false
+          description: |
+            Execution-center search prefix, matched against the execution id OR
+            the workflow id the execution was submitted under. Both identities
+            are opaque and server-assigned, so a prefix is the only narrowing a
+            caller can express without the full identity. Matched as a literal
+            prefix on either column (LIKE metacharacters in the value are
+            escaped, not interpreted); rows match only within the caller's
+            namespace. A row with no recorded workflow id (the unattributed
+            sentinel `""`) can still match through its execution id, but never
+            through the empty workflow id.
+
+            The value is restricted to at most 64 characters drawn from
+            letters, digits, `_` and `-` — the alphabet these ids are minted
+            from. Anything else, including `%` used as a wildcard, is a 400
+            `execution_query_invalid` rather than being silently ignored:
+            ignoring it would answer with the whole namespace as if it were the
+            filtered page. Absent or empty means no prefix narrowing.
+          schema:
+            type: string
+            maxLength: 64
+            pattern: "^[A-Za-z0-9_-]*$"
         - name: workflow_id
           in: query
           required: false
@@ -2220,10 +2447,13 @@ paths:
                         $ref: "#/components/schemas/ExecutionListResponse"
         "400":
           description: |
-            A filter value is unusable: an unrecognized `status`, a
-            `workflow_id` longer than the 64-byte identity column, or a
-            `created_after` / `created_before` that is not an RFC3339
-            date-time.
+            A filter value is unusable: an unrecognized `status`
+            (`execution_status_invalid`), a `q` search string longer than 64
+            characters or outside the id alphabet (`execution_query_invalid`),
+            a `workflow_id` longer than the 64-byte identity column
+            (`execution_workflow_id_invalid`), or a `created_after` /
+            `created_before` that is not an RFC3339 date-time
+            (`execution_list_time_invalid`).
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
@@ -2252,6 +2482,197 @@ paths:
                     success: false
                     code: execution_workflow_id_invalid
                     message: workflow_id must be at most 64 characters
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "501":
+          description: |
+            This deployment has no execution store configured, so it cannot
+            answer an execution collection read. The stable code is
+            `execution_listing_unsupported`; it distinguishes "this backend
+            does not support listing" from a server fault (500) and from a
+            truthfully empty collection (200 with `list: []`).
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                unsupported:
+                  summary: No execution store is configured.
+                  value:
+                    success: false
+                    code: execution_listing_unsupported
+                    message: the configured execution store does not support listing executions
+                    trace_id: 0123456789abcdef0123456789abcdef
+        default:
+          $ref: "#/components/responses/DefaultError"
+
+  /v1/executions/stats:
+    get:
+      operationId: getExecutionStats
+      summary: Aggregate executions by status
+      description: |
+        A bounded status aggregate over the executions recorded in the caller's
+        own namespace: counts per lifecycle status in a required
+        `[created_after, created_before)` window, plus an optional histogram.
+        Namespace is resolved server-side from the authenticated principal and
+        every aggregation is scoped to it — there is no `namespace` parameter,
+        and a caller can never aggregate another tenant's rows.
+
+        The window is REQUIRED (both bounds, exclusive) and its span must not
+        exceed 30 days. `bucket` is an enum (`5m`, `1h`, `1d`); the resulting
+        bucket count must not exceed 168. Those limits are request validation,
+        not truncation: an oversized request is a 400 rather than a partial
+        answer. Histogram buckets are UTC-aligned ("epoch-aligned": a `1h`
+        bucket starts on the hour) and tile the window; a bucket with no
+        executions is present with zero counts, so a gap is never mistaken for
+        a shorter window. `counts_by_status` always carries all nine status
+        keys, zero-filled: an absent key would be indistinguishable from an
+        unknown status.
+
+        This route is the user-facing expansion of P0's internal aggregate; it
+        is a literal segment at the depth of `{id}`, and Go's pattern mux
+        prefers the literal, so no execution may be addressed by the id
+        `stats`.
+      tags: [Executions]
+      parameters:
+        - name: created_after
+          in: query
+          required: true
+          description: |
+            Lower bound on `created_at`, RFC3339 (a fractional second is
+            accepted). The bound is EXCLUSIVE: an execution created exactly at
+            it is not counted, so adjacent windows cannot double-count a row
+            landing on the boundary.
+          schema:
+            type: string
+            format: date-time
+        - name: created_before
+          in: query
+          required: true
+          description: |
+            Upper bound on `created_at`, RFC3339, EXCLUSIVE. Must be strictly
+            after `created_after`; the span must not exceed 30 days.
+          schema:
+            type: string
+            format: date-time
+        - name: workflow_id
+          in: query
+          required: false
+          description: |
+            Narrows the aggregate to one workflow, by the server-assigned
+            workflow id and EXACT match. Rows with the unattributed sentinel
+            `""` match NO `workflow_id` filter. A value longer than 64
+            characters is a 400 `execution_workflow_id_invalid`.
+          schema:
+            type: string
+            maxLength: 64
+        - name: bucket
+          in: query
+          required: false
+          description: |
+            Bucket width for the histogram. Absent means no histogram at all
+            (the `histogram` property is omitted, which is distinct from an
+            empty array). The resulting bucket count must not exceed 168; for
+            example a 30-day window at `5m` is refused because it would need
+            8640 buckets.
+          schema:
+            type: string
+            enum: [5m, 1h, 1d]
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: The status aggregate for the requested window.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ExecutionStats"
+        "400":
+          description: |
+            The request cannot be answered as presented: a missing or
+            unparsable bound, an inverted window, a span over 30 days
+            (`stats_window_invalid`), an unknown bucket or one that would
+            produce more than 168 buckets (`stats_bucket_invalid`), or an
+            over-long `workflow_id` (`execution_workflow_id_invalid`).
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                invalidWindow:
+                  summary: A bound is missing, unparsable, or the span exceeds 30 days.
+                  value:
+                    success: false
+                    code: stats_window_invalid
+                    message: the window must not exceed 30 days
+                    trace_id: 0123456789abcdef0123456789abcdef
+                invalidBucket:
+                  summary: The bucket would produce more than 168 buckets.
+                  value:
+                    success: false
+                    code: stats_bucket_invalid
+                    message: bucket produces more than 168 buckets for this window
+                    trace_id: 0123456789abcdef0123456789abcdef
+                overlongWorkflowId:
+                  summary: The workflow_id filter cannot equal any stored id.
+                  value:
+                    success: false
+                    code: execution_workflow_id_invalid
+                    message: workflow_id must be at most 64 characters
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "403":
+          description: |
+            The authenticated principal carries no usable namespace scope, so
+            there is nothing to aggregate. The stable code is
+            `execution_namespace_invalid`.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                namespaceInvalid:
+                  summary: The principal's namespace scope is missing or invalid.
+                  value:
+                    success: false
+                    code: execution_namespace_invalid
+                    message: forbidden
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "501":
+          description: |
+            This deployment has no execution store configured, or its store
+            does not implement the optional statistics capability. The stable
+            code is `execution_stats_unsupported`; it distinguishes "this
+            backend cannot answer the question" from a server fault (500) and
+            from a truthfully empty window (200 with `total: 0`).
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                unsupported:
+                  summary: The execution store cannot produce statistics.
+                  value:
+                    success: false
+                    code: execution_stats_unsupported
+                    message: the configured execution store does not support execution statistics
                     trace_id: 0123456789abcdef0123456789abcdef
         default:
           $ref: "#/components/responses/DefaultError"
@@ -2684,6 +3105,8 @@ paths:
                     code: idempotency_key_in_progress
                     message: a request with this idempotency key is still in progress
                     trace_id: 0123456789abcdef0123456789abcdef
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
         "429":
           description: |
             The workflow refused the rerun because of its own declared limits
@@ -2774,6 +3197,8 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/AcceptedResponse"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
         "429":
           $ref: "#/components/responses/RateLimited"
         "503":
@@ -3346,6 +3771,12 @@ paths:
         rather than a static policy file. This tells an operator which runners a
         revoked registration code would affect.
 
+        When a directory snapshot exists, each entry also carries its placement
+        projection (`capacity`, `in_flight`, `labels`, `namespaces`); those
+        fields are omitted, not zeroed, when the server cannot observe them.
+        Pool attribution (`pool_id`, `pool_name`) is present only for a live
+        runner whose registration recorded a pool.
+
         Returns 501 `runner_listing_unsupported` when the configured runner
         directory does not structurally support enumeration, rather than an
         empty array — an empty list and "this backend cannot answer" must
@@ -3493,6 +3924,8 @@ paths:
           $ref: "#/components/responses/DefaultError"
         "409":
           $ref: "#/components/responses/DefaultError"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
         "501":
           $ref: "#/components/responses/DefaultError"
         default:
@@ -3544,6 +3977,8 @@ paths:
           $ref: "#/components/responses/DefaultError"
         "409":
           $ref: "#/components/responses/DefaultError"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
         "501":
           $ref: "#/components/responses/DefaultError"
         default:
@@ -3654,6 +4089,8 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/DeadLetterReplayResponse"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
         "429":
           $ref: "#/components/responses/RateLimited"
         "503":
@@ -3690,6 +4127,8 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/RunnerPoolView"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
         default:
           $ref: "#/components/responses/DefaultError"
     get:
@@ -3774,6 +4213,8 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/RunnerPoolView"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
         default:
           $ref: "#/components/responses/DefaultError"
     delete:
@@ -3837,6 +4278,8 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/RunnerPoolTokenCreateResponse"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
         default:
           $ref: "#/components/responses/DefaultError"
     get:
@@ -4311,6 +4754,28 @@ components:
                 code: server_overloaded
                 message: server is overloaded
                 trace_id: 0123456789abcdef0123456789abcdef
+    RequestTooLarge:
+      description: |
+        `request_too_large`: the request body exceeds the server's 8 MiB
+        request-body limit. It was refused before decoding, so the operation
+        never ran and nothing was admitted, persisted or executed. This is a
+        denial-of-service bound, not business validation. Retrying the same
+        payload will fail the same way; reduce the body first.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/XRequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          examples:
+            requestTooLarge:
+              summary: The request body exceeded the 8 MiB limit.
+              value:
+                success: false
+                code: request_too_large
+                message: request body too large
+                trace_id: 0123456789abcdef0123456789abcdef
 
   schemas:
     Envelope:
@@ -4765,6 +5230,16 @@ components:
             snapshot with `GET /v1/workflows/{id}/versions/{version}`.
             Absent when there is no recorded identity or the definition
             declares no version.
+        trace_id:
+          type: string
+          description: |
+            The external tracing system's correlation id captured when this
+            execution was submitted (a W3C trace id, for example). Diagnostic
+            metadata only: it names the span tree behind the run, carries no
+            payload, and is what a client uses to open the corresponding trace
+            in its tracing UI. Absent when the submission carried no trace
+            context; absence means unknown, and a client must not invent or
+            reconstruct a value.
         status:
           $ref: "#/components/schemas/ExecutionStatus"
         created_at:
@@ -4908,6 +5383,285 @@ components:
             shrink as pages are consumed.
           example: 3
 
+    ExecutionStatusCounts:
+      type: object
+      description: |
+        A count per lifecycle status. EVERY one of the nine statuses is present
+        — a status with no execution in the window is `0`, never omitted — so a
+        missing key is always a server defect rather than "no data" and a
+        client may index the map directly.
+      required: [pending, queued, paused, running, success, failed, canceling, canceled, timeout]
+      additionalProperties: false
+      properties:
+        pending:
+          type: integer
+          minimum: 0
+        queued:
+          type: integer
+          minimum: 0
+        paused:
+          type: integer
+          minimum: 0
+        running:
+          type: integer
+          minimum: 0
+        success:
+          type: integer
+          minimum: 0
+        failed:
+          type: integer
+          minimum: 0
+        canceling:
+          type: integer
+          minimum: 0
+        canceled:
+          type: integer
+          minimum: 0
+        timeout:
+          type: integer
+          minimum: 0
+
+    ExecutionStatsBucket:
+      type: object
+      description: |
+        One histogram bucket. `start` is the bucket's inclusive lower bound,
+        UTC-aligned; the bucket covers the half-open interval
+        `[start, start + bucket)`. A bucket with no executions is present with
+        zero counts so the array tiles the window without gaps.
+      required: [start, counts]
+      properties:
+        start:
+          type: string
+          format: date-time
+          description: Inclusive start of the bucket (UTC).
+        counts:
+          $ref: "#/components/schemas/ExecutionStatusCounts"
+
+    ExecutionStats:
+      type: object
+      description: |
+        The `data` payload of `GET /v1/executions/stats`: status counts for one
+        `[created_after, created_before)` window in the caller's namespace.
+
+        `counts_by_status` and `total` describe the SAME filtered set, so
+        `total` equals the sum of `counts_by_status` (and, when present, of
+        every bucket's counts). `histogram` is present only when the request
+        named a `bucket`; its absence means "not requested", which is distinct
+        from an empty array.
+      required: [window_start, window_end, total, counts_by_status]
+      properties:
+        window_start:
+          type: string
+          format: date-time
+          description: The request's `created_after` — inclusive lower bound of the window.
+        window_end:
+          type: string
+          format: date-time
+          description: The request's `created_before` — EXCLUSIVE upper bound of the window.
+        total:
+          type: integer
+          minimum: 0
+          description: Total executions in the window; the sum of `counts_by_status`.
+          example: 12
+        counts_by_status:
+          $ref: "#/components/schemas/ExecutionStatusCounts"
+        histogram:
+          type: array
+          maxItems: 168
+          description: |
+            UTC-aligned, zero-filled status counts per bucket. Omitted when no
+            `bucket` was requested.
+          items:
+            $ref: "#/components/schemas/ExecutionStatsBucket"
+
+    OverviewResponse:
+      type: object
+      description: |
+        The `data` payload of `GET /v1/overview`: a dashboard over one
+        namespace. Every aggregate describes the same window; the histogram and
+        the sparkline are derived from the same buckets, so they can never
+        disagree about a bucket's counts. Percentiles are computed from a
+        bounded sample of the most recent terminal runs, not from the whole
+        window's history.
+      required: [window, generated_at, kpis, histogram, top_failing]
+      properties:
+        window:
+          type: string
+          enum: [24h, 7d]
+          description: Echo of the requested window label.
+        generated_at:
+          type: string
+          format: date-time
+          description: |
+            When this payload was BUILT. On a cache hit it is older than the
+            response instant by up to the 30-second cache TTL.
+        kpis:
+          $ref: "#/components/schemas/OverviewKPIs"
+        histogram:
+          type: array
+          description: |
+            The 24 buckets tiling the window (1h wide for `24h`, 7h for `7d`),
+            UTC-aligned and ascending. Every bucket is present, zero-filled: a
+            gap is never mistaken for a shorter window.
+          items:
+            $ref: "#/components/schemas/ExecutionStatsBucket"
+        top_failing:
+          type: array
+          maxItems: 5
+          description: |
+            Up to five workflows with the most failed/timeout executions in the
+            window, ordered by failure count descending then workflow id
+            ascending. Always present; `[]` when nothing failed.
+          items:
+            $ref: "#/components/schemas/OverviewFailingWorkflow"
+        cluster:
+          $ref: "#/components/schemas/OverviewCluster"
+
+    OverviewKPIs:
+      type: object
+      description: |
+        The overview's KPI block. `success_rate`, `p50_ms` and `p95_ms` are
+        nullable: null means "there was no terminal run to compute it from",
+        never zero — zero is a real measurement (an all-failed window has a
+        success rate of 0).
+      required: [runs, runs_previous, failed_previous, success_rate, p50_ms, p95_ms, active_workflows, sparkline]
+      properties:
+        runs:
+          type: integer
+          format: int64
+          description: Executions created in the window, terminal or not.
+        runs_previous:
+          type: integer
+          format: int64
+          description: Executions created in the immediately preceding, equally sized window.
+        failed_previous:
+          type: integer
+          format: int64
+          description: |
+            Failed plus timeout executions created in the immediately preceding,
+            equally sized window — the same `runs_previous` window and the same
+            failure definition as `top_failing[].failed`.
+        success_rate:
+          type: [number, "null"]
+          minimum: 0
+          maximum: 1
+          description: |
+            Succeeded divided by terminal runs in the window (canceled counts in
+            the denominator). Null when there is no terminal run.
+        p50_ms:
+          type: [integer, "null"]
+          minimum: 0
+          description: |
+            Nearest-rank P50 duration of terminal runs in the window, in whole
+            milliseconds. Null when the sample is empty. Computed from at most
+            5000 of the most recent terminal rows.
+        p95_ms:
+          type: [integer, "null"]
+          minimum: 0
+          description: Nearest-rank P95 duration, same sample rule as `p50_ms`.
+        active_workflows:
+          type: integer
+          format: int64
+          description: |
+            DISTINCT workflow ids with at least one execution in the window.
+            Rows whose workflow id is the unattributed sentinel `""` are not
+            counted — they name no workflow.
+        sparkline:
+          $ref: "#/components/schemas/OverviewSparkline"
+
+    OverviewSparkline:
+      type: object
+      description: |
+        The fixed-width 24-point series behind the KPI charts, aligned with
+        `histogram` bucket for bucket.
+      required: [runs, success_rate]
+      properties:
+        runs:
+          type: array
+          description: Executions per bucket, in the same order as `histogram`.
+          items:
+            type: integer
+            format: int64
+        success_rate:
+          type: array
+          description: |
+            Success rate per bucket. An entry is null — not 0 — when the bucket
+            has no terminal run.
+          items:
+            type: [number, "null"]
+            minimum: 0
+            maximum: 1
+
+    OverviewFailingWorkflow:
+      type: object
+      description: |
+        One entry of the overview's failing-workflow list. `last_error` and
+        `last_failed_at` describe the NEWEST failed/timeout execution of that
+        workflow inside the window; they are omitted when that row could not be
+        read, never guessed.
+      required: [workflow_id, failed]
+      properties:
+        workflow_id:
+          type: string
+        workflow_name:
+          type: string
+          description: |
+            Best-effort display name from the registry. Omitted when the
+            registry cannot name the id (for example a deleted workflow that
+            still has execution rows).
+        failed:
+          type: integer
+          format: int64
+          description: Failed plus timeout executions of this workflow in the window.
+        last_error:
+          type: string
+          description: |
+            The newest failure's message, truncated to 200 characters. Absent
+            when the newest failure carried none.
+        last_failed_at:
+          type: string
+          format: date-time
+          description: |
+            Creation time of the newest failed/timeout execution (its exact
+            `finished_at` when known, otherwise `updated_at`).
+
+    OverviewCluster:
+      type: object
+      description: |
+        Cluster capacity for a caller that also holds `management.runner.list`.
+        The whole segment is OMITTED for a caller without that grant: the
+        runner roster is cluster-wide and must not leak to a namespace-scoped
+        principal. It is also omitted when the deployment has no runner
+        directory to answer from, rather than manufacturing "0 runners online".
+      required: [is_leader, runners]
+      properties:
+        is_leader:
+          type: boolean
+          description: Whether this server instance currently holds cluster leadership.
+        runners:
+          $ref: "#/components/schemas/OverviewRunnerSummary"
+
+    OverviewRunnerSummary:
+      type: object
+      description: |
+        Aggregate over the LIVE runner directory members. Capacity and in-flight
+        task counts are summed over online runners only: an offline runner's
+        capacity is not schedulable, so including it would overstate what the
+        cluster can take.
+      required: [online, total, capacity, in_flight]
+      properties:
+        online:
+          type: integer
+        total:
+          type: integer
+          description: Directory members, online or not.
+        capacity:
+          type: integer
+          description: Summed task capacity of the online runners.
+        in_flight:
+          type: integer
+          description: Summed tasks currently in flight on the online runners.
+
     ExecutionListItem:
       type: object
       description: |
@@ -4958,6 +5712,41 @@ components:
           type: string
           format: date-time
           description: When the execution row was last updated.
+        duration_ms:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            Wall-clock duration of a TERMINAL execution in whole milliseconds
+            (`finished_at − created_at`). Exact when the row carries
+            `finished_at`; for rows written before that column existed it is the
+            documented estimate `updated_at − created_at`. Omitted for a live
+            row: absence means "not finished", not zero.
+        finished_at:
+          type: string
+          format: date-time
+          description: |
+            The exact completion instant, write-once on the first terminal
+            transition — a duplicate terminal write cannot move it. Omitted
+            when the execution is live or predates the column; in that case the
+            completion time is UNKNOWN, never the zero instant.
+        trigger_kind:
+          type: string
+          description: |
+            The server-derived path that started the run (`api`, `rerun`,
+            `subworkflow`, `timer`, `cron`, `webhook`, `kafka`, `redis`).
+            Omitted when the row predates the column, so absence means
+            UNKNOWN, not "started by the API".
+        retries:
+          type: integer
+          minimum: 0
+          description: |
+            How many extra node attempts the execution consumed: the sum of
+            `attempt − 1` over its node rows. Omitted when the configured store
+            cannot answer the batch node read (absence means UNKNOWN, not
+            zero).
+        node_progress:
+          $ref: "#/components/schemas/ExecutionNodeProgress"
         queue_position:
           type: integer
           description: |
@@ -4970,6 +5759,31 @@ components:
             read from live queue state at list time, not stored with the row,
             and the read is best effort so a position that is unavailable
             omits the field rather than failing the page.
+
+    ExecutionNodeProgress:
+      type: object
+      description: |
+        How far an execution's nodes got, as a narrow aggregate: how many node
+        rows reached a terminal status, out of the graph's size recorded on the
+        execution at creation. The node bodies (output, ports, signal
+        payloads, lease tokens) are never part of it.
+      required: [done, total]
+      properties:
+        done:
+          type: integer
+          minimum: 0
+          description: |
+            Node rows that reached a terminal status (success, failed, skipped,
+            canceled, continued, pinned). A node still running, suspended or
+            waiting is not counted.
+        total:
+          type: integer
+          minimum: 1
+          description: |
+            The graph's node count recorded when the execution was created.
+            Always positive: the list row omits `node_progress` entirely when
+            this count is UNKNOWN (0), rather than reporting a denominator of
+            zero.
 
     NodeStatus:
       type: string
@@ -5025,6 +5839,36 @@ components:
             Present when the runner has a control snapshot. `draining` means the
             runner is winding down but may still be heartbeating and reporting
             state: online.
+        capacity:
+          type: integer
+          description: |
+            Reported task capacity when a directory snapshot is available. A
+            runner with no snapshot has UNKNOWN capacity, so the field is
+            omitted rather than reported as 0.
+        in_flight:
+          type: integer
+          description: |
+            Reported in-flight task count when a directory snapshot is
+            available. Omitted (unknown), not 0, when no snapshot exists.
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+          description: Registration labels task placement matches on. Omitted when none were reported.
+        namespaces:
+          type: array
+          items:
+            type: string
+          description: Namespaces this runner is entitled to serve. Omitted when none were reported.
+        pool_id:
+          type: string
+          description: |
+            The runner pool this runner's identity is bound to. Present only
+            for a live runner whose registration recorded a pool; a
+            static-token runner has none.
+        pool_name:
+          type: string
+          description: The pool's display name, recorded alongside pool_id.
 
     RunnerSnapshot:
       type: object
@@ -5530,13 +6374,24 @@ components:
         definition. The definition and compiled graph are deliberately absent —
         a page of definitions would be O(page × definition size) on the wire —
         and are read one at a time via `GET /v1/workflows/{id}`.
-      required: [id, name, version, definition_hash, registry_revision]
+
+        `triggers` and `latest_execution` are derived summaries: they let a
+        list render its "triggers" and "most recent run" columns without a
+        per-row follow-up read. `description` and `cron_expressions` are the
+        same kind of zero-extra-IO projection of the stored definition.
+      required: [id, name, version, definition_hash, registry_revision, triggers]
       properties:
         id:
           type: string
           description: Server-assigned workflow id (the `{id}` of the read/replace/deregister routes).
         name:
           type: string
+        description:
+          type: string
+          description: |
+            The stored definition's one-line description. Omitted when the
+            definition has none. It is metadata, not runtime semantics: it is
+            excluded from `definition_hash`.
         version:
           type: string
         definition_hash:
@@ -5558,6 +6413,181 @@ components:
             The registry's monotonically increasing revision for this record.
             Opaque except for ordering and equality; it is the compare-and-swap
             token a replacement must present.
+        triggers:
+          type: array
+          description: |
+            The distinct trigger kinds present in the stored definition, derived
+            from nodes whose type is `xflow.trigger.<kind>`. Current kinds are
+            `timer`, `cron`, `webhook`, `kafka` and `redis`; a future
+            `xflow.trigger.*` kind is reported by its suffix without a contract
+            change. The list is deduplicated and sorted lexicographically, so it
+            is stable across reads. It is always present and is `[]` (never
+            `null`, never omitted) when the workflow has no trigger node. An
+            `xflow.start` entry node is NOT a trigger and is never reported
+            here.
+          items:
+            type: string
+          example: [timer, webhook]
+        cron_expressions:
+          type: array
+          description: |
+            The distinct `expression` parameters of the definition's
+            `xflow.trigger.cron` nodes, sorted lexicographically. It is the
+            derived readable-schedule summary a workflow list renders without
+            reading each definition. Only the expression is exported; no other
+            cron-node parameter appears here. Omitted when the workflow has no
+            cron trigger (or no expression-bearing cron node).
+          items:
+            type: string
+          example: ["0 2 * * *"]
+        updated_at:
+          type: string
+          format: date-time
+          description: |
+            When the registry last registered or REPLACED this workflow
+            (including a replacement that changed only definition metadata —
+            `registry_revision` advances in that case too). The registry
+            assigns it; it is excluded from `definition_hash`. Omitted for a
+            record written before the registry stamped the field: absence means
+            UNKNOWN, not the zero instant.
+        latest_execution:
+          $ref: "#/components/schemas/WorkflowLatestExecution"
+        stats:
+          $ref: "#/components/schemas/WorkflowExecutionStats"
+        recent_executions:
+          type: array
+          maxItems: 10
+          description: |
+            The workflow's newest executions, newest first (at most 10). Present
+            only when the request asked for `include=recent`, the caller also
+            holds `execution.read`, and the workflow has at least one execution
+            in the caller's namespace; otherwise the property is omitted.
+          items:
+            $ref: "#/components/schemas/WorkflowRecentExecution"
+
+    WorkflowLatestExecution:
+      type: object
+      description: |
+        Summary of the most recent execution recorded for one listed workflow —
+        the "most recent run" column of a workflow list. It is a projection of
+        the execution record and deliberately excludes the definition, params,
+        output and error: a list row that needed any of those reads the
+        execution directly via `GET /v1/executions/{id}`.
+
+        The field is absent from a `WorkflowListItem` when the caller does not
+        also hold `execution.read`, when the server has no execution store, when
+        the store cannot answer the batch lookup, when the workflow has no
+        execution in the caller's namespace, or when that lookup degraded on a
+        read error. A missing grant degrades the column to absent rather than
+        failing the page with a 403: the list itself only requires
+        `workflow.read`. Absent therefore means UNKNOWN, never "this workflow
+        never ran" — a caller that must distinguish the two reads the
+        executions collection with `workflow_id`.
+      required: [execution_id, status, created_at, updated_at]
+      properties:
+        execution_id:
+          type: string
+          description: Server-assigned execution id (the `{id}` of `GET /v1/executions/{id}`).
+        status:
+          $ref: "#/components/schemas/ExecutionStatus"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    WorkflowExecutionStats:
+      type: object
+      description: |
+        Per-workflow execution statistics over the requested `window` — the
+        `stats` field of a workflow list row, present only for
+        `include=stats` when the caller also holds `execution.read`.
+
+        `failed` counts both `failed` and `timeout` (a timeout is a failed run
+        for the purpose of a success rate). Every terminal status counts in the
+        denominator: `success_rate = succeeded / (succeeded + failed +
+        canceled)`, so a canceled run cannot inflate the rate. `success_rate` is
+        null when the window has NO terminal run — null means "no data", never
+        zero.
+
+        A workflow the store did not mention (it has no execution at all) is
+        rendered as a KNOWN zero: `runs: 0`, `success_rate: null`, and
+        `sample_size: 0`. A workflow whose read FAILED is different: the
+        `stats` property is omitted entirely.
+
+        `p50_ms` / `p95_ms` are nearest-rank percentiles of the durations of the
+        most recent `sample_size` terminal runs (≤ 100). `sample_size` is that
+        count, not the number of runs in the window: when it is smaller than
+        the terminal run count, the percentiles describe a sample rather than
+        the whole window. Duration is currently approximated as
+        `updated_at − created_at` because executions have no `finished_at`
+        column yet; the values carry that approximation.
+      required: [window, runs, succeeded, failed, success_rate, sample_size]
+      properties:
+        window:
+          type: string
+          enum: [24h, 7d, 30d]
+          description: The window the aggregate covers, echoed from the request.
+        runs:
+          type: integer
+          minimum: 0
+          description: Executions created in the window, whatever their status.
+        succeeded:
+          type: integer
+          minimum: 0
+          description: Runs that reached `success`.
+        failed:
+          type: integer
+          minimum: 0
+          description: Runs that reached `failed` OR `timeout`.
+        success_rate:
+          type: [number, "null"]
+          minimum: 0
+          maximum: 1
+          description: |
+            `succeeded / (succeeded + failed + canceled)`, or null when the
+            window has no terminal run.
+        p50_ms:
+          type: [integer, "null"]
+          minimum: 0
+          description: Median duration of the sampled terminal runs, in milliseconds.
+        p95_ms:
+          type: [integer, "null"]
+          minimum: 0
+          description: 95th-percentile duration of the sampled terminal runs, in milliseconds.
+        sample_size:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Number of terminal runs the percentiles were computed from.
+
+    WorkflowRecentExecution:
+      type: object
+      description: |
+        One element of a workflow list row's `recent_executions`: a minimal
+        projection of an execution, newest first. The definition, params,
+        output and error are deliberately absent; read the execution directly
+        for those.
+      required: [execution_id, status, created_at]
+      properties:
+        execution_id:
+          type: string
+          description: Server-assigned execution id (the `{id}` of `GET /v1/executions/{id}`).
+        status:
+          $ref: "#/components/schemas/ExecutionStatus"
+        created_at:
+          type: string
+          format: date-time
+        duration_ms:
+          type: [integer, "null"]
+          minimum: 0
+          description: |
+            Approximate wall-clock duration in milliseconds, present only for a
+            TERMINAL execution (non-terminal = omitted, never 0). It is
+            currently `updated_at − created_at`, since executions have no
+            `finished_at` column yet; an inverted interval (clock skew) is
+            reported as 0.
 
     WorkflowVersionListResponse:
       type: object
@@ -5893,17 +6923,57 @@ components:
         zoom:
           type: number
 
+    WorkflowEditorSection:
+      type: object
+      description: |
+        One purely visual grouping box on the editor canvas (dashed border plus
+        a title label). A section is a display-only annotation: it has no
+        execution effect, the engine never reads it, and it is excluded from
+        the runtime conflict hash (`DefinitionHash`). It is covered only by the
+        audit fingerprint, which hashes the whole editor metadata sibling.
+
+        `node_keys` uses the same stable node identity as `positions` and `ui`:
+        the node's `id`, falling back to its `name` when it has no id (with a
+        NODE_METADATA_KEYED_BY_NAME warning). On save, the server drops keys
+        that match no node, drops a section whose every key was dropped, and
+        drops sections whose `id` is empty or duplicates an earlier surviving
+        section's id (the first such section wins).
+
+        This is not `groups[]`: groups are scheduling semantics (members are
+        dispatched to one runner and carry a runner_selector and group-level
+        on_error), while a section only groups nodes visually. A section also
+        stores no colour; clients derive its accent from the member nodes'
+        categories.
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        node_keys:
+          type: array
+          items:
+            type: string
+        x:
+          type: number
+        y:
+          type: number
+        width:
+          type: number
+        height:
+          type: number
+
     WorkflowEditorMetadata:
       type: object
       description: |
         Editor-only sibling of WorkflowDef (ADR-D4 §2.2-§2.3, D1): visual node
-        positions, canvas viewport, per-node UI state, and author notes. None
-        of these fields have any execution effect and none participate in the
-        runtime conflict hash. Every node-keyed map is keyed by the node's
-        stable id (`NodeDef.id`), falling back to `NodeDef.name` when the node
-        has no id -- a fallback that triggers a NODE_METADATA_KEYED_BY_NAME
-        warning in the response's `warnings` array. A key matching no node is
-        dropped silently.
+        positions, canvas viewport, per-node UI state, author notes, and visual
+        canvas sections. None of these fields have any execution effect and
+        none participate in the runtime conflict hash. Every node-keyed map and
+        every section's `node_keys` entry is keyed by the node's stable id
+        (`NodeDef.id`), falling back to `NodeDef.name` when the node has no id
+        -- a fallback that triggers a NODE_METADATA_KEYED_BY_NAME warning in
+        the response's `warnings` array. A key matching no node is dropped
+        silently.
       properties:
         positions:
           type: object
@@ -5918,6 +6988,10 @@ components:
           type: object
           additionalProperties:
             type: string
+        sections:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkflowEditorSection"
 
     WorkflowDefWithEditorMetadata:
       description: |
@@ -6027,7 +7101,45 @@ components:
       type: object
       properties:
         concurrency:
-          type: integer
+          description: |
+            How many executions of this workflow may be in flight at once.
+            The bare-int shorthand (`concurrency: 10`) means queue mode with
+            that limit; the server preserves that spelling across a
+            decode/encode round trip so an existing definition's hash stays
+            stable. The object form carries an explicit admission mode and the
+            queue controls. A limit of 0 (or an absent value) means unlimited.
+          oneOf:
+            - type: integer
+              minimum: 0
+              description: |
+                Shorthand for `{ limit: N, mode: queue }`.
+            - type: object
+              properties:
+                limit:
+                  type: integer
+                  minimum: 0
+                  description: Maximum concurrent executions; 0 means unlimited.
+                mode:
+                  type: string
+                  enum: [queue, reject]
+                  description: |
+                    Admission policy for submissions over the limit. Defaults
+                    to `queue`, the mode the bare-int shorthand means; `reject`
+                    refuses them with 429 instead of queueing.
+                max_queued:
+                  type: integer
+                  minimum: 0
+                  description: |
+                    Cap on the queue backlog in `queue` mode; 0 means
+                    unbounded. Ignored outside queue mode, and rejected at
+                    compile time in `reject` mode.
+                queue_timeout:
+                  type: integer
+                  minimum: 0
+                  description: |
+                    How long a queued execution may wait for a slot, in
+                    nanoseconds; 0 means unbounded. Applies only in `queue`
+                    mode, and is rejected at compile time in `reject` mode.
         timezone:
           type: string
         on_error:
@@ -6545,7 +7657,17 @@ components:
           maxItems: 3
         description:
           type: string
-          description: Reserved; Descriptor has no description today, so the server never writes it.
+          description: |
+            One-line, editor-facing summary of what the node does, phrased for
+            a workflow author (at most 120 characters). Absent means no summary
+            is available; the editor shows the display name alone.
+        examples:
+          type: array
+          description: |
+            Minimal parameter sets the editor can offer as starting points.
+            Absent means the type declares none.
+          items:
+            $ref: "#/components/schemas/NodeFormExample"
         docs:
           type: string
           description: Long-form documentation (Markdown).
@@ -6589,6 +7711,29 @@ components:
             server types and for runners registered without a pool.
           items:
             type: string
+
+    NodeFormExample:
+      type: object
+      description: |
+        One minimal, valid parameter set for a node type, in DSL form. The
+        values are what a workflow author would write, not editor-display
+        strings: a pure expression param carries the bare expression
+        (`$input.amount >= 100`), never a `${{ }}` template, because a template
+        in a pure expression param fails to parse. Each builtin example passes
+        the server's param validator.
+      additionalProperties: false
+      required: [params]
+      properties:
+        name:
+          type: string
+          description: Short label the editor shows for this example.
+        description:
+          type: string
+          description: One-line explanation of what the example demonstrates.
+        params:
+          type: object
+          description: Top-level parameter values, keyed by param name.
+          additionalProperties: true
 
     NodeFormPorts:
       type: object

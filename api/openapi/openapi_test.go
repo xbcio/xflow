@@ -201,6 +201,35 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 			value:  apiserver.ExampleExecutionListItemQueued(execID, "namespaceA", "wf-01H8XG", "health-check", 2, now, now.Add(time.Minute)),
 		},
 		{
+			// The statistics payload: every status key populated (the schema
+			// requires all nine) and a histogram, so a renamed tag on
+			// counts_by_status, start, or counts fails here.
+			name:   "execution stats",
+			schema: "ExecutionStats",
+			value:  apiserver.ExampleExecutionStats(),
+		},
+		{
+			// The populated dashboard: non-null KPIs, all 24 buckets and the
+			// cluster segment. The second case pins the nullable KPI branch and
+			// the omitted cluster segment.
+			name:   "overview",
+			schema: "OverviewResponse",
+			value:  apiserver.ExampleOverview(),
+		},
+		{
+			name:   "overview with no terminal run",
+			schema: "OverviewResponse",
+			value:  apiserver.ExampleOverviewEmptyKPI(),
+		},
+		{
+			// A workflow page carrying both execution-derived projections. The
+			// recent array deliberately mixes a terminal row (duration_ms set)
+			// with a running one (absent), pinning duration_ms as optional.
+			name:   "workflow list response with stats and recent executions",
+			schema: "WorkflowListResponse",
+			value:  apiserver.ExampleWorkflowListResponseWithStats("wf-01H8XG"),
+		},
+		{
 			// The definition-backed shape: every omitempty field populated and
 			// both instants known. A renamed tag on any of them turns this red.
 			name:   "schedule view",
@@ -698,6 +727,124 @@ func TestRunnerRosterContract(t *testing.T) {
 	assertStringEnum(t, runnerListItem.Value.Properties["desired_state"], "active", "draining")
 }
 
+// TestExecutionListUnsupportedContract pins the storeless execution-list
+// answer: GET /v1/executions must publish a 501 carrying the stable
+// execution_listing_unsupported code. Without it a client cannot tell "this
+// deployment has no execution store" from a server fault, and the handler's
+// 501 would be an undocumented status.
+func TestExecutionListUnsupportedContract(t *testing.T) {
+	spec := loadSpec(t)
+	path := spec.Paths.Value("/v1/executions")
+	if path == nil || path.Get == nil {
+		t.Fatal("GET /v1/executions is missing")
+	}
+	response := path.Get.Responses.Value("501")
+	if response == nil || response.Value == nil {
+		t.Fatal("GET /v1/executions does not declare the 501 a storeless deployment returns")
+	}
+	media := response.Value.Content.Get("application/json")
+	if media == nil || media.Schema == nil {
+		t.Fatal("GET /v1/executions 501 has no application/json schema")
+	}
+	if got, want := media.Schema.Ref, "#/components/schemas/ErrorEnvelope"; got != want {
+		t.Fatalf("GET /v1/executions 501 schema ref = %q, want %q", got, want)
+	}
+	description := strings.ToLower(strings.Join(strings.Fields(derefString(response.Value.Description)), " "))
+	if !strings.Contains(description, "execution_listing_unsupported") {
+		t.Errorf("501 description does not name execution_listing_unsupported:\n%s", description)
+	}
+	found := false
+	for _, example := range media.Examples {
+		if example == nil || example.Value == nil {
+			continue
+		}
+		value, ok := example.Value.Value.(map[string]any)
+		if ok && value["code"] == "execution_listing_unsupported" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("GET /v1/executions 501 has no execution_listing_unsupported example")
+	}
+}
+
+// TestWorkflowListItemMetadataContract pins the two zero-cost metadata
+// projections on a workflow row. Both are optional (a definition may have no
+// description and no cron node), and JSON Schema tolerates undeclared
+// properties, so their absence from the spec would otherwise go unnoticed.
+func TestWorkflowListItemMetadataContract(t *testing.T) {
+	spec := loadSpec(t)
+	item := spec.Components.Schemas["WorkflowListItem"]
+	if item == nil || item.Value == nil {
+		t.Fatal("WorkflowListItem schema is missing")
+	}
+	required := make(map[string]bool, len(item.Value.Required))
+	for _, name := range item.Value.Required {
+		required[name] = true
+	}
+	for _, name := range []string{"description", "cron_expressions"} {
+		prop := item.Value.Properties[name]
+		if prop == nil || prop.Value == nil {
+			t.Errorf("WorkflowListItem.%s is missing from the spec", name)
+			continue
+		}
+		if required[name] {
+			t.Errorf("WorkflowListItem.%s must stay optional", name)
+		}
+	}
+	description := item.Value.Properties["description"]
+	if description != nil && description.Value != nil && (description.Value.Type == nil || !description.Value.Type.Is("string")) {
+		t.Errorf("WorkflowListItem.description type = %v, want string", description.Value.Type)
+	}
+	cron := item.Value.Properties["cron_expressions"]
+	if cron == nil || cron.Value == nil || cron.Value.Items == nil {
+		t.Fatal("WorkflowListItem.cron_expressions must be an array of strings")
+	}
+	if cron.Value.Items.Value == nil || cron.Value.Items.Value.Type == nil || !cron.Value.Items.Value.Type.Is("string") {
+		t.Errorf("WorkflowListItem.cron_expressions items = %v, want string", cron.Value.Items)
+	}
+}
+
+// TestRunnerListItemPlacementContract pins the placement columns the roster
+// gained. They are optional because a directory without a snapshot cannot
+// report them, and an undeclared property would still validate.
+func TestRunnerListItemPlacementContract(t *testing.T) {
+	spec := loadSpec(t)
+	item := spec.Components.Schemas["RunnerListItem"]
+	if item == nil || item.Value == nil {
+		t.Fatal("RunnerListItem schema is missing")
+	}
+	required := make(map[string]bool, len(item.Value.Required))
+	for _, name := range item.Value.Required {
+		required[name] = true
+	}
+	for _, name := range []string{"capacity", "in_flight", "labels", "namespaces", "pool_id", "pool_name"} {
+		prop := item.Value.Properties[name]
+		if prop == nil || prop.Value == nil {
+			t.Errorf("RunnerListItem.%s is missing from the spec", name)
+			continue
+		}
+		if required[name] {
+			t.Errorf("RunnerListItem.%s must stay optional: no snapshot means unknown, not zero", name)
+		}
+	}
+	for _, name := range []string{"capacity", "in_flight"} {
+		prop := item.Value.Properties[name]
+		if prop != nil && prop.Value != nil && (prop.Value.Type == nil || !prop.Value.Type.Is("integer")) {
+			t.Errorf("RunnerListItem.%s type = %v, want integer", name, prop.Value.Type)
+		}
+	}
+	labels := item.Value.Properties["labels"]
+	if labels == nil || labels.Value == nil || labels.Value.AdditionalProperties.Schema == nil {
+		t.Error("RunnerListItem.labels must be an object with string values")
+	}
+	namespaces := item.Value.Properties["namespaces"]
+	if namespaces == nil || namespaces.Value == nil || namespaces.Value.Items == nil {
+		t.Error("RunnerListItem.namespaces must be an array of strings")
+	}
+}
+
 func assertStringEnum(t *testing.T, schema *openapi3.SchemaRef, want ...string) {
 	t.Helper()
 	if schema == nil || schema.Value == nil {
@@ -990,7 +1137,7 @@ func TestScheduleContract(t *testing.T) {
 	if got := patch.RequestBody.Value.Content.Get("application/json").Schema.Ref; got != "#/components/schemas/SchedulePatchRequest" {
 		t.Errorf("PATCH request schema = %q, want SchedulePatchRequest", got)
 	}
-	if got, want := scheduleResponseCodes(patch), []string{"200", "202", "400", "404", "409", "501", "default"}; !reflect.DeepEqual(got, want) {
+	if got, want := scheduleResponseCodes(patch), []string{"200", "202", "400", "404", "409", "413", "501", "default"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("PATCH responses = %v, want %v", got, want)
 	}
 	for _, status := range []string{"200", "202"} {
