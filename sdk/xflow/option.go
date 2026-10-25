@@ -52,6 +52,11 @@ type engineConfig struct {
 	// at Execute time. nil = feature disabled.
 	artifactStore *store.ArtifactStore
 
+	// metadataStore is the optional durable metadata mirror. NewLocal passes it
+	// to the in-memory backend (backendlocal.WithStore); NewCluster uses it as
+	// the ClusterConfig.Store value when that field is nil. nil = no mirror.
+	metadataStore store.Store
+
 	// scheduleOverrides holds the runtime overlays an operator has placed on
 	// trigger nodes (a retimed cron expression, a pause). Read by the
 	// in-process trigger host at activation time — see WithScheduleOverrides.
@@ -199,6 +204,35 @@ func WithVersionPolicy(p execution.VersionPolicy) Option {
 // artifact_digest params fail at Execute with a permanent config error.
 func WithArtifactStore(s *store.ArtifactStore) Option {
 	return func(c *engineConfig) { c.artifactStore = s }
+}
+
+// WithStore installs an optional durable metadata store.
+//
+// For NewLocal the store is a mirror of the in-process state: executions, node
+// status, signals, and the resulting audit rows are projected into it after
+// each accepted transition, so they survive process exit and can be listed
+// from the store. It does NOT make an in-flight execution resumable — a
+// restarted local engine starts empty and never resumes, redelivers, or
+// repairs work it finds only in the store. Use NewCluster for durable
+// execution.
+//
+// Per-workflow transient executions are never mirrored. A deterministic
+// execution ID that already has a store row from a previous process fails a
+// required create with an error wrapping local.ErrStoreExecutionExists (the
+// in-memory execution is rolled back); seed collisions are logged and stop
+// further projection for that execution, leaving the old row untouched.
+// Projections for one execution are serialized and converge on the latest
+// in-memory status, so a completion racing the initial insert still ends
+// terminal in the store.
+//
+// For NewCluster this is the same knob as ClusterConfig.Store. ClusterConfig
+// wins when both are set, so an existing caller that passes the field is
+// unaffected.
+//
+// nil (the default) leaves NewLocal purely in-memory, exactly as before this
+// option existed.
+func WithStore(s store.Store) Option {
+	return func(c *engineConfig) { c.metadataStore = s }
 }
 
 // WithScheduleOverrides provides the store holding trigger-node overlays: the

@@ -19,7 +19,8 @@ type ClusterConfig struct {
 
 	// Store is an optional durable metadata store, such as sqlstore over GORM
 	// or memstore for tests. Nil means Redis-only runtime state with no SQL
-	// persistence mirror.
+	// persistence mirror. xflow.WithStore supplies the same value through the
+	// common option set; this field wins when both are set.
 	Store store.Store
 
 	// DisableConsumer leaves this SDK instance as an API/control client only:
@@ -92,7 +93,14 @@ func NewCluster(clusterCfg ClusterConfig, opts ...Option) (*Engine, error) {
 	if fn := artifactCodeResolverFor(cfg.artifactStore); fn != nil && !clusterCfg.DisableConsumer {
 		asynqOpts = append(asynqOpts, distributed.WithArtifactCodeResolver(fn))
 	}
-	a, err := distributed.New(clusterCfg.RedisAddr, clusterCfg.Store, asynqOpts...)
+	db := clusterCfg.Store
+	if db == nil {
+		// The common option set is honoured here so a caller can configure the
+		// durable store the same way for NewLocal and NewCluster. The explicit
+		// field wins when both are present.
+		db = cfg.metadataStore
+	}
+	a, err := distributed.New(clusterCfg.RedisAddr, db, asynqOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("cluster: %w", err)
 	}

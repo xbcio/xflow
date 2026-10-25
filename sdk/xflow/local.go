@@ -10,10 +10,19 @@ import (
 // goroutine worker pool.
 //
 // Use NewLocal for unit tests, examples, local development, and single-process
-// embedded usage. It supports LocalNode and typed nodes, but all state is
-// process memory: stopping the process loses executions, signals, outputs, and
-// queued work. For distributed workers, durable Redis state, or API-only pods,
-// use NewCluster instead.
+// embedded usage. It supports LocalNode and typed nodes. State is process
+// memory unless WithStore is supplied: stopping the process loses executions,
+// signals, outputs, and queued work.
+//
+// With WithStore, execution metadata — the execution row, node status,
+// signals, and the audit projection — is additionally mirrored into the
+// supplied store after each accepted transition, exactly as the distributed
+// backend mirrors Redis state into its SQL store. The mirror is metadata only:
+// execution history survives process exit and can be listed from the store,
+// but an in-flight execution does NOT resume, and no queued task is
+// redelivered from it after a restart. The in-memory state remains the sole
+// scheduling authority while the process runs. For durable execution use
+// NewCluster instead.
 //
 // NewLocal only supports ExecutionModeDefault. Transient execution mode is a
 // cluster/Redis-only concept: it needs Redis TTLs and Asynq's fire-and-forget
@@ -48,6 +57,16 @@ func NewLocal(opts ...Option) (*Engine, error) {
 	}
 	if fn := artifactCodeResolverFor(cfg.artifactStore); fn != nil {
 		memOpts = append(memOpts, backendlocal.WithArtifactCodeResolver(fn))
+	}
+	if cfg.metadataStore != nil {
+		memOpts = append(memOpts, backendlocal.WithStore(cfg.metadataStore))
+		if cfg.logger != nil {
+			// The backend's logger reports failed best-effort mirror writes. It is
+			// wired only when a mirror exists so the nil-store path stays
+			// byte-for-byte what it was: previously NewLocal never handed the SDK
+			// logger to the in-memory provider.
+			memOpts = append(memOpts, backendlocal.WithQueueLogger(cfg.logger))
+		}
 	}
 	provider := backendlocal.New(memOpts...)
 	return newFromConfig(cfg, provider)
