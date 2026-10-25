@@ -1048,6 +1048,10 @@ func TestExpireExecutionAlreadyTerminalLeavesNoMemo(t *testing.T) {
 // on a real child (the dispatch ran), driven through an engine whose store and
 // hooks feed one expireLog. The log tracks the parent; a test that expires the
 // child points log.track at the child's id.
+//
+// A graph with several sub-workflow nodes parks each on its own child: nodes
+// lists them in graph order and links holds every link by node name, while link
+// is the one of the node named "sub".
 type expireSubWorkflowRig struct {
 	eng      *Engine
 	state    *expireState
@@ -1055,12 +1059,18 @@ type expireSubWorkflowRig struct {
 	hooks    *expireHooks
 	parentID types.ExecutionID
 	link     SubWorkflowLink
+	nodes    []string
+	links    map[string]SubWorkflowLink
 }
 
 func newExpireSubWorkflowRig(t *testing.T) *expireSubWorkflowRig {
 	t.Helper()
+	return newExpireSubWorkflowRigOf(t, resolvedSubWorkflowParent(t))
+}
+
+func newExpireSubWorkflowRigOf(t *testing.T, g *graph.Graph) *expireSubWorkflowRig {
+	t.Helper()
 	ctx := context.Background()
-	g := resolvedSubWorkflowParent(t)
 	parentID := types.ExecutionID("exec-parent")
 	log := &expireLog{track: parentID}
 	hooks := &expireHooks{log: log}
@@ -1075,27 +1085,36 @@ func newExpireSubWorkflowRig(t *testing.T) *expireSubWorkflowRig {
 	}
 	eng := New(&expireAckState{expireState: state}, &fakeQueue{},
 		WithHooks(hooks), WithSubWorkflowResolver(subWorkflowStubResolver(t)))
-	idx, ok := g.NodeIndex("sub")
-	if !ok {
-		t.Fatal(`the graph has no node named "sub"`)
+	rig := &expireSubWorkflowRig{
+		eng: eng, state: state, log: log, hooks: hooks, parentID: parentID,
+		links: make(map[string]SubWorkflowLink),
 	}
-	handled, err := eng.handleSystemTask(ctx, &Task{
-		ExecutionID:  parentID,
-		NodeName:     "sub",
-		NodeIdx:      idx,
-		UnitIdx:      g.UnitIndexForNode(idx),
-		Type:         TaskTypeSubWorkflow,
-		ActivationID: 1,
-	}, true)
-	if err != nil || !handled {
-		t.Fatalf("dispatch the sub-workflow node: handled=%v err=%v", handled, err)
+	for _, idx := range g.SubWorkflowNodeIndexes() {
+		name := g.NodeName(idx)
+		handled, err := eng.handleSystemTask(ctx, &Task{
+			ExecutionID:  parentID,
+			NodeName:     name,
+			NodeIdx:      idx,
+			UnitIdx:      g.UnitIndexForNode(idx),
+			Type:         TaskTypeSubWorkflow,
+			ActivationID: 1,
+		}, true)
+		if err != nil || !handled {
+			t.Fatalf("dispatch the sub-workflow node %q: handled=%v err=%v", name, handled, err)
+		}
+		link, found, err := state.GetSubWorkflowLink(ctx, parentID, name)
+		if err != nil || !found {
+			t.Fatalf("read the sub-workflow link of %q: found=%v err=%v", name, found, err)
+		}
+		rig.nodes = append(rig.nodes, name)
+		rig.links[name] = link
 	}
-	link, found, err := state.GetSubWorkflowLink(ctx, parentID, "sub")
-	if err != nil || !found {
-		t.Fatalf("read the sub-workflow link: found=%v err=%v", found, err)
+	if len(rig.nodes) == 0 {
+		t.Fatal("the graph has no sub-workflow node")
 	}
+	rig.link = rig.links["sub"]
 	log.clear()
-	return &expireSubWorkflowRig{eng: eng, state: state, log: log, hooks: hooks, parentID: parentID, link: link}
+	return rig
 }
 
 func (r *expireSubWorkflowRig) nodeStatus(t *testing.T) types.NodeStatus {
@@ -1635,5 +1654,100 @@ func TestExpireExecutionLinkReadFailureIsResumable(t *testing.T) {
 	}
 	if got := rig.hooks.completions(); len(got) != 1 {
 		t.Fatalf("completion hooks = %v, want exactly one", got)
+	}
+}
+
+// TestExpireExecutionOneFailingChildDoesNotStopTheOthers pins the cascade's
+// join: the children of a parent's sub-workflow nodes are each cancelled even
+// when an earlier one could not be, and the error that comes back names every
+// failure. Stopping at the first failure would leave the later children running
+// with nothing left to list the parent again for them once the entry were
+// acknowledged, and would hide the second failure behind the first. The replay
+// after the faults clear finishes both children, acknowledges once, and does not
+// repeat the completion hook.
+func TestExpireExecutionOneFailingChildDoesNotStopTheOthers(t *testing.T) {
+	cases := []struct {
+		name string
+		fail []string // parent node names whose child's own cancel fails
+	}{
+		{name: "the first child fails", fail: []string{"sub"}},
+		{name: "the second child fails", fail: []string{"sub2"}},
+		{name: "both children fail", fail: []string{"sub", "sub2"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			def := subWorkflowParentDef()
+			def.Nodes = append(def.Nodes, types.NodeDef{
+				Name:       "sub2",
+				Type:       types.SubWorkflowNodeType,
+				Parameters: map[string]any{"workflow": "child"},
+			})
+			g, err := graph.CompileWithResolver(ctx, def, subWorkflowStubResolver(t))
+			if err != nil {
+				t.Fatalf("CompileWithResolver: %v", err)
+			}
+			rig := newExpireSubWorkflowRigOf(t, g)
+			if got := rig.nodes; len(got) != 2 || got[0] != "sub" || got[1] != "sub2" {
+				t.Fatalf("parked nodes = %v, want [sub sub2]", got)
+			}
+			injected := make(map[string]error, len(tc.fail))
+			for _, name := range tc.fail {
+				injected[name] = errors.New("injected: child list suspended nodes failed for " + name)
+				rig.state.failListSuspendedFor(rig.links[name].ChildExecutionID, injected[name])
+			}
+
+			got, err := rig.eng.ExpireExecution(ctx, rig.parentID)
+			if err == nil {
+				t.Fatalf("ExpireExecution() = (%q, nil), want the child cancel failures", got)
+			}
+			for name, want := range injected {
+				if !errors.Is(err, want) {
+					t.Fatalf("ExpireExecution() error = %v, want it to wrap the failure of %q (%v)", err, name, want)
+				}
+			}
+			for _, name := range rig.nodes {
+				child, err := rig.state.GetExecution(ctx, rig.links[name].ChildExecutionID)
+				if err != nil || child == nil {
+					t.Fatalf("read the child of %q: %+v, %v", name, child, err)
+				}
+				want := types.ExecutionStatusCanceled
+				if injected[name] != nil {
+					want = types.ExecutionStatusCanceling
+				}
+				if child.Status != want {
+					t.Fatalf("child of %q = %q after the failed call, want %q: one failing child must not stop the others", name, child.Status, want)
+				}
+			}
+			if n := rig.log.count("ack"); n != 0 {
+				t.Fatalf("acked %d times after a failed child cancel, want 0: the entry must stay listed", n)
+			}
+			if got := rig.hooks.completions(); len(got) != 1 {
+				t.Fatalf("completion hooks after the failed call = %v, want exactly one", got)
+			}
+
+			rig.expire(t, rig.parentID, ExpireOutcomeResumed)
+
+			for _, name := range rig.nodes {
+				child, err := rig.state.GetExecution(ctx, rig.links[name].ChildExecutionID)
+				if err != nil || child == nil || child.Status != types.ExecutionStatusCanceled {
+					t.Fatalf("child of %q = %+v (err %v), want canceled after the replay", name, child, err)
+				}
+				node, err := rig.state.GetNode(ctx, rig.parentID, name)
+				if err != nil || node == nil || node.Status != types.NodeStatusCanceled {
+					t.Fatalf("parked node %q = %+v (err %v), want canceled after the replay", name, node, err)
+				}
+			}
+			if n := rig.log.count("ack"); n != 1 {
+				t.Fatalf("acked %d times after the replay, want 1", n)
+			}
+			if got := rig.hooks.completions(); len(got) != 1 || got[0] != types.ExecutionStatusTimeout {
+				t.Fatalf("completion hooks after the replay = %v, want still exactly [timeout]", got)
+			}
+			if n := rig.log.count("write:timeout"); n != 1 {
+				t.Fatalf("timeout was written %d times, want once: the replay must not rewrite it", n)
+			}
+			rig.log.requireLast(t, "ack")
+		})
 	}
 }
