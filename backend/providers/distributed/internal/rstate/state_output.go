@@ -196,15 +196,14 @@ func (s *Store) extendExecTTL(ctx context.Context, id types.ExecutionID, nodeNam
 // It picks the largest of the execution's base TTL, spec.Timeout + 1 hour, and
 // the time left to the execution's deadline plus its grace.
 //
-// The deadline term is read from the store rather than from the in-memory
-// override: getExecTTL falls back to the 24h default on a replica that did not
-// create the execution, and a suspended execution can sit parked for longer
-// than that while its time budget is still running. Without this its status
-// would expire at the default retention and the execution would vanish instead
-// of timing out.
-//
 // The base TTL comes from getExecTTL, which resolves the explicit per-execution
-// override first, then the per-workflow transient TTL, then the adapter default.
+// override first, then the per-workflow transient TTL, then the adapter default,
+// and lengthens the result past the execution's deadline (read from the store,
+// not the in-memory override, so a replica that did not create the execution
+// still honors it). A suspended execution can sit parked for longer than the
+// default retention while its time budget is still running; without the deadline
+// term its status would expire at the default and the execution would vanish
+// instead of timing out.
 // Reading s.execTTLs directly would miss the transient case: a per-workflow
 // transient execution never writes that map, so its suspended keys would be
 // EXPIREd to the durable retention window -- hours of extra life for an
@@ -218,7 +217,7 @@ func (s *Store) suspendTTL(ctx context.Context, id types.ExecutionID, spec *type
 			ttl = candidate
 		}
 	}
-	return retentionPastDeadline(ttl, s.executionDeadline(ctx, id))
+	return ttl
 }
 
 // ---------------------------------------------------------------------------

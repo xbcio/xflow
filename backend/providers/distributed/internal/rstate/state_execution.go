@@ -391,6 +391,9 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("create execution %q: %w", e.ID, err)
 	}
+	// The deadline just written is remembered so this replica's first getExecTTL
+	// does not read it back; a zero one is remembered too, as "no time budget".
+	s.rememberExecDeadline(e.ID, e.Deadline)
 	if err := s.refreshTransientTTL(ctx, e.ID, keys...); err != nil {
 		return err
 	}
@@ -415,6 +418,7 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 func (s *Store) cleanupCreatedExecution(ctx context.Context, e *engine.ExecutionSnapshot) {
 	s.ttlMu.Lock()
 	delete(s.execTTLs, e.ID)
+	delete(s.execDeadlines, e.ID)
 	s.ttlMu.Unlock()
 
 	t := namespace.FromContext(ctx)

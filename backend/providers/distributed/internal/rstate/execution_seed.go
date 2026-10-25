@@ -281,7 +281,10 @@ func (s *Store) SeedExecution(ctx context.Context, req engine.SeedExecutionReque
 
 	execID := req.Execution.ID
 	t := namespace.FromContext(ctx)
-	ttl := s.getExecTTL(ctx, execID)
+	// The creation retention starts from the base rule, not getExecTTL: the
+	// deadline is sized in below from the snapshot in hand, and getExecTTL would
+	// read deadline_ms before this call has written it and memoize "no budget".
+	ttl := s.baseExecTTL(ctx, execID)
 
 	// Step 0: the slot decision, before anything is written.
 	status := types.ExecutionStatusRunning
@@ -437,6 +440,9 @@ func (s *Store) SeedExecution(ctx context.Context, req engine.SeedExecutionReque
 			return engine.SeedExecutionResponse{}, fmt.Errorf("persist rerun origin for %q: %w", execID, err)
 		}
 	}
+	// The deadline just written is remembered so this replica's getExecTTL does
+	// not read it back; zero is remembered as "no time budget".
+	s.rememberExecDeadline(execID, req.Execution.Deadline)
 
 	// Prime the verdict when the graph is NOT transient: this call is
 	// authoritative for the execution, and the durable marker above is already in

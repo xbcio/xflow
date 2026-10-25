@@ -437,8 +437,16 @@ func (s *Store) seedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 		if err := s.registerExecutionDeadline(ctx, t, execID, time.UnixMilli(deadlineMs), true); err != nil {
 			return engine.SeedExecutionFromEntryResponse{}, err
 		}
-		if err := s.rdb.SetNX(ctx, execKey(t, execID, "deadline_ms"), deadlineMs, ttl).Err(); err != nil {
+		written, err := s.rdb.SetNX(ctx, execKey(t, execID, "deadline_ms"), deadlineMs, ttl).Result()
+		if err != nil {
 			return engine.SeedExecutionFromEntryResponse{}, fmt.Errorf("persist deadline for %q: %w", execID, err)
+		}
+		// Remember the deadline only when this call wrote it. A redelivered
+		// admission lost the SetNX and the stored deadline is the original one,
+		// which this call's own value would overstate; leaving the memo empty
+		// lets getExecTTL read the real one.
+		if written {
+			s.rememberExecDeadline(execID, time.UnixMilli(deadlineMs))
 		}
 	}
 

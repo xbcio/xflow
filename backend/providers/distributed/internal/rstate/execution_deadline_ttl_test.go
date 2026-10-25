@@ -101,10 +101,10 @@ func TestSeedExecutionFromEntryKeepsKeysPastTheDeadline(t *testing.T) {
 
 // TestSuspendOnAnotherReplicaKeepsKeysPastTheDeadline is the cross-replica case
 // the in-memory override cannot cover: replica B never created the execution,
-// so its getExecTTL answers the default retention. The park renews the
-// execution's keys, and it must renew them to the deadline, not back down to a
-// retention shorter than the time budget still running. The spec's own timeout
-// is deliberately short, so only the deadline can account for the lifetime.
+// so its base retention is the default. The park renews the execution's keys,
+// and it must renew them to the deadline, not back down to a retention shorter
+// than the time budget still running. The spec's own timeout is deliberately
+// short, so only the deadline can account for the lifetime.
 func TestSuspendOnAnotherReplicaKeepsKeysPastTheDeadline(t *testing.T) {
 	ctx := context.Background()
 	srv, rdb, creator := newMiniredisStore(t)
@@ -118,8 +118,8 @@ func TestSuspendOnAnotherReplicaKeepsKeysPastTheDeadline(t *testing.T) {
 	}
 
 	other := New(rdb, nil, time.Minute) // a second replica: no in-memory override
-	if got := other.getExecTTL(ctx, id); got != time.Minute {
-		t.Fatalf("precondition: the other replica resolves a %v retention, want the %v default", got, time.Minute)
+	if got := other.baseExecTTL(ctx, id); got != time.Minute {
+		t.Fatalf("precondition: the other replica resolves a %v base retention, want the %v default", got, time.Minute)
 	}
 	lease := privateRedisLease(id, "wait", 0, "lease-ttl", "token-ttl")
 	lease.Task.ActivationID = 1
