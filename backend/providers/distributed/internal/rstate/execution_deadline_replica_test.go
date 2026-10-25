@@ -352,12 +352,32 @@ func TestCreationPathsRememberTheDeadline(t *testing.T) {
 			hook := &deadlineReadHook{}
 			rdb.AddHook(hook)
 			id := tc.create(t, state)
-			hook.reads.Store(0)
+			// Reads made while the execution is being created count too: a creation
+			// path that sizes its retention through getExecTTL reads deadline_ms
+			// before it has written it, which is a wasted round trip at best and
+			// the wrong answer at worst.
+			if got := hook.reads.Load(); got != 0 {
+				t.Fatalf("creating the execution read deadline_ms %d times, want 0: the creation path holds the deadline it writes", got)
+			}
 			for i := 0; i < 5; i++ {
 				state.getExecTTL(ctx, id)
 			}
 			if got := hook.reads.Load(); got != 0 {
 				t.Fatalf("the creating replica read deadline_ms %d times after creation, want 0: it already knows the deadline", got)
+			}
+
+			// What the replica remembers is what was stored, not merely something.
+			memo := requireMemo(t, state, id, true)
+			stored, err := rdb.Get(ctx, execKey(namespace.Default, id, "deadline_ms")).Int64()
+			switch {
+			case errors.Is(err, redis.Nil):
+				if !memo.IsZero() {
+					t.Fatalf("no deadline_ms was stored but the replica remembers %v, want the zero deadline", memo)
+				}
+			case err != nil:
+				t.Fatalf("read the stored deadline: %v", err)
+			case memo.UnixMilli() != stored:
+				t.Fatalf("the replica remembers deadline %d ms, want the stored %d ms", memo.UnixMilli(), stored)
 			}
 		})
 	}
