@@ -222,6 +222,7 @@ func TestWorkflowControlInspect(t *testing.T) {
 		Status:          types.ExecutionStatusRunning,
 		WorkflowID:      "wf-1",
 		WorkflowVersion: "v2",
+		TraceID:         "0123456789abcdef0123456789abcdef",
 	}}
 	mux := newControlMux(f)
 
@@ -238,6 +239,7 @@ func TestWorkflowControlInspect(t *testing.T) {
 		Status          types.ExecutionStatus `json:"status"`
 		WorkflowID      string                `json:"workflow_id"`
 		WorkflowVersion string                `json:"workflow_version"`
+		TraceID         string                `json:"trace_id"`
 	}
 	env := decodeEnvelope(t, resp, &detail)
 	if !env.Success || env.Code != "200" {
@@ -252,6 +254,11 @@ func TestWorkflowControlInspect(t *testing.T) {
 	if detail.WorkflowID != "wf-1" || detail.WorkflowVersion != "v2" {
 		t.Fatalf("detail identity = (%q, %q), want (%q, %q)",
 			detail.WorkflowID, detail.WorkflowVersion, "wf-1", "v2")
+	}
+	// The trace correlation id the 运行日志 tab offers for copying and for an
+	// external trace link. It is diagnostic metadata, not business data.
+	if detail.TraceID != "0123456789abcdef0123456789abcdef" {
+		t.Fatalf("detail trace_id = %q, want the submission trace id", detail.TraceID)
 	}
 }
 

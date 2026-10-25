@@ -20,6 +20,14 @@ type ExecutionDetail struct {
 	// an unattributed run must not be reported under a guessed workflow.
 	WorkflowID      types.WorkflowID `json:"workflow_id,omitempty"`
 	WorkflowVersion string           `json:"workflow_version,omitempty"`
+	// TraceID is the correlation id of the external tracing system that
+	// accepted the submission — the trace id captured when the execution was
+	// submitted (see ExecutionSnapshot.TraceID). It is diagnostic metadata, not
+	// business data: it names a span tree rather than carrying a payload, and it
+	// is what lets a reader jump from an execution to the trace that produced
+	// its logs. Empty means the submission carried no trace context, which is
+	// unknown — a client must not reconstruct or guess one.
+	TraceID string `json:"trace_id,omitempty"`
 	// CreatedAt / UpdatedAt describe the execution's lifetime: creation and the
 	// latest status transition, both taken from the backend's clock. Pointers
 	// rather than time.Time because omitempty does not omit a zero struct, and
@@ -106,6 +114,7 @@ func (e *Engine) InspectStatus(ctx context.Context, id types.ExecutionID) (Execu
 		Status:          snap.Status,
 		WorkflowID:      snap.WorkflowID,
 		WorkflowVersion: snap.WorkflowVersion,
+		TraceID:         snap.TraceID,
 		CreatedAt:       timePtr(snap.CreatedAt),
 		UpdatedAt:       timePtr(snap.UpdatedAt),
 		Error:           snap.Error,
