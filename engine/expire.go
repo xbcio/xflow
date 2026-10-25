@@ -88,9 +88,12 @@ func (e *Engine) ExpireExecution(ctx context.Context, id types.ExecutionID) (out
 		}
 		span.Set("outcome", string(outcome))
 		// Reading the trace carrier for the span above memoizes it per
-		// execution. An execution that is gone or concluded long ago is not
-		// evicted by anything else, so it is dropped here.
-		if outcome == ExpireOutcomeGone || outcome == ExpireOutcomeAlreadyTerminal {
+		// execution. Expired and Resumed evict at the end of the cascade; every
+		// other result leaves the execution to someone else (or to nobody), and
+		// on an engine that does not own it nothing else would ever evict the
+		// entry, so it is dropped here. Eviction only drops this engine's
+		// process-local caches: dropping something still in use costs a reload.
+		if outcome != ExpireOutcomeExpired && outcome != ExpireOutcomeResumed {
 			e.EvictExecution(id)
 		}
 	}()

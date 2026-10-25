@@ -1150,3 +1150,66 @@ func TestExpireExecutionResumedNotifiesTheParent(t *testing.T) {
 	}
 	rig.log.requireLast(t, "ack")
 }
+
+// TestExpireExecutionEarlyReturnsLeaveNoMemo pins that no result which returns
+// before the cascade keeps the engine's per-execution memo. The call's own span
+// reads the execution's trace carrier and memoizes it, and an engine that does
+// not own the execution (a sweeper's, or a runner's) has nothing else that would
+// ever evict it. Eviction only drops this engine's process-local caches, so a
+// result that evicts something still in use costs one reload, nothing more.
+func TestExpireExecutionEarlyReturnsLeaveNoMemo(t *testing.T) {
+	cases := []struct {
+		name    string
+		prepare func(rig *expireRig)
+		want    ExpireOutcome
+		calls   []string
+	}{
+		{
+			name:    "canceling",
+			prepare: func(rig *expireRig) { rig.force(types.ExecutionStatusCanceling, "") },
+			want:    ExpireOutcomeCanceling,
+		},
+		{
+			name: "canceling lands between the pre-read and the write",
+			prepare: func(rig *expireRig) {
+				rig.state.onceBeforeTimeoutWrite(func() { rig.force(types.ExecutionStatusCanceling, "") })
+			},
+			want:  ExpireOutcomeCanceling,
+			calls: []string{"write:timeout"},
+		},
+		{
+			name:    "deadline not reached",
+			prepare: func(rig *expireRig) { rig.setDeadline(time.Now().Add(time.Hour)) },
+			want:    ExpireOutcomeNotDue,
+		},
+		{
+			name: "graph missing",
+			prepare: func(rig *expireRig) {
+				rig.eng.EvictExecution(rig.id)
+				rig.state.fakeState.mu.Lock()
+				rig.state.fakeState.executions[rig.id].Graph = nil
+				rig.state.fakeState.mu.Unlock()
+			},
+			want: ExpireOutcomeGone,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newExpireRig(t, true)
+			rig.start(t)
+			rig.setDeadline(pastDeadline)
+			primeEvictProbe(t, rig)
+			tc.prepare(rig)
+
+			rig.expire(t, tc.want)
+
+			rig.log.requireExactly(t, tc.calls...)
+			if traceMemoized(rig.eng, rig.id) {
+				t.Fatalf("the trace carrier memo survived a %q result, want it evicted", tc.want)
+			}
+			if graphCached(rig.eng, rig.id) {
+				t.Fatalf("the graph cache entry survived a %q result, want it evicted", tc.want)
+			}
+		})
+	}
+}
