@@ -83,6 +83,11 @@ type storedWorkflowRecord struct {
 	// failure does not abort decoding the whole record. unmarshalWorkflowRecord
 	// can then fall back to recompiling Definition for legacy snapshots.
 	Graph json.RawMessage `json:"graph,omitempty"`
+	// UpdatedAt is registry-assigned at commit (add or replace). It carries
+	// `omitzero` so a legacy payload without the field stays byte-identical,
+	// and it is excluded from semantic fingerprints: a retried mutation must
+	// hash the same replacement even though the commit stamps a new instant.
+	UpdatedAt time.Time `json:"updated_at,omitzero"`
 }
 
 var (
@@ -968,6 +973,10 @@ func (r *Registry) AddWorkflow(ctx context.Context, rec backend.WorkflowRecord) 
 		}
 	}
 
+	// Registration time is registry-assigned: it is part of the stored record
+	// but excluded from the semantic fingerprint (see marshalWorkflowRecord),
+	// so it never affects idempotent replay or unchanged detection.
+	rec.UpdatedAt = time.Now().UTC()
 	stored, err := marshalWorkflowRecord(rec)
 	if err != nil {
 		return backend.WorkflowRecord{}, err
@@ -1651,6 +1660,10 @@ func (r *Registry) CompareAndReplaceWorkflow(ctx context.Context, req backend.Wo
 		replacement.ID = deterministicReplacementID(t, req.MutationID, req.Expected.ID)
 	}
 	replacement.RegistryRevision = 0
+	// UpdatedAt is commit-assigned and deliberately excluded from the
+	// idempotency fingerprint: a retry re-marshals the same replacement and
+	// must hash identically, so it is zeroed until the mutation is submitted.
+	replacement.UpdatedAt = time.Time{}
 	stored, err := marshalWorkflowRecord(replacement)
 	if err != nil {
 		return backend.WorkflowReplaceResult{}, fmt.Errorf("replace workflow: %w", err)
@@ -1707,6 +1720,14 @@ func (r *Registry) CompareAndReplaceWorkflow(ctx context.Context, req backend.Wo
 		if found {
 			return backend.WorkflowReplaceResult{}, &backend.WorkflowNameConflictError{Holder: holder}
 		}
+	}
+
+	// The mutation is about to be submitted, so it gets its commit timestamp
+	// now. The canonical marshal above already fixed the request fingerprint;
+	// this second marshal only adds UpdatedAt to the stored payload.
+	replacement.UpdatedAt = time.Now().UTC()
+	if stored, err = marshalWorkflowRecord(replacement); err != nil {
+		return backend.WorkflowReplaceResult{}, fmt.Errorf("replace workflow: %w", err)
 	}
 
 	result, err := compareAndReplaceWorkflowLua.Run(
@@ -2191,15 +2212,30 @@ func marshalWorkflowRecord(rec backend.WorkflowRecord) (*marshaledWorkflowRecord
 	if !containsRevisionPlaceholder(payload) {
 		return nil, fmt.Errorf("marshal workflow %q: revision placeholder missing", rec.Key)
 	}
+	// The semantic fingerprint describes the replacement CONTENT, not when it
+	// was committed: UpdatedAt is zeroed for it so an idempotent re-replace
+	// still answers "unchanged" and a retried request hashes identically.
+	fingerprintPayload, err := marshalWorkflowRecordPayloadForFingerprint(rec)
+	if err != nil {
+		return nil, err
+	}
 	return &marshaledWorkflowRecord{
 		ID:             rec.ID,
 		Key:            rec.Key,
 		Name:           rec.Name,
 		Version:        rec.Version,
 		DefinitionHash: rec.DefinitionHash,
-		fingerprint:    semanticFingerprint(payload),
+		fingerprint:    semanticFingerprint(fingerprintPayload),
 		payload:        payload,
 	}, nil
+}
+
+// marshalWorkflowRecordPayloadForFingerprint marshals rec with its
+// registry-assigned UpdatedAt zeroed. Every other field is included, so the
+// fingerprint still distinguishes definitions, names, revisions and metadata.
+func marshalWorkflowRecordPayloadForFingerprint(rec backend.WorkflowRecord) ([]byte, error) {
+	rec.UpdatedAt = time.Time{}
+	return marshalWorkflowRecordPayload(rec)
 }
 
 // marshalWorkflowRecordPayload re-marshals an already-stored record while
@@ -2232,6 +2268,7 @@ func marshalWorkflowRecordPayload(rec backend.WorkflowRecord) ([]byte, error) {
 		Definition:       rec.Definition,
 		EditorMetadata:   rec.EditorMetadata,
 		Graph:            rawGraph,
+		UpdatedAt:        rec.UpdatedAt,
 	}
 	payload, err := json.Marshal(stored)
 	if err != nil {
@@ -2308,6 +2345,7 @@ func unmarshalWorkflowRecord(raw []byte) (backend.WorkflowRecord, error) {
 		AuditFingerprint: stored.AuditFingerprint,
 		Definition:       stored.Definition,
 		EditorMetadata:   stored.EditorMetadata,
+		UpdatedAt:        stored.UpdatedAt,
 	}
 	if len(stored.Graph) > 0 {
 		g := &graph.Graph{}

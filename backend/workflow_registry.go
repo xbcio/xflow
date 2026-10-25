@@ -130,6 +130,14 @@ type WorkflowRecord struct {
 	// editor metadata has ever been stored for this record.
 	EditorMetadata *types.WorkflowEditorMetadata
 	Graph          *graph.Graph
+	// UpdatedAt is when this record was last registered or replaced through a
+	// registry mutation — the "last edited" time a workflow list row shows. It
+	// is registry-assigned, NOT caller-supplied content: the Redis registry
+	// stamps it at commit and excludes it from the replacement idempotency
+	// fingerprint, so retrying a mutation cannot hash a different value.
+	// Zero means UNKNOWN (a record written before this field existed, or a
+	// legacy import that preserved the old payload).
+	UpdatedAt time.Time
 }
 
 // WorkflowRevision is the immutable identity used by atomic registry

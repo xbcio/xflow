@@ -130,6 +130,9 @@ func (r *workflowRegistry) AddWorkflow(ctx context.Context, rec backend.Workflow
 		return backend.WorkflowRecord{}, err
 	}
 	rec.RegistryRevision = r.nextRevisionLocked()
+	// Registration time is registry-assigned: a caller-supplied value cannot
+	// claim a record was registered at some other instant.
+	rec.UpdatedAt = time.Now().UTC()
 	r.byKey[rec.Key] = rec.ID
 	r.byID[rec.ID] = rec
 	if index := workflowNameIndexID(rec); index != "" {
@@ -371,9 +374,11 @@ func (r *workflowRegistry) CompareAndReplaceWorkflow(ctx context.Context, req ba
 	}
 
 	replacement := req.Replacement
-	// RegistryRevision is storage-owned and therefore neither accepted from the
-	// caller nor included in the idempotency fingerprint.
+	// RegistryRevision and UpdatedAt are storage-owned: the revision is
+	// re-stamped on commit, and the timestamp is excluded from the idempotency
+	// fingerprint so a retry cannot hash a different value.
 	replacement.RegistryRevision = 0
+	replacement.UpdatedAt = time.Time{}
 	fingerprint, err := workflowReplaceFingerprint(req.Expected, replacement)
 	if err != nil {
 		return backend.WorkflowReplaceResult{}, err
@@ -415,7 +420,12 @@ func (r *workflowRegistry) CompareAndReplaceWorkflow(ctx context.Context, req ba
 	}
 
 	replacement.RegistryRevision = current.RegistryRevision
-	if reflect.DeepEqual(current, replacement) {
+	// The timestamp is excluded from the content comparison (replacement was
+	// zeroed above): re-sending the same definition must answer "unchanged"
+	// and keep the existing record's registration time.
+	currentContent := current
+	currentContent.UpdatedAt = time.Time{}
+	if reflect.DeepEqual(currentContent, replacement) {
 		result := backend.WorkflowReplaceResult{
 			Status:   backend.WorkflowReplaceUnchanged,
 			Previous: previous,
@@ -457,6 +467,7 @@ func (r *workflowRegistry) CompareAndReplaceWorkflow(ctx context.Context, req ba
 		return backend.WorkflowReplaceResult{}, err
 	}
 	replacement.RegistryRevision = r.nextRevisionLocked()
+	replacement.UpdatedAt = time.Now().UTC()
 	delete(r.byID, current.ID)
 	delete(r.byKey, current.Key)
 	r.byID[replacement.ID] = replacement
