@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { declaredOutputPorts, toGraphModel, type WorkflowDef } from "./index";
+import { autoLayoutPositions, declaredOutputPorts, toGraphModel, type WorkflowDef } from "./index";
 
 describe("declaredOutputPorts", () => {
   it("replaces the single default output with the branches a type declares", () => {
@@ -131,7 +131,7 @@ describe("toGraphModel", () => {
         name: "charge",
         type: "xflow.http",
         label: "charge",
-        position: { x: 280, y: 0 },
+        position: { x: 360, y: 0 },
         disabled: false,
         kind: "action",
         notes: "Calls payment gateway",
@@ -303,7 +303,7 @@ describe("toGraphModel", () => {
       expect.objectContaining({
         name: "worker",
         kind: "action",
-        position: { x: 0, y: 120 }
+        position: { x: 0, y: 192 }
       })
     ]);
   });
@@ -327,10 +327,57 @@ describe("toGraphModel", () => {
     };
 
     expect(toGraphModel(workflow).nodes.map((node) => [node.name, node.position])).toEqual([
-      ["notify", { x: 560, y: 0 }],
+      ["notify", { x: 720, y: 0 }],
       ["start", { x: 0, y: 0 }],
-      ["review", { x: 280, y: 120 }],
-      ["charge", { x: 280, y: 0 }]
+      ["review", { x: 360, y: 192 }],
+      ["charge", { x: 360, y: 0 }]
     ]);
+  });
+});
+
+describe("autoLayoutPositions", () => {
+  const stack: WorkflowDef = {
+    nodes: [
+      { id: "start-id", name: "start", type: "xflow.start" },
+      { id: "a-id", name: "a", type: "xflow.http" },
+      { id: "b-id", name: "b", type: "xflow.http" },
+      { id: "c-id", name: "c", type: "xflow.http" }
+    ],
+    connections: {
+      start: { main: [{ node: "a" }, { node: "b" }] },
+      a: { main: [{ node: "c" }] },
+      b: { main: [{ node: "c" }] }
+    }
+  };
+
+  it("spaces same-column rows by the measured height plus the 32px gap", () => {
+    const positions = autoLayoutPositions(stack, { boxOf: () => ({ width: 264, height: 159 }) });
+    const a = positions.get("a-id")!;
+    const b = positions.get("b-id")!;
+    expect(a.x).toBe(b.x);
+    expect(b.y - a.y).toBe(159 + 32);
+    // A taller card moves the row below it instead of overlapping it.
+    const tall = autoLayoutPositions(stack, { boxOf: () => ({ width: 264, height: 178 }) });
+    expect(tall.get("b-id")!.y - tall.get("a-id")!.y).toBe(178 + 32);
+  });
+
+  it("measures each node on its own instead of assuming one card height", () => {
+    const heights = new Map([["a-id", 120], ["b-id", 200]]);
+    const positions = autoLayoutPositions(stack, {
+      boxOf: (id) => ({ width: 264, height: heights.get(id) ?? 160 })
+    });
+    expect(positions.get("b-id")!.y - positions.get("a-id")!.y).toBe(120 + 32);
+  });
+
+  it("returns only the coordinate-less nodes when asked, keeping pinned ones untouched", () => {
+    const pinned: WorkflowDef = {
+      ...stack,
+      nodes: stack.nodes!.map((node) => (node.id === "b-id" ? { ...node, position: { x: 900, y: 40 } } : node))
+    };
+    const positions = autoLayoutPositions(pinned, { onlyUnpositioned: true });
+    expect(positions.has("b-id")).toBe(false);
+    expect(positions.get("a-id")).toEqual({ x: 360, y: 0 });
+    // The pinned node still owns its row, so later nodes keep their slots.
+    expect(positions.get("c-id")!.x).toBe(720);
   });
 });

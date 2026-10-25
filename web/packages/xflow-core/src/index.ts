@@ -1,3 +1,5 @@
+import { foundationTokens } from "./tokens";
+
 export type NodeKind = "action" | "trigger" | "supply";
 export type ErrorPolicy = "stop" | "error_output" | "main_output" | "continue";
 export type RetryStrategy = "fixed" | "exponential";
@@ -43,9 +45,34 @@ export interface RetryPolicy {
   multiplier?: number;
 }
 
+/** Values of `ConcurrencySettings.mode`; empty means "queue". */
+export type ConcurrencyMode = "queue" | "reject";
+
+/**
+ * The object form of `settings.concurrency`. The wire also accepts a bare int,
+ * which is the shorthand for `{ limit: N, mode: "queue" }`. `max_queued` and
+ * `queue_timeout` apply only in queue mode; `queue_timeout` is in nanoseconds.
+ */
+export interface ConcurrencySettings {
+  /** Maximum concurrent executions; 0 or absent means unlimited. */
+  limit?: number;
+  /** Admission policy for submissions over the limit. Defaults to "queue". */
+  mode?: ConcurrencyMode;
+  /** Queue-mode backlog cap; 0 or absent means unbounded. */
+  max_queued?: number;
+  /** Queue-mode wait bound in nanoseconds; 0 or absent means unbounded. */
+  queue_timeout?: number;
+}
+
 export interface WorkflowSettings {
   timeout?: string | number;
-  concurrency?: number;
+  /**
+   * How many executions of this workflow may run at once. A bare int
+   * (`concurrency: 10`) means queue mode, the shorthand the server preserves
+   * across a round trip; the object form adds the admission mode and the
+   * queue controls.
+   */
+  concurrency?: number | ConcurrencySettings;
   timezone?: string;
   on_error?: ErrorPolicy;
   pin_data_mode?: "test_only" | "always" | "disabled";
@@ -260,6 +287,14 @@ export interface RuntimeNodeSnapshot {
 
 export interface RuntimeSnapshot {
   status?: WorkflowStatus;
+  /**
+   * The external tracing system's correlation id for the run that produced this
+   * snapshot (the server's `ExecutionDetail.trace_id`, carried here by
+   * `@xflow/api`'s `executionDetailToRuntimeSnapshot`). Diagnostic metadata,
+   * not business data: it is absent when the submission carried no trace
+   * context, and absence means unknown rather than a value to reconstruct.
+   */
+  traceId?: string;
   nodes?: Record<string, RuntimeNodeSnapshot>;
 }
 
@@ -294,7 +329,8 @@ export interface GraphModel {
   edges: GraphEdge[];
 }
 
-function nodeKey(node: WorkflowNode): string {
+/** The stable id a workflow node takes on the canvas. */
+export function nodeKey(node: WorkflowNode): string {
   return node.id ?? node.name ?? "unnamed";
 }
 
@@ -306,7 +342,8 @@ function nodeLabel(node: WorkflowNode, fallback: string): string {
   return typeof node.ui?.label === "string" && node.ui.label.trim() ? node.ui.label : fallback;
 }
 
-function hasPosition(node: WorkflowNode): boolean {
+/** True when the definition pins at least one coordinate of the node. */
+export function hasNodePosition(node: WorkflowNode): boolean {
   return node.position?.x !== undefined || node.position?.y !== undefined;
 }
 
@@ -399,28 +436,87 @@ function buildDepths(workflow: WorkflowDef, names: string[]): Map<string, number
   return depths;
 }
 
-function buildAutoPositions(workflow: WorkflowDef): Map<string, Required<Position>> {
-  const sourceNodes = workflow.nodes ?? [];
-  const names = sourceNodes.map(nodeName);
-  const depths = buildDepths(workflow, names);
-  const byDepth = new Map<number, string[]>();
+/** A node card's box in canvas units, as React Flow measured it. */
+export interface AutoLayoutBox {
+  width: number;
+  height: number;
+}
 
-  for (const name of names) {
-    const depth = depths.get(name) ?? 0;
+export interface AutoLayoutOptions {
+  /** Measured box of one node, by graph node id ({@link nodeKey}). */
+  boxOf?: (nodeId: string) => AutoLayoutBox | undefined;
+  /** Return positions only for nodes whose definition pins no coordinate. */
+  onlyUnpositioned?: boolean;
+}
+
+/** Column and row gaps of the fallback layout, in canvas units. */
+const autoLayoutGapX = 96;
+const autoLayoutGapY = 32;
+
+/**
+ * The box the fallback layout assumes before React Flow has measured a card:
+ * the card's 264px CSS width and the 159px full card measured on the 26-node
+ * purchase-approval workflow, rounded up. It is a stand-in for one frame only —
+ * callers that can measure (the preview) pass the real boxes through `boxOf`.
+ */
+const defaultAutoLayoutBox: AutoLayoutBox = {
+  width: Number.parseInt(foundationTokens.nodeWidth, 10),
+  height: 160
+};
+
+/**
+ * Columns from the longest data path, rows sorted by name; x accumulates the
+ * widest box per column and y the height of each box, so cards never share a
+ * slot whatever their content makes them. Nodes that pin a coordinate are
+ * still placed for spacing, and returned only when `onlyUnpositioned` is off.
+ */
+export function autoLayoutPositions(
+  workflow: WorkflowDef,
+  options: AutoLayoutOptions = {}
+): Map<string, Required<Position>> {
+  return buildAutoPositions(workflow, options);
+}
+
+function buildAutoPositions(
+  workflow: WorkflowDef,
+  options: AutoLayoutOptions = {}
+): Map<string, Required<Position>> {
+  const sourceNodes = workflow.nodes ?? [];
+  const entries = sourceNodes.map((node) => ({
+    node,
+    name: nodeName(node),
+    key: nodeKey(node),
+    box: options.boxOf?.(nodeKey(node)) ?? defaultAutoLayoutBox
+  }));
+  const depths = buildDepths(workflow, entries.map((entry) => entry.name));
+  const byDepth = new Map<number, typeof entries>();
+
+  for (const entry of entries) {
+    const depth = depths.get(entry.name) ?? 0;
     const bucket = byDepth.get(depth) ?? [];
-    bucket.push(name);
+    bucket.push(entry);
     byDepth.set(depth, bucket);
   }
 
   for (const bucket of byDepth.values()) {
-    bucket.sort((a, b) => a.localeCompare(b));
+    bucket.sort((a, b) => a.name.localeCompare(b.name));
   }
 
   const positions = new Map<string, Required<Position>>();
-  for (const [depth, bucket] of byDepth) {
-    bucket.forEach((name, row) => {
-      positions.set(name, { x: depth * 280, y: row * 120 });
-    });
+  let columnX = 0;
+  for (const depth of [...byDepth.keys()].sort((a, b) => a - b)) {
+    const bucket = byDepth.get(depth) ?? [];
+    const columnWidth = Math.max(...bucket.map((entry) => entry.box.width));
+    let cursorY = 0;
+    for (const entry of bucket) {
+      if (!options.onlyUnpositioned || !hasNodePosition(entry.node)) {
+        positions.set(entry.key, { x: columnX, y: cursorY });
+      }
+      // A positioned node still takes its row: the unpositioned neighbours must
+      // keep the slots the definition has not pinned.
+      cursorY += entry.box.height + autoLayoutGapY;
+    }
+    columnX += columnWidth + autoLayoutGapX;
   }
 
   return positions;
@@ -430,7 +526,7 @@ function nodePosition(
   node: WorkflowNode,
   fallback: Required<Position>
 ): Required<Position> {
-  if (hasPosition(node)) {
+  if (hasNodePosition(node)) {
     return {
       x: node.position?.x ?? fallback.x,
       y: node.position?.y ?? fallback.y
@@ -440,7 +536,7 @@ function nodePosition(
 }
 
 export function toGraphModel(workflow: WorkflowDef): GraphModel {
-  const autoPositions = buildAutoPositions(workflow);
+  const autoPositions = autoLayoutPositions(workflow);
   const nodes = (workflow.nodes ?? []).map<GraphNode>((node) => {
     const name = nodeName(node);
     const declared = declaredOutputPorts(node);
@@ -455,7 +551,7 @@ export function toGraphModel(workflow: WorkflowDef): GraphModel {
       type: node.type ?? "xflow.unknown",
       kind: node.kind ?? "action",
       label: nodeLabel(node, name),
-      position: nodePosition(node, autoPositions.get(name) ?? { x: 0, y: 0 }),
+      position: nodePosition(node, autoPositions.get(nodeKey(node)) ?? { x: 0, y: 0 }),
       disabled: node.disabled ?? false,
       notes: node.notes,
       inputs: normalizeInputs(node.inputs),
@@ -509,6 +605,7 @@ export * from "./nodeSummary";
 export * from "./editorMetadata";
 export * from "./nodeHelpers";
 export * from "./tokens";
+export * from "./antdTheme";
 export * from "./statusMeta";
 export * from "./categoryMeta";
 export * from "./breakpoints";
