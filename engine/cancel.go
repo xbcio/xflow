@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -59,6 +60,39 @@ func (e *Engine) Cancel(ctx context.Context, id types.ExecutionID) error {
 		return fmt.Errorf("mark execution %q canceling: %w", id, err)
 	}
 
+	if err := e.cancelSuspendedNodes(ctx, id, g); err != nil {
+		return err
+	}
+
+	// The children must stop too, and they stop BEFORE the parent is marked
+	// canceled: each child's own cancellation notifies this execution's node,
+	// and the canceling status set above is what keeps that notification from
+	// concluding the node with a failure this cancel already supersedes.
+	e.cancelSubWorkflowChildren(ctx, id, g)
+
+	// With the children stopping, the nodes they were parked under have no
+	// completion left to wait for: the completion path refuses them while this
+	// execution is canceling, so the cancel finalizes them here rather than
+	// leaving a waiting node for the sweeper to reclaim once per wait TTL.
+	if err := e.finalizeParkedSubWorkflowNodes(ctx, id, g); err != nil {
+		return err
+	}
+
+	if err := e.state.UpdateExecutionStatus(ctx, id, types.ExecutionStatusCanceled, ""); err != nil {
+		return fmt.Errorf("mark execution %q canceled: %w", id, err)
+	}
+	e.notifyExecutionComplete(ctx, id, types.ExecutionStatusCanceled)
+	e.EvictExecution(id)
+	return nil
+}
+
+// cancelSuspendedNodes cancels every node the execution still has suspended. It
+// does not touch the execution's own status, so Cancel (which has already
+// marked the execution canceling) and the execution-level timeout (which
+// drives its own terminal status) share it. It is idempotent: a node no longer
+// Suspended, whether an earlier attempt already canceled it or a concurrent
+// resume moved it on, is skipped rather than rewritten.
+func (e *Engine) cancelSuspendedNodes(ctx context.Context, id types.ExecutionID, g *graph.Graph) error {
 	suspendedNodes, err := e.state.ListSuspendedNodes(ctx, id)
 	if err != nil {
 		return fmt.Errorf("list suspended nodes for %q: %w", id, err)
@@ -114,25 +148,5 @@ func (e *Engine) Cancel(ctx context.Context, id types.ExecutionID) error {
 			return fmt.Errorf("mark suspended node %q/%q canceled: %w", id, nodeName, err)
 		}
 	}
-
-	// The children must stop too, and they stop BEFORE the parent is marked
-	// canceled: each child's own cancellation notifies this execution's node,
-	// and the canceling status set above is what keeps that notification from
-	// concluding the node with a failure this cancel already supersedes.
-	e.cancelSubWorkflowChildren(ctx, id, g)
-
-	// With the children stopping, the nodes they were parked under have no
-	// completion left to wait for: the completion path refuses them while this
-	// execution is canceling, so the cancel finalizes them here rather than
-	// leaving a waiting node for the sweeper to reclaim once per wait TTL.
-	if err := e.finalizeParkedSubWorkflowNodes(ctx, id, g); err != nil {
-		return err
-	}
-
-	if err := e.state.UpdateExecutionStatus(ctx, id, types.ExecutionStatusCanceled, ""); err != nil {
-		return fmt.Errorf("mark execution %q canceled: %w", id, err)
-	}
-	e.notifyExecutionComplete(ctx, id, types.ExecutionStatusCanceled)
-	e.EvictExecution(id)
 	return nil
 }
