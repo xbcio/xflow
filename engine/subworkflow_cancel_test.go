@@ -191,3 +191,31 @@ func TestSubWorkflowDispatchFailsWhenThePostStartParentReadFails(t *testing.T) {
 		t.Fatalf("child status = %s, want running: the failed re-read decides nothing", child.Status)
 	}
 }
+
+// TestSubWorkflowCancelStaysBestEffortWhenTheChildCancelFails pins that the
+// error the cascade now reports to ExpireExecution does not reach Cancel: a
+// child that cannot be stopped costs that child's cancellation, not the
+// parent's. Cancel still returns nil, still finalizes the parked node, and
+// still ends the parent canceled.
+func TestSubWorkflowCancelStaysBestEffortWhenTheChildCancelFails(t *testing.T) {
+	ctx := context.Background()
+	rig := newExpireSubWorkflowRig(t)
+	childID := rig.link.ChildExecutionID
+	rig.state.failListSuspendedFor(childID, errors.New("injected: child list suspended nodes failed"))
+
+	if err := rig.eng.Cancel(ctx, rig.parentID); err != nil {
+		t.Fatalf("Cancel(parent) = %v, want nil: a failed child cancel is logged, not returned", err)
+	}
+
+	parent, err := rig.state.GetExecution(ctx, rig.parentID)
+	if err != nil || parent == nil || parent.Status != types.ExecutionStatusCanceled {
+		t.Fatalf("parent = %+v (err %v), want canceled", parent, err)
+	}
+	if got := rig.nodeStatus(t); got != types.NodeStatusCanceled {
+		t.Fatalf("parked node = %q, want canceled: Cancel must still finalize the wait", got)
+	}
+	child, err := rig.state.GetExecution(ctx, childID)
+	if err != nil || child == nil || child.Status != types.ExecutionStatusCanceling {
+		t.Fatalf("child = %+v (err %v), want canceling: its own cancel failed half way", child, err)
+	}
+}

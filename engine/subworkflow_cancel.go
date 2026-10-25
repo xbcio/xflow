@@ -53,17 +53,28 @@ func (e *Engine) subWorkflowParentCanceling(ctx context.Context, id types.Execut
 // terminal state on its own, which is the same window Cancel already accepts
 // for in-flight runner leases.
 //
-// Every refusal is benign and swallowed: the child may already be terminal (its
-// own completion raced the cancel), and a store read failure costs the child's
-// cancellation, not this cancel — the execution is still marked canceled, and
-// the child's own wait/lease machinery remains in charge of it.
-func (e *Engine) cancelSubWorkflowChildren(ctx context.Context, id types.ExecutionID, g *graph.Graph) {
+// A child that already concluded or is gone (Cancel answers ErrExecutionInactive)
+// is exactly the state this wants and counts as success; a child already
+// canceling is resumed by Cancel and finishes the same way. Every other failure
+// (a link read, a child read, any step of the child's own cancel) is logged
+// where it happens and returned, joined across the children: one failing child
+// does not stop the others from being canceled.
+//
+// Cancel discards the result. A failure costs the child's cancellation, not the
+// parent's: the execution is still marked canceled, and the child's own
+// wait/lease machinery remains in charge of it. ExpireExecution returns it,
+// because its deadline entry may only be withdrawn once the children are
+// stopped, and the replay that follows finds the child canceling or concluded.
+// A failure inside a grandchild's cancel is not seen here: the child's own
+// Cancel discards it by the same rule.
+func (e *Engine) cancelSubWorkflowChildren(ctx context.Context, id types.ExecutionID, g *graph.Graph) error {
 	store, ok := e.state.(SubWorkflowLinkStore)
 	if !ok {
 		// No links can exist without the capability, and a graph this engine
 		// could run has none of these nodes.
-		return
+		return nil
 	}
+	var errs []error
 	for _, idx := range g.SubWorkflowNodeIndexes() {
 		nodeName := g.NodeName(idx)
 		link, found, err := store.GetSubWorkflowLink(ctx, id, nodeName)
@@ -72,27 +83,37 @@ func (e *Engine) cancelSubWorkflowChildren(ctx context.Context, id types.Executi
 				e.logger.Error("read sub-workflow link for cancel failed",
 					"execution_id", string(id), "node_name", nodeName, "err", err)
 			}
+			errs = append(errs, fmt.Errorf("read sub-workflow link %q/%q for cancel: %w", id, nodeName, err))
 			continue
 		}
 		if !found {
 			continue
 		}
-		e.cancelSubWorkflowChild(ctx, link.ChildExecutionID)
+		if err := e.cancelSubWorkflowChild(ctx, link.ChildExecutionID); err != nil {
+			errs = append(errs, err)
+		}
 	}
+	return errors.Join(errs...)
 }
 
 // cancelSubWorkflowChild cancels one child execution, tolerating the benign
-// answers: a child that already concluded (inactive) is exactly the state this
-// wants, and a child already canceling or canceled is the same answer reached
-// twice.
-func (e *Engine) cancelSubWorkflowChild(ctx context.Context, childID types.ExecutionID) {
+// answers: a child that already concluded or is gone (inactive) is exactly the
+// state this wants, and a child already canceling or canceled is the same answer
+// reached twice. Any other failure is logged and returned; callers that treat
+// the cancel as best-effort (the dispatch paths, Cancel) discard it.
+func (e *Engine) cancelSubWorkflowChild(ctx context.Context, childID types.ExecutionID) error {
 	if childID == "" {
-		return
+		return nil
 	}
-	if err := e.Cancel(ctx, childID); err != nil && !errors.Is(err, ErrExecutionInactive) && e.logger != nil {
+	err := e.Cancel(ctx, childID)
+	if err == nil || errors.Is(err, ErrExecutionInactive) {
+		return nil
+	}
+	if e.logger != nil {
 		e.logger.Error("cancel sub-workflow child failed",
 			"child_execution_id", string(childID), "err", err)
 	}
+	return fmt.Errorf("cancel sub-workflow child %q: %w", childID, err)
 }
 
 // finalizeParkedSubWorkflowNodes marks this execution's still-parked
