@@ -8,6 +8,7 @@ import (
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/types"
 )
@@ -268,10 +269,17 @@ func (b *Backend) bindHandlerWithOutbox(eng *engine.Engine, handler func(context
 		b.runQueueTimeoutSweeper(outboxCtx, interval)
 	}()
 
+	deadlineDone := make(chan struct{})
+	go func() {
+		defer close(deadlineDone)
+		b.runDeadlineSweeper(outboxCtx, eng, interval)
+	}()
+
 	return func() {
 		cancelOutbox()
 		<-outboxDone
 		<-queueTimeoutDone
+		<-deadlineDone
 		b.queue.Stop()
 	}
 }
@@ -306,6 +314,65 @@ func (b *Backend) runQueueTimeoutSweeper(ctx context.Context, interval time.Dura
 		case <-ticker.C:
 			if _, err := b.state.ExpireQueuedExecutions(ctx, 0); err != nil && b.logger != nil {
 				b.logger.Error("concurrency_queue_timeout_sweep_failed", "err", err)
+			}
+		}
+	}
+}
+
+// deadlineSweepInterval is how often executions past their settings.timeout
+// deadline are expired when the caller does not say otherwise. One second,
+// matching the queue-timeout sweep: an execution can overrun its deadline by up
+// to one tick.
+const deadlineSweepInterval = time.Second
+
+// deadlineSweepBatch bounds how many overdue executions one tick expires. The
+// rest are still listed on the next tick, so a burst of simultaneous deadlines
+// drains over a few ticks instead of holding one tick open.
+const deadlineSweepBatch = 100
+
+// runDeadlineSweeper expires the executions whose settings.timeout deadline has
+// passed with no task left to notice it.
+//
+// A running node enforces the deadline through its own lease; an execution that
+// is parked (suspended, paused, queued) or between tasks has no lease, so
+// without this loop it would outlive its deadline indefinitely in-process.
+// Unlike the queue-timeout sweep this one needs the engine, because expiring an
+// execution is not only a status write: ExpireExecution also cascades the
+// cancellation to what the execution still had suspended or running, and
+// acknowledges the index entry only once that finished.
+//
+// It holds no state: the deadlines live in the store, and every tick asks the
+// store which ones have passed. A candidate that fails is logged and left in
+// the index, so the next tick retries it.
+func (b *Backend) runDeadlineSweeper(ctx context.Context, eng *engine.Engine, interval time.Duration) {
+	if interval <= 0 {
+		interval = deadlineSweepInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			overdue, err := b.state.ListDeadlineExceededExecutions(ctx, time.Now().UTC(), deadlineSweepBatch)
+			if err != nil {
+				if b.logger != nil {
+					b.logger.Error("execution_deadline_sweep_failed", "err", err)
+				}
+				continue
+			}
+			for _, candidate := range overdue {
+				if ctx.Err() != nil {
+					return
+				}
+				execCtx := ctx
+				if candidate.Namespace != "" {
+					execCtx = namespace.WithNamespace(ctx, candidate.Namespace)
+				}
+				if _, err := eng.ExpireExecution(execCtx, candidate.ExecutionID); err != nil && b.logger != nil {
+					b.logger.Error("execution_deadline_expire_failed", "execution_id", candidate.ExecutionID, "err", err)
+				}
 			}
 		}
 	}
