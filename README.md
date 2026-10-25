@@ -228,3 +228,4 @@ See `docs/` for detailed design documentation:
 - [docs/design/DEPLOYMENT-TOPOLOGIES.md](docs/design/DEPLOYMENT-TOPOLOGIES.md) — SDK modes, server/runner cluster, current vs planned
 - [docs/design/CORE-COMPONENTS.md](docs/design/CORE-COMPONENTS.md) — Target design for server clustering
 - [docs/dsl-samples/](docs/dsl-samples/) — Worked DSL samples. Each file states its own prerequisites in its header: the samples that run against real services name their placeholders (host-registered `function_name` implementations, credentials, service URLs). All of them are parsed and registered by `test/workflows`' sample corpus test.
+- [docs/deploy/xbc-infrastructure.md](docs/deploy/xbc-infrastructure.md) — Optional xbc-backed logging, metrics, tracing, and database selected with `--xbc-config`
