@@ -126,6 +126,11 @@ var guardSamples = []guardSample{
 	{"PathWorkflowScheduleResume", PathWorkflowScheduleResume, http.MethodPost, "/v1/workflows/wf-1/schedules/nightly/resume"},
 	{"PathWorkflowScheduleBackfill", PathWorkflowScheduleBackfill, http.MethodPost, "/v1/workflows/wf-1/schedules/nightly/backfill"},
 
+	// The dashboard read is registered unconditionally (it answers 501 when the
+	// deployment has no execution store) so a storeless fixture still resolves
+	// the route rather than 404-ing as if the server were older.
+	{"PathOverview", PathOverview, http.MethodGet, "/v1/overview"},
+
 	// PathExecutions is shared by two methods on the same path. The sample is
 	// the GET (the offset-paginated collection read, spec §3.3) rather than the
 	// POST entry-seed: both are registered on this fixture's production mux, so
@@ -134,6 +139,7 @@ var guardSamples = []guardSample{
 	// covered by the entry-seed tests.
 	{"PathExecutions", PathExecutions, http.MethodGet, "/v1/executions"},
 
+	{"PathExecutionStats", PathExecutionStats, http.MethodGet, "/v1/executions/stats"},
 	{"PathExecutionByID", PathExecutionByID, http.MethodGet, "/v1/executions/ex-1"},
 	{"PathExecutionCancel", PathExecutionCancel, http.MethodPost, "/v1/executions/ex-1/cancel"},
 	{"PathExecutionPause", PathExecutionPause, http.MethodPost, "/v1/executions/ex-1/pause"},

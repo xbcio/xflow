@@ -90,9 +90,15 @@ const (
 	OpWorkflowRegister         = "workflow.register"
 	OpWorkflowDefinitionUpdate = "workflowdefinition.update" // draft; consumed by PUT /v1/workflows/{id}
 	OpExecutionRead            = "execution.read"
-	OpExecutionSignal          = "execution.signal"
-	OpExecutionRevoke          = "execution.revoke"
-	OpExecutionCancel          = "execution.cancel"
+	// OpOverviewRead gates GET /v1/overview. It is a tenant-wide aggregate read,
+	// so it maps to the same "execution" scope the other execution reads use:
+	// a principal that may list and count executions may also see the dashboard
+	// built from them. The cluster segment inside the response has its own
+	// second decision (OpManagementRunnerList); this operation does not grant it.
+	OpOverviewRead    = "overview.read"
+	OpExecutionSignal = "execution.signal"
+	OpExecutionRevoke = "execution.revoke"
+	OpExecutionCancel = "execution.cancel"
 	// OpExecutionPause and OpExecutionResume suspend and release dispatch of a
 	// running execution. They are separate operations from cancel — and from
 	// each other — because each is its own state transition with its own
@@ -255,6 +261,12 @@ func scopeForOperation(op string) string {
 		OpWorkflowRegister, OpWorkflowDefinitionUpdate:
 		return ScopeWorkflow
 	case OpExecutionRead, OpExecutionSignal, OpExecutionRevoke, OpExecutionCancel, OpExecutionSeed:
+		return "execution"
+	case OpOverviewRead:
+		// The dashboard is an aggregate over the same rows execution.read
+		// already exposes; a separate scope would silently remove it from every
+		// token issued before today. In this codebase "execution.read" is
+		// spelled "execution" (see the case above).
 		return "execution"
 	case OpExecutionRerun:
 		// A scope of its own: starting a new execution from a terminal one is

@@ -8,8 +8,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -105,6 +109,19 @@ type workflowControlModule struct {
 	// same shape the executions store uses, because a constructor parameter
 	// would touch every test call site for no behavioral reason.
 	schedules *control.ScheduleManager
+	// overviewOnce/overviewCache hold GET /v1/overview's 30-second response
+	// cache. Lazily initialized so a module built directly in a test (instead of
+	// through newWorkflowControlModule) still works; the once keeps concurrent
+	// first requests from racing two caches into existence.
+	overviewOnce  sync.Once
+	overviewCache *overviewCache
+}
+
+// overviewCacheFor returns the module's overview cache, creating it on first
+// use.
+func (m *workflowControlModule) overviewCacheFor() *overviewCache {
+	m.overviewOnce.Do(func() { m.overviewCache = newOverviewCache() })
+	return m.overviewCache
 }
 
 func newWorkflowControlModule(cp *control.ControlPlane, auth WorkflowAuthenticator, log engine.Logger, tracer tracing.Tracer) *workflowControlModule {
@@ -208,6 +225,14 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 	// even when no execution store is wired; the handler then answers 500
 	// rather than serving a false empty page.
 	mux.HandleFunc("GET "+PathExecutions, wrap("execution.read", m.handleListExecutions))
+	// GET /v1/executions/stats is the bounded status aggregate. Go 1.22's mux
+	// prefers the literal segment over {id} at the same depth, so "stats" is
+	// never read as an execution id; the /v1/executions/{id}/ catch below needs
+	// a trailing slash and cannot intercept it either.
+	mux.HandleFunc("GET "+PathExecutionStats, wrap("execution.read", m.handleExecutionStats))
+	// GET /v1/overview is the tenant dashboard read. It reuses the execution
+	// read scope through its own operation; see authz.go's OpOverviewRead.
+	mux.HandleFunc("GET "+PathOverview, wrap("overview.read", m.handleOverview))
 	mux.HandleFunc("GET "+PathExecutionByID, wrap("execution.read", m.handleInspectByID))
 	mux.HandleFunc("GET "+PathExecutionWait, wrap("execution.read", m.handleWaitByID))
 	mux.HandleFunc("POST "+PathExecutionSignals, wrap("execution.signal", m.handleSignalByID))
@@ -332,6 +357,12 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	// the read is the principal's own namespace, resolved inside the handler
 	// via namespace.FromContext (never from a query parameter).
 	mux.HandleFunc("GET "+PathExecutions, authz(OpExecutionRead, false, m.handleListExecutions, nil))
+	mux.HandleFunc("GET "+PathExecutionStats, authz(OpExecutionRead, false, m.handleExecutionStats, nil))
+	// GET /v1/overview: OpOverviewRead maps to the same "execution" scope as
+	// the execution reads. No resource resolver: the aggregate is over the
+	// principal's own namespace, resolved inside the handler. The cluster
+	// segment is a second, in-handler decision on OpManagementRunnerList.
+	mux.HandleFunc("GET "+PathOverview, authz(OpOverviewRead, false, m.handleOverview, nil))
 	mux.HandleFunc("GET "+PathExecutionByID, authz(OpExecutionRead, false, m.handleInspectByID, execIDResolver("")))
 	mux.HandleFunc("GET "+PathExecutionWait, authz(OpExecutionRead, false, m.handleWaitByID, execIDResolver("wait")))
 	mux.HandleFunc("POST "+PathExecutionSignals, authz(OpExecutionSignal, true, m.handleSignalByID, execIDResolver("signals")))
@@ -1338,12 +1369,64 @@ func (m *workflowControlModule) handleDeregisterWorkflow(w http.ResponseWriter, 
 // table row needs is the identity (id, name, version), a change detector
 // (definition_hash), and the compare-and-swap token PUT /v1/workflows/{id}
 // expects (registry_revision).
+//
+// Triggers is a derived summary, not stored data: the distinct trigger kinds
+// named by the definition's nodes. It is always present ([] when there is no
+// trigger) so a client can render the column without a null check. The
+// derivation reads rec.Definition.Nodes only — never the compiled graph and
+// never the node registry — so it costs nothing beyond the record read this
+// row already performs and cannot fail independently.
+//
+// Description is the stored definition's one-line description (zero extra IO:
+// the record this row already read carries it) and is omitted when empty.
+// CronExpressions is the same kind of derived trigger summary as Triggers,
+// narrowed to the `expression` parameter of `xflow.trigger.cron` nodes: a
+// workflow list can render a human-readable schedule without reading each
+// definition, and no other trigger parameter leaves the server.
+//
+// LatestExecution is the store-backed "most recent run" projection, present
+// only when the caller passes the execution.read check AND an execution store
+// is wired AND implements the batch reader AND the read succeeds. It carries
+// exactly four fields — no definition, params, output, or credential can reach
+// the wire through it. Absent means UNKNOWN (no permission, no store, no
+// capability, no executions, or a degraded read), never "this workflow never
+// ran".
+//
+// Stats and RecentExecutions are the ?include=stats,recent projections. They
+// are execution data behind the same execution.read scope as
+// LatestExecution, so they are attached only after the same second
+// authorization check and are omitted (never a 403) when the caller lacks it
+// or the backend cannot answer. Stats present with runs=0 is a known zero;
+// stats absent means the aggregate could not be read. RecentExecutions is
+// omitted when the workflow has no executions in scope.
 type workflowListItem struct {
-	ID               string `json:"id"`
-	Name             string `json:"name"`
-	Version          string `json:"version"`
-	DefinitionHash   string `json:"definition_hash"`
-	RegistryRevision uint64 `json:"registry_revision"`
+	ID               string                    `json:"id"`
+	Name             string                    `json:"name"`
+	Version          string                    `json:"version"`
+	DefinitionHash   string                    `json:"definition_hash"`
+	RegistryRevision uint64                    `json:"registry_revision"`
+	Description      string                    `json:"description,omitempty"`
+	Triggers         []string                  `json:"triggers"`
+	CronExpressions  []string                  `json:"cron_expressions,omitempty"`
+	LatestExecution  *workflowLatestExecution  `json:"latest_execution,omitempty"`
+	Stats            *workflowExecutionStats   `json:"stats,omitempty"`
+	RecentExecutions []workflowRecentExecution `json:"recent_executions,omitempty"`
+	// UpdatedAt is when the registry last registered or replaced this record.
+	// Pointer + omitempty so a legacy record written before the registry
+	// stamped it reports UNKNOWN by omitting the field rather than claiming
+	// the zero instant. The UI treats absence as "unknown", not "never edited".
+	UpdatedAt *time.Time `json:"updated_at,omitempty"`
+}
+
+// workflowLatestExecution is the summary of one workflow's most recent
+// execution. It is a projection of store.ExecutionRecord with the heavy and
+// sensitive columns — workflow_def, params, runtime, error — deliberately
+// absent; a list row that needed those would read the execution directly.
+type workflowLatestExecution struct {
+	ExecutionID string                `json:"execution_id"`
+	Status      types.ExecutionStatus `json:"status"`
+	CreatedAt   time.Time             `json:"created_at"`
+	UpdatedAt   time.Time             `json:"updated_at"`
 }
 
 // handleListWorkflows serves GET /v1/workflows (spec §3.3 page list). It is the
@@ -1355,11 +1438,20 @@ type workflowListItem struct {
 // handleGetWorkflow does. There is deliberately no `namespace` query parameter
 // and no body — a caller can only ever list its own namespace — and the
 // registry takes ns as a required explicit argument that it validates, so even
-// a bad value here cannot widen the read beyond the caller's namespace.
+// a bad value here cannot widen the read beyond the caller's namespace. The
+// `q` name filter is applied strictly INSIDE that resolved scope: it narrows
+// the caller's own collection and can never reach another namespace's records.
 //
 // Pagination: offset, 1-based, through the shared pageParams helper (default
 // 20, hard cap 200). Cursor pagination is reserved for machine scans (spec
 // §3.3); this is a page list, so it must not grow a second pagination dialect.
+//
+// Filtering: `q` is a case-insensitive substring match on the workflow name.
+// It is applied BEFORE pagination, so offset/page_size and the reported total
+// describe the filtered collection. The unfiltered path keeps its O(page)
+// record reads; the filtering path is inherently O(N) record reads, where N is
+// the number of workflows in the caller's OWN namespace — see
+// workflowListItemsFiltered for the trade-off and why it cannot leak.
 //
 // Envelope: writeList, i.e. the mandated {list,total} collection shape —
 // never a bare array. The two pre-existing list endpoints (listRunners,
@@ -1387,6 +1479,50 @@ func (m *workflowControlModule) handleListWorkflows(w http.ResponseWriter, r *ht
 		writeFail(w, r, http.StatusInternalServerError, "internal_error", "internal server error")
 	}
 
+	include, ok := workflowListIncludeFrom(w, r)
+	if !ok {
+		return
+	}
+	// A row carrying stats costs one entry in a per-workflow aggregate; the
+	// sample cap keeps the total cost proportional to the page, so the page is
+	// tightened before either branch reads it.
+	if include.stats && pageSize > maxWorkflowListPageSizeWithStats {
+		pageSize = maxWorkflowListPageSizeWithStats
+	}
+	// The execution-derived fields are execution.read data. The second check is
+	// evaluated once per request (never per row); a denial simply leaves the
+	// fields off, because a workflow.read principal may still read the page.
+	// latest_execution is gated here too, and for the same reason as the
+	// ?include= aggregates: a row's most recent run status is execution data,
+	// so a workflow.read-only principal must not learn it through the list.
+	attachExecutionProjections := func(items []workflowListItem) {
+		if !m.executionReadAuthorized(r) {
+			return
+		}
+		m.attachLatestExecutions(r.Context(), ns, items)
+		if include.requested() {
+			m.attachExecutionStats(r.Context(), ns, items, include)
+		}
+	}
+
+	q, ok := workflowListQueryFrom(w, r)
+	if !ok {
+		return
+	}
+	if q != "" {
+		// Filtering needs the whole namespace enumeration, so it cannot reuse
+		// the registry-sliced page read below. It reads each record exactly
+		// once and paginates the matches itself (see the function doc).
+		items, total, err := m.workflowListItemsFiltered(r.Context(), registry, ns, q, page, pageSize)
+		if err != nil {
+			fail("list_workflows_search_failed", err)
+			return
+		}
+		attachExecutionProjections(items)
+		writeList(w, r, items, total)
+		return
+	}
+
 	// One page of ids, sliced by the registry itself: the registry owns the
 	// namespace's enumeration order (newest registry revision first, then id
 	// ascending) and the offset/limit contract, so the handler never
@@ -1409,7 +1545,37 @@ func (m *workflowControlModule) handleListWorkflows(w http.ResponseWriter, r *ht
 		fail("list_workflows_rows_failed", err)
 		return
 	}
+	attachExecutionProjections(items)
 	writeList(w, r, items, total)
+}
+
+// maxWorkflowListQueryLen bounds the `q` name filter. It is a request
+// validation limit, not a truncation point: an over-long value is refused
+// (400) rather than silently shortened, because a shortened query would answer
+// a different question than the caller asked. 128 characters is far beyond any
+// real workflow name the registry accepts and keeps the filter from becoming a
+// way to ship large strings into the O(N) scan.
+const maxWorkflowListQueryLen = 128
+
+// workflowListQueryFrom parses the optional `q` name filter.
+//
+// A missing, empty, or whitespace-only value means "no filter" — the same
+// convention the execution list filters use for their empty values, and the
+// only reading under which clearing a search box returns the full collection.
+// A value longer than maxWorkflowListQueryLen (counted in characters, matching
+// the contract's maxLength) is a 400: like the execution list's malformed
+// filters, silently ignoring it would answer the unfiltered collection as if
+// it were the search result.
+//
+// ok=false means the failure response has already been written.
+func workflowListQueryFrom(w http.ResponseWriter, r *http.Request) (string, bool) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if utf8.RuneCountInString(q) > maxWorkflowListQueryLen {
+		writeFail(w, r, http.StatusBadRequest, "invalid_argument",
+			"q must be at most 128 characters")
+		return "", false
+	}
+	return q, true
 }
 
 // countWorkflows returns the number of workflows registered in ns — the
@@ -1454,6 +1620,12 @@ func countWorkflows(ctx context.Context, registry backend.WorkflowRegistry, ns n
 // whose GetWorkflow ignores the context namespace; on the distributed registry
 // a foreign id cannot be resolved in the caller's slot at all, so both
 // backends answer "not yours" the same way.
+//
+// The rows are returned WITHOUT the optional latest_execution projection: the
+// handler attaches it after the per-request execution.read check, so a
+// workflow.read-only caller never sees it. It cannot fail the list: a missing
+// store, a store without the capability, or a failing read all degrade to
+// "field absent".
 func (m *workflowControlModule) workflowListItems(ctx context.Context, registry backend.WorkflowRegistry, ns namespace.Namespace, ids []types.WorkflowID) ([]workflowListItem, error) {
 	items := make([]workflowListItem, 0, len(ids))
 	for _, id := range ids {
@@ -1467,15 +1639,239 @@ func (m *workflowControlModule) workflowListItems(ctx context.Context, registry 
 		if rec.Namespace != "" && ns != "" && rec.Namespace != string(ns) {
 			continue
 		}
-		items = append(items, workflowListItem{
-			ID:               string(rec.ID),
-			Name:             rec.Name,
-			Version:          rec.Version,
-			DefinitionHash:   rec.DefinitionHash,
-			RegistryRevision: rec.RegistryRevision,
-		})
+		items = append(items, workflowListItemFrom(rec))
 	}
 	return items, nil
+}
+
+// workflowListItemsFiltered serves the `q` name search. It is the ONLY path in
+// this handler that reads every record in the namespace, and it is deliberate:
+//
+//   - The registry exposes no name index and backend.WorkflowListOptions has no
+//     name/query field (adding one would touch both registry implementations
+//     and, on the Redis side, the workflowreg Lua state machine). Enumerating
+//     the namespace's ids and reading each record is the implementation the
+//     audit approved for this size of collection.
+//   - Matching MUST happen before pagination, otherwise page 2 of "alpha" could
+//     be empty while matching workflows sit on page 5 of the unfiltered order.
+//     So the matches are collected first and sliced here with exactly the same
+//     pageOffset/pageSize semantics as the unfiltered path.
+//   - Each id is read ONCE and the row is built in the same pass, which is the
+//     "avoid reading the same record twice" requirement: total is the length of
+//     the collected matches, not a second enumeration.
+//
+// Cost and scope: O(N) GetWorkflow calls per request, where N is the number of
+// workflows in the caller's OWN namespace (the registry refuses any other
+// namespace, and the per-record namespace check below is the same defense the
+// unfiltered path applies). No client-supplied namespace participates. The
+// result order is the registry's enumeration order (newest revision first, then
+// id ascending), identical to the unfiltered ordering.
+func (m *workflowControlModule) workflowListItemsFiltered(ctx context.Context, registry backend.WorkflowRegistry, ns namespace.Namespace, q string, page, pageSize int) ([]workflowListItem, int, error) {
+	ids, err := registry.ListWorkflows(ctx, ns, backend.WorkflowListOptions{})
+	if err != nil {
+		return nil, 0, err
+	}
+	needle := strings.ToLower(q)
+	matched := make([]workflowListItem, 0, len(ids))
+	for _, id := range ids {
+		rec, err := registry.GetWorkflow(ctx, id)
+		if err != nil {
+			if errors.Is(err, backend.ErrWorkflowNotFound) {
+				continue
+			}
+			return nil, 0, err
+		}
+		if rec.Namespace != "" && ns != "" && rec.Namespace != string(ns) {
+			continue
+		}
+		if !workflowNameMatches(rec.Name, needle) {
+			continue
+		}
+		matched = append(matched, workflowListItemFrom(rec))
+	}
+
+	total := len(matched)
+	offset := pageOffset(page, pageSize)
+	if offset >= total {
+		return []workflowListItem{}, total, nil
+	}
+	end := offset + pageSize
+	if end > total {
+		end = total
+	}
+	pageItems := matched[offset:end]
+	return pageItems, total, nil
+}
+
+// workflowNameMatches reports whether name contains needle, case-insensitively.
+// needle must already be lower-cased; the caller lower-cases the query once
+// instead of once per record.
+func workflowNameMatches(name, needle string) bool {
+	return strings.Contains(strings.ToLower(name), needle)
+}
+
+// workflowListItemFrom projects one registry record onto the list row shape.
+// Triggers are derived from the stored definition's nodes; the compiled Graph
+// is deliberately not consulted (it is the runtime projection, not the stored
+// definition, and a list read must not depend on it).
+func workflowListItemFrom(rec backend.WorkflowRecord) workflowListItem {
+	item := workflowListItem{
+		ID:               string(rec.ID),
+		Name:             rec.Name,
+		Version:          rec.Version,
+		DefinitionHash:   rec.DefinitionHash,
+		RegistryRevision: rec.RegistryRevision,
+		Triggers:         workflowTriggerKinds(rec.Definition),
+	}
+	if !rec.UpdatedAt.IsZero() {
+		updated := rec.UpdatedAt
+		item.UpdatedAt = &updated
+	}
+	if rec.Definition != nil {
+		item.Description = rec.Definition.Description
+		item.CronExpressions = workflowCronExpressions(rec.Definition)
+	}
+	return item
+}
+
+// triggerNodeTypePrefix is the node-type namespace of the builtin triggers.
+// Only node types below it are reported in WorkflowListItem.triggers; the
+// entry marker xflow.start is NOT a trigger and does not match.
+const triggerNodeTypePrefix = "xflow.trigger."
+
+// workflowTriggerKinds returns the distinct trigger kinds named by def, sorted
+// lexicographically so the field is stable across reads.
+//
+// A nil definition (a record whose definition was never stored, or a fixture)
+// has no triggers and yields [] — never nil, because the field is always
+// serialized and a client must never receive null for an array. The same
+// non-nil guarantee applies to a definition with no trigger nodes.
+//
+// "Kind" here is the node-type suffix (timer, cron, webhook, kafka, redis).
+// The suffix is taken verbatim: an unknown xflow.trigger.* type is reported as
+// its own kind rather than dropped, so a future trigger kind becomes visible
+// without an apiserver change, and a definition carrying a typo is visible as
+// that typo instead of silently looking trigger-less.
+func workflowTriggerKinds(def *types.WorkflowDef) []string {
+	kinds := make([]string, 0)
+	if def == nil {
+		return kinds
+	}
+	seen := make(map[string]struct{}, len(def.Nodes))
+	for _, n := range def.Nodes {
+		kind, ok := strings.CutPrefix(n.Type, triggerNodeTypePrefix)
+		if !ok || kind == "" {
+			continue
+		}
+		if _, dup := seen[kind]; dup {
+			continue
+		}
+		seen[kind] = struct{}{}
+		kinds = append(kinds, kind)
+	}
+	sort.Strings(kinds)
+	return kinds
+}
+
+// cronTriggerNodeType is the one trigger kind whose expression is projected on
+// the workflow list: it is the only trigger whose schedule is a short,
+// user-meaningful string a table row can render.
+const cronTriggerNodeType = "xflow.trigger.cron"
+
+// workflowCronExpressions returns the distinct `expression` parameters of the
+// definition's cron trigger nodes, sorted lexicographically so the field is
+// stable across reads.
+//
+// Only the expression leaves the server: a cron node's other parameters are
+// not part of a list row's contract. A node with a missing, non-string or
+// blank expression contributes nothing, and a definition with no cron node
+// yields nil — the field is omitted rather than serialized as an empty list.
+func workflowCronExpressions(def *types.WorkflowDef) []string {
+	if def == nil {
+		return nil
+	}
+	var out []string
+	seen := make(map[string]struct{})
+	for _, n := range def.Nodes {
+		if n.Type != cronTriggerNodeType {
+			continue
+		}
+		expression, ok := n.Parameters["expression"].(string)
+		if !ok {
+			continue
+		}
+		expression = strings.TrimSpace(expression)
+		if expression == "" {
+			continue
+		}
+		if _, dup := seen[expression]; dup {
+			continue
+		}
+		seen[expression] = struct{}{}
+		out = append(out, expression)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// attachLatestExecutions fills LatestExecution on the given rows with ONE
+// batch store call for the whole page.
+//
+// Every failure mode degrades to "field absent" and never fails the list:
+//
+//   - no execution store wired (dev/embedded without Config.Store) — absent;
+//   - a store that does not implement the optional batch reader — absent;
+//   - a read error — logged under workflow_list_latest_execution_failed and
+//     absent. A page that renders without one column is strictly better than a
+//     500 that renders no page, and the failure is visible in the log.
+//
+// Security: the namespace passed to the store is the one the handler resolved
+// from the authenticated principal's context — there is no client-supplied
+// namespace anywhere in this path. Because it is a defense-in-depth layer on
+// top of the store's own scoping, a returned record is only projected when its
+// persisted Namespace is exactly this ns and its persisted WorkflowID matches
+// the row it is attached to. That second check is what makes crossing two
+// workflows' rows (a map keyed wrongly by a broken backend) a visible omission
+// rather than one workflow showing another's latest run.
+func (m *workflowControlModule) attachLatestExecutions(ctx context.Context, ns namespace.Namespace, items []workflowListItem) {
+	if len(items) == 0 || m.executions == nil {
+		return
+	}
+	reader, ok := m.executions.(store.LatestExecutionReader)
+	if !ok {
+		return
+	}
+	ids := make([]types.WorkflowID, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, types.WorkflowID(item.ID))
+	}
+	latest, err := reader.LatestExecutions(ctx, ns, ids)
+	if err != nil {
+		// Only the event, the caller's namespace and the error are logged: the
+		// rows' contents (names, hashes) must not reach the log.
+		if m.log != nil {
+			m.log.Error("workflow_list_latest_execution_failed", "namespace", string(ns), "err", err)
+		}
+		return
+	}
+	for i := range items {
+		id := types.WorkflowID(items[i].ID)
+		rec := latest[id]
+		if rec == nil {
+			continue
+		}
+		// Fail closed on a foreign or mis-keyed record: the store's scope and
+		// the map key are the authority, and this only ever withholds.
+		if rec.Namespace != string(ns) || rec.WorkflowID != id {
+			continue
+		}
+		items[i].LatestExecution = &workflowLatestExecution{
+			ExecutionID: string(rec.ExecutionID),
+			Status:      rec.Status,
+			CreatedAt:   rec.CreatedAt,
+			UpdatedAt:   rec.UpdatedAt,
+		}
+	}
 }
 
 // executionListItem is one row of a GET /v1/executions page. It is a summary

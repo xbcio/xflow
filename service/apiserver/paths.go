@@ -41,7 +41,13 @@ const (
 	// constant. The two are not merely different verbs on one resource: POST is a runner admission mutation (OpExecutionSeed) and
 	// GET is a tenant-scoped read (OpExecutionRead), and the authz wrapper takes
 	// that distinction from the registered pattern rather than from the request.
-	PathExecutions          = "/v1/executions"
+	PathExecutions = "/v1/executions"
+	// PathExecutionStats is the bounded status aggregate over the caller's own
+	// namespace: counts per lifecycle status for a required [created_after,
+	// created_before) window, plus an optional UTC-aligned histogram. It is a
+	// literal segment at the depth where {id} lives, and Go 1.22's mux prefers
+	// the literal, so no execution may be addressed by the id "stats".
+	PathExecutionStats      = "/v1/executions/stats"
 	PathExecutionByID       = "/v1/executions/{id}"
 	PathExecutionCancel     = "/v1/executions/{id}/cancel"
 	PathExecutionPause      = "/v1/executions/{id}/pause"
@@ -50,6 +56,13 @@ const (
 	PathExecutionSignals    = "/v1/executions/{id}/signals"
 	PathExecutionSignalByID = "/v1/executions/{id}/signals/{name}"
 	PathExecutionWait       = "/v1/executions/{id}/wait"
+
+	// PathOverview is the tenant dashboard read: 24h/7d KPIs, a 24-bucket
+	// status histogram, the top failing workflows, and (only for a caller that
+	// also holds management.runner.list) a cluster segment. It is a literal
+	// top-level path, not a sub-resource of /v1/executions, because it composes
+	// several execution aggregates into one cached response.
+	PathOverview = "/v1/overview"
 
 	// Schedules are the runtime overlays on a workflow's cron and timer trigger
 	// nodes: what an operator may retime or pause WITHOUT registering a new
@@ -160,7 +173,10 @@ var UserFacingPaths = []string{
 	PathWorkflowScheduleResume,
 	PathWorkflowScheduleBackfill,
 
+	PathOverview,
+
 	PathExecutions,
+	PathExecutionStats,
 	PathExecutionByID,
 	PathExecutionCancel,
 	PathExecutionPause,
