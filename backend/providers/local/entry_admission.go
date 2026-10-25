@@ -45,9 +45,43 @@ func (s *memoryState) SeedExecutionFromEntryWithConcurrency(ctx context.Context,
 // is the plain admission: no slot is consulted and the execution starts
 // running.
 func (s *memoryState) seedExecutionFromEntry(ctx context.Context, req engine.SeedExecutionFromEntryRequest, admission *engine.ConcurrencyAdmission) (engine.SeedExecutionFromEntryResponse, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	var (
+		result  engine.SeedExecutionFromEntryResponse
+		created bool
+		err     error
+	)
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		result, created, err = s.seedExecutionFromEntryLocked(ctx, req, admission)
+	}()
+	if created {
+		// Best-effort, matching rstate.projectSeededExecution: the admission has
+		// already committed, so a failed projection is a reporting gap. The
+		// projection re-reads the execution's final status under s.mu; the
+		// release then closes the create-pending gate and unparks the intents
+		// the admission held.
+		s.mirrorSeededEntryExecution(ctx, req)
+		id := engine.DeterministicExecutionID(req.AdmissionKey)
+		s.releaseInitialMirrorHold(id)
+		s.pruneTransientSkipAfterTerminal(id)
+	}
+	return result, err
+}
 
+// seedExecutionFromEntryLocked is the admission body both entry points share.
+// Going through one body is what keeps a seeded execution indistinguishable from
+// a submitted one: the seed writes its execution, its counters and its intents
+// with the same helpers a submission does, and an admission that lands in the
+// queue leaves the same state behind — status queued, intents held, a place in
+// line — because it is the same decision (chargeOrParkLocked) that put it
+// there.
+//
+// admission is nil when the seeded graph declares no concurrency limit, which
+// is the plain admission: no slot is consulted and the execution starts
+// running. created reports whether this call wrote a new execution; the
+// duplicate and conflict answers did not, so they must not project a row.
+func (s *memoryState) seedExecutionFromEntryLocked(ctx context.Context, req engine.SeedExecutionFromEntryRequest, admission *engine.ConcurrencyAdmission) (engine.SeedExecutionFromEntryResponse, bool, error) {
 	execID := engine.DeterministicExecutionID(req.AdmissionKey)
 	// The admission's namespace is the registration namespace dispatch resolves
 	// sub-workflows with: the request's when supplied, the ctx otherwise — never
@@ -74,7 +108,7 @@ func (s *memoryState) seedExecutionFromEntry(ctx context.Context, req engine.See
 				Duplicate:     true,
 				Queued:        position > 0,
 				QueuePosition: position,
-			}, nil
+			}, false, nil
 		}
 		// Conflict — same key, different hash.
 		return engine.SeedExecutionFromEntryResponse{
@@ -82,7 +116,7 @@ func (s *memoryState) seedExecutionFromEntry(ctx context.Context, req engine.See
 			ExecutionID:   existing.executionID,
 			Queued:        position > 0,
 			QueuePosition: position,
-		}, nil
+		}, false, nil
 	}
 
 	// Step 2a: Slot decision. A refusal writes nothing at all — not the
@@ -95,7 +129,8 @@ func (s *memoryState) seedExecutionFromEntry(ctx context.Context, req engine.See
 		var err error
 		pending, err = s.chargeOrParkLocked(execID, *admission)
 		if err != nil {
-			return engine.SeedAdmissionRefusal(err)
+			resp, refusalErr := engine.SeedAdmissionRefusal(err)
+			return resp, false, refusalErr
 		}
 	}
 
@@ -119,6 +154,8 @@ func (s *memoryState) seedExecutionFromEntry(ctx context.Context, req engine.See
 		WorkflowVersion: req.WorkflowVersion,
 		Namespace:       string(registrationNamespace),
 	}
+	s.noteMirrorModeLocked(ctx, snap)
+	s.markMirrorCreatePendingLocked(execID)
 	s.createExecutionLocked(snap)
 
 	// Step 3: Unit counters were initialized by createExecutionLocked (remaining,
@@ -199,13 +236,22 @@ func (s *memoryState) seedExecutionFromEntry(ctx context.Context, req engine.See
 		s.holdOutboxLocked(execID)
 	}
 
+	// Step 6e: hold the ready work while the required seed insert is in flight,
+	// so a dispatcher cannot run node side effects for a row the store may
+	// still refuse. A terminal admission has no work left to hold.
+	if s.mirrorCreatePending[execID] {
+		if entry := s.executions[execID]; entry != nil && !isTerminalStatus(entry.snap.Status) {
+			s.holdOutboxLocked(execID)
+		}
+	}
+
 	// Step 7: Store admission entry.
 	s.admissions[req.AdmissionKey] = &admissionEntry{
 		executionID: execID,
 		resultHash:  req.ResultHash,
 	}
 
-	return result, nil
+	return result, true, nil
 }
 
 // admissionOutboxID builds a deterministic outbox ID for an admission's

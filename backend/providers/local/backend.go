@@ -8,6 +8,7 @@ import (
 	"github.com/xbcio/xflow/backend"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
+	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -21,6 +22,7 @@ type config struct {
 	artifactCode  func(ctx context.Context, digest string) ([]byte, error)
 	registry      *execution.Registry
 	logger        engine.Logger
+	store         store.Store
 }
 
 // WithConcurrency sets the number of in-memory queue consumer goroutines. Default is 4.
@@ -55,12 +57,66 @@ func WithQueueCapacity(n int) Option {
 // that already hold one (service/apiserver's Config.Logger, which the
 // distributed backend beside it has always received) should pass it; the
 // no-logger behaviour is unchanged for those that do not.
+//
+// The same logger reports a failed metadata-mirror write (see WithStore).
 func WithQueueLogger(l engine.Logger) Option {
 	return func(c *config) {
 		if l != nil {
 			c.logger = l
 		}
 	}
+}
+
+// WithStore installs an optional durable metadata mirror. The memory state
+// remains the sole scheduling authority and the only source for the engine's
+// reads; every accepted transition is additionally projected into s, exactly
+// as the Redis-backed distributed store projects into its SQL store
+// (rstate/doc.go).
+//
+// The mirror is metadata only. Execution history, node status, signals, and
+// the resulting audit rows survive a process exit and can be listed from the
+// store, but in-flight work does not: a restarted local engine starts with
+// empty in-memory state and will not resume, redeliver, or repair an execution
+// it finds only in the store. Use the distributed backend for durable
+// execution.
+//
+// Error semantics mirror the distributed backend:
+//   - CreateExecution is required. If the store cannot persist the execution
+//     row, the in-memory execution (and any initial intents / concurrency
+//     slot it took) is rolled back and the create fails. Initial intents are
+//     held until the row lands, so nothing is dispatched for an execution the
+//     store refused.
+//   - Every later projection is best-effort. A failed status, node, signal, or
+//     seed-row write is logged and dropped; the in-memory transition has
+//     already committed and is not rolled back.
+//
+// Projections for one execution are serialized and read the current in-memory
+// state inside the serialized section, so a completion that races the required
+// insert still converges on the terminal status rather than leaving the row
+// running. While that insert is in flight, ordinary status/node/signal
+// projections for the same execution are dropped (the insert reconciles live
+// state afterwards), promotions keep the execution's intents held, and seeds
+// hold theirs, so nothing can run against a row the store may still refuse.
+// Mirror writes are bounded to two seconds and never block scheduling on a
+// contended database.
+//
+// Per-workflow transient executions (WorkflowOptions.Transient or a
+// per-execution transient hint) are never projected: no execution, node, or
+// signal rows are written for them, matching the distributed backend's
+// transient promise.
+//
+// A deterministic execution ID (engine.IdempotentExecutionID, entry seeds)
+// whose row already exists from a previous process cannot be created again: a
+// required create returns an error wrapping ErrStoreExecutionExists and rolls
+// back, while a seed logs the collision at warn level and disables mirroring
+// for that execution so the old run's rows are not overwritten. In-memory
+// idempotency maps do not survive a restart, so callers reusing IDs across
+// processes must treat that error as "already ran".
+//
+// nil (the default) leaves the backend purely in-memory, byte-for-byte as
+// before this option existed.
+func WithStore(s store.Store) Option {
+	return func(c *config) { c.store = s }
 }
 
 // WithResourcePool installs a process-scope ResourcePool used by
@@ -115,6 +171,8 @@ func New(opts ...Option) *Backend {
 	q.SetLogger(cfg.logger)
 
 	state := newMemoryState()
+	state.db = cfg.store
+	state.logger = cfg.logger
 
 	return &Backend{
 		state:            state,

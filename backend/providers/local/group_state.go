@@ -172,9 +172,26 @@ func (s *memoryState) expireGroupLeaseLocked(id types.ExecutionID, unitIdx int, 
 	return true
 }
 
-func (s *memoryState) CommitGroup(_ context.Context, req engine.GroupCommitRequest) (engine.GroupCommitResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *memoryState) CommitGroup(ctx context.Context, req engine.GroupCommitRequest) (engine.GroupCommitResult, error) {
+	var result engine.GroupCommitResult
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		result = s.commitGroupLocked(req)
+	}()
+	// Best-effort, matching rstate.CommitGroup: the group finalizes the
+	// execution inside the transition, so this is the only place the terminal
+	// status can reach the store. Group member outputs are deliberately not
+	// projected — neither backend writes xflow_nodes rows for them. The
+	// projection re-reads the live status, so a later transition wins.
+	if result.ExecutionDone {
+		s.mirrorExecutionStatus(ctx, req.ExecutionID)
+	}
+	return result, nil
+}
+
+// commitGroupLocked is the group commit body. Callers must hold s.mu.
+func (s *memoryState) commitGroupLocked(req engine.GroupCommitRequest) engine.GroupCommitResult {
 	st := s.groupUnits[groupKey(req.ExecutionID, req.GroupUnitIdx)]
 	// No lease / already terminal / fence mismatch => not applied.
 	if st == nil || st.leaseToken != req.LeaseToken || st.attempt != req.Attempt || st.status != groupUnitRunning {
@@ -182,11 +199,11 @@ func (s *memoryState) CommitGroup(_ context.Context, req engine.GroupCommitReque
 		if st != nil && st.status == groupUnitDone {
 			outcome = engine.CommitOutcomeDuplicateTerminal
 		}
-		return engine.GroupCommitResult{Applied: false, Outcome: outcome}, nil
+		return engine.GroupCommitResult{Applied: false, Outcome: outcome}
 	}
 	entry := s.executions[req.ExecutionID]
 	if entry == nil || isTerminalStatus(entry.snap.Status) {
-		return engine.GroupCommitResult{Applied: false, Outcome: engine.CommitOutcomeExecutionInactive}, nil
+		return engine.GroupCommitResult{Applied: false, Outcome: engine.CommitOutcomeExecutionInactive}
 	}
 	// req.Transient (groups[].mode: transient) is deliberately not acted on.
 	// The mode's only effect is retention: the group's artifacts — its boundary
@@ -220,6 +237,7 @@ func (s *memoryState) CommitGroup(_ context.Context, req engine.GroupCommitReque
 	// allowCycles=0 for the same reason; reading it off the snapshot's graph
 	// instead would silently skip the counting for a graph-less snapshot.
 	result := engine.GroupCommitResult{Applied: true, Outcome: engine.CommitOutcomeAccepted}
+	terminalErr := ""
 	s.remaining[req.ExecutionID]--
 	if req.Outcome == engine.GroupOutcomeFailed {
 		s.failed[req.ExecutionID]++
@@ -229,8 +247,8 @@ func (s *memoryState) CommitGroup(_ context.Context, req engine.GroupCommitReque
 		if req.Fatal || s.failed[req.ExecutionID] > 0 {
 			status = types.ExecutionStatusFailed
 		}
-		s.finishExecutionLocked(req.ExecutionID, entry, status,
-			engine.TerminalExecutionError(status, req.Error, ""))
+		terminalErr = engine.TerminalExecutionError(status, req.Error, "")
+		s.finishExecutionLocked(req.ExecutionID, entry, status, terminalErr)
 		result.ExecutionDone = true
 		result.ExecutionStatus = status
 	}
@@ -238,7 +256,7 @@ func (s *memoryState) CommitGroup(_ context.Context, req engine.GroupCommitReque
 	ids, skipped := s.applyGroupDownstreamLocked(req.ExecutionID, req.Downstream)
 	result.OutboxIDs = append(result.OutboxIDs, ids...)
 	result.Skipped = skipped
-	return result, nil
+	return result
 }
 
 // applyGroupDownstreamLocked converts group commit downstream arrivals into

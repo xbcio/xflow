@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/xbcio/xflow/backend/internal/statestoretest"
+	"github.com/xbcio/xflow/store/memstore"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -13,6 +14,15 @@ import (
 // resume lock, pub/sub).
 func TestMemoryStateStoreContract(t *testing.T) {
 	state := New().State()
+	statestoretest.RunStateStoreContract(t, memoryCapabilityManifest(), state)
+}
+
+// TestMemoryStateStoreContractWithStore is the same contract with a durable
+// store attached. The mirror must not change a single scheduling answer: the
+// in-memory maps stay authoritative, and the store only observes committed
+// transitions. Running the suite both ways is what proves that.
+func TestMemoryStateStoreContractWithStore(t *testing.T) {
+	state := New(WithStore(memstore.New())).State()
 	statestoretest.RunStateStoreContract(t, memoryCapabilityManifest(), state)
 }
 

@@ -34,7 +34,25 @@ const seedScheduledMarker = "seed"
 // unit reaches another resolved unit's counters, and the marker is what stops
 // that arrival from scheduling work whose result the new execution was built
 // on. Marking as we go would let the first unit's arrivals schedule the second.
-func (s *memoryState) SeedExecution(_ context.Context, req engine.SeedExecutionRequest) (engine.SeedExecutionResponse, error) {
+func (s *memoryState) SeedExecution(ctx context.Context, req engine.SeedExecutionRequest) (engine.SeedExecutionResponse, error) {
+	resp, err := s.seedExecution(ctx, req)
+	if err != nil {
+		return resp, err
+	}
+	// Best-effort, matching rstate.projectSeededRerun: this path never calls
+	// CreateExecution, so without the projection a seeded execution would have
+	// no durable row at all. The projection is the create-pending work; the
+	// release closes the gate and unparks whatever the seed held.
+	s.mirrorSeededExecution(ctx, req)
+	s.releaseInitialMirrorHold(req.Execution.ID)
+	s.pruneTransientSkipAfterTerminal(req.Execution.ID)
+	return resp, nil
+}
+
+// seedExecution is the locked body of SeedExecution. The projection reads the
+// final status from the execution entry after the transition rather than the
+// value observed here.
+func (s *memoryState) seedExecution(ctx context.Context, req engine.SeedExecutionRequest) (engine.SeedExecutionResponse, error) {
 	if req.Execution == nil {
 		return engine.SeedExecutionResponse{}, errors.New("seed execution: no execution snapshot")
 	}
@@ -72,6 +90,8 @@ func (s *memoryState) SeedExecution(_ context.Context, req engine.SeedExecutionR
 	if pending {
 		admitted.Status = types.ExecutionStatusQueued
 	}
+	s.noteMirrorModeLocked(ctx, &admitted)
+	s.markMirrorCreatePendingLocked(id)
 	s.createExecutionLocked(&admitted)
 
 	// Step 3: mark every resolved unit, before applying a single arrival.
@@ -136,6 +156,17 @@ func (s *memoryState) SeedExecution(_ context.Context, req engine.SeedExecutionR
 		result.QueuePosition = s.queuePositionLocked(id)
 		result.Queued = result.QueuePosition > 0
 		if result.Queued {
+			s.holdOutboxLocked(id)
+		}
+	}
+
+	// Step 9: hold the ready work while the required seed insert is in flight.
+	// The seed wrote its intents through the same helpers a running execution
+	// uses, so nothing distinguishes them from deliverable work; the hold is
+	// what keeps a dispatcher from running side effects for a row the store may
+	// still refuse. A terminal seed has nothing left to dispatch.
+	if s.mirrorCreatePending[id] {
+		if entry := s.executions[id]; entry != nil && !isTerminalStatus(entry.snap.Status) {
 			s.holdOutboxLocked(id)
 		}
 	}

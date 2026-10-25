@@ -10,6 +10,7 @@ import (
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -84,6 +85,32 @@ type memoryState struct {
 	// backend's register-before-write — and an entry is removed when the
 	// execution goes terminal.
 	cancelingSince map[types.ExecutionID]time.Time
+
+	// db is the optional durable metadata mirror. nil disables every
+	// projection; the in-memory maps above remain the sole scheduling truth
+	// either way. See store_mirror.go for the write-point contract.
+	db store.Store
+	// logger reports failed best-effort projections. nil is permitted and
+	// leaves those failures observable only through the store itself.
+	logger engine.Logger
+	// mirrorLocks serializes every store write for one execution, and
+	// mirrorSkip records the executions that must not be projected at all
+	// (transient workflows and seed-ID collisions with a previous process).
+	// mirrorCreatePending is the create-pending gate: while the required
+	// create/seed insert for an execution is in flight, ordinary projections
+	// are dropped, promotions keep intents held, and seeds hold theirs too.
+	// mirrorConflict marks the subset of skips that must survive until the
+	// in-memory execution ends (a colliding row belongs to a different run).
+	// All are guarded by mu; see store_mirror.go.
+	mirrorLocks         map[types.ExecutionID]*execMirrorLock
+	mirrorSkip          map[types.ExecutionID]bool
+	mirrorCreatePending map[types.ExecutionID]bool
+	mirrorConflict      map[types.ExecutionID]bool
+	// rolledBack marks executions that existed and were then removed because
+	// their required store projection failed. A late task for one of them must
+	// not recreate node state; an ID that never existed is a different case
+	// (the state contract leases bare nodes) and is not listed here.
+	rolledBack map[types.ExecutionID]bool
 }
 
 type execEntry struct {
@@ -93,30 +120,35 @@ type execEntry struct {
 
 func newMemoryState() *memoryState {
 	return &memoryState{
-		executions:       make(map[types.ExecutionID]*execEntry),
-		nodes:            make(map[string]*engine.NodeSnapshot),
-		inDegrees:        make(map[string]int),
-		activeIns:        make(map[string]int),
-		remaining:        make(map[types.ExecutionID]int),
-		failed:           make(map[types.ExecutionID]int),
-		advanced:         make(map[string]bool),
-		scheduled:        make(map[string]string),
-		outbox:           make(map[types.ExecutionID]map[string]memoryOutboxEntry),
-		deadOutbox:       make(map[types.ExecutionID]map[string]memoryOutboxEntry),
-		replayReceipts:   make(map[types.ExecutionID]map[string]*memoryReplayReceipt),
-		replayEntryIdx:   make(map[types.ExecutionID]map[string]string),
-		outputs:          make(map[string]map[string]any),
-		privateOutputs:   make(map[string]bool),
-		suspended:        make(map[string]*types.SuspendSpec),
-		signals:          make(map[string]map[string]any),
-		signalSets:       make(map[string]map[string]map[string]any),
-		resumed:          make(map[string]bool),
-		subExecs:         make(map[string][]*engine.SubExecution),
-		subWorkflowLinks: make(map[string]*engine.SubWorkflowLink),
-		groupUnits:       make(map[string]*groupUnitState),
-		doneCh:           make(map[types.ExecutionID]chan struct{}),
-		eventWatchers:    make(map[types.ExecutionID][]chan engine.ExecutionEvent),
-		cancelingSince:   make(map[types.ExecutionID]time.Time),
+		executions:          make(map[types.ExecutionID]*execEntry),
+		nodes:               make(map[string]*engine.NodeSnapshot),
+		inDegrees:           make(map[string]int),
+		activeIns:           make(map[string]int),
+		remaining:           make(map[types.ExecutionID]int),
+		failed:              make(map[types.ExecutionID]int),
+		advanced:            make(map[string]bool),
+		scheduled:           make(map[string]string),
+		outbox:              make(map[types.ExecutionID]map[string]memoryOutboxEntry),
+		deadOutbox:          make(map[types.ExecutionID]map[string]memoryOutboxEntry),
+		replayReceipts:      make(map[types.ExecutionID]map[string]*memoryReplayReceipt),
+		replayEntryIdx:      make(map[types.ExecutionID]map[string]string),
+		outputs:             make(map[string]map[string]any),
+		privateOutputs:      make(map[string]bool),
+		suspended:           make(map[string]*types.SuspendSpec),
+		signals:             make(map[string]map[string]any),
+		signalSets:          make(map[string]map[string]map[string]any),
+		resumed:             make(map[string]bool),
+		subExecs:            make(map[string][]*engine.SubExecution),
+		subWorkflowLinks:    make(map[string]*engine.SubWorkflowLink),
+		groupUnits:          make(map[string]*groupUnitState),
+		doneCh:              make(map[types.ExecutionID]chan struct{}),
+		eventWatchers:       make(map[types.ExecutionID][]chan engine.ExecutionEvent),
+		cancelingSince:      make(map[types.ExecutionID]time.Time),
+		mirrorLocks:         make(map[types.ExecutionID]*execMirrorLock),
+		mirrorSkip:          make(map[types.ExecutionID]bool),
+		mirrorCreatePending: make(map[types.ExecutionID]bool),
+		mirrorConflict:      make(map[types.ExecutionID]bool),
+		rolledBack:          make(map[types.ExecutionID]bool),
 	}
 }
 
@@ -124,28 +156,59 @@ func newMemoryState() *memoryState {
 // ExecutionStore
 // ---------------------------------------------------------------------------
 
-func (s *memoryState) CreateExecution(_ context.Context, e *engine.ExecutionSnapshot) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.createExecutionLocked(e)
+func (s *memoryState) CreateExecution(ctx context.Context, e *engine.ExecutionSnapshot) error {
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.noteMirrorModeLocked(ctx, e)
+		s.markMirrorCreatePendingLocked(e.ID)
+		s.createExecutionLocked(e)
+	}()
+	// Required mirror, matching rstate.CreateExecution: an execution the caller
+	// is told exists must be visible in the durable store. The memory commit is
+	// already done, so a failed projection is undone rather than left behind.
+	if err := s.mirrorCreateExecution(ctx, e.ID); err != nil {
+		s.rollbackCreatedExecution(e.ID)
+		return fmt.Errorf("store create execution: %w", err)
+	}
+	s.releaseInitialMirrorHold(e.ID)
+	s.pruneTransientSkipAfterTerminal(e.ID)
 	return nil
 }
 
 // CreateExecutionWithOutbox atomically records an execution and its initial
 // durable task intents under the memory reference model's single mutex.
-func (s *memoryState) CreateExecutionWithOutbox(_ context.Context, e *engine.ExecutionSnapshot, entries []engine.OutboxEntry) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.createExecutionLocked(e)
-	for _, entry := range entries {
-		// A root skip intent is fenced on its unit's "skip" scheduling marker,
-		// which must exist before the intent can be delivered (see
-		// engine.UnselectedRootSkips).
-		if entry.Task.Type == engine.TaskTypeNodeSkip {
-			s.scheduled[memoryCounterKey(e.ID, entry.Task.UnitIdx)] = "skip"
+//
+// When a durable mirror is attached, the intents are parked behind the same
+// hold a QUEUE-mode execution uses until the required create insert succeeds.
+// Without it the dispatcher could run the workflow, and its node side effects,
+// while a failed insert is about to roll the execution back. The hold is
+// released as soon as the row lands; a queued execution keeps its hold for
+// promotion.
+func (s *memoryState) CreateExecutionWithOutbox(ctx context.Context, e *engine.ExecutionSnapshot, entries []engine.OutboxEntry) error {
+	holdForMirror := false
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.noteMirrorModeLocked(ctx, e)
+		holdForMirror = s.markMirrorCreatePendingLocked(e.ID)
+		s.createExecutionLocked(e)
+		availableAt := time.Time{}
+		if holdForMirror {
+			availableAt = queuedOutboxHold
 		}
-		s.putOutboxEntryLocked(e.ID, entry)
+		s.writeInitialIntentsLocked(e.ID, entries, availableAt)
+	}()
+	// Required mirror; the rollback removes the intents too, so a failed create
+	// leaves neither an execution nor deliverable work behind.
+	if err := s.mirrorCreateExecution(ctx, e.ID); err != nil {
+		s.rollbackCreatedExecution(e.ID)
+		return fmt.Errorf("store create execution: %w", err)
 	}
+	if holdForMirror {
+		s.releaseInitialMirrorHold(e.ID)
+	}
+	s.pruneTransientSkipAfterTerminal(e.ID)
 	return nil
 }
 
@@ -188,27 +251,55 @@ type queuedExecution struct {
 //
 // A refused submission writes nothing. The engine relies on that to report a
 // 429 for a rejection rather than leaving a zero-node execution behind.
-func (s *memoryState) CreateExecutionWithConcurrency(_ context.Context, e *engine.ExecutionSnapshot, entries []engine.OutboxEntry, admission engine.ConcurrencyAdmission) (engine.ConcurrencyAdmissionResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *memoryState) CreateExecutionWithConcurrency(ctx context.Context, e *engine.ExecutionSnapshot, entries []engine.OutboxEntry, admission engine.ConcurrencyAdmission) (engine.ConcurrencyAdmissionResult, error) {
+	var (
+		result        engine.ConcurrencyAdmissionResult
+		admissionErr  error
+		holdForMirror bool
+	)
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		pending, err := s.chargeOrParkLocked(e.ID, admission)
+		if err != nil {
+			admissionErr = err
+			return
+		}
+		status := types.ExecutionStatusRunning
+		hold := time.Time{}
+		if pending {
+			status = types.ExecutionStatusQueued
+		}
+		admitted := *e
+		admitted.Status = status
+		s.noteMirrorModeLocked(ctx, &admitted)
+		holdForMirror = s.markMirrorCreatePendingLocked(e.ID)
+		s.createExecutionLocked(&admitted)
+		if pending || holdForMirror {
+			hold = queuedOutboxHold
+		}
+		s.writeInitialIntentsLocked(e.ID, entries, hold)
+		if pending {
+			result = engine.ConcurrencyAdmissionResult{Queued: true, QueuePosition: s.queuePositionLocked(e.ID)}
+		}
+	}()
+	if admissionErr != nil {
+		return engine.ConcurrencyAdmissionResult{}, admissionErr
+	}
 
-	pending, err := s.chargeOrParkLocked(e.ID, admission)
-	if err != nil {
-		return engine.ConcurrencyAdmissionResult{}, err
+	// Required mirror, like CreateExecution. The rollback also releases the
+	// charged slot (or queue position), so a failed create cannot leak capacity.
+	// Initial intents stay parked until the row lands, so nothing dispatched
+	// during the insert can outlive a rollback.
+	if err := s.mirrorCreateExecution(ctx, e.ID); err != nil {
+		s.rollbackCreatedExecution(e.ID)
+		return engine.ConcurrencyAdmissionResult{}, fmt.Errorf("store create execution: %w", err)
 	}
-	status := types.ExecutionStatusRunning
-	hold := time.Time{}
-	if pending {
-		status, hold = types.ExecutionStatusQueued, queuedOutboxHold
+	if holdForMirror {
+		s.releaseInitialMirrorHold(e.ID)
 	}
-	admitted := *e
-	admitted.Status = status
-	s.createExecutionLocked(&admitted)
-	s.writeInitialIntentsLocked(e.ID, entries, hold)
-	if !pending {
-		return engine.ConcurrencyAdmissionResult{}, nil
-	}
-	return engine.ConcurrencyAdmissionResult{Queued: true, QueuePosition: s.queuePositionLocked(e.ID)}, nil
+	s.pruneTransientSkipAfterTerminal(e.ID)
+	return result, nil
 }
 
 // chargeOrParkLocked decides where one admission lands and records the
@@ -339,6 +430,43 @@ func (s *memoryState) writeInitialIntentsLocked(id types.ExecutionID, entries []
 	}
 }
 
+// releaseInitialMirrorHold makes a running execution's create-held intents
+// deliverable once the required store insert has succeeded.
+//
+// A queued execution keeps its hold: promotion releases it together with the
+// status change. An execution that finalized before the insert landed has
+// nothing left to deliver, so its held intents are dropped rather than
+// released into a finished execution.
+// releaseInitialMirrorHold closes the create-pending gate and unparks the
+// intents the create/seed held for the required store insert. It must run once
+// the insert has been attempted, whether it succeeded, failed, or found an
+// existing row: from then on memory is authoritative and the execution may
+// dispatch.
+//
+// A queued execution keeps its hold for promotion. A terminal execution drops
+// the held intents — there is no work left to deliver. Everything else becomes
+// immediately deliverable.
+func (s *memoryState) releaseInitialMirrorHold(id types.ExecutionID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.mirrorCreatePending, id)
+	entry := s.executions[id]
+	if entry == nil || isTerminalStatus(entry.snap.Status) {
+		s.dropHeldOutboxLocked(id)
+		return
+	}
+	if entry.snap.Status == types.ExecutionStatusQueued {
+		return
+	}
+	for entryID, held := range s.outbox[id] {
+		if !held.entry.AvailableAt.Equal(queuedOutboxHold) {
+			continue
+		}
+		held.entry.AvailableAt = time.Time{}
+		s.outbox[id][entryID] = held
+	}
+}
+
 // releaseWorkflowSlotLocked frees the concurrency state an execution held. It is
 // called from every path that moves an execution into a terminal status, so no
 // engine call site can forget it; a non-terminal transition (canceling) keeps
@@ -421,6 +549,13 @@ func (s *memoryState) completePromotionLocked(id types.ExecutionID) {
 		if !held.entry.AvailableAt.Equal(queuedOutboxHold) {
 			continue
 		}
+		// While the required insert is in flight, promotion flips the status but
+		// the intents stay parked: dispatching them now would run side effects
+		// for an execution the store may still refuse. releaseInitialMirrorHold
+		// unparks them once the row exists (or memory wins a seed conflict).
+		if s.mirrorCreatePending[id] {
+			return
+		}
 		held.entry.AvailableAt = time.Time{}
 		s.outbox[id][entryID] = held
 	}
@@ -448,28 +583,40 @@ func (s *memoryState) dropHeldOutboxLocked(id types.ExecutionID) {
 // wait for a slot. Measured from promotion it could never fire at all — a
 // promoted execution is not waiting for anything — and a workflow whose limit
 // never frees would hold submissions forever.
-func (s *memoryState) ExpireQueuedExecutions(_ context.Context, limit int) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.queued) == 0 {
-		return 0, nil
-	}
-	now := time.Now().UTC()
-	expired := make([]types.ExecutionID, 0, len(s.queued))
-	for id, waiting := range s.queued {
-		if limit > 0 && len(expired) >= limit {
-			break
+func (s *memoryState) ExpireQueuedExecutions(ctx context.Context, limit int) (int, error) {
+	var (
+		expired   []types.ExecutionID
+		projected []types.ExecutionID
+	)
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if len(s.queued) == 0 {
+			return
 		}
-		if waiting.deadline.IsZero() || waiting.deadline.After(now) {
-			continue
+		now := time.Now().UTC()
+		expired = make([]types.ExecutionID, 0, len(s.queued))
+		for id, waiting := range s.queued {
+			if limit > 0 && len(expired) >= limit {
+				break
+			}
+			if waiting.deadline.IsZero() || waiting.deadline.After(now) {
+				continue
+			}
+			expired = append(expired, id)
 		}
-		expired = append(expired, id)
-	}
-	for _, id := range expired {
-		// Through the same terminal write every other path uses, so the queue
-		// departure, the event and the error read-back cannot diverge from a
-		// cancellation.
-		_ = s.updateExecutionStatusLocked(id, types.ExecutionStatusTimeout, engine.ConcurrencyQueueTimeoutError)
+		for _, id := range expired {
+			// Through the same terminal write every other path uses, so the queue
+			// departure, the event and the error read-back cannot diverge from a
+			// cancellation.
+			if s.updateExecutionStatusLocked(id, types.ExecutionStatusTimeout, engine.ConcurrencyQueueTimeoutError) {
+				projected = append(projected, id)
+			}
+		}
+	}()
+
+	for _, id := range projected {
+		s.mirrorExecutionStatus(ctx, id)
 	}
 	return len(expired), nil
 }
@@ -500,6 +647,12 @@ func (s *memoryState) ConcurrencyQueuePosition(_ context.Context, id types.Execu
 }
 
 func (s *memoryState) createExecutionLocked(e *engine.ExecutionSnapshot) {
+	// A create with an ID a previous failed create rolled back clears the
+	// tombstone: this execution is live, so its tasks must be leasable again.
+	// A previous seed conflict is cleared too: this is a new run, not the old
+	// one the colliding row belongs to.
+	delete(s.rolledBack, e.ID)
+	delete(s.mirrorConflict, e.ID)
 	cp := *e
 	// The execution's clock belongs to the backend, not to the caller: every
 	// store stamps creation so the inspect API can time a run even when the
@@ -531,30 +684,45 @@ func (s *memoryState) createExecutionLocked(e *engine.ExecutionSnapshot) {
 	}
 }
 
-func (s *memoryState) UpdateExecutionStatus(_ context.Context, id types.ExecutionID, status types.ExecutionStatus, errMsg string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.updateExecutionStatusLocked(id, status, errMsg)
+func (s *memoryState) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID, status types.ExecutionStatus, errMsg string) error {
+	applied := false
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		applied = s.updateExecutionStatusLocked(id, status, errMsg)
+	}()
+	if applied {
+		// Best-effort, matching rstate.UpdateExecutionStatus: the in-memory
+		// transition is authoritative and a store failure is a reporting gap.
+		// The projection reads the status current when it reaches the store, so
+		// a later transition can never be overwritten by this one.
+		s.mirrorExecutionStatus(ctx, id)
+	}
+	return nil
 }
 
 // updateExecutionStatusLocked is the terminal-write body shared by the public
 // method and the store's own background transitions (the queue timeout). They
 // have to agree on everything — the CAS fence, the reason read-back, the slot
 // release, the event — and the only way to guarantee that is to have one.
-func (s *memoryState) updateExecutionStatusLocked(id types.ExecutionID, status types.ExecutionStatus, errMsg string) error {
+//
+// It reports whether the transition landed. A missing execution and a fenced
+// write both leave the state untouched and must not project a status the store
+// never observed.
+func (s *memoryState) updateExecutionStatusLocked(id types.ExecutionID, status types.ExecutionStatus, errMsg string) bool {
 	entry, ok := s.executions[id]
 	if !ok {
-		return nil
+		return false
 	}
 	// CAS guard — mirrors the distributed backend's Lua fencing:
 	//   - A terminal status is never overwritten.
 	//   - canceling blocks any non-canceled write (cancel owns the terminal transition).
 	current := entry.snap.Status
 	if isTerminalStatus(current) {
-		return nil
+		return false
 	}
 	if current == types.ExecutionStatusCanceling && status != types.ExecutionStatusCanceled {
-		return nil
+		return false
 	}
 	// Register the canceling age in the same locked transition as the status
 	// write (engine.CancelingExecutionLister's register-before-write rule; here
@@ -591,7 +759,7 @@ func (s *memoryState) updateExecutionStatusLocked(id types.ExecutionID, status t
 		}
 	}
 	s.publishLocked(engine.ExecutionEvent{ExecutionID: id, Status: status, Error: errMsg})
-	return nil
+	return true
 }
 
 func (s *memoryState) GetExecution(_ context.Context, id types.ExecutionID) (*engine.ExecutionSnapshot, error) {
@@ -752,19 +920,35 @@ func (s *memoryState) LoadGraph(_ context.Context, id types.ExecutionID) (*graph
 // NodeStore
 // ---------------------------------------------------------------------------
 
-func (s *memoryState) UpsertNode(_ context.Context, n *engine.NodeSnapshot) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *memoryState) UpsertNode(ctx context.Context, n *engine.NodeSnapshot) error {
+	applied := false
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		applied = s.upsertNodeLocked(n)
+	}()
+	if applied {
+		// The projection re-reads the stored snapshot under s.mu; the caller's
+		// pointer never escapes the lock.
+		s.mirrorNode(ctx, n.ExecutionID, n.Name)
+	}
+	return nil
+}
+
+// upsertNodeLocked is the fenced body of UpsertNode. It reports whether the
+// snapshot was accepted; a stale snapshot must not be projected to the store.
+// Callers must hold s.mu.
+func (s *memoryState) upsertNodeLocked(n *engine.NodeSnapshot) bool {
 	key := memoryNodeKey(n.ExecutionID, n.Name)
 	// Record a privacy decision before checking the write fence. A stale update
 	// that carries the marker must still fail closed; a later zero-value update
 	// is never authority to declassify this runtime output.
 	privateOutput := s.preserveOutputPrivacyLocked(key, n.PrivateOutput)
 	if existing, ok := s.nodes[key]; ok && isTerminalNode(existing.Status) && n.ActivationID <= existing.ActivationID {
-		return nil // CAS: don't overwrite terminal state
+		return false // CAS: don't overwrite terminal state
 	}
 	if existing, ok := s.nodes[key]; ok && (existing.Status == types.NodeStatusCommitting || existing.Status == types.NodeStatusWaiting) && n.Status == types.NodeStatusRunning {
-		return nil
+		return false
 	}
 	cp := *n
 	// Timing is write-once. The caller's zero value means "no new fact", not
@@ -786,7 +970,7 @@ func (s *memoryState) UpsertNode(_ context.Context, n *engine.NodeSnapshot) erro
 		cp.Output = nil
 	}
 	s.nodes[key] = &cp
-	return nil
+	return true
 }
 
 func (s *memoryState) GetNode(_ context.Context, id types.ExecutionID, name string) (*engine.NodeSnapshot, error) {
@@ -856,31 +1040,38 @@ func (s *memoryState) outputIsPrivateLocked(key string) bool {
 // (cancelSuspendedNodeLua SREMs the suspended set) and wipes the rest of the
 // waiter state in cleanupOnCancel when the execution reaches Canceled. There is
 // no cleanupOnCancel here, so this deletion is the only place it can happen.
-func (s *memoryState) CancelSuspendedNode(_ context.Context, id types.ExecutionID, name string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	key := string(id) + "/" + name
-	ns := s.nodes[key]
-	if ns == nil || ns.Status != types.NodeStatusSuspended {
-		return false, nil
+func (s *memoryState) CancelSuspendedNode(ctx context.Context, id types.ExecutionID, name string) (bool, error) {
+	canceled := false
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		key := string(id) + "/" + name
+		ns := s.nodes[key]
+		if ns == nil || ns.Status != types.NodeStatusSuspended {
+			return
+		}
+		cp := *ns
+		cp.Status = types.NodeStatusCanceled
+		// Cancel is a terminal transition of a parked node: the first one stamps the
+		// end line, and the start line survives from the lease that parked it.
+		if cp.FinishedAt.IsZero() {
+			cp.FinishedAt = time.Now().UTC()
+		}
+		cp.PrivateOutput = s.preserveOutputPrivacyLocked(key, cp.PrivateOutput)
+		if cp.PrivateOutput {
+			cp.Output = nil
+		}
+		s.nodes[key] = &cp
+		delete(s.suspended, key)
+		// Multi-signal waiters accumulate partial arrivals under the same key; the
+		// consume paths drop both together and so must the cancel path.
+		delete(s.signalSets, key)
+		canceled = true
+	}()
+	if canceled {
+		s.mirrorNode(ctx, id, name)
 	}
-	cp := *ns
-	cp.Status = types.NodeStatusCanceled
-	// Cancel is a terminal transition of a parked node: the first one stamps the
-	// end line, and the start line survives from the lease that parked it.
-	if cp.FinishedAt.IsZero() {
-		cp.FinishedAt = time.Now().UTC()
-	}
-	cp.PrivateOutput = s.preserveOutputPrivacyLocked(key, cp.PrivateOutput)
-	if cp.PrivateOutput {
-		cp.Output = nil
-	}
-	s.nodes[key] = &cp
-	delete(s.suspended, key)
-	// Multi-signal waiters accumulate partial arrivals under the same key; the
-	// consume paths drop both together and so must the cancel path.
-	delete(s.signalSets, key)
-	return true, nil
+	return canceled, nil
 }
 
 func cloneNodeSnapshot(ns *engine.NodeSnapshot) *engine.NodeSnapshot {
@@ -912,10 +1103,22 @@ func cloneLeasePayload(payload *types.SignalPayload) *types.SignalPayload {
 	return &cp
 }
 
-func (s *memoryState) AcquireTaskLease(_ context.Context, lease *engine.TaskLease) (*engine.NodeSnapshot, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	previous, acquired := s.acquireTaskLeaseLocked(lease)
+func (s *memoryState) AcquireTaskLease(ctx context.Context, lease *engine.TaskLease) (*engine.NodeSnapshot, bool, error) {
+	var (
+		previous *engine.NodeSnapshot
+		acquired bool
+	)
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		previous, acquired = s.acquireTaskLeaseLocked(lease)
+	}()
+	if acquired {
+		// Best-effort, matching rstate's acquire_task_lease projection: the new
+		// running record is written after the state transition, and a store
+		// failure never refuses the lease.
+		s.mirrorNode(ctx, lease.Task.ExecutionID, lease.Task.NodeName)
+	}
 	return previous, acquired, nil
 }
 
@@ -930,40 +1133,54 @@ var _ engine.RouteCheckedLeaseAcquirer = (*memoryState)(nil)
 // acyclic task refuses a terminal node whatever activation it carries, and a
 // cyclic task must carry a positive activation. Every guard AcquireTaskLease
 // applies is kept unchanged.
-func (s *memoryState) AcquireTaskLeaseChecked(_ context.Context, lease *engine.TaskLease, opts engine.LeaseAcquireOptions) (engine.LeaseAcquireResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *memoryState) AcquireTaskLeaseChecked(ctx context.Context, lease *engine.TaskLease, opts engine.LeaseAcquireOptions) (engine.LeaseAcquireResult, error) {
+	var res engine.LeaseAcquireResult
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
 
-	res := engine.LeaseAcquireResult{}
-	entry, found := s.executions[lease.Task.ExecutionID]
-	if !found {
-		return res, nil
-	}
-	res.ExecutionFound = true
-	res.ExecutionStatus = entry.snap.Status
-	if types.IsTerminalExecutionStatus(entry.snap.Status) {
-		return res, nil
-	}
-
-	key := memoryNodeKey(lease.Task.ExecutionID, lease.Task.NodeName)
-	current := s.nodes[key]
-	if opts.AllowCycles {
-		if lease.Task.ActivationID <= 0 {
-			res.Previous = s.publicNodeSnapshotLocked(key, current)
-			return res, nil
+		key := memoryNodeKey(lease.Task.ExecutionID, lease.Task.NodeName)
+		entry, found := s.executions[lease.Task.ExecutionID]
+		if !found {
+			return
 		}
-	} else if current != nil && isTerminalNode(current.Status) {
-		res.Previous = s.publicNodeSnapshotLocked(key, current)
-		return res, nil
-	}
+		res.ExecutionFound = true
+		res.ExecutionStatus = entry.snap.Status
+		if types.IsTerminalExecutionStatus(entry.snap.Status) {
+			return
+		}
 
-	res.Previous, res.Acquired = s.acquireTaskLeaseLocked(lease)
+		current := s.nodes[key]
+		if opts.AllowCycles {
+			if lease.Task.ActivationID <= 0 {
+				res.Previous = s.publicNodeSnapshotLocked(key, current)
+				return
+			}
+		} else if current != nil && isTerminalNode(current.Status) {
+			res.Previous = s.publicNodeSnapshotLocked(key, current)
+			return
+		}
+
+		res.Previous, res.Acquired = s.acquireTaskLeaseLocked(lease)
+	}()
+	if res.Acquired {
+		s.mirrorNode(ctx, lease.Task.ExecutionID, lease.Task.NodeName)
+	}
 	return res, nil
 }
 
 // acquireTaskLeaseLocked is the node-level body shared by both acquire entry
 // points. Callers must hold s.mu.
 func (s *memoryState) acquireTaskLeaseLocked(lease *engine.TaskLease) (*engine.NodeSnapshot, bool) {
+	// A task can outlive the execution it names — most notably when a required
+	// create projection failed and the execution was rolled back after its
+	// intents were already visible. Refusing here keeps a late acquire from
+	// recreating node state under an execution that no longer exists. An ID
+	// that never existed is deliberately allowed: the shared state contract
+	// leases standalone nodes without an execution row.
+	if s.rolledBack[lease.Task.ExecutionID] {
+		return nil, false
+	}
 	key := memoryNodeKey(lease.Task.ExecutionID, lease.Task.NodeName)
 	current := s.nodes[key]
 	if current != nil {
@@ -1376,36 +1593,55 @@ func (s *memoryState) SuspendOrConsume(_ context.Context, id types.ExecutionID, 
 	return nil, nil
 }
 
-func (s *memoryState) DeliverSignal(_ context.Context, id types.ExecutionID, signalName string, data map[string]any) (string, *types.SignalPayload, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	prefix := string(id) + "/"
-	// Check if any suspended node is waiting for this signal.
-	for key, spec := range s.suspended {
-		if !strings.HasPrefix(key, prefix) {
-			continue
-		}
-		for _, sig := range spec.Signals {
-			if sig == signalName {
-				nodeName := strings.TrimPrefix(key, prefix)
+func (s *memoryState) DeliverSignal(ctx context.Context, id types.ExecutionID, signalName string, data map[string]any) (string, *types.SignalPayload, error) {
+	var (
+		nodeName     string
+		payload      *types.SignalPayload
+		preDelivered bool
+	)
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		prefix := string(id) + "/"
+		// Check if any suspended node is waiting for this signal.
+		for key, spec := range s.suspended {
+			if !strings.HasPrefix(key, prefix) {
+				continue
+			}
+			for _, sig := range spec.Signals {
+				if sig != signalName {
+					continue
+				}
+				name := strings.TrimPrefix(key, prefix)
 				if spec.Mode == types.ModeMultiSignal {
-					payload := s.addMultiSignalLocked(id, nodeName, signalName, data, spec)
-					if payload == nil {
-						return "", nil, nil
+					p := s.addMultiSignalLocked(id, name, signalName, data, spec)
+					if p == nil {
+						return
 					}
 					delete(s.suspended, key)
 					delete(s.signalSets, key)
-					return nodeName, payload, nil
+					nodeName, payload = name, p
+					return
 				}
 				delete(s.suspended, key)
-				return nodeName, nil, nil
+				nodeName = name
+				return
 			}
 		}
+		// No suspended node yet — store for later consumption. Clone to decouple
+		// from caller's map (matches distributed serialize semantics).
+		s.signals[string(id)+"/"+signalName] = cloneData(data)
+		preDelivered = true
+	}()
+
+	// Only the pre-delivery path writes a signal row, matching
+	// rstate.DeliverSignal: a signal that resumed a waiting node was never
+	// parked in the store's signal table. The projection itself re-reads the
+	// signal table, so a consumption or revoke that raced ahead is honored.
+	if preDelivered {
+		s.mirrorSaveSignal(ctx, id, signalName)
 	}
-	// No suspended node yet — store for later consumption. Clone to decouple
-	// from caller's map (matches distributed serialize semantics).
-	s.signals[string(id)+"/"+signalName] = cloneData(data)
-	return "", nil, nil
+	return nodeName, payload, nil
 }
 
 var _ engine.DurableSignalDeliverer = (*memoryState)(nil)
@@ -1514,31 +1750,43 @@ func (s *memoryState) AcquireResumeLock(_ context.Context, id types.ExecutionID,
 	return true, nil
 }
 
-func (s *memoryState) RevokeSignal(_ context.Context, id types.ExecutionID, signalName string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sigKey := string(id) + "/" + signalName
-	if _, ok := s.signals[sigKey]; !ok {
-		return false, nil
-	}
-	// Check if any node that was waiting for this signal has already been resumed.
-	// The suspended map keys are execID/nodeName → *SuspendSpec, and resumed keys are execID/nodeName.
-	// We need to find the node waiting for this signal by checking suspended entries.
-	for key, spec := range s.suspended {
-		if !strings.HasPrefix(key, string(id)+"/") {
-			continue
+func (s *memoryState) RevokeSignal(ctx context.Context, id types.ExecutionID, signalName string) (bool, error) {
+	revoked := false
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		sigKey := string(id) + "/" + signalName
+		if _, ok := s.signals[sigKey]; !ok {
+			return
 		}
-		for _, sig := range spec.Signals {
-			if sig == signalName {
-				// Found the node waiting for this signal — check its resume lock.
-				if s.resumed[key] {
-					return false, nil
+		// Check if any node that was waiting for this signal has already been resumed.
+		// The suspended map keys are execID/nodeName → *SuspendSpec, and resumed keys are execID/nodeName.
+		// We need to find the node waiting for this signal by checking suspended entries.
+		for key, spec := range s.suspended {
+			if !strings.HasPrefix(key, string(id)+"/") {
+				continue
+			}
+			for _, sig := range spec.Signals {
+				if sig == signalName {
+					// Found the node waiting for this signal — check its resume lock.
+					if s.resumed[key] {
+						return
+					}
+					break
 				}
-				break
 			}
 		}
+		delete(s.signals, sigKey)
+		revoked = true
+	}()
+	if !revoked {
+		return false, nil
 	}
-	delete(s.signals, sigKey)
+
+	// Best-effort, matching rstate.RevokeSignal: the bool from the store is not
+	// consulted, because the in-memory revoke is the authority. The projection
+	// re-reads the signal table, so a re-delivery after the revoke keeps the row.
+	s.mirrorRevokeSignal(ctx, id, signalName)
 	return true, nil
 }
 

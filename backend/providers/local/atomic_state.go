@@ -77,27 +77,50 @@ func (s *memoryState) CommitLeasedNode(ctx context.Context, req engine.CommitNod
 
 // CommitNode atomically applies a fenced terminal node transition, updates
 // execution completion counters, and records the follow-up advance task.
-func (s *memoryState) CommitNode(_ context.Context, req engine.CommitNodeRequest) (engine.CommitNodeResult, error) {
+func (s *memoryState) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (engine.CommitNodeResult, error) {
 	if err := req.Validate(); err != nil {
 		return engine.CommitNodeResult{}, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	var result engine.CommitNodeResult
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		result = s.commitNodeLocked(req)
+	}()
 
+	// Best-effort post-commit projections, matching rstate.CommitNode: the
+	// accepted node snapshot first, then — when the commit finalized the
+	// execution inside the same transition — the terminal status that no
+	// UpdateExecutionStatus call will ever see. Both helpers read the current
+	// state under s.mu, so a later transition is never overwritten by a stale
+	// projection.
+	if result.Applied {
+		s.mirrorNode(ctx, req.ExecutionID, req.NodeName)
+		if result.ExecutionDone {
+			s.mirrorExecutionStatus(ctx, req.ExecutionID)
+		}
+	}
+	return result, nil
+}
+
+// commitNodeLocked is the fenced transition body. Callers must hold s.mu. The
+// projection helpers re-read the accepted node and the execution status after
+// the transition, so only the result is returned here.
+func (s *memoryState) commitNodeLocked(req engine.CommitNodeRequest) engine.CommitNodeResult {
 	entry := s.executions[req.ExecutionID]
 	if entry == nil {
-		return engine.CommitNodeResult{Outcome: engine.CommitOutcomeExecutionInactive}, nil
+		return engine.CommitNodeResult{Outcome: engine.CommitOutcomeExecutionInactive}
 	}
 	key := memoryNodeKey(req.ExecutionID, req.NodeName)
 	current := s.nodes[key]
 	if current != nil && isTerminalNode(current.Status) {
 		if current.ActivationID == req.ActivationID && ((!req.System && current.CommittedLeaseToken == req.LeaseToken && req.LeaseToken != "") || (req.System && current.Status == req.Status)) {
-			return engine.CommitNodeResult{Outcome: engine.CommitOutcomeDuplicateTerminal}, nil
+			return engine.CommitNodeResult{Outcome: engine.CommitOutcomeDuplicateTerminal}
 		}
-		return engine.CommitNodeResult{Outcome: engine.CommitOutcomeStaleToken}, nil
+		return engine.CommitNodeResult{Outcome: engine.CommitOutcomeStaleToken}
 	}
 	if types.IsTerminalExecutionStatus(entry.snap.Status) {
-		return engine.CommitNodeResult{Outcome: engine.CommitOutcomeExecutionInactive}, nil
+		return engine.CommitNodeResult{Outcome: engine.CommitOutcomeExecutionInactive}
 	}
 
 	if req.System {
@@ -123,14 +146,14 @@ func (s *memoryState) CommitNode(_ context.Context, req engine.CommitNodeRequest
 		pinned := req.Status == types.NodeStatusPinned
 		skipped := req.Status == types.NodeStatusSkipped
 		if (pinned && skipMarked) || (!pinned && !skipped && !skipMarked) {
-			return engine.CommitNodeResult{Outcome: engine.CommitOutcomeStaleToken}, nil
+			return engine.CommitNodeResult{Outcome: engine.CommitOutcomeStaleToken}
 		}
 		if current != nil && current.Status != types.NodeStatusPending {
-			return engine.CommitNodeResult{Outcome: engine.CommitOutcomeStaleToken}, nil
+			return engine.CommitNodeResult{Outcome: engine.CommitOutcomeStaleToken}
 		}
 	} else {
 		if current == nil || (current.Status != types.NodeStatusRunning && current.Status != types.NodeStatusCommitting && current.Status != types.NodeStatusWaiting) || current.LeaseID != req.LeaseID || current.LeaseToken != req.LeaseToken || current.Attempt != req.Attempt || current.ActivationID != req.ActivationID {
-			return engine.CommitNodeResult{Outcome: engine.CommitOutcomeStaleToken}, nil
+			return engine.CommitNodeResult{Outcome: engine.CommitOutcomeStaleToken}
 		}
 	}
 
@@ -182,6 +205,7 @@ func (s *memoryState) CommitNode(_ context.Context, req engine.CommitNodeRequest
 	}
 
 	result := engine.CommitNodeResult{Outcome: engine.CommitOutcomeAccepted, Applied: true}
+	terminalErr := ""
 	for _, sourceName := range req.ReclaimOutputNames {
 		delete(s.outputs, memoryNodeKey(req.ExecutionID, sourceName))
 	}
@@ -195,8 +219,8 @@ func (s *memoryState) CommitNode(_ context.Context, req engine.CommitNodeRequest
 			if req.Fatal || s.failed[req.ExecutionID] > 0 {
 				status = types.ExecutionStatusFailed
 			}
-			s.finishExecutionLocked(req.ExecutionID, entry, status,
-				engine.TerminalExecutionError(status, req.Error, ""))
+			terminalErr = engine.TerminalExecutionError(status, req.Error, "")
+			s.finishExecutionLocked(req.ExecutionID, entry, status, terminalErr)
 			result.ExecutionDone = true
 			result.ExecutionStatus = status
 		}
@@ -244,13 +268,13 @@ func (s *memoryState) CommitNode(_ context.Context, req engine.CommitNodeRequest
 				}
 			}
 		} else if req.CyclicComplete {
-			s.finishExecutionLocked(req.ExecutionID, entry, req.CyclicFinalStatus,
-				engine.TerminalExecutionError(req.CyclicFinalStatus, req.Error, req.CyclicFinalError))
+			terminalErr = engine.TerminalExecutionError(req.CyclicFinalStatus, req.Error, req.CyclicFinalError)
+			s.finishExecutionLocked(req.ExecutionID, entry, req.CyclicFinalStatus, terminalErr)
 			result.ExecutionDone = true
 			result.ExecutionStatus = req.CyclicFinalStatus
 		}
 	}
-	return result, nil
+	return result
 }
 
 // AdvanceNode atomically converts the committed source's outbound edge

@@ -25,27 +25,44 @@ var _ engine.ExecutionPauser = (*memoryState)(nil)
 // released to "now" by a resume that had to reconstruct it. See
 // engine.ExecutionPauser for why the enforcement point is the store rather than
 // the engine.
-func (s *memoryState) PauseExecution(_ context.Context, id types.ExecutionID) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *memoryState) PauseExecution(ctx context.Context, id types.ExecutionID) error {
+	var (
+		err     error
+		project bool
+	)
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
 
-	entry, ok := s.executions[id]
-	if !ok {
-		return fmt.Errorf("pause execution %q: %w", id, engine.ErrExecutionNotPausable)
+		entry, ok := s.executions[id]
+		if !ok {
+			err = fmt.Errorf("pause execution %q: %w", id, engine.ErrExecutionNotPausable)
+			return
+		}
+		switch entry.snap.Status {
+		case types.ExecutionStatusPaused:
+			// A repeat is the ordinary shape of a lost response, not a conflict.
+			// rstate projects the already-paused answer as well: the operator's
+			// listing must read paused whether this call applied the transition or
+			// found it already applied.
+			project = true
+		case types.ExecutionStatusRunning:
+			entry.snap.Status = types.ExecutionStatusPaused
+			entry.snap.UpdatedAt = time.Now().UTC()
+			project = true
+		default:
+			// A queued execution holds no state to suspend and a terminal one is
+			// over; "paused" would be a lie about either.
+			err = fmt.Errorf("pause execution %q in status %q: %w", id, entry.snap.Status, engine.ErrExecutionNotPausable)
+		}
+	}()
+	if err != nil {
+		return err
 	}
-	switch entry.snap.Status {
-	case types.ExecutionStatusPaused:
-		// A repeat is the ordinary shape of a lost response, not a conflict.
-		return nil
-	case types.ExecutionStatusRunning:
-		entry.snap.Status = types.ExecutionStatusPaused
-		entry.snap.UpdatedAt = time.Now().UTC()
-		return nil
-	default:
-		// A queued execution holds no state to suspend and a terminal one is
-		// over; "paused" would be a lie about either.
-		return fmt.Errorf("pause execution %q in status %q: %w", id, entry.snap.Status, engine.ErrExecutionNotPausable)
+	if project {
+		s.mirrorExecutionStatus(ctx, id)
 	}
+	return nil
 }
 
 // ResumeExecution returns a paused execution to dispatch.
@@ -54,19 +71,28 @@ func (s *memoryState) PauseExecution(_ context.Context, id types.ExecutionID) er
 // set was never moved, so the work that was held is due again the instant the
 // status changes. What it cannot do is deliver it — that is FlushOutbox's job,
 // and the engine calls it after this returns.
-func (s *memoryState) ResumeExecution(_ context.Context, id types.ExecutionID) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *memoryState) ResumeExecution(ctx context.Context, id types.ExecutionID) error {
+	var err error
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
 
-	entry, ok := s.executions[id]
-	if !ok || entry.snap.Status != types.ExecutionStatusPaused {
-		// Covers the execution that finished or was cancelled while paused:
-		// there is nothing to resume, and reporting success would promise work
-		// that will never run.
-		return fmt.Errorf("resume execution %q: %w", id, engine.ErrExecutionNotPaused)
+		entry, ok := s.executions[id]
+		if !ok || entry.snap.Status != types.ExecutionStatusPaused {
+			// Covers the execution that finished or was cancelled while paused:
+			// there is nothing to resume, and reporting success would promise work
+			// that will never run.
+			err = fmt.Errorf("resume execution %q: %w", id, engine.ErrExecutionNotPaused)
+			return
+		}
+		entry.snap.Status = types.ExecutionStatusRunning
+		entry.snap.UpdatedAt = time.Now().UTC()
+	}()
+	if err != nil {
+		return err
 	}
-	entry.snap.Status = types.ExecutionStatusRunning
-	entry.snap.UpdatedAt = time.Now().UTC()
+
+	s.mirrorExecutionStatus(ctx, id)
 	return nil
 }
 
