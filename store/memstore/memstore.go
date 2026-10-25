@@ -3,6 +3,7 @@ package memstore
 import (
 	"context"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,6 +40,7 @@ var (
 	_ store.ScopedAuditReconciler = (*Store)(nil)
 	_ store.Supplies              = (*Store)(nil)
 	_ store.ScheduleOverrideStore = (*Store)(nil)
+	_ store.LatestExecutionReader = (*Store)(nil)
 )
 
 // New creates a new in-memory store.
@@ -161,6 +163,13 @@ func (s *Store) UpdateExecutionStatus(_ context.Context, id types.ExecutionID, s
 	rec.Status = status
 	rec.Error = errMsg
 	rec.UpdatedAt = time.Now()
+	// Write-once, like the SQL backend's COALESCE: the first terminal instant
+	// wins, a duplicate terminal write never moves it, and a non-terminal
+	// transition never sets it.
+	if store.IsTerminalExecutionStatus(status) && rec.FinishedAt == nil {
+		finished := rec.UpdatedAt
+		rec.FinishedAt = &finished
+	}
 	return nil
 }
 
@@ -205,6 +214,66 @@ func (s *Store) CountExecutions(_ context.Context, ns namespace.Namespace, filte
 	return int64(len(scope)), nil
 }
 
+// LatestExecutions implements store.LatestExecutionReader for the in-memory
+// backend. It applies the same fail-closed scope check as ListExecutions, then
+// scans once for every requested workflow; the set is small enough that a
+// second index would be cost without benefit.
+//
+// The ordering is deliberately NOT sortExecutionsNewestFirst: that helper
+// orders listings by the auto-increment id (the pagination tiebreak), while
+// this contract breaks CreatedAt ties by ExecutionID ascending. Both are total;
+// they are simply two different documented orders, and the shared contract
+// pins this one.
+func (s *Store) LatestExecutions(_ context.Context, ns namespace.Namespace, workflowIDs []types.WorkflowID) (map[types.WorkflowID]*store.ExecutionRecord, error) {
+	if err := store.ValidateNamespaceScope(ns); err != nil {
+		return nil, err
+	}
+	out := make(map[types.WorkflowID]*store.ExecutionRecord, len(workflowIDs))
+	if len(workflowIDs) == 0 {
+		return out, nil
+	}
+	// Drop ids that cannot name a stored workflow before scanning: an empty id
+	// would only select unattributed rows, and an over-long one exceeds the
+	// persisted column. Both answers are "no execution", not an error.
+	wanted := make(map[types.WorkflowID]struct{}, len(workflowIDs))
+	for _, id := range workflowIDs {
+		if id == "" || store.ValidateExecutionWorkflowID(string(id)) != nil {
+			continue
+		}
+		wanted[id] = struct{}{}
+	}
+	if len(wanted) == 0 {
+		return out, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, rec := range s.executions {
+		if rec.Namespace != string(ns) {
+			continue
+		}
+		if _, ok := wanted[rec.WorkflowID]; !ok {
+			continue
+		}
+		cur, ok := out[rec.WorkflowID]
+		if !ok || executionIsNewer(rec, cur) {
+			cp := *rec
+			out[rec.WorkflowID] = &cp
+		}
+	}
+	return out, nil
+}
+
+// executionIsNewer reports whether a wins LatestExecutions' order against b:
+// CreatedAt descending, then ExecutionID ascending. The tie-break is a total
+// order because execution ids are unique, which is what makes repeated reads
+// return the same row.
+func executionIsNewer(a, b *store.ExecutionRecord) bool {
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.After(b.CreatedAt)
+	}
+	return a.ExecutionID < b.ExecutionID
+}
+
 // scopedExecutions applies the scope and filter, in the same order and with the
 // same failures as the SQL backend. Scope validation comes first and is
 // unconditional: a malformed namespace must not reach the matcher, so that no
@@ -220,30 +289,60 @@ func (s *Store) scopedExecutions(ns namespace.Namespace, filter store.ExecutionF
 	defer s.mu.Unlock()
 	var scope []*store.ExecutionRecord
 	for _, rec := range s.executions {
-		// Exact equality against a scope that is known non-empty, so a record
-		// with an empty namespace can never be selected.
-		if rec.Namespace != string(ns) {
-			continue
-		}
-		if filter.Status != "" && rec.Status != filter.Status {
-			continue
-		}
-		// Exact equality against a value the caller asked for. An unattributed
-		// record (WorkflowID "") therefore matches no non-empty filter, the same
-		// fail-closed rule the namespace comparison above applies.
-		if filter.WorkflowID != "" && rec.WorkflowID != filter.WorkflowID {
-			continue
-		}
-		if !filter.CreatedAfter.IsZero() && !rec.CreatedAt.After(filter.CreatedAfter) {
-			continue
-		}
-		if !filter.CreatedBefore.IsZero() && !rec.CreatedAt.Before(filter.CreatedBefore) {
+		if !executionMatchesFilter(rec, ns, filter) {
 			continue
 		}
 		scope = append(scope, rec)
 	}
 	sortExecutionsNewestFirst(scope)
 	return scope, nil
+}
+
+// executionMatchesFilter is the one definition of "this row is in scope" for
+// the in-memory backend: the namespace equality and every optional filter, in
+// the same order and with the same fail-closed rules as the SQL query builder.
+// scopedExecutions and the overview aggregations all call it, so a listing page
+// and the counters computed over the same filter cannot disagree.
+func executionMatchesFilter(rec *store.ExecutionRecord, ns namespace.Namespace, filter store.ExecutionFilter) bool {
+	// Exact equality against a scope that is known non-empty, so a record
+	// with an empty namespace can never be selected.
+	if rec.Namespace != string(ns) {
+		return false
+	}
+	if statuses := filter.StatusSet(); len(statuses) > 0 {
+		matched := false
+		for _, status := range statuses {
+			if rec.Status == status {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	// Prefix match on EITHER identity column: the execution id or the workflow
+	// id it was submitted under. Validate() already restricted the prefix to the
+	// id alphabet, so a plain strings.HasPrefix is exactly the
+	// `LIKE 'x%' ESCAPE '!'` the SQL backend runs on both columns.
+	if filter.Query != "" &&
+		!strings.HasPrefix(string(rec.ExecutionID), filter.Query) &&
+		!strings.HasPrefix(string(rec.WorkflowID), filter.Query) {
+		return false
+	}
+	// Exact equality against a value the caller asked for. An unattributed
+	// record (WorkflowID "") therefore matches no non-empty filter, the same
+	// fail-closed rule the namespace comparison above applies.
+	if filter.WorkflowID != "" && rec.WorkflowID != filter.WorkflowID {
+		return false
+	}
+	if !filter.CreatedAfter.IsZero() && !rec.CreatedAt.After(filter.CreatedAfter) {
+		return false
+	}
+	if !filter.CreatedBefore.IsZero() && !rec.CreatedAt.Before(filter.CreatedBefore) {
+		return false
+	}
+	return true
 }
 
 // sortExecutionsNewestFirst is store.ExecutionOrder in Go: created_at

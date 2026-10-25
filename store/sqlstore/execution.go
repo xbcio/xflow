@@ -3,6 +3,7 @@ package sqlstore
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -17,6 +18,7 @@ type executionRepo struct {
 }
 
 var _ store.Executions = (*executionRepo)(nil)
+var _ store.LatestExecutionReader = (*executionRepo)(nil)
 
 func (r *executionRepo) CreateExecution(ctx context.Context, rec *store.ExecutionRecord) error {
 	if err := store.ValidateExecutionWorkflowID(string(rec.WorkflowID)); err != nil {
@@ -31,13 +33,22 @@ func (r *executionRepo) CreateExecution(ctx context.Context, rec *store.Executio
 }
 
 func (r *executionRepo) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID, status types.ExecutionStatus, errMsg string) error {
+	updates := map[string]any{
+		"status":    string(status),
+		"error_msg": errMsg,
+	}
+	// finished_at is write-once, exactly like a node's: the COALESCE keeps the
+	// FIRST terminal instant when a duplicate terminal write (a retry, a
+	// cancel/complete race) arrives later. A non-terminal transition never
+	// touches it, so a canceling execution that resumes cannot carry a
+	// completion time it did not reach.
+	if store.IsTerminalExecutionStatus(status) {
+		updates["finished_at"] = gorm.Expr("COALESCE(finished_at, ?)", time.Now().UTC())
+	}
 	result := r.db.WithContext(ctx).
 		Model(&dbExecution{}).
 		Where("execution_id = ?", string(id)).
-		Updates(map[string]any{
-			"status":    string(status),
-			"error_msg": errMsg,
-		})
+		Updates(updates)
 	if err := wrapDBErr(fmt.Sprintf("update execution status %q", id), result.Error); err != nil {
 		return err
 	}
@@ -72,8 +83,26 @@ func (r *executionRepo) executionQuery(ctx context.Context, ns namespace.Namespa
 	q := r.db.WithContext(ctx).
 		Model(&dbExecution{}).
 		Where("namespace = ?", string(ns))
-	if filter.Status != "" {
-		q = q.Where("status = ?", string(filter.Status))
+	// StatusSet collapses the single and multi-select forms into one predicate.
+	// A single value keeps the equality form (it is the same plan, and existing
+	// callers/tests read that shape); several values expand to IN with every
+	// member bound as a parameter.
+	switch statuses := filter.StatusSet(); len(statuses) {
+	case 0:
+	case 1:
+		q = q.Where("status = ?", string(statuses[0]))
+	default:
+		q = q.Where("status IN ?", statusStrings(statuses))
+	}
+	// A search prefix matches EITHER identity column: the execution id or the
+	// workflow id it was submitted under. The same escaped pattern is bound to
+	// both sides, and the escape character is declared explicitly because MySQL
+	// and SQLite disagree about a backslash in a string literal, but both honor
+	// ESCAPE '!'. Validate() has already refused anything outside the id
+	// alphabet, so this is the second line of defense.
+	if filter.Query != "" {
+		pattern := store.ExecutionQueryLikePattern(filter.Query)
+		q = q.Where("(execution_id LIKE ? ESCAPE '!' OR workflow_id LIKE ? ESCAPE '!')", pattern, pattern)
 	}
 	// Exact equality, never LIKE: a workflow filter is an identity lookup, and a
 	// row stored with an empty workflow_id (unattributed) matches no non-empty
@@ -122,4 +151,85 @@ func (r *executionRepo) CountExecutions(ctx context.Context, ns namespace.Namesp
 		return 0, err
 	}
 	return count, nil
+}
+
+// LatestExecutions implements store.LatestExecutionReader with one statement.
+//
+// ROW_NUMBER() over PARTITION BY workflow_id ORDER BY created_at DESC,
+// execution_id ASC, filtered to rn = 1, is the same total order the memstore
+// applies: a single read cannot disagree with itself about which row is newest,
+// and a per-id loop (up to one query per workflow id) is avoided. The predicate
+// is exactly idx_namespace_workflow_id_created_at's leading columns, so the
+// scan is scoped to one namespace and the requested ids; execution_id is not in
+// that index, so a group whose rows share created_at still sorts by it, but
+// such groups are bounded by executions created in the same millisecond for one
+// workflow. The outer rn = 1 bounds the result to one row per requested id, so
+// a workflow list page of at most 200 rows costs one statement and at most 200
+// returned rows.
+//
+// The projection is deliberately narrow. The workflow-list caller reads only
+// the identity (execution_id, namespace, workflow_id), the status and the two
+// timestamps; workflow_def, params and runtime are JSON blobs proportional to
+// the workflow and are never consulted by this capability. Selecting them at
+// either level of the derived table made one page of 200 workflows read 200
+// full definitions, so both the inner and the outer SELECT list only these six
+// columns. The contract's callers MUST NOT read any field this projection
+// leaves zero.
+//
+// Both `IN ?` expansion and window functions are supported by every dialect
+// this package is used with (audit_repo.go already relies on the former; MySQL
+// 8 and SQLite 3.25+ support the latter), so the single statement is portable
+// across the supported dialects.
+//
+// The scope and the ids are bind parameters; nothing about the request is
+// concatenated into the SQL. An id that cannot name a workflow (empty, or
+// longer than the column) is dropped before the statement is built, and an
+// empty id list sends no statement at all. On error the operation name is the
+// only context added: the namespace, the SQL and the row contents stay out of
+// the error and out of any log it reaches.
+func (r *executionRepo) LatestExecutions(ctx context.Context, ns namespace.Namespace, workflowIDs []types.WorkflowID) (map[types.WorkflowID]*store.ExecutionRecord, error) {
+	if err := store.ValidateNamespaceScope(ns); err != nil {
+		return nil, err
+	}
+	out := make(map[types.WorkflowID]*store.ExecutionRecord, len(workflowIDs))
+	if len(workflowIDs) == 0 {
+		return out, nil
+	}
+	ids := make([]string, 0, len(workflowIDs))
+	seen := make(map[string]struct{}, len(workflowIDs))
+	for _, id := range workflowIDs {
+		if id == "" || store.ValidateExecutionWorkflowID(string(id)) != nil {
+			continue
+		}
+		if _, dup := seen[string(id)]; dup {
+			continue
+		}
+		seen[string(id)] = struct{}{}
+		ids = append(ids, string(id))
+	}
+	if len(ids) == 0 {
+		return out, nil
+	}
+
+	var rows []dbExecution
+	err := r.db.WithContext(ctx).Raw(`
+SELECT execution_id, namespace, workflow_id, status, created_at, updated_at
+FROM (
+    SELECT execution_id, namespace, workflow_id, status, created_at, updated_at,
+           ROW_NUMBER() OVER (
+               PARTITION BY workflow_id
+               ORDER BY created_at DESC, execution_id ASC
+           ) AS rn
+    FROM xflow_executions
+    WHERE namespace = ? AND workflow_id IN ?
+) AS ranked
+WHERE rn = 1`, string(ns), ids).Find(&rows).Error
+	if err := wrapDBErr("latest executions in scope", err); err != nil {
+		return nil, err
+	}
+	for i := range rows {
+		rec := fromDBExecution(&rows[i])
+		out[rec.WorkflowID] = rec
+	}
+	return out, nil
 }

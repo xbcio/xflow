@@ -18,6 +18,9 @@ import (
 // run it. store.Executions satisfies it.
 type ExecutionsStore interface {
 	CreateExecution(ctx context.Context, rec *store.ExecutionRecord) error
+	// UpdateExecutionStatus drives the lifecycle transitions the write-once
+	// finished_at contract is asserted through.
+	UpdateExecutionStatus(ctx context.Context, id types.ExecutionID, status types.ExecutionStatus, errMsg string) error
 	GetExecution(ctx context.Context, id types.ExecutionID) (*store.ExecutionRecord, error)
 	ListExecutions(ctx context.Context, ns namespace.Namespace, filter store.ExecutionFilter, opts store.ListOptions) ([]*store.ExecutionRecord, error)
 	CountExecutions(ctx context.Context, ns namespace.Namespace, filter store.ExecutionFilter) (int64, error)
@@ -80,10 +83,15 @@ func ExecutionsContract(t *testing.T, s ExecutionsStore, nsPrefix string) {
 	// it nil would fail at the first CreateExecution against MySQL with an
 	// error that says nothing about listings. `{}` is the same placeholder
 	// test/integration's emptyJSON uses for the same reason.
+	// finishedAt is set on precisely one row: it makes the new execution-table
+	// columns observable on a round trip, and leaves the other terminal row
+	// (ids[2]) as the "written before the column existed" case that must read
+	// back as nil rather than as a manufactured instant.
+	finishedAt := base.Add(1500 * time.Millisecond)
 	seed := []*store.ExecutionRecord{
-		{ExecutionID: ids[0], Namespace: string(nsA), WorkflowID: "wfid-alpha", WorkflowName: "wf-alpha", WorkflowDef: emptyWorkflowDef, Status: types.ExecutionStatusSuccess, CreatedAt: base, UpdatedAt: base},
+		{ExecutionID: ids[0], Namespace: string(nsA), WorkflowID: "wfid-alpha", WorkflowName: "wf-alpha", WorkflowDef: emptyWorkflowDef, Status: types.ExecutionStatusSuccess, TriggerKind: "timer", NodeTotal: 4, FinishedAt: &finishedAt, CreatedAt: base, UpdatedAt: base},
 		{ExecutionID: ids[1], Namespace: string(nsA), WorkflowID: "wfid-alpha", WorkflowName: "wf-alpha", WorkflowDef: emptyWorkflowDef, Status: types.ExecutionStatusFailed, CreatedAt: base.Add(time.Second), UpdatedAt: base.Add(time.Second)},
-		{ExecutionID: ids[2], Namespace: string(nsA), WorkflowID: "wfid-beta", WorkflowName: "wf-beta", WorkflowDef: emptyWorkflowDef, Status: types.ExecutionStatusSuccess, CreatedAt: base.Add(2 * time.Second), UpdatedAt: base.Add(2 * time.Second)},
+		{ExecutionID: ids[2], Namespace: string(nsA), WorkflowID: "wfid-beta", WorkflowName: "wf-beta", WorkflowDef: emptyWorkflowDef, Status: types.ExecutionStatusSuccess, TriggerKind: "webhook", NodeTotal: 2, CreatedAt: base.Add(2 * time.Second), UpdatedAt: base.Add(2 * time.Second)},
 		{ExecutionID: ids[3], Namespace: string(nsB), WorkflowID: "wfid-alpha", WorkflowName: "wf-alpha", WorkflowDef: emptyWorkflowDef, Status: types.ExecutionStatusSuccess, CreatedAt: base.Add(3 * time.Second), UpdatedAt: base.Add(3 * time.Second)},
 		{ExecutionID: ids[4], Namespace: string(nsB), WorkflowID: "wfid-gamma", WorkflowName: "wf-gamma", WorkflowDef: emptyWorkflowDef, Status: types.ExecutionStatusRunning, CreatedAt: base.Add(4 * time.Second), UpdatedAt: base.Add(4 * time.Second)},
 		// The unattributed row. Its execution_id is still readable through
@@ -375,6 +383,199 @@ func ExecutionsContract(t *testing.T, s ExecutionsStore, nsPrefix string) {
 			assertExactly(t, "successful executions in nsB", got, []types.ExecutionID{ids[3]})
 		})
 
+		t.Run("statuses_multi_select", func(t *testing.T) {
+			// The multi-select form must describe the same set as the union of
+			// the single-status listings, in the same order.
+			multi, err := s.ListExecutions(ctx, nsA, store.ExecutionFilter{
+				Statuses: []types.ExecutionStatus{types.ExecutionStatusSuccess, types.ExecutionStatusFailed},
+			}, store.DefaultListOptions())
+			if err != nil {
+				t.Fatalf("multi-status filter: %v", err)
+			}
+			assertExactly(t, "success+failed executions in nsA", multi, []types.ExecutionID{ids[2], ids[1], ids[0]})
+			if total := mustCount(t, s, ctx, nsA, store.ExecutionFilter{
+				Statuses: []types.ExecutionStatus{types.ExecutionStatusSuccess, types.ExecutionStatusFailed},
+			}); total != 3 {
+				t.Fatalf("CountExecutions(statuses=success,failed) = %d, want 3", total)
+			}
+
+			// A one-element multi-select is the same set as the scalar form.
+			one, err := s.ListExecutions(ctx, nsA, store.ExecutionFilter{
+				Statuses: []types.ExecutionStatus{types.ExecutionStatusSuccess},
+			}, store.DefaultListOptions())
+			if err != nil {
+				t.Fatalf("one-element multi-status filter: %v", err)
+			}
+			assertExactly(t, "statuses=[success] in nsA", one, []types.ExecutionID{ids[2], ids[0]})
+
+			// Duplicates cannot change an IN set.
+			dup, err := s.ListExecutions(ctx, nsA, store.ExecutionFilter{
+				Statuses: []types.ExecutionStatus{types.ExecutionStatusSuccess, types.ExecutionStatusSuccess},
+			}, store.DefaultListOptions())
+			if err != nil {
+				t.Fatalf("duplicated multi-status filter: %v", err)
+			}
+			assertExactly(t, "statuses=[success,success] in nsA", dup, []types.ExecutionID{ids[2], ids[0]})
+
+			// The two forms are mutually exclusive: setting both is a caller
+			// bug, not a filter to guess at.
+			if _, err := s.ListExecutions(ctx, nsA, store.ExecutionFilter{
+				Status:   types.ExecutionStatusSuccess,
+				Statuses: []types.ExecutionStatus{types.ExecutionStatusSuccess},
+			}, store.DefaultListOptions()); err == nil {
+				t.Fatal("a filter with both status and statuses was accepted; the two forms cannot both apply")
+			}
+
+			// One unknown member rejects the whole filter, exactly like an
+			// unknown scalar status.
+			if _, err := s.ListExecutions(ctx, nsA, store.ExecutionFilter{
+				Statuses: []types.ExecutionStatus{types.ExecutionStatusSuccess, types.ExecutionStatus("succes")},
+			}, store.DefaultListOptions()); err == nil {
+				t.Fatal("an unrecognized status in statuses was accepted; a typo must not read back as an empty page")
+			}
+			if _, err := s.CountExecutions(ctx, nsA, store.ExecutionFilter{
+				Statuses: []types.ExecutionStatus{types.ExecutionStatus("succes")},
+			}); err == nil {
+				t.Fatal("CountExecutions accepted an unrecognized status in statuses that ListExecutions rejects")
+			}
+		})
+
+		t.Run("query", func(t *testing.T) {
+			// The fixtures are <prefix>-a1, -a2, -a3, -b1, -b2, -orphan, and
+			// the nsA rows are attributed to workflow ids wfid-alpha/wfid-beta.
+			prefix := nsPrefix + "-a"
+			got, err := s.ListExecutions(ctx, nsA, store.ExecutionFilter{Query: prefix}, store.DefaultListOptions())
+			if err != nil {
+				t.Fatalf("query filter: %v", err)
+			}
+			assertExactly(t, "execution ids starting with "+prefix, got, []types.ExecutionID{ids[2], ids[1], ids[0]})
+			if total := mustCount(t, s, ctx, nsA, store.ExecutionFilter{Query: prefix}); total != 3 {
+				t.Fatalf("CountExecutions(query=%q) = %d, want 3", prefix, total)
+			}
+
+			// A full execution id as the query is an exact-id lookup.
+			exact, err := s.ListExecutions(ctx, nsA, store.ExecutionFilter{Query: string(ids[0])}, store.DefaultListOptions())
+			if err != nil {
+				t.Fatalf("exact-id query filter: %v", err)
+			}
+			assertExactly(t, "execution id equal to "+string(ids[0]), exact, []types.ExecutionID{ids[0]})
+
+			// The query matches the WORKFLOW id column too, ORed with the
+			// execution id: one search box answers "this run, or the runs of
+			// this workflow?" without the caller knowing which identity the
+			// string is.
+			wfPrefix := "wfid-alpha"
+			wfGot, err := s.ListExecutions(ctx, nsA, store.ExecutionFilter{Query: wfPrefix}, store.DefaultListOptions())
+			if err != nil {
+				t.Fatalf("workflow-id query filter: %v", err)
+			}
+			assertExactly(t, "workflow ids starting with "+wfPrefix, wfGot, []types.ExecutionID{ids[1], ids[0]})
+			if total := mustCount(t, s, ctx, nsA, store.ExecutionFilter{Query: wfPrefix}); total != 2 {
+				t.Fatalf("CountExecutions(query=%q) = %d, want 2", wfPrefix, total)
+			}
+			inB, err := s.ListExecutions(ctx, nsB, store.ExecutionFilter{Query: wfPrefix}, store.DefaultListOptions())
+			if err != nil {
+				t.Fatalf("workflow-id query filter in nsB: %v", err)
+			}
+			assertExactly(t, "workflow ids starting with wfid-alpha in nsB", inB, []types.ExecutionID{ids[3]})
+
+			// Query matching stays inside the scope: nsB's -b rows share the
+			// fixture prefix, and its wfid-gamma row shares the workflow
+			// column's shape, but neither must answer an nsA query.
+			cross, err := s.ListExecutions(ctx, nsA, store.ExecutionFilter{Query: nsPrefix + "-b"}, store.DefaultListOptions())
+			if err != nil {
+				t.Fatalf("cross-namespace query filter: %v", err)
+			}
+			if len(cross) != 0 {
+				t.Fatalf("query filter in nsA returned %d nsB rows: %v", len(cross), executionIDs(cross))
+			}
+			if wfCross, err := s.ListExecutions(ctx, nsA, store.ExecutionFilter{Query: "wfid-gamma"}, store.DefaultListOptions()); err != nil {
+				t.Fatalf("cross-namespace workflow-id query filter: %v", err)
+			} else if len(wfCross) != 0 {
+				t.Fatalf("workflow-id query filter in nsA returned %d nsB rows: %v", len(wfCross), executionIDs(wfCross))
+			}
+
+			// A single query must reach one row through EITHER column: an
+			// AND-shaped implementation would drop the workflow-only row, and
+			// an execution-id-only one would drop it too.
+			nsOr := namespace.Namespace(nsPrefix + "-or")
+			orBase := base.Add(10 * time.Second)
+			orRows := []*store.ExecutionRecord{
+				{ExecutionID: types.ExecutionID(nsPrefix + "-or-1"), Namespace: string(nsOr), WorkflowID: "or-wf-1", WorkflowDef: emptyWorkflowDef, Status: types.ExecutionStatusSuccess, CreatedAt: orBase, UpdatedAt: orBase},
+				{ExecutionID: types.ExecutionID(nsPrefix + "-or-2"), Namespace: string(nsOr), WorkflowID: "other-wf-2", WorkflowDef: emptyWorkflowDef, Status: types.ExecutionStatusSuccess, CreatedAt: orBase.Add(time.Second), UpdatedAt: orBase.Add(time.Second)},
+				{ExecutionID: types.ExecutionID(nsPrefix + "-zeta-3"), Namespace: string(nsOr), WorkflowID: "or-wf-3", WorkflowDef: emptyWorkflowDef, Status: types.ExecutionStatusSuccess, CreatedAt: orBase.Add(2 * time.Second), UpdatedAt: orBase.Add(2 * time.Second)},
+			}
+			for _, rec := range orRows {
+				if err := s.CreateExecution(ctx, rec); err != nil {
+					t.Fatalf("CreateExecution(%s): %v", rec.ExecutionID, err)
+				}
+			}
+			orGot, err := s.ListExecutions(ctx, nsOr, store.ExecutionFilter{Query: "or-wf"}, store.DefaultListOptions())
+			if err != nil {
+				t.Fatalf("either-column query filter: %v", err)
+			}
+			assertExactly(t, "rows matching or-wf through either identity", orGot,
+				[]types.ExecutionID{types.ExecutionID(nsPrefix + "-zeta-3"), types.ExecutionID(nsPrefix + "-or-1")})
+			if total := mustCount(t, s, ctx, nsOr, store.ExecutionFilter{Query: "or-wf"}); total != 2 {
+				t.Fatalf("CountExecutions(query=or-wf) = %d, want 2", total)
+			}
+
+			// LIKE metacharacters in the query are data, not wildcards. '_'
+			// is in the id alphabet, so this is reachable through the HTTP
+			// boundary and must be escaped on BOTH sides of the OR; an
+			// unescaped '_' would also match the 'a' rows.
+			nsWild := namespace.Namespace(nsPrefix + "-wild")
+			for _, id := range []types.ExecutionID{
+				types.ExecutionID(nsPrefix + "-wild-x_1"),
+				types.ExecutionID(nsPrefix + "-wild-xa1"),
+			} {
+				rec := &store.ExecutionRecord{
+					ExecutionID: id, Namespace: string(nsWild), WorkflowDef: emptyWorkflowDef,
+					Status: types.ExecutionStatusSuccess, CreatedAt: base, UpdatedAt: base,
+				}
+				if err := s.CreateExecution(ctx, rec); err != nil {
+					t.Fatalf("CreateExecution(%s): %v", id, err)
+				}
+			}
+			wild, err := s.ListExecutions(ctx, nsWild, store.ExecutionFilter{Query: nsPrefix + "-wild-x_"}, store.DefaultListOptions())
+			if err != nil {
+				t.Fatalf("underscore query filter: %v", err)
+			}
+			assertExactly(t, "literal underscore query", wild, []types.ExecutionID{types.ExecutionID(nsPrefix + "-wild-x_1")})
+
+			nsWildWF := namespace.Namespace(nsPrefix + "-wildwf")
+			for i, wf := range []types.WorkflowID{"wfid_alpha", "wfidXalpha"} {
+				rec := &store.ExecutionRecord{
+					ExecutionID: types.ExecutionID(fmt.Sprintf("%s-wildwf-%d", nsPrefix, i)),
+					Namespace:   string(nsWildWF), WorkflowID: wf, WorkflowDef: emptyWorkflowDef,
+					Status: types.ExecutionStatusSuccess, CreatedAt: base.Add(time.Duration(i) * time.Second), UpdatedAt: base.Add(time.Duration(i) * time.Second),
+				}
+				if err := s.CreateExecution(ctx, rec); err != nil {
+					t.Fatalf("CreateExecution(%s): %v", rec.ExecutionID, err)
+				}
+			}
+			wildWF, err := s.ListExecutions(ctx, nsWildWF, store.ExecutionFilter{Query: "wfid_a"}, store.DefaultListOptions())
+			if err != nil {
+				t.Fatalf("underscore workflow-id query filter: %v", err)
+			}
+			assertExactly(t, "literal underscore workflow-id query", wildWF,
+				[]types.ExecutionID{types.ExecutionID(fmt.Sprintf("%s-wildwf-0", nsPrefix))})
+
+			// '%' and other LIKE metacharacters are outside the id alphabet and
+			// must be refused before they reach a LIKE expression: `q=a%` must
+			// never widen into a match-all.
+			for _, bad := range []string{nsPrefix + "-a%", nsPrefix + "-a_%", "a!b", "a b"} {
+				if _, err := s.ListExecutions(ctx, nsA, store.ExecutionFilter{Query: bad}, store.DefaultListOptions()); err == nil {
+					t.Fatalf("query filter %q was accepted; it contains a character outside the id alphabet", bad)
+				}
+			}
+			// A prefix longer than the id column can never match a stored id.
+			long := repeatByte('a', store.MaxExecutionIDQueryLen+1)
+			if _, err := s.CountExecutions(ctx, nsA, store.ExecutionFilter{Query: long}); err == nil {
+				t.Fatal("CountExecutions accepted an over-long query that ListExecutions rejects")
+			}
+		})
+
 		t.Run("workflow_id", func(t *testing.T) {
 			got, err := s.ListExecutions(ctx, nsA, store.ExecutionFilter{WorkflowID: "wfid-alpha"}, store.DefaultListOptions())
 			if err != nil {
@@ -561,6 +762,110 @@ func ExecutionsContract(t *testing.T, s ExecutionsStore, nsPrefix string) {
 						"the count must describe the same set", ns, filter, total, len(rows))
 				}
 			}
+		}
+	})
+
+	// --- execution-table columns added with the statistics work ------------
+	t.Run("trigger_kind_node_total_finished_at_round_trip", func(t *testing.T) {
+		// ids[0] was written with all three values; ids[1] (terminal, written
+		// without them) is the pre-column row that must read back as the zero
+		// value, never as a manufactured one.
+		got, err := s.GetExecution(ctx, ids[0])
+		if err != nil {
+			t.Fatalf("GetExecution(%s): %v", ids[0], err)
+		}
+		if got.TriggerKind != "timer" {
+			t.Fatalf("TriggerKind = %q, want %q", got.TriggerKind, "timer")
+		}
+		if got.NodeTotal != 4 {
+			t.Fatalf("NodeTotal = %d, want 4", got.NodeTotal)
+		}
+		if got.FinishedAt == nil || !got.FinishedAt.Equal(finishedAt) {
+			t.Fatalf("FinishedAt = %v, want %v", got.FinishedAt, finishedAt)
+		}
+
+		plain, err := s.GetExecution(ctx, ids[1])
+		if err != nil {
+			t.Fatalf("GetExecution(%s): %v", ids[1], err)
+		}
+		if plain.TriggerKind != "" || plain.NodeTotal != 0 || plain.FinishedAt != nil {
+			t.Fatalf("a row written without the new columns read back as %q/%d/%v, want empty/0/nil",
+				plain.TriggerKind, plain.NodeTotal, plain.FinishedAt)
+		}
+
+		// The listing projection must carry the same columns: the API's
+		// execution list reads them from here.
+		listed, err := s.ListExecutions(ctx, nsA, store.ExecutionFilter{Query: string(ids[0])}, store.DefaultListOptions())
+		if err != nil {
+			t.Fatalf("ListExecutions(%s): %v", ids[0], err)
+		}
+		if len(listed) != 1 {
+			t.Fatalf("ListExecutions(%s) returned %d rows, want 1", ids[0], len(listed))
+		}
+		if listed[0].TriggerKind != "timer" || listed[0].NodeTotal != 4 || listed[0].FinishedAt == nil || !listed[0].FinishedAt.Equal(finishedAt) {
+			t.Fatalf("listed row lost the new columns: trigger_kind=%q node_total=%d finished_at=%v",
+				listed[0].TriggerKind, listed[0].NodeTotal, listed[0].FinishedAt)
+		}
+	})
+
+	// --- finished_at is write-once ------------------------------------------
+	t.Run("finished_at_is_write_once", func(t *testing.T) {
+		nsFin := namespace.Namespace(nsPrefix + "-fin")
+		id := types.ExecutionID(nsPrefix + "-fin-1")
+		created := base
+		if err := s.CreateExecution(ctx, &store.ExecutionRecord{
+			ExecutionID: id, Namespace: string(nsFin), WorkflowDef: emptyWorkflowDef,
+			Status: types.ExecutionStatusRunning, CreatedAt: created, UpdatedAt: created,
+		}); err != nil {
+			t.Fatalf("CreateExecution(%s): %v", id, err)
+		}
+		read := func(when string) *store.ExecutionRecord {
+			t.Helper()
+			rec, err := s.GetExecution(ctx, id)
+			if err != nil {
+				t.Fatalf("GetExecution(%s): %v", id, err)
+			}
+			return rec
+		}
+
+		// A non-terminal transition does not set the fact.
+		if err := s.UpdateExecutionStatus(ctx, id, types.ExecutionStatusCanceling, ""); err != nil {
+			t.Fatalf("UpdateExecutionStatus(canceling): %v", err)
+		}
+		if rec := read("after canceling"); rec.FinishedAt != nil {
+			t.Fatalf("FinishedAt = %v after a non-terminal transition, want nil", rec.FinishedAt)
+		}
+
+		// The first terminal transition sets it.
+		if err := s.UpdateExecutionStatus(ctx, id, types.ExecutionStatusSuccess, ""); err != nil {
+			t.Fatalf("UpdateExecutionStatus(success): %v", err)
+		}
+		first := read("after success")
+		if first.FinishedAt == nil {
+			t.Fatal("FinishedAt = nil after the first terminal transition, want the completion instant")
+		}
+
+		// A duplicate terminal write (a retry, a cancel/complete race) must not
+		// move it, even though the status and error do change.
+		if err := s.UpdateExecutionStatus(ctx, id, types.ExecutionStatusFailed, "late failure"); err != nil {
+			t.Fatalf("UpdateExecutionStatus(failed): %v", err)
+		}
+		second := read("after failed")
+		if second.Status != types.ExecutionStatusFailed || second.Error != "late failure" {
+			t.Fatalf("second terminal write did not apply status/error: %+v", second)
+		}
+		if second.FinishedAt == nil || !second.FinishedAt.Equal(*first.FinishedAt) {
+			t.Fatalf("FinishedAt = %v after a duplicate terminal write, want the first instant %v",
+				second.FinishedAt, first.FinishedAt)
+		}
+
+		// A later non-terminal transition cannot clear it either.
+		if err := s.UpdateExecutionStatus(ctx, id, types.ExecutionStatusCanceling, ""); err != nil {
+			t.Fatalf("UpdateExecutionStatus(canceling again): %v", err)
+		}
+		if third := read("after second canceling"); third.FinishedAt == nil || !third.FinishedAt.Equal(*first.FinishedAt) {
+			t.Fatalf("FinishedAt = %v after a later non-terminal transition, want the first instant %v",
+				third.FinishedAt, first.FinishedAt)
 		}
 	})
 

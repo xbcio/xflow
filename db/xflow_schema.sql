@@ -2,6 +2,15 @@
 --
 -- 工作流执行持久化所需表。
 -- 使用 WithMySQL(dsn) 或 WithStore(s) 前需先创建这些表。
+--
+-- 时间列约定：所有 DATETIME(3) 存的是 UTC 墙钟。Go 驱动在 DSN 不带 loc= 时按
+-- UTC 写入（带 loc= 则按该时区写入，并要求读写两侧一致），它与服务器/会话的
+-- time_zone 无关。因此查询里不得用依赖会话时区的函数（UNIX_TIMESTAMP(col)、
+-- FROM_UNIXTIME、NOW()、CURDATE() 等）去解释这些列；窗口边界和分桶锚点一律以 Go
+-- time 绑定参数，分桶用 TIMESTAMPDIFF(SECOND, ?, created_at) 这类纯日期时间算术。
+-- 下方各列的 DEFAULT / ON UPDATE CURRENT_TIMESTAMP(3) 由服务器按会话时区取值，
+-- 只有写入未显式带时间时才生效；GORM 模型的 autoCreateTime/autoUpdateTime 在 Go
+-- 侧给出时间并经驱动按 UTC 写入，所以常规写入路径不依赖它们。
 
 -- 工作流执行记录
 --
@@ -28,11 +37,15 @@ CREATE TABLE IF NOT EXISTS xflow_executions (
     span_id      VARCHAR(32)  NOT NULL DEFAULT ''   COMMENT '提交时指定的 Span ID',
     status       VARCHAR(20)  NOT NULL DEFAULT 'pending' COMMENT '生命周期状态',
     error_msg    TEXT                               COMMENT '失败时的错误信息',
+    trigger_kind VARCHAR(32)  NOT NULL DEFAULT ''   COMMENT '服务端推导的触发来源（api/rerun/subworkflow/timer/cron/webhook/kafka/redis）；空串 = 未知（本列新增前的历史行）',
+    node_total   INT          NOT NULL DEFAULT 0    COMMENT '创建时图包含的节点数，用于列表行渲染节点进度；0 = 未知（历史行或无图的种子）',
+    finished_at  DATETIME(3)  NULL                  COMMENT '首次进入终态的时间，write-once；NULL = 尚未结束或本列新增前的历史行',
     created_at   DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     updated_at   DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
     UNIQUE INDEX uk_execution_id (execution_id),
     INDEX idx_namespace_created_at (namespace, created_at),
     INDEX idx_namespace_workflow_id_created_at (namespace, workflow_id, created_at),
+    INDEX idx_namespace_created_status (namespace, created_at, status, workflow_id),
     INDEX idx_status (status),
     INDEX idx_workflow_name (workflow_name),
     INDEX idx_created_at (created_at),
@@ -1073,6 +1086,31 @@ DELIMITER ;
 CALL xflow_add_execution_workflow_id_index();
 DROP PROCEDURE IF EXISTS xflow_add_execution_workflow_id_index;
 
+-- 统计覆盖索引 (namespace, created_at, status, workflow_id)。/v1/executions/stats
+-- 的两种查询都是「一个 namespace 的 created_at 区间，按 status 分组计数」：
+-- namespace 等值与 created_at 范围用前两列做范围扫描，status 与 workflow_id 都在
+-- 索引里，计数不需要回表。workflow_id 放最后一列只是为了让按工作流过滤的统计也
+-- 能用上同一索引前缀，它不承担排序职责。已有的
+-- idx_namespace_workflow_id_created_at 继续服务按工作流列举与 recent/分位数的
+-- 采样查询；两个索引职责不同，不要合并。
+DROP PROCEDURE IF EXISTS xflow_add_execution_stats_index;
+DELIMITER $$
+CREATE PROCEDURE xflow_add_execution_stats_index()
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_executions'
+          AND INDEX_NAME = 'idx_namespace_created_status'
+    ) THEN
+        ALTER TABLE xflow_executions
+            ADD INDEX idx_namespace_created_status (namespace, created_at, status, workflow_id);
+    END IF;
+END$$
+DELIMITER ;
+CALL xflow_add_execution_stats_index();
+DROP PROCEDURE IF EXISTS xflow_add_execution_stats_index;
+
 -- 节点计时列 started_at / finished_at。与其余补列同一写法：CREATE TABLE IF NOT
 -- EXISTS 对已存在的表是 no-op，故用 INFORMATION_SCHEMA 守卫逐列补。两列都 NULL
 -- 而非 DEFAULT：NULL 表达"这个事实没发生过"（尚未开始 / 尚未结束 / 本列新增前的
@@ -1109,6 +1147,54 @@ END$$
 DELIMITER ;
 CALL xflow_add_node_timing_columns();
 DROP PROCEDURE IF EXISTS xflow_add_node_timing_columns;
+
+-- 执行行统计列 trigger_kind / node_total / finished_at。与节点计时列同一写法：
+-- 三列各自用 INFORMATION_SCHEMA 守卫补齐，任意中间态可幂等收敛。finished_at 是
+-- write-once：UpdateExecutionStatus 只在进入终态时用 COALESCE(finished_at, ?)
+-- 写入，重复的终态写不会改写首次完成时间，非终态迁移则完全不碰它。trigger_kind
+-- 与 node_total 用 DEFAULT（'' / 0）而非 NULL：两者都有明确的"未知"表达，且
+-- 老表补列只能是带缺省值的形式。
+DROP PROCEDURE IF EXISTS xflow_add_execution_stats_columns;
+DELIMITER $$
+CREATE PROCEDURE xflow_add_execution_stats_columns()
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_executions'
+          AND COLUMN_NAME = 'trigger_kind'
+    ) THEN
+        ALTER TABLE xflow_executions
+            ADD COLUMN trigger_kind VARCHAR(32) NOT NULL DEFAULT ''
+                COMMENT '服务端推导的触发来源；空串 = 未知（本列新增前的历史行）'
+                AFTER error_msg;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_executions'
+          AND COLUMN_NAME = 'node_total'
+    ) THEN
+        ALTER TABLE xflow_executions
+            ADD COLUMN node_total INT NOT NULL DEFAULT 0
+                COMMENT '创建时图包含的节点数；0 = 未知（历史行或无图的种子）'
+                AFTER trigger_kind;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'xflow_executions'
+          AND COLUMN_NAME = 'finished_at'
+    ) THEN
+        ALTER TABLE xflow_executions
+            ADD COLUMN finished_at DATETIME(3) NULL
+                COMMENT '首次进入终态的时间，write-once；NULL = 尚未结束或本列新增前的历史行'
+                AFTER node_total;
+    END IF;
+END$$
+DELIMITER ;
+CALL xflow_add_execution_stats_columns();
+DROP PROCEDURE IF EXISTS xflow_add_execution_stats_columns;
 
 -- Runner pool 绑定与 credential rotation 列。CREATE TABLE IF NOT EXISTS 对老表是
 -- no-op，故每列和索引独立用 INFORMATION_SCHEMA 守卫，任意中间态都能幂等收敛。

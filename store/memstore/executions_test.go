@@ -25,6 +25,23 @@ func TestExecutionsContract(t *testing.T) {
 	storetest.ExecutionsContract(t, New(), fmt.Sprintf("memexec%d", time.Now().UnixNano()))
 }
 
+// TestLatestExecutionsContract runs the shared optional-capability contract
+// against the in-memory backend. The SQL backend runs the same suite from
+// store/sqlstore/sqlitestore's tests, which exercise the identical
+// executionRepo statement against SQLite.
+func TestLatestExecutionsContract(t *testing.T) {
+	storetest.LatestExecutionsContract(t, New(), fmt.Sprintf("memlatest%d", time.Now().UnixNano()))
+}
+
+// TestExecutionStatsContract runs the shared statistics contract against the
+// in-memory backend. The SQL backend runs the same suite from
+// store/sqlstore/sqlitestore's tests (and, against real MySQL, from
+// test/integration); the two implementations must agree on namespace scoping,
+// exclusive window bounds, percentile sampling and histogram alignment.
+func TestExecutionStatsContract(t *testing.T) {
+	storetest.ExecutionStatsContract(t, New(), fmt.Sprintf("memstats%d", time.Now().UnixNano()))
+}
+
 // TestListExecutionsScopeIsRequired pins the fail-closed reading of an empty
 // scope on the in-memory backend specifically. It is redundant with the shared
 // contract on purpose: the contract is the cross-backend assertion, and this is

@@ -141,17 +141,20 @@ func fromDBSupply(d *dbSupply) *store.SupplyResource {
 type dbExecution struct {
 	ID           uint64                `gorm:"column:id;primaryKey;autoIncrement"`
 	ExecutionID  types.ExecutionID     `gorm:"column:execution_id;type:varchar(64);uniqueIndex:uk_execution_id"`
-	Namespace    string                `gorm:"column:namespace;type:varchar(64);not null;default:'';index:idx_namespace_created_at,priority:1;index:idx_namespace_workflow_id_created_at,priority:1"`
-	WorkflowID   string                `gorm:"column:workflow_id;type:varchar(64);not null;default:'';index:idx_namespace_workflow_id_created_at,priority:2"`
+	Namespace    string                `gorm:"column:namespace;type:varchar(64);not null;default:'';index:idx_namespace_created_at,priority:1;index:idx_namespace_workflow_id_created_at,priority:1;index:idx_namespace_created_status,priority:1"`
+	WorkflowID   string                `gorm:"column:workflow_id;type:varchar(64);not null;default:'';index:idx_namespace_workflow_id_created_at,priority:2;index:idx_namespace_created_status,priority:4"`
 	WorkflowName string                `gorm:"column:workflow_name;type:varchar(255)"`
 	WorkflowDef  jsonBytes             `gorm:"column:workflow_def;type:json"`
 	Params       jsonBytes             `gorm:"column:params;type:json"`
 	Runtime      jsonBytes             `gorm:"column:runtime;type:json"`
 	TraceID      string                `gorm:"column:trace_id;type:varchar(64)"`
 	SpanID       string                `gorm:"column:span_id;type:varchar(32)"`
-	Status       types.ExecutionStatus `gorm:"column:status;type:varchar(20)"`
+	Status       types.ExecutionStatus `gorm:"column:status;type:varchar(20);index:idx_namespace_created_status,priority:3"`
 	Error        string                `gorm:"column:error_msg;type:text"`
-	CreatedAt    time.Time             `gorm:"column:created_at;autoCreateTime:milli;index:idx_namespace_created_at,priority:2;index:idx_namespace_workflow_id_created_at,priority:3"`
+	TriggerKind  string                `gorm:"column:trigger_kind;type:varchar(32);not null;default:''"`
+	NodeTotal    int                   `gorm:"column:node_total;not null;default:0"`
+	FinishedAt   *time.Time            `gorm:"column:finished_at"`
+	CreatedAt    time.Time             `gorm:"column:created_at;autoCreateTime:milli;index:idx_namespace_created_at,priority:2;index:idx_namespace_workflow_id_created_at,priority:3;index:idx_namespace_created_status,priority:2"`
 	UpdatedAt    time.Time             `gorm:"column:updated_at;autoUpdateTime:milli"`
 }
 
@@ -171,6 +174,9 @@ func toDBExecution(r *store.ExecutionRecord) *dbExecution {
 		SpanID:       r.SpanID,
 		Status:       r.Status,
 		Error:        r.Error,
+		TriggerKind:  r.TriggerKind,
+		NodeTotal:    r.NodeTotal,
+		FinishedAt:   r.FinishedAt,
 		CreatedAt:    r.CreatedAt,
 		UpdatedAt:    r.UpdatedAt,
 	}
@@ -190,6 +196,9 @@ func fromDBExecution(d *dbExecution) *store.ExecutionRecord {
 		SpanID:       d.SpanID,
 		Status:       d.Status,
 		Error:        d.Error,
+		TriggerKind:  d.TriggerKind,
+		NodeTotal:    d.NodeTotal,
+		FinishedAt:   d.FinishedAt,
 		CreatedAt:    d.CreatedAt,
 		UpdatedAt:    d.UpdatedAt,
 	}

@@ -183,6 +183,124 @@ func TestListExecutionsQueryShape(t *testing.T) {
 	})
 }
 
+// TestLatestExecutionsFailsClosedBeforeSQL asserts the refusal of an unusable
+// scope happens before any SQL is built, including when there is nothing to
+// look up. A query that reaches the database with a widened scope has already
+// leaked by the time a result-set assertion could notice.
+func TestLatestExecutionsFailsClosedBeforeSQL(t *testing.T) {
+	capture := newSQLCapture(t)
+	repo := &executionRepo{db: capture.db}
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name string
+		ns   namespace.Namespace
+	}{
+		{name: "empty", ns: ""},
+		{name: "too long", ns: namespace.Namespace(strings.Repeat("n", namespace.MaxNameLen+1))},
+		{name: "colon", ns: "ns:a"},
+		{name: "glob", ns: "ns-*"},
+	} {
+		for _, ids := range [][]types.WorkflowID{nil, {"wfid-a"}} {
+			capture.last = ""
+			got, err := repo.LatestExecutions(ctx, tc.ns, ids)
+			if !errors.Is(err, store.ErrInvalidNamespace) {
+				t.Fatalf("LatestExecutions(ns=%q, ids=%v) = %v, want store.ErrInvalidNamespace", tc.ns, ids, err)
+			}
+			if got != nil {
+				t.Fatalf("LatestExecutions(ns=%q, ids=%v) returned %d entries with its error", tc.ns, ids, len(got))
+			}
+			if capture.last != "" {
+				t.Fatalf("LatestExecutions(ns=%q, ids=%v) built SQL despite the refusal:\n%s", tc.ns, ids, capture.last)
+			}
+		}
+	}
+}
+
+// TestLatestExecutionsQueryShape pins the statement: one namespace-scoped,
+// parameter-bound batch read with the documented total order. The behavioural
+// half lives in store/storetest.LatestExecutionsContract and runs against this
+// backend via the SQLite tests; this half proves the properties a fixture on a
+// two-row table cannot distinguish — a widened scope predicate, a LIKE instead
+// of an identity match, or a client-side loop that would be O(ids) queries.
+func TestLatestExecutionsQueryShape(t *testing.T) {
+	capture := newSQLCapture(t)
+	repo := &executionRepo{db: capture.db}
+	ctx := context.Background()
+
+	latestSQL := func(t *testing.T, ids []types.WorkflowID) string {
+		t.Helper()
+		return capture.sql(t, func() {
+			if _, err := repo.LatestExecutions(ctx, "tenant-a", ids); err != nil {
+				t.Fatalf("LatestExecutions(ids=%v): %v", ids, err)
+			}
+		})
+	}
+
+	t.Run("scope is exact equality and ids are the only IN list", func(t *testing.T) {
+		sql := latestSQL(t, []types.WorkflowID{"wfid-a", "wfid-b"})
+		if !strings.Contains(sql, "namespace = 'tenant-a'") {
+			t.Fatalf("generated SQL does not scope by exact namespace equality:\n%s", sql)
+		}
+		if !strings.Contains(sql, "workflow_id IN (") ||
+			!strings.Contains(sql, "'wfid-a'") || !strings.Contains(sql, "'wfid-b'") {
+			t.Fatalf("generated SQL does not bind the requested workflow ids into an IN list:\n%s", sql)
+		}
+		for _, forbidden := range []string{"LIKE", "OR namespace", "namespace IS NULL", "namespace IN"} {
+			if strings.Contains(strings.ToUpper(sql), forbidden) {
+				t.Fatalf("generated SQL contains %q, which could widen the scope past one namespace:\n%s", forbidden, sql)
+			}
+		}
+		if !strings.Contains(sql, "FROM xflow_executions") {
+			t.Fatalf("generated SQL does not read xflow_executions:\n%s", sql)
+		}
+	})
+
+	t.Run("window orders newest-first with the documented tiebreak", func(t *testing.T) {
+		sql := latestSQL(t, []types.WorkflowID{"wfid-a"})
+		for _, want := range []string{
+			"ROW_NUMBER() OVER (",
+			"PARTITION BY workflow_id",
+			"ORDER BY created_at DESC, execution_id ASC",
+			"WHERE rn = 1",
+		} {
+			if !strings.Contains(sql, want) {
+				t.Fatalf("generated SQL does not contain %q:\n%s", want, sql)
+			}
+		}
+	})
+
+	t.Run("surplus ids are dropped before the statement", func(t *testing.T) {
+		long := strings.Repeat("w", store.MaxExecutionWorkflowIDLen+1)
+		sql := latestSQL(t, []types.WorkflowID{"wfid-keep", "wfid-keep", "", types.WorkflowID(long)})
+		if strings.Count(sql, "'wfid-keep'") != 1 {
+			t.Fatalf("a duplicate id was bound more than once:\n%s", sql)
+		}
+		if strings.Contains(sql, long) {
+			t.Fatalf("an over-long workflow id reached the SQL; it can never match a stored id:\n%s", sql)
+		}
+		if strings.Contains(sql, "''") {
+			t.Fatalf("an empty workflow id reached the SQL; it would select unattributed rows:\n%s", sql)
+		}
+	})
+
+	t.Run("no ids means no statement", func(t *testing.T) {
+		for _, ids := range [][]types.WorkflowID{nil, {}, {""}, {types.WorkflowID(strings.Repeat("w", store.MaxExecutionWorkflowIDLen+1))}} {
+			capture.last = ""
+			got, err := repo.LatestExecutions(ctx, "tenant-a", ids)
+			if err != nil {
+				t.Fatalf("LatestExecutions(ids=%v): %v", ids, err)
+			}
+			if got == nil || len(got) != 0 {
+				t.Fatalf("LatestExecutions(ids=%v) = %v, want a non-nil empty map", ids, got)
+			}
+			if capture.last != "" {
+				t.Fatalf("LatestExecutions(ids=%v) sent a statement with nothing usable to look up:\n%s", ids, capture.last)
+			}
+		}
+	})
+}
+
 // TestExecutionNamespaceRoundTrip covers the projection: the column must survive
 // both directions of the dbExecution <-> store.ExecutionRecord mapping. A listing
 // is only scoped correctly if the column it filtered on is the one it read back,
