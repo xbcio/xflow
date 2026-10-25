@@ -1,0 +1,61 @@
+/* Node library page — example rows under an expanded node type.
+   Values come from --xflow-* tokens so light and dark stay aligned. */
+.xflow-node-types-examples {
+  display: flex;
+  flex-direction: column;
+  gap: var(--xflow-space-3);
+  padding: var(--xflow-space-1) var(--xflow-space-2);
+}
+
+.xflow-node-types-example {
+  display: flex;
+  flex-direction: column;
+  gap: var(--xflow-space-1-5);
+  min-width: 0;
+}
+
+.xflow-node-types-example__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--xflow-space-2);
+  min-width: 0;
+}
+
+.xflow-node-types-example__name {
+  color: var(--xflow-text);
+  font-weight: 600;
+}
+
+.xflow-node-types-example__desc {
+  color: var(--xflow-text-secondary);
+}
+
+.xflow-node-types-example__copy {
+  margin-left: auto;
+}
+
+.xflow-node-types-params {
+  display: grid;
+  grid-template-columns: minmax(120px, max-content) minmax(0, 1fr);
+  gap: var(--xflow-space-1) var(--xflow-space-3);
+  margin: 0;
+  color: var(--xflow-text);
+  font-family: var(--xflow-font-mono);
+  font-size: var(--xflow-font-xs);
+}
+
+.xflow-node-types-param {
+  display: contents;
+}
+
+.xflow-node-types-param dt {
+  color: var(--xflow-text-tertiary);
+  overflow-wrap: anywhere;
+}
+
+.xflow-node-types-param dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
