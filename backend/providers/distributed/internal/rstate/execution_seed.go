@@ -610,6 +610,7 @@ func (s *Store) projectSeededRerun(ctx context.Context, execID types.ExecutionID
 		ExecutionID: execID,
 		Namespace:   string(namespace.FromContext(ctx)),
 		Status:      status,
+		TriggerKind: engine.ExecutionTriggerKind(req.Execution),
 		CreatedAt:   now,
 		UpdatedAt:   now,
 		// workflow_def is NOT NULL in the schema (db/xflow_schema.sql) and a seed
@@ -619,6 +620,14 @@ func (s *Store) projectSeededRerun(ctx context.Context, execID types.ExecutionID
 	}
 	if req.Execution.Graph != nil {
 		rec.WorkflowName = req.Execution.Graph.Name()
+		rec.NodeTotal = req.Execution.Graph.NodeCount()
+	}
+	// A rerun seeded straight into a terminal state (nothing left to run) gets
+	// its finish time here; any other status leaves it nil until the authoritative
+	// transition writes it once.
+	if store.IsTerminalExecutionStatus(status) {
+		finished := now
+		rec.FinishedAt = &finished
 	}
 	// A seed carries only a compiled graph, so the workflow identity comes from
 	// the definition the caller attached (the rerun path inherits it from the

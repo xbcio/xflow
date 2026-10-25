@@ -687,6 +687,7 @@ func (s *Store) projectSeededExecution(ctx context.Context, execID types.Executi
 		ExecutionID: execID,
 		Namespace:   string(namespace.FromContext(ctx)),
 		Status:      status,
+		TriggerKind: req.TriggerKind,
 		TraceID:     req.TraceID,
 		SpanID:      req.SpanID,
 		CreatedAt:   now,
@@ -696,11 +697,19 @@ func (s *Store) projectSeededExecution(ctx context.Context, execID types.Executi
 		// the insert valid instead of failing the whole projection.
 		WorkflowDef: emptyJSONObject,
 	}
+	// A seed that lands terminal (the entry unit completed the whole workflow
+	// inline) records its finish at creation; otherwise the authoritative
+	// transition writes finished_at once.
+	if store.IsTerminalExecutionStatus(status) {
+		finished := now
+		rec.FinishedAt = &finished
+	}
 	if status == types.ExecutionStatusFailed {
 		rec.Error = req.Error
 	}
 	if req.Graph != nil {
 		rec.WorkflowName = req.Graph.Name()
+		rec.NodeTotal = req.Graph.NodeCount()
 	}
 	// Workflow identity: prefer the definition attached to the seeding context
 	// (the control plane resolves it from the authoritative registry). A store

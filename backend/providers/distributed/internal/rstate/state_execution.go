@@ -442,8 +442,22 @@ func buildExecutionRecord(ctx context.Context, e *engine.ExecutionSnapshot, now 
 		ExecutionID: e.ID,
 		Namespace:   string(namespace.FromContext(ctx)),
 		Status:      e.Status,
+		TriggerKind: engine.ExecutionTriggerKind(e),
 		CreatedAt:   now,
 		UpdatedAt:   now,
+	}
+	// NodeTotal is the compiled graph's size at creation — the denominator of a
+	// list row's node progress. A nil graph (a seed with no compiled body) stays
+	// 0 = UNKNOWN rather than "zero nodes".
+	if e.Graph != nil {
+		rec.NodeTotal = e.Graph.NodeCount()
+	}
+	// A creation whose status is already terminal (an admission that completed
+	// a trivial workflow inline) records the same instant as its finish: the
+	// row's first and only terminal observation.
+	if store.IsTerminalExecutionStatus(e.Status) {
+		finished := now
+		rec.FinishedAt = &finished
 	}
 	if def, ok := engine.WorkflowDefFromContext(ctx); ok {
 		rec.WorkflowName = def.Name
