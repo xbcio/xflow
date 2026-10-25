@@ -3,6 +3,8 @@ package engine
 import (
 	"context"
 	"errors"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -69,6 +71,39 @@ func (l *expireLog) count(event string) int {
 	return n
 }
 
+// requireExactly fails unless the log holds exactly want, in that order.
+func (l *expireLog) requireExactly(t *testing.T, want ...string) {
+	t.Helper()
+	if got := l.snapshot(); !slices.Equal(got, want) {
+		t.Fatalf("calls = %v, want exactly %v", got, want)
+	}
+}
+
+// requireInOrder fails unless every event is in the log and their first
+// occurrences come in the given order.
+func (l *expireLog) requireInOrder(t *testing.T, want ...string) {
+	t.Helper()
+	prev := -1
+	for _, event := range want {
+		i := l.index(event)
+		if i < 0 {
+			t.Fatalf("calls = %v, missing %q", l.snapshot(), event)
+		}
+		if i <= prev {
+			t.Fatalf("calls = %v, want %v in that order", l.snapshot(), want)
+		}
+		prev = i
+	}
+}
+
+// requireLast fails unless event is the final entry in the log.
+func (l *expireLog) requireLast(t *testing.T, event string) {
+	t.Helper()
+	if got := l.snapshot(); len(got) == 0 || got[len(got)-1] != event {
+		t.Fatalf("calls = %v, want %q as the last call", got, event)
+	}
+}
+
 // expireState is the store ExpireExecution runs against in these tests. It is
 // the sub-workflow link fake plus the three behaviours the real backends have
 // and fakeState does not: the status compare-and-set (a terminal status is
@@ -81,6 +116,7 @@ type expireState struct {
 
 	faultMu            sync.Mutex
 	listSuspendedErr   error
+	upsertNodeErr      error
 	beforeTimeoutWrite func()
 }
 
@@ -156,6 +192,25 @@ func (s *expireState) ListSuspendedNodes(ctx context.Context, id types.Execution
 	return s.fakeState.ListSuspendedNodes(ctx, id)
 }
 
+// UpsertNode logs the node writes of the tracked execution, which is what makes
+// the sub-workflow half of the cascade (finalizeParkedSubWorkflowNodes, the only
+// node write an expiry makes with this store) visible in the ordered log. The
+// one-shot fault fails the first such write, so a test can break that step
+// after the status write landed.
+func (s *expireState) UpsertNode(ctx context.Context, n *NodeSnapshot) error {
+	s.log.add(n.ExecutionID, "upsert-node:"+string(n.Status))
+	if n.ExecutionID == s.log.track {
+		s.faultMu.Lock()
+		err := s.upsertNodeErr
+		s.upsertNodeErr = nil
+		s.faultMu.Unlock()
+		if err != nil {
+			return err
+		}
+	}
+	return s.subWorkflowLinkState.UpsertNode(ctx, n)
+}
+
 // CancelSuspendedNode mirrors the fenced compare-and-set both real backends
 // implement (see cancelResumeState for why the fallback path is not enough).
 func (s *expireState) CancelSuspendedNode(_ context.Context, id types.ExecutionID, name string) (bool, error) {
@@ -177,6 +232,12 @@ func (s *expireState) CancelSuspendedNode(_ context.Context, id types.ExecutionI
 func (s *expireState) failListSuspended(err error) {
 	s.faultMu.Lock()
 	s.listSuspendedErr = err
+	s.faultMu.Unlock()
+}
+
+func (s *expireState) failUpsertNode(err error) {
+	s.faultMu.Lock()
+	s.upsertNodeErr = err
 	s.faultMu.Unlock()
 }
 
@@ -542,6 +603,15 @@ func TestExpireExecutionExpiresTheWholeExecution(t *testing.T) {
 	if !(write < hook) {
 		t.Fatalf("order = %v, want the completion hook after the durable timeout write", rig.log.snapshot())
 	}
+	// The hook is announced BEFORE the cascade, not after it. A Resumed call
+	// never announces again, so a hook placed after a cascade that can fail on a
+	// store error would be lost for good the first time that happens.
+	if !(hook < cascade) {
+		t.Fatalf("order = %v, want the completion hook before the cascade", rig.log.snapshot())
+	}
+	// The ack is the very last call: the entry may only be withdrawn once
+	// everything the expiry owes has been done.
+	rig.log.requireLast(t, "ack")
 	if n := rig.log.count("write:timeout"); n != 1 {
 		t.Fatalf("timeout was written %d times, want once", n)
 	}
@@ -771,9 +841,12 @@ func TestExpireExecutionCascadesToSubWorkflowChildren(t *testing.T) {
 	if got := hooks.completions(); len(got) != 1 || got[0] != types.ExecutionStatusTimeout {
 		t.Fatalf("parent completion hooks = %v, want exactly [timeout]", got)
 	}
-	if write, ack := log.index("write:timeout"), log.index("ack"); write < 0 || ack < 0 || write > ack {
-		t.Fatalf("order = %v, want the timeout write before the ack", log.snapshot())
-	}
+	// The hook comes before the cascade (a Resumed call does not announce again,
+	// so it must not wait on steps that can fail), and the ack comes after every
+	// step of the cascade, the sub-workflow half included: the parked node's
+	// finalization is the "upsert-node" write.
+	log.requireInOrder(t, "write:timeout", "hook:complete", "cascade:list-suspended", "upsert-node:canceled", "ack")
+	log.requireLast(t, "ack")
 }
 
 // TestExpireExecutionSpan pins the span contract: one xflow.execution.expire
@@ -807,4 +880,273 @@ func TestExpireExecutionSpan(t *testing.T) {
 		}
 	}
 	assertNoSensitiveSpanAttributes(t, span)
+}
+
+// TestExpireExecutionYieldsToAQueueTimeoutThatLandsFirst is the same race
+// against the other timeout mechanism. The concurrency queue's timeout lands
+// between the pre-read and the write, so the read-back sees status timeout. The
+// status alone cannot tell it from this mechanism's own write: only the reason
+// can, and it is not the deadline's. Expire must report AlreadyTerminal without
+// cascading and without announcing a second completion, and acknowledge once.
+func TestExpireExecutionYieldsToAQueueTimeoutThatLandsFirst(t *testing.T) {
+	rig := newExpireRig(t, true)
+	rig.start(t)
+	rig.setDeadline(pastDeadline)
+	rig.state.onceBeforeTimeoutWrite(func() {
+		rig.force(types.ExecutionStatusTimeout, ConcurrencyQueueTimeoutError)
+	})
+
+	rig.expire(t, ExpireOutcomeAlreadyTerminal)
+
+	if got := rig.snapshot(t); got.Status != types.ExecutionStatusTimeout || got.Error != ConcurrencyQueueTimeoutError {
+		t.Fatalf("snapshot = (%q, %q), want the queue timeout kept", got.Status, got.Error)
+	}
+	rig.log.requireExactly(t, "write:timeout", "ack")
+	if got := rig.hooks.completions(); len(got) != 0 {
+		t.Fatalf("completion hooks = %v, want none: the queue timeout is not this call's to announce", got)
+	}
+	if got := rig.nodeStatus(t); got != types.NodeStatusSuspended {
+		t.Fatalf("node status = %q, want suspended: nothing may cascade", got)
+	}
+}
+
+// traceMemoized reports whether the engine still holds a memoized trace carrier
+// for id. ExpireExecution's own span reads the carrier to find its parent, and
+// that read is what leaves the entry behind on an engine that does not own the
+// execution.
+func traceMemoized(e *Engine, id types.ExecutionID) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	_, ok := e.traceCarriers[id]
+	return ok
+}
+
+func graphCached(e *Engine, id types.ExecutionID) bool {
+	_, ok := e.graphs.Get(id)
+	return ok
+}
+
+// primeEvictProbe leaves the engine holding nothing for the execution except
+// what the call under test adds: the trace memo and the graph cache entry are
+// dropped, then the graph is loaded again so a missing eviction is visible as a
+// surviving entry.
+func primeEvictProbe(t *testing.T, rig *expireRig) {
+	t.Helper()
+	rig.eng.EvictExecution(rig.id)
+	if _, err := rig.eng.loadGraph(context.Background(), rig.id); err != nil {
+		t.Fatalf("loadGraph() error = %v", err)
+	}
+	if !graphCached(rig.eng, rig.id) || traceMemoized(rig.eng, rig.id) {
+		t.Fatal("precondition: want the graph cached and no trace memo before the call")
+	}
+}
+
+// TestExpireExecutionGoneWritesNothingAndLeavesNoMemo pins the Gone result: an
+// execution that does not exist is not written, cascaded or acknowledged, and the
+// span's read of its trace carrier does not leave a memo entry on an engine that
+// will never see the execution again.
+func TestExpireExecutionGoneWritesNothingAndLeavesNoMemo(t *testing.T) {
+	rig := newExpireRig(t, true)
+	const missing = types.ExecutionID("exec-missing")
+	rig.log.track = missing
+
+	got, err := rig.eng.ExpireExecution(context.Background(), missing)
+	if err != nil || got != ExpireOutcomeGone {
+		t.Fatalf("ExpireExecution(missing) = (%q, %v), want (%q, nil)", got, err, ExpireOutcomeGone)
+	}
+
+	rig.log.requireExactly(t)
+	if traceMemoized(rig.eng, missing) {
+		t.Fatal("the trace carrier memo survived a Gone result, want it evicted")
+	}
+}
+
+// TestExpireExecutionAlreadyTerminalLeavesNoMemo pins the same hygiene for an
+// execution somebody else concluded: nothing is written or cascaded, the
+// deadline entry is acknowledged exactly once, and neither the graph nor the
+// trace memo is kept for an execution this engine has nothing more to do with.
+func TestExpireExecutionAlreadyTerminalLeavesNoMemo(t *testing.T) {
+	cases := []struct {
+		name   string
+		status types.ExecutionStatus
+		reason string
+	}{
+		{"concluded", types.ExecutionStatusSuccess, ""},
+		{"timed out in the concurrency queue", types.ExecutionStatusTimeout, ConcurrencyQueueTimeoutError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newExpireRig(t, true)
+			rig.start(t)
+			rig.setDeadline(pastDeadline)
+			rig.force(tc.status, tc.reason)
+			primeEvictProbe(t, rig)
+
+			rig.expire(t, ExpireOutcomeAlreadyTerminal)
+
+			rig.log.requireExactly(t, "ack")
+			if traceMemoized(rig.eng, rig.id) {
+				t.Fatal("the trace carrier memo survived an AlreadyTerminal result, want it evicted")
+			}
+			if graphCached(rig.eng, rig.id) {
+				t.Fatal("the graph cache entry survived an AlreadyTerminal result, want it evicted")
+			}
+		})
+	}
+}
+
+// expireSubWorkflowRig is a parent execution with its sub-workflow node parked
+// on a real child (the dispatch ran), driven through an engine whose store and
+// hooks feed one expireLog. The log tracks the parent; a test that expires the
+// child points log.track at the child's id.
+type expireSubWorkflowRig struct {
+	eng      *Engine
+	state    *expireState
+	log      *expireLog
+	hooks    *expireHooks
+	parentID types.ExecutionID
+	link     SubWorkflowLink
+}
+
+func newExpireSubWorkflowRig(t *testing.T) *expireSubWorkflowRig {
+	t.Helper()
+	ctx := context.Background()
+	g := resolvedSubWorkflowParent(t)
+	parentID := types.ExecutionID("exec-parent")
+	log := &expireLog{track: parentID}
+	hooks := &expireHooks{log: log}
+	state := &expireState{subWorkflowLinkState: newSubWorkflowLinkState(), log: log}
+	if err := state.CreateExecution(ctx, &ExecutionSnapshot{
+		ID:       parentID,
+		Graph:    g,
+		Status:   types.ExecutionStatusRunning,
+		Deadline: pastDeadline,
+	}); err != nil {
+		t.Fatalf("seed parent execution: %v", err)
+	}
+	eng := New(&expireAckState{expireState: state}, &fakeQueue{},
+		WithHooks(hooks), WithSubWorkflowResolver(subWorkflowStubResolver(t)))
+	idx, ok := g.NodeIndex("sub")
+	if !ok {
+		t.Fatal(`the graph has no node named "sub"`)
+	}
+	handled, err := eng.handleSystemTask(ctx, &Task{
+		ExecutionID:  parentID,
+		NodeName:     "sub",
+		NodeIdx:      idx,
+		UnitIdx:      g.UnitIndexForNode(idx),
+		Type:         TaskTypeSubWorkflow,
+		ActivationID: 1,
+	}, true)
+	if err != nil || !handled {
+		t.Fatalf("dispatch the sub-workflow node: handled=%v err=%v", handled, err)
+	}
+	link, found, err := state.GetSubWorkflowLink(ctx, parentID, "sub")
+	if err != nil || !found {
+		t.Fatalf("read the sub-workflow link: found=%v err=%v", found, err)
+	}
+	log.clear()
+	return &expireSubWorkflowRig{eng: eng, state: state, log: log, hooks: hooks, parentID: parentID, link: link}
+}
+
+func (r *expireSubWorkflowRig) nodeStatus(t *testing.T) types.NodeStatus {
+	t.Helper()
+	node, err := r.state.GetNode(context.Background(), r.parentID, "sub")
+	if err != nil || node == nil {
+		t.Fatalf("GetNode(sub) = (%v, %v)", node, err)
+	}
+	return node.Status
+}
+
+func (r *expireSubWorkflowRig) expire(t *testing.T, id types.ExecutionID, want ExpireOutcome) {
+	t.Helper()
+	got, err := r.eng.ExpireExecution(context.Background(), id)
+	if err != nil || got != want {
+		t.Fatalf("ExpireExecution(%q) = (%q, %v), want (%q, nil) (log %v)", id, got, err, want, r.log.snapshot())
+	}
+}
+
+// TestExpireExecutionSubWorkflowCascadeFailureIsResumable is the cascade
+// failure test for the last step of the cascade. Finalizing the parked
+// sub-workflow node fails after the status write landed: the error must come
+// back (not be swallowed into an ack that would stop the entry being listed),
+// the status stays timeout, and nothing is acknowledged. The next call is
+// Resumed, finishes the finalization, acknowledges once, and the completion hook
+// still has fired exactly once overall.
+func TestExpireExecutionSubWorkflowCascadeFailureIsResumable(t *testing.T) {
+	ctx := context.Background()
+	rig := newExpireSubWorkflowRig(t)
+	injected := errors.New("injected: finalize parked node failed")
+	rig.state.failUpsertNode(injected)
+
+	got, err := rig.eng.ExpireExecution(ctx, rig.parentID)
+	if !errors.Is(err, injected) {
+		t.Fatalf("ExpireExecution() = (%q, %v), want an error wrapping %v", got, err, injected)
+	}
+	parent, err := rig.state.GetExecution(ctx, rig.parentID)
+	if err != nil || parent == nil || parent.Status != types.ExecutionStatusTimeout || parent.Error != ExecutionDeadlineExceededError {
+		t.Fatalf("parent = %+v (err %v), want timeout with the deadline reason kept", parent, err)
+	}
+	if n := rig.log.count("ack"); n != 0 {
+		t.Fatalf("acked %d times after a failed finalization, want 0: the entry must stay listed", n)
+	}
+	if got := rig.nodeStatus(t); got != types.NodeStatusWaiting {
+		t.Fatalf("parked node = %q, want waiting: the failed finalization did not reach it", got)
+	}
+	if got := rig.hooks.completions(); len(got) != 1 {
+		t.Fatalf("completion hooks after the failed call = %v, want exactly one", got)
+	}
+
+	rig.expire(t, rig.parentID, ExpireOutcomeResumed)
+
+	if got := rig.nodeStatus(t); got != types.NodeStatusCanceled {
+		t.Fatalf("parked node = %q, want canceled after the resumed cascade", got)
+	}
+	if n := rig.log.count("ack"); n != 1 {
+		t.Fatalf("acked %d times after the resume, want 1", n)
+	}
+	if got := rig.hooks.completions(); len(got) != 1 || got[0] != types.ExecutionStatusTimeout {
+		t.Fatalf("completion hooks after the resume = %v, want still exactly [timeout]", got)
+	}
+	if n := rig.log.count("write:timeout"); n != 1 {
+		t.Fatalf("timeout was written %d times, want once: the resume must not rewrite it", n)
+	}
+	rig.log.requireLast(t, "ack")
+}
+
+// TestExpireExecutionResumedNotifiesTheParent pins that a Resumed call tells the
+// parent of a sub-workflow child. The call that wrote the child's timeout also
+// notified the parent, but that notification is in memory only: a crash between
+// the status write and the notification loses it, and the child is later seen
+// only as already in timeout. The Resumed call is then the one place left to
+// deliver it quickly, without waiting for the parent's wait lease to expire.
+// It must not repeat the completion hook, which the first call already fired.
+func TestExpireExecutionResumedNotifiesTheParent(t *testing.T) {
+	ctx := context.Background()
+	rig := newExpireSubWorkflowRig(t)
+	childID := rig.link.ChildExecutionID
+	// The earlier call that was lost: the child is in timeout for its deadline,
+	// the parent has not been told.
+	if err := rig.state.UpdateExecutionStatus(ctx, childID, types.ExecutionStatusTimeout, ExecutionDeadlineExceededError); err != nil {
+		t.Fatalf("seed the child timeout: %v", err)
+	}
+	if got := rig.nodeStatus(t); got != types.NodeStatusWaiting {
+		t.Fatalf("precondition: parked node = %q, want waiting", got)
+	}
+	rig.log.track = childID
+	rig.log.clear()
+
+	rig.expire(t, childID, ExpireOutcomeResumed)
+
+	node, err := rig.state.GetNode(ctx, rig.parentID, "sub")
+	if err != nil || node == nil || node.Status != types.NodeStatusFailed {
+		t.Fatalf("parked node = %+v (err %v), want failed: the Resumed call must tell the parent its child timed out", node, err)
+	}
+	if !strings.Contains(node.Error, "timed out") || !strings.Contains(node.Error, string(childID)) {
+		t.Fatalf("parked node error = %q, want the child's timeout and identity", node.Error)
+	}
+	if n := rig.log.count("hook:complete"); n != 0 {
+		t.Fatalf("the Resumed call announced completion %d times, want 0", n)
+	}
+	rig.log.requireLast(t, "ack")
 }
