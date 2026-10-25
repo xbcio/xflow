@@ -4,8 +4,10 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -546,6 +548,10 @@ func TestRedisClusterSlotSafety(t *testing.T) {
 			t.Fatal("AcquireResumeLock(second) = true, want the lock held")
 		}
 	})
+
+	t.Run("execution deadline index", func(t *testing.T) {
+		clusterVerifyDeadlineIndex(t, ctx, addrs, rdb, state)
+	})
 }
 
 // redisClusterAddrs parses XFLOW_TEST_REDIS_CLUSTER_ADDRS and skips when it is
@@ -729,4 +735,286 @@ func clusterVerifyContainsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// clusterVerifyDeadlineIndex drives the execution-deadline index against the
+// real cluster. The index (xflow:ns:<ns>:exec_deadlines) is the one
+// namespace-wide key the deadline feature adds and, unlike every key of an
+// execution, it carries no {id} hash tag. It therefore must never be a KEYS
+// entry of a per-execution Lua script, and the scripts that run beside it
+// (updateExecutionStatusLua, checkCompletionLua) must keep refusing a missing
+// execution without touching anything. Only a real cluster fails these with
+// CROSSSLOT, so every step names the keys it touches.
+func clusterVerifyDeadlineIndex(t *testing.T, ctx context.Context, addrs []string, rdb *redis.ClusterClient, state engine.StateStore) {
+	t.Helper()
+	expirer, ok := state.(engine.ExecutionDeadlineExpirer)
+	if !ok {
+		t.Fatalf("%T does not implement engine.ExecutionDeadlineExpirer", state)
+	}
+	ns := namespace.Namespace("cluster-verify-deadline")
+	ctx = namespace.WithNamespace(ctx, ns)
+	runID := fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
+	indexKey := fmt.Sprintf("xflow:ns:%s:exec_deadlines", ns)
+	execKey := func(id types.ExecutionID, suffix string) string {
+		return fmt.Sprintf("xflow:ns:%s:exec:{%s}:%s", ns, id, suffix)
+	}
+	check := func(op string, err error, keys ...string) {
+		t.Helper()
+		if err == nil {
+			return
+		}
+		if strings.Contains(err.Error(), "CROSSSLOT") {
+			t.Fatalf("%s: CROSSSLOT over keys %q: %v", op, keys, err)
+		}
+		t.Fatalf("%s (keys %q): %v", op, keys, err)
+	}
+
+	// Twelve executions whose {id} keys spread over the slots, plus the index
+	// key. The run is meaningless if every key happened to share one slot.
+	const total = 12
+	base := time.Now().UTC().Add(2 * time.Hour).Truncate(time.Millisecond)
+	far := base.Add(time.Hour)
+	ids := make([]types.ExecutionID, total)
+	for i := range ids {
+		ids[i] = types.ExecutionID(fmt.Sprintf("cluster-verify-dl-%s-%02d", runID, i))
+	}
+	indexSlot, err := rdb.ClusterKeySlot(ctx, indexKey).Result()
+	check("CLUSTER KEYSLOT", err, indexKey)
+	slots := map[int64]struct{}{}
+	apart := 0
+	for _, id := range ids {
+		slot, err := rdb.ClusterKeySlot(ctx, execKey(id, "status")).Result()
+		check("CLUSTER KEYSLOT", err, execKey(id, "status"))
+		slots[slot] = struct{}{}
+		if slot != indexSlot {
+			apart++
+		}
+	}
+	if len(slots) < 2 || apart == 0 {
+		t.Fatalf("the %d execution keys hash to %d slot(s), %d apart from the index slot %d: "+
+			"the run would not exercise cross-slot routing", total, len(slots), apart, indexSlot)
+	}
+	graphs := clusterVerifyTwoNodeGraph(t)
+	deadlineOf := func(i int) time.Time { return base.Add(time.Duration(i) * time.Second) }
+	listAt := func(before time.Time, limit int) []engine.DeadlineExpiredExecution {
+		t.Helper()
+		got, err := expirer.ListDeadlineExceededExecutions(ctx, before, limit)
+		check("ListDeadlineExceededExecutions", err, indexKey)
+		var mine []engine.DeadlineExpiredExecution
+		for _, item := range got {
+			if item.Namespace == ns {
+				mine = append(mine, item)
+			}
+		}
+		return mine
+	}
+	requireListed := func(what string, got []engine.DeadlineExpiredExecution, want ...types.ExecutionID) {
+		t.Helper()
+		have := make([]types.ExecutionID, 0, len(got))
+		for _, item := range got {
+			have = append(have, item.ExecutionID)
+		}
+		if !slices.Equal(have, want) {
+			t.Fatalf("%s: listed %v, want %v", what, have, want)
+		}
+	}
+	inIndex := func(id types.ExecutionID) bool {
+		t.Helper()
+		_, err := rdb.ZScore(ctx, indexKey, string(id)).Result()
+		if errors.Is(err, redis.Nil) {
+			return false
+		}
+		check("ZSCORE", err, indexKey)
+		return true
+	}
+	exists := func(key string) bool {
+		t.Helper()
+		n, err := rdb.Exists(ctx, key).Result()
+		check("EXISTS", err, key)
+		return n > 0
+	}
+	statusOf := func(id types.ExecutionID) types.ExecutionStatus {
+		t.Helper()
+		snap, err := state.GetExecution(ctx, id)
+		check("GetExecution", err, execKey(id, "status"))
+		if snap == nil {
+			t.Fatalf("GetExecution(%q) = nil, want the execution", id)
+		}
+		return snap.Status
+	}
+	setStatus := func(id types.ExecutionID, status types.ExecutionStatus, reason string) {
+		t.Helper()
+		check("UpdateExecutionStatus("+string(status)+")",
+			state.UpdateExecutionStatus(ctx, id, status, reason),
+			execKey(id, "status"), execKey(id, "error"), indexKey)
+	}
+	succeedNodes := func(id types.ExecutionID) {
+		t.Helper()
+		for idx, name := range []string{"start", "end"} {
+			check("UpsertNode("+name+")", state.UpsertNode(ctx, &engine.NodeSnapshot{
+				ExecutionID: id, Name: name, NodeIdx: idx, Status: types.NodeStatusSuccess, ActivationID: 1,
+			}), execKey(id, "node:"+name+":status"))
+		}
+	}
+
+	// 1. Registration. Each create writes its {id} keys in one transaction and
+	// its member into the shared index with an ordinary ZADD beforehand.
+	for i, id := range ids {
+		check("CreateExecution", state.CreateExecution(ctx, &engine.ExecutionSnapshot{
+			ID: id, Graph: graphs, Status: types.ExecutionStatusRunning, Deadline: deadlineOf(i),
+		}), execKey(id, "status"), execKey(id, "deadline_ms"), indexKey)
+	}
+	if n, err := rdb.ZCard(ctx, indexKey).Result(); err != nil || n != total {
+		t.Fatalf("ZCARD %s = %d, %v, want %d members", indexKey, n, err, total)
+	}
+	got := listAt(far, 100)
+	requireListed("all due", got, ids...)
+	for i, item := range got {
+		if item.Deadline.UnixMilli() != deadlineOf(i).UnixMilli() {
+			t.Fatalf("listed %q Deadline = %v, want %v", item.ExecutionID, item.Deadline, deadlineOf(i))
+		}
+	}
+	requireListed("not yet due", listAt(base.Add(-time.Millisecond), 100))
+	requireListed("boundary is inclusive", listAt(deadlineOf(2), 100), ids[0], ids[1], ids[2])
+	requireListed("page bound", listAt(far, 5), ids[:5]...)
+	// 2. Withdrawal. success, failed and canceled drop the member in the
+	// terminal write (an ordinary ZREM beside the Lua), and so does the commit
+	// path that finalizes an execution from its node statuses. timeout keeps the
+	// member until AckDeadlineExpired.
+	setStatus(ids[0], types.ExecutionStatusSuccess, "")
+	setStatus(ids[1], types.ExecutionStatusFailed, "cluster verify failure")
+	setStatus(ids[2], types.ExecutionStatusCanceled, "")
+	for i, want := range []types.ExecutionStatus{
+		types.ExecutionStatusSuccess, types.ExecutionStatusFailed, types.ExecutionStatusCanceled,
+	} {
+		if got := statusOf(ids[i]); got != want {
+			t.Fatalf("status of %q = %q, want %q", ids[i], got, want)
+		}
+		if inIndex(ids[i]) {
+			t.Fatalf("%q is still in %s after %s", ids[i], indexKey, want)
+		}
+	}
+	succeedNodes(ids[4])
+	if done, failed, err := state.CheckCompletion(ctx, ids[4], 2); err != nil || !done || failed {
+		check("CheckCompletion(complete)", err, execKey(ids[4], "status"), execKey(ids[4], "node:start:status"))
+		t.Fatalf("CheckCompletion(%q) = (%v, %v), want (true, false)", ids[4], done, failed)
+	}
+	if got := statusOf(ids[4]); got != types.ExecutionStatusSuccess || inIndex(ids[4]) {
+		t.Fatalf("after CheckCompletion %q has status %q (indexed=%v), want success withdrawn", ids[4], got, inIndex(ids[4]))
+	}
+	setStatus(ids[3], types.ExecutionStatusTimeout, engine.ExecutionDeadlineExceededError)
+	if got := statusOf(ids[3]); got != types.ExecutionStatusTimeout || !inIndex(ids[3]) {
+		t.Fatalf("after timeout %q has status %q (indexed=%v), want timeout kept in the index", ids[3], got, inIndex(ids[3]))
+	}
+	requireListed("timeout stays until ack", listAt(far, 100), append([]types.ExecutionID{ids[3]}, ids[5:]...)...)
+	for range 2 {
+		check("AckDeadlineExpired", expirer.AckDeadlineExpired(ctx, ids[3]), indexKey)
+	}
+	check("AckDeadlineExpired(unknown)", expirer.AckDeadlineExpired(ctx, types.ExecutionID("cluster-verify-dl-"+runID+"-unknown")), indexKey)
+	requireListed("after ack", listAt(far, 100), ids[5:]...)
+	// 3. Absent executions. Both Lua scripts must refuse a missing execution
+	// without writing anything. A never-created id has no keys at all; ids[8] is
+	// an execution whose status key is gone while its node keys, graph cache and
+	// index member survive, which is the shape that would otherwise make the
+	// scripts resurrect a bare status key.
+	ghost := types.ExecutionID("cluster-verify-dl-" + runID + "-ghost")
+	setStatus(ghost, types.ExecutionStatusRunning, "")
+	setStatus(ghost, types.ExecutionStatusTimeout, engine.ExecutionDeadlineExceededError)
+	if done, failed, err := state.CheckCompletion(ctx, ghost, 2); err != nil || done || failed {
+		check("CheckCompletion(ghost)", err, execKey(ghost, "status"))
+		t.Fatalf("CheckCompletion(ghost) = (%v, %v), want (false, false)", done, failed)
+	}
+	if snap, err := state.GetExecution(ctx, ghost); err != nil || snap != nil {
+		check("GetExecution(ghost)", err, execKey(ghost, "status"))
+		t.Fatalf("GetExecution(ghost) = %+v, want nil", snap)
+	}
+	var leaked []string
+	check("SCAN ghost keys", rdb.ForEachMaster(ctx, func(ctx context.Context, node *redis.Client) error {
+		keys, _, err := node.Scan(ctx, 0, execKey(ghost, "*"), 1000).Result()
+		leaked = append(leaked, keys...)
+		return err
+	}))
+	if len(leaked) != 0 {
+		t.Fatalf("writes for the missing execution %q left keys behind: %v", ghost, leaked)
+	}
+
+	succeedNodes(ids[8])
+	check("DEL status", rdb.Del(ctx, execKey(ids[8], "status")).Err(), execKey(ids[8], "status"))
+	if done, failed, err := state.CheckCompletion(ctx, ids[8], 2); err != nil || done || failed {
+		check("CheckCompletion(status gone)", err, execKey(ids[8], "status"), execKey(ids[8], "node:start:status"))
+		t.Fatalf("CheckCompletion(status gone) = (%v, %v), want (false, false)", done, failed)
+	}
+	setStatus(ids[8], types.ExecutionStatusRunning, "")
+	setStatus(ids[8], types.ExecutionStatusTimeout, engine.ExecutionDeadlineExceededError)
+	for _, suffix := range []string{"status", "error"} {
+		if exists(execKey(ids[8], suffix)) {
+			t.Fatalf("%s was written for an execution whose status key is gone", execKey(ids[8], suffix))
+		}
+	}
+	// The orphaned member is repaired by the read that finds it (a ZREM and a
+	// re-check, all on the index key).
+	requireListed("orphaned member repaired", listAt(far, 100), ids[5], ids[6], ids[7], ids[9], ids[10], ids[11])
+	if inIndex(ids[8]) {
+		t.Fatalf("%s still holds %q after a listing found its execution gone", indexKey, ids[8])
+	}
+	// 4. canceling fence. canceling is not terminal: the member stays, success
+	// is refused by the fence in updateExecutionStatusLua, CheckCompletion
+	// refuses to finalize it, and only canceled concludes it.
+	cancelID := ids[9]
+	setStatus(cancelID, types.ExecutionStatusCanceling, "")
+	if got := statusOf(cancelID); got != types.ExecutionStatusCanceling || !inIndex(cancelID) {
+		t.Fatalf("after canceling %q has status %q (indexed=%v), want canceling and still indexed", cancelID, got, inIndex(cancelID))
+	}
+	setStatus(cancelID, types.ExecutionStatusSuccess, "")
+	if got := statusOf(cancelID); got != types.ExecutionStatusCanceling {
+		t.Fatalf("success over canceling left %q in status %q, want the fence to keep canceling", cancelID, got)
+	}
+	succeedNodes(cancelID)
+	if done, failed, err := state.CheckCompletion(ctx, cancelID, 2); err != nil || done || failed {
+		check("CheckCompletion(canceling)", err, execKey(cancelID, "status"), execKey(cancelID, "node:start:status"))
+		t.Fatalf("CheckCompletion(canceling) = (%v, %v), want (false, false)", done, failed)
+	}
+	if got := statusOf(cancelID); got != types.ExecutionStatusCanceling || !inIndex(cancelID) {
+		t.Fatalf("CheckCompletion changed canceling %q to %q (indexed=%v)", cancelID, got, inIndex(cancelID))
+	}
+	setStatus(cancelID, types.ExecutionStatusCanceled, "")
+	if got := statusOf(cancelID); got != types.ExecutionStatusCanceled || inIndex(cancelID) {
+		t.Fatalf("after canceled %q has status %q (indexed=%v), want canceled and withdrawn", cancelID, got, inIndex(cancelID))
+	}
+
+	// 5. Retention read path. A second backend is another replica: its deadline
+	// memo is empty, so its first status write reads deadline_ms back through
+	// the EXISTS+GET transaction of executionDeadline (two keys of one {id}
+	// slot). That read logs and degrades to the default retention on any
+	// failure, so a CROSSSLOT would be invisible except for the TTL it leaves:
+	// the status key would carry the one-minute default instead of outliving
+	// the deadline by the grace hour.
+	replica, err := distributed.New("", nil,
+		distributed.WithRedisConfig(distributed.RedisConfig{Mode: distributed.RedisModeCluster, Addrs: addrs}),
+		distributed.WithConsumer(false),
+		distributed.WithExecTTL(time.Minute),
+	)
+	if err != nil {
+		t.Fatalf("distributed.New(cluster replica): %v", err)
+	}
+	stopReplica, err := replica.StartBinding(engine.New(replica.State(), replica.Queue()))
+	if err != nil {
+		t.Fatalf("replica StartBinding: %v", err)
+	}
+	t.Cleanup(stopReplica)
+	retained := ids[10]
+	statusKey := execKey(retained, "status")
+	before, err := rdb.PTTL(ctx, statusKey).Result()
+	check("PTTL", err, statusKey)
+	if before < 2*time.Hour {
+		t.Fatalf("PTTL %s = %v after create, want retention past the deadline (over 2h)", statusKey, before)
+	}
+	check("replica UpdateExecutionStatus", replica.State().UpdateExecutionStatus(ctx, retained, types.ExecutionStatusRunning, ""),
+		statusKey, execKey(retained, "deadline_ms"))
+	after, err := rdb.PTTL(ctx, statusKey).Result()
+	check("PTTL", err, statusKey)
+	if after < 2*time.Hour {
+		t.Fatalf("PTTL %s = %v after a write from a replica with an empty memo, want retention past the deadline (over 2h): "+
+			"the EXISTS+GET deadline read did not run or did not return", statusKey, after)
+	}
 }
