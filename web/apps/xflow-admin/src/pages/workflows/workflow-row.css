@@ -1,0 +1,254 @@
+/* Workflow list row (A/B proposal): two-line identity, trigger summary,
+   last-ten-run strip and the row-end menu. Every visual value comes from the
+   --xflow-* tokens so light/dark stay aligned; this file is unlayered like the
+   other page-local styles, and selectors are scoped to row-owned classes. */
+
+/* ---------- Name: title + one-line metadata (description · version · id) ---------- */
+
+.xflow-row-name {
+  display: flex;
+  flex-direction: column;
+  gap: var(--xflow-space-0-5);
+  min-width: 0;
+}
+
+.xflow-row-name__title {
+  overflow: hidden;
+  color: var(--xflow-text);
+  font-size: var(--xflow-font-md);
+  font-weight: var(--xflow-font-weight-medium);
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xflow-row-name__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--xflow-space-2);
+  min-width: 0;
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-xs);
+  line-height: 16px;
+}
+
+.xflow-row-name__desc {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--xflow-text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xflow-row-name__version {
+  flex: none;
+  color: var(--xflow-text-tertiary);
+  font-family: var(--xflow-font-mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.xflow-row-name__meta .xflow-admin-short-id {
+  flex: none;
+  font-family: var(--xflow-font-mono);
+}
+
+/* ---------- Triggers: kind chips + the cron expression ---------- */
+
+.xflow-row-triggers {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: var(--xflow-space-0-5) var(--xflow-space-1);
+  max-height: 38px;
+  overflow: hidden;
+}
+
+.xflow-row-cron {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  color: var(--xflow-text-tertiary);
+  font-family: var(--xflow-font-mono);
+  font-size: var(--xflow-font-xs);
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- Last ten runs: 8×16 status chips, oldest first ---------- */
+
+.xflow-row-runs {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--xflow-space-0-5);
+  height: 16px;
+}
+
+.xflow-row-run {
+  width: 8px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  /* Half the xs step: the 8×16 chip takes a 2px corner, which the scale has no
+     tier for; keep the value derived from the token rather than a literal. */
+  border-radius: calc(var(--xflow-radius-xs) / 2);
+  background: var(--xflow-text-tertiary);
+  cursor: pointer;
+  transition:
+    transform var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard),
+    filter var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard);
+}
+
+.xflow-row-run[data-tone='success'] {
+  background: var(--xflow-success);
+}
+
+.xflow-row-run[data-tone='danger'] {
+  background: var(--xflow-danger);
+}
+
+.xflow-row-run[data-tone='warning'] {
+  background: var(--xflow-warning);
+}
+
+.xflow-row-run[data-tone='info'] {
+  background: var(--xflow-info);
+}
+
+.xflow-row-run:hover {
+  filter: brightness(1.12);
+  transform: scaleY(1.12);
+}
+
+.xflow-row-run:focus-visible {
+  outline: 2px solid var(--xflow-focus-ring);
+  outline-offset: 1px;
+}
+
+/* ---------- Success rate / P50 / updated ---------- */
+
+.xflow-row-rate,
+.xflow-row-duration,
+.xflow-row-updated {
+  color: var(--xflow-text);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* R2: the rate is neutral text plus a small ratio bar. Colour lives only on
+   the bar (threshold-coloured) so a low rate is not shouted twice. */
+.xflow-row-rate {
+  display: inline-flex;
+  flex-direction: column;
+  gap: var(--xflow-space-0-5);
+  color: var(--xflow-text-secondary);
+}
+
+.xflow-row-rate-value {
+  line-height: var(--xflow-line-height-xs);
+}
+
+.xflow-row-rate-bar {
+  display: block;
+  width: 44px;
+  height: 4px;
+  overflow: hidden;
+  border-radius: calc(var(--xflow-radius-xs) / 2);
+  background: var(--xflow-surface-sunken);
+}
+
+.xflow-row-rate-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--xflow-success);
+}
+
+.xflow-row-rate[data-tone='warning'] .xflow-row-rate-fill {
+  background: var(--xflow-warning);
+}
+
+.xflow-row-rate[data-tone='danger'] .xflow-row-rate-fill {
+  background: var(--xflow-danger);
+}
+
+.xflow-row-updated {
+  color: var(--xflow-text-secondary);
+}
+
+/* ---------- Favourite star ---------- */
+
+.xflow-row-favorite,
+.xflow-row-fav-filter {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.xflow-row-favorite {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--xflow-radius-xs);
+  background: none;
+  color: var(--xflow-text-tertiary);
+  cursor: pointer;
+  transition:
+    color var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard),
+    background-color var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard);
+}
+
+.xflow-row-favorite:hover {
+  background: var(--xflow-surface-hover);
+  color: var(--xflow-text-secondary);
+}
+
+.xflow-row-favorite[data-fav='true'] {
+  color: var(--xflow-warning);
+}
+
+.xflow-row-favorite:focus-visible {
+  outline: 2px solid var(--xflow-focus-ring);
+  outline-offset: 1px;
+}
+
+/* Filled star tracks the icon, so the filter reads as a toggle too. */
+.xflow-row-fav-filter[data-active='true'] {
+  color: var(--xflow-warning);
+}
+
+/* ---------- Row-end ⋯ menu: quiet until the row is pointed at ---------- */
+
+.xflow-row-ops {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.xflow-row-ops-btn {
+  opacity: 0;
+  transition: opacity var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard);
+}
+
+tr:hover .xflow-row-ops-btn,
+tr:focus-within .xflow-row-ops-btn,
+.xflow-row-ops-btn:focus-visible {
+  opacity: 1;
+}
+
+/* Touch hosts have no hover: keep the menu discoverable. */
+@media (hover: none) {
+  .xflow-row-ops-btn {
+    opacity: 1;
+  }
+}
+
+/* The toolbar packs more controls than the old search-only row; let the
+   search shrink before the window switch wraps. */
+.xflow-row-toolbar .xflow-admin-search {
+  width: 240px;
+  min-width: 160px;
+}
