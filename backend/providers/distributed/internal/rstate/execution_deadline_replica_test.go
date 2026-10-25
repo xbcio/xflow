@@ -235,31 +235,42 @@ func TestPausedThenResumedExecutionStillTimesOut(t *testing.T) {
 	requireListed(t, due, id)
 }
 
-// deadlineReadHook counts GETs of any execution's deadline_ms key and can fail
-// the first few of them. Counting at the client is the point: getExecTTL sits on
-// the hot path of every state write, and an extra Redis round trip per call
-// would show up here and nowhere else.
+// deadlineReadHook counts reads of any execution's deadline_ms key and can fail
+// the first few of them. A read is either a plain GET or, as getExecTTL does it,
+// a transaction that carries that GET next to an EXISTS of the status key.
+// Counting at the client is the point: getExecTTL sits on the hot path of every
+// state write, and an extra Redis round trip per call would show up here and
+// nowhere else.
 type deadlineReadHook struct {
 	reads    atomic.Int64
 	failures int64 // the first N reads fail with an injected error
+}
+
+func isDeadlineGet(cmd redis.Cmder) bool {
+	args := cmd.Args()
+	return cmd.Name() == "get" && len(args) > 1 && strings.HasSuffix(fmt.Sprint(args[1]), ":deadline_ms")
 }
 
 func (h *deadlineReadHook) DialHook(next redis.DialHook) redis.DialHook { return next }
 
 func (h *deadlineReadHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 	return func(ctx context.Context, cmd redis.Cmder) error {
-		args := cmd.Args()
-		if cmd.Name() == "get" && len(args) > 1 && strings.HasSuffix(fmt.Sprint(args[1]), ":deadline_ms") {
-			if h.reads.Add(1) <= h.failures {
-				return errors.New("injected deadline read failure")
-			}
+		if isDeadlineGet(cmd) && h.reads.Add(1) <= h.failures {
+			return errors.New("injected deadline read failure")
 		}
 		return next(ctx, cmd)
 	}
 }
 
 func (h *deadlineReadHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
-	return next
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		for _, cmd := range cmds {
+			if isDeadlineGet(cmd) && h.reads.Add(1) <= h.failures {
+				return errors.New("injected deadline read failure")
+			}
+		}
+		return next(ctx, cmds)
+	}
 }
 
 // TestGetExecTTLReadsTheDeadlineOncePerReplica pins the cost of folding the

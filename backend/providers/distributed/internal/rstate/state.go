@@ -240,11 +240,21 @@ func (s *Store) getExecTTL(ctx context.Context, id types.ExecutionID) time.Durat
 }
 
 // execDeadline resolves an execution's deadline for retention purposes: the
-// memo when this replica has seen the execution, otherwise one read of the
-// persisted deadline_ms. "No time budget" is memoized as a zero deadline, so an
-// execution without a timeout costs one read per replica rather than one per
-// write. A failed read is NOT memoized: it would pin the replica to "no budget"
-// for this execution until a restart, so it answers zero for this call only.
+// memo when this replica has seen the execution, otherwise one transactional read
+// of the persisted state (executionDeadline). "No time budget" is memoized as a
+// zero deadline, so an execution without a timeout costs one read per replica
+// rather than one per write.
+//
+// Only a settled answer is memoized. An answer for an execution that does not
+// exist yet, and a failed read, are returned for this call alone: memoizing
+// either would pin the execution to "no budget" on this replica for as long as
+// it runs, and every later write would shrink the status back to the default
+// retention (see executionDeadline).
+//
+// The memo is filled with set-if-absent here. A creation path on this replica
+// may have recorded the authoritative value between the read and this write, and
+// a reader must never overwrite it; the value that ends up in the memo is the one
+// returned.
 func (s *Store) execDeadline(ctx context.Context, id types.ExecutionID) time.Time {
 	s.ttlMu.RLock()
 	deadline, ok := s.execDeadlines[id]
@@ -252,11 +262,11 @@ func (s *Store) execDeadline(ctx context.Context, id types.ExecutionID) time.Tim
 	if ok {
 		return deadline
 	}
-	deadline, ok = s.executionDeadline(ctx, id)
-	if ok {
-		s.rememberExecDeadline(id, deadline)
+	deadline, settled := s.executionDeadline(ctx, id)
+	if !settled {
+		return deadline
 	}
-	return deadline
+	return s.learnExecDeadline(id, deadline)
 }
 
 // execDeadlineMemoCap bounds execDeadlines. Terminalization evicts an entry only
@@ -269,15 +279,37 @@ func (s *Store) execDeadline(ctx context.Context, id types.ExecutionID) time.Tim
 const execDeadlineMemoCap = 1 << 16
 
 // rememberExecDeadline records an execution's deadline, zero for "no time
-// budget". The creation paths call it with the deadline they just wrote, which
-// spares the first getExecTTL its read.
+// budget", overwriting whatever the memo held. It is for the creation paths,
+// which hold the authoritative value they just wrote and spare the first
+// getExecTTL its read. A reader that learned something from Redis must use
+// learnExecDeadline instead, which never overwrites.
 func (s *Store) rememberExecDeadline(id types.ExecutionID, deadline time.Time) {
 	s.ttlMu.Lock()
+	s.storeExecDeadlineLocked(id, deadline)
+	s.ttlMu.Unlock()
+}
+
+// learnExecDeadline records a deadline read from Redis unless the memo already
+// holds one, and returns the deadline the memo holds afterwards. Set-if-absent
+// under the write lock, so a reader racing a creation on this replica cannot
+// replace the creator's value with what it saw before the creation landed.
+func (s *Store) learnExecDeadline(id types.ExecutionID, deadline time.Time) time.Time {
+	s.ttlMu.Lock()
+	defer s.ttlMu.Unlock()
+	if known, ok := s.execDeadlines[id]; ok {
+		return known
+	}
+	s.storeExecDeadlineLocked(id, deadline)
+	return deadline
+}
+
+// storeExecDeadlineLocked writes the memo entry, dropping the memo whole first
+// when it is full. The caller holds ttlMu for writing.
+func (s *Store) storeExecDeadlineLocked(id types.ExecutionID, deadline time.Time) {
 	if _, known := s.execDeadlines[id]; !known && len(s.execDeadlines) >= execDeadlineMemoCap {
 		clear(s.execDeadlines)
 	}
 	s.execDeadlines[id] = deadline
-	s.ttlMu.Unlock()
 }
 
 // baseExecTTL returns the per-execution TTL override if set, otherwise the
