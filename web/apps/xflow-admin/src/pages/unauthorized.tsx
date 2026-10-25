@@ -18,9 +18,12 @@ export default function UnauthorizedPage() {
   const showDevHint = process.env.NODE_ENV !== 'production' && getToken() === null;
 
   return (
-    <Result
-      status="warning"
-      title={intl.formatMessage({ id: 'page.unauthorized.title' })}
+    <>
+      {/* AD-11: one page heading; Result's title is a non-heading text block. */}
+      <h1 className="xflow-admin-visually-hidden">未授权</h1>
+      <Result
+        status="warning"
+        title={intl.formatMessage({ id: 'page.unauthorized.title' })}
       subTitle={intl.formatMessage({ id: 'page.unauthorized.subtitle' })}
       extra={
         <Space wrap>
@@ -43,5 +46,6 @@ export default function UnauthorizedPage() {
         />
       ) : null}
     </Result>
+    </>
   );
 }
