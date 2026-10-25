@@ -187,13 +187,19 @@ describe("ExecutionListPanel (§6.8)", () => {
     const onLoad = vi.fn();
     render(
       <ExecutionListPanel
-        state={{ list: [row()], total: 1, error: "列表加载失败" }}
+        state={{ list: [row()], total: 1, error: "internal server error", errorStatus: 500 }}
         onLoad={onLoad}
       />
     );
 
     expect(screen.getByText("exec-1")).toBeTruthy();
-    expect(screen.getByRole("alert").textContent).toContain("列表加载失败");
+    // EL-20: the panel names the failure in Chinese and keeps the raw server
+    // message out; the HTTP status is the only technical detail it shows.
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toContain("执行记录加载失败");
+    expect(alert.textContent).toContain("HTTP 500");
+    expect(alert.textContent).not.toContain("internal server error");
+    expect(alert.querySelector(".xflow-editor-exec-error__icon")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
     expect(onLoad).toHaveBeenCalledTimes(2);
     expect(onLoad.mock.calls[1][0]).toMatchObject({ page: 1 });

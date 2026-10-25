@@ -1,4 +1,4 @@
-import { DownOutlined, HistoryOutlined } from "@ant-design/icons";
+import { DownIcon, HistoryIcon, WarnIcon } from "@xflow/icons";
 import { Button, Dropdown, Segmented, Tooltip } from "antd";
 import { workflowStatusMeta, type ExecutionStatusKey } from "@xflow/core";
 import * as React from "react";
@@ -46,6 +46,11 @@ export interface XFlowExecutionListState {
   total: number;
   loading?: boolean;
   error?: string;
+  /**
+   * HTTP status of the failed page, when the host knows it. The panel shows it
+   * as the error's secondary line; the raw server message stays out of the UI.
+   */
+  errorStatus?: number;
 }
 
 /** One page request. The host adds its own workflow identity filter. */
@@ -106,8 +111,12 @@ export function executionClock(value: string): string {
  * every read. Unparsable or inverted stamps produce no duration rather than a
  * made-up one.
  */
-export function executionDuration(item: XFlowExecutionListItem): string | undefined {
+export function executionDuration(
+  item: Pick<XFlowExecutionListItem, "status"> &
+    Partial<Pick<XFlowExecutionListItem, "createdAt" | "updatedAt">>
+): string | undefined {
   if (!workflowStatusMeta[item.status].terminal) return undefined;
+  if (!item.createdAt || !item.updatedAt) return undefined;
   const created = Date.parse(item.createdAt);
   const updated = Date.parse(item.updatedAt);
   if (!Number.isFinite(created) || !Number.isFinite(updated) || updated < created) return undefined;
@@ -207,13 +216,17 @@ export function ExecutionListPanel({
   return (
     <EditorPanel
       className="xflow-editor-exec-list"
-      icon={<HistoryOutlined />}
+      icon={<HistoryIcon />}
       title="执行"
       count={state === undefined ? undefined : `本工作流 · ${total}`}
     >
       <div className="xflow-editor-exec-filters">
         <Segmented
           className="xflow-editor-exec-filters__status"
+          classNames={{
+            item: "xflow-editor-exec-filters__item",
+            label: "xflow-editor-exec-filters__label"
+          }}
           options={statusFilters}
           size="small"
           value={filter}
@@ -230,17 +243,25 @@ export function ExecutionListPanel({
           }}
           trigger={["click"]}
         >
-          <Button icon={<DownOutlined />} iconPlacement="end" size="small">
+          <Button icon={<DownIcon />} iconPlacement="end" size="small">
             {rangeLabels[range]}
           </Button>
         </Dropdown>
       </div>
       {state?.error ? (
         <div className="xflow-editor-exec-error" role="alert">
-          <span>{state.error}</span>
-          <Button autoInsertSpace={false} size="small" onClick={retry}>
-            重试
-          </Button>
+          <span aria-hidden="true" className="xflow-editor-exec-error__icon">
+            <WarnIcon />
+          </span>
+          <div className="xflow-editor-exec-error__body">
+            <strong className="xflow-editor-exec-error__title">执行记录加载失败</strong>
+            {state.errorStatus !== undefined ? (
+              <span className="xflow-editor-exec-error__detail">HTTP {state.errorStatus}</span>
+            ) : null}
+            <Button autoInsertSpace={false} size="small" onClick={retry}>
+              重试
+            </Button>
+          </div>
         </div>
       ) : null}
       <div className="xflow-editor-exec-rows" role="list" onScroll={onScroll}>
