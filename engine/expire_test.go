@@ -1751,3 +1751,46 @@ func TestExpireExecutionOneFailingChildDoesNotStopTheOthers(t *testing.T) {
 		})
 	}
 }
+
+// TestExpireExecutionKeepsTheGraphWhenAChildCancelFails pins the eviction
+// timing for the one cascade step that has its own error path: a child that
+// could not be stopped. The call fails, the entry stays listed and the replay
+// will run the cascade again, so the graph it needs must still be cached; the
+// replay that stops the child is the call that evicts it and acknowledges.
+func TestExpireExecutionKeepsTheGraphWhenAChildCancelFails(t *testing.T) {
+	ctx := context.Background()
+	rig := newExpireSubWorkflowRig(t)
+	childID := rig.link.ChildExecutionID
+	// The dispatch left the graph cached; drop it and load it again so the
+	// entry under test is the one this probe put there.
+	rig.eng.EvictExecution(rig.parentID)
+	if _, err := rig.eng.loadGraph(ctx, rig.parentID); err != nil {
+		t.Fatalf("loadGraph() error = %v", err)
+	}
+	if !graphCached(rig.eng, rig.parentID) {
+		t.Fatal("precondition: want the graph cached before the call")
+	}
+	injected := errors.New("injected: child list suspended nodes failed")
+	rig.state.failListSuspendedFor(childID, injected)
+
+	got, err := rig.eng.ExpireExecution(ctx, rig.parentID)
+	if !errors.Is(err, injected) {
+		t.Fatalf("ExpireExecution() = (%q, %v), want an error wrapping %v", got, err, injected)
+	}
+	if !graphCached(rig.eng, rig.parentID) {
+		t.Fatal("the graph cache entry was dropped by a failed child cancel, want it kept for the replay")
+	}
+	if n := rig.log.count("ack"); n != 0 {
+		t.Fatalf("acked %d times after a failed child cancel, want 0", n)
+	}
+
+	rig.expire(t, rig.parentID, ExpireOutcomeResumed)
+
+	if graphCached(rig.eng, rig.parentID) {
+		t.Fatal("the graph cache entry survived the resumed expiry, want it evicted")
+	}
+	if n := rig.log.count("ack"); n != 1 {
+		t.Fatalf("acked %d times after the replay, want 1", n)
+	}
+	rig.log.requireLast(t, "ack")
+}
