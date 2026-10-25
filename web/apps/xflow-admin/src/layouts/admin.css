@@ -8,61 +8,256 @@
  */
 @layer components {
   .xflow-admin {
+    /* WCAG AA (4.5:1) for the two small-copy surfaces the shell owns. Both
+       aliases resolve per appearance, so dark mode only improves: primary-fg
+       is the brand blue mixed toward body text, and secondary replaces the
+       de-emphasis tertiary that does not clear AA on the app background. */
+    --xflow-admin-nav-active-fg: var(--xflow-primary-fg);
+    --xflow-admin-note-fg: var(--xflow-text-secondary);
+    /* tokens.css has no 20px type step; the approved page-title size lives here
+       (提案 C: 20/28 600) and is scoped to the admin shell. */
+    --xflow-admin-page-title-size: 20px;
+    --xflow-admin-page-title-line: 28px;
+    --xflow-admin-nav-width: 220px;
+    --xflow-admin-nav-rail: 56px;
     display: grid;
-    grid-template-columns: 220px minmax(0, 1fr);
+    grid-template-columns: var(--xflow-admin-nav-width) minmax(0, 1fr);
     height: 100dvh;
     min-width: 0;
     overflow: hidden;
-    background: var(--xflow-app);
+    background: var(--xflow-surface-app);
     color: var(--xflow-text);
     font-family: var(--xflow-font-sans);
     font-size: var(--xflow-font-md);
-    line-height: var(--xflow-line-height);
+    line-height: var(--xflow-line-height-md);
+  }
+
+  /* AL-09: the rail collapses to an icon track; the preference is persisted by
+     the shell (localStorage), so this is a pure layout state. */
+  .xflow-admin[data-collapsed='true'] {
+    grid-template-columns: var(--xflow-admin-nav-rail) minmax(0, 1fr);
+  }
+
+  /* @xflow/icons draws a 16px box; here it follows the surrounding text size
+     and inherits colour through `currentColor`. */
+  .xflow-admin .xflow-icon {
+    flex: none;
+    height: 1em;
+    width: 1em;
   }
 
   .xflow-admin-nav {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: var(--xflow-space-1);
     min-width: 0;
-    padding: 12px;
+    padding: var(--xflow-space-3);
     overflow: auto;
-    background: var(--xflow-panel);
-    border-right: 1px solid var(--xflow-border);
+    background: var(--xflow-surface-panel);
+    border-right: 1px solid var(--xflow-border-subtle);
+  }
+
+  .xflow-admin[data-collapsed='true'] .xflow-admin-nav {
+    padding: var(--xflow-space-2);
+    overflow-x: hidden;
+  }
+
+  /* Brand row: the mark/word is the way back to the workflow list (AD-22), and
+     the collapse control sits at its right edge (AL-09). */
+  .xflow-admin-brand-row {
+    display: flex;
+    align-items: center;
+    gap: var(--xflow-space-2);
+    min-width: 0;
+    margin-bottom: var(--xflow-space-1);
   }
 
   .xflow-admin-brand {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 4px 8px 10px;
+    gap: var(--xflow-space-2);
+    min-width: 0;
+    padding: var(--xflow-space-1) var(--xflow-space-2);
+    border: 0;
+    background: none;
+    color: inherit;
+    font-family: inherit;
     font-size: var(--xflow-font-lg);
-    font-weight: 600;
+    font-weight: var(--xflow-font-weight-semibold);
+    text-align: left;
+    cursor: pointer;
   }
 
-  .xflow-admin-brand i {
+  .xflow-admin-collapse {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    flex: none;
+    margin-left: auto;
+    padding: 0;
+    border: 0;
+    border-radius: var(--xflow-radius-sm);
+    background: transparent;
+    color: var(--xflow-text-secondary);
+    font-size: var(--xflow-font-lg);
+    cursor: pointer;
+  }
+
+  .xflow-admin-collapse:hover {
+    background: var(--xflow-hover);
+    color: var(--xflow-text);
+  }
+
+  .xflow-admin-collapse:focus-visible {
+    outline: 2px solid var(--xflow-focus-ring);
+    outline-offset: 2px;
+  }
+
+  .xflow-admin[data-collapsed='true'] .xflow-admin-brand-row {
+    flex-direction: column;
+    gap: var(--xflow-space-2);
+  }
+
+  .xflow-admin[data-collapsed='true'] .xflow-admin-brand {
+    justify-content: center;
+    width: 100%;
+    padding: var(--xflow-space-1) 0;
+  }
+
+  .xflow-admin[data-collapsed='true'] .xflow-admin-brand-name,
+  .xflow-admin[data-collapsed='true'] .xflow-admin-space,
+  .xflow-admin[data-collapsed='true'] .xflow-admin-group,
+  .xflow-admin[data-collapsed='true'] .xflow-admin-item-label,
+  .xflow-admin[data-collapsed='true'] .xflow-admin-item-count,
+  .xflow-admin[data-collapsed='true'] .xflow-admin-status-label {
+    display: none;
+  }
+
+  .xflow-admin[data-collapsed='true'] .xflow-admin-collapse {
+    margin-left: 0;
+  }
+
+  .xflow-admin-brand-mark {
     width: 24px;
     height: 24px;
-    border-radius: var(--xflow-radius-sm);
-    background: var(--xflow-primary);
+    flex: none;
+    color: var(--xflow-primary);
+  }
+
+  /* Design `.space`: a 32px bordered row under the brand, full nav width, 12px
+   * text and a trailing chevron (the chevron is AntD's own Select suffix). */
+  .xflow-admin-space {
+    width: 100%;
+    height: var(--xflow-control-height);
+    margin: 0 0 var(--xflow-space-2);
+    font-size: var(--xflow-font-sm);
+  }
+
+  .xflow-admin-space .ant-select-selector {
+    height: 100%;
+    padding-inline: var(--xflow-space-2);
   }
 
   .xflow-admin-group {
-    margin: 12px 8px 4px;
+    margin: var(--xflow-space-3) var(--xflow-space-2) var(--xflow-space-1);
     font-size: var(--xflow-font-xs);
-    font-weight: 600;
+    font-weight: var(--xflow-font-weight-semibold);
     color: var(--xflow-text-tertiary);
   }
 
+  /* AL-09/AL-22: 32px rows on the 8 grid, 8px gaps. */
   .xflow-admin-item {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: var(--xflow-space-2);
     width: 100%;
-    height: 34px;
+    height: 32px;
     min-width: 0;
-    padding: 0 10px;
+    padding: 0 var(--xflow-space-2);
     border: 0;
+    border-radius: var(--xflow-radius-sm);
+    background: transparent;
+    color: var(--xflow-text-secondary);
+    font-family: inherit;
+    font-size: var(--xflow-font-md);
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .xflow-admin[data-collapsed='true'] .xflow-admin-item {
+    justify-content: center;
+    gap: 0;
+    padding: 0;
+  }
+
+  .xflow-admin-item-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .xflow-admin-item:hover {
+    background: var(--xflow-hover);
+    color: var(--xflow-text);
+  }
+
+  /* Nav rows are the shell's primary keyboard path; the UA's 1px auto ring was
+     invisible on the dark panel. Same 2px/2px ring as the rest of the product. */
+  .xflow-admin-item:focus-visible,
+  .xflow-admin-brand:focus-visible {
+    outline: 2px solid var(--xflow-focus-ring);
+    outline-offset: 2px;
+  }
+
+  .xflow-admin-item[aria-current='page'] {
+    background: var(--xflow-primary-bg-subtle);
+    color: var(--xflow-admin-nav-active-fg);
+    font-weight: var(--xflow-font-weight-semibold);
+  }
+
+  .xflow-admin-item-icon {
+    display: inline-flex;
+  }
+
+  /* The mockup's nav glyph is the 16px sprite, not the item's 13px label size. */
+  .xflow-admin-item-icon .xflow-icon {
+    height: 16px;
+    width: 16px;
+  }
+
+  /* The baseline `.nav-item .n`: the server total, right-aligned and quiet. */
+  .xflow-admin-item-count {
+    margin-left: auto;
+    /* The count is 11px on the panel; tertiary measures 4.83:1 there but only
+       4.19:1 on the active row's tinted fill, so it takes the AA-safe
+       secondary instead. */
+    color: var(--xflow-text-secondary);
+    font-size: var(--xflow-font-xs);
+    font-weight: var(--xflow-font-weight-regular);
+  }
+
+  /* AL-18: footer health control. The popover content keeps the old
+     Runner/Leader rows; the collapsed rail draws only the dot. */
+  .xflow-admin-nav-footer {
+    display: flex;
+    flex-direction: column;
+    gap: var(--xflow-space-2);
+    margin-top: auto;
+    padding-top: var(--xflow-space-2);
+  }
+
+  .xflow-admin-status {
+    display: flex;
+    align-items: center;
+    gap: var(--xflow-space-2);
+    width: 100%;
+    height: 32px;
+    min-width: 0;
+    padding: 0 var(--xflow-space-2);
+    border: 1px solid var(--xflow-border);
     border-radius: var(--xflow-radius-sm);
     background: transparent;
     color: var(--xflow-text-secondary);
@@ -72,36 +267,51 @@
     cursor: pointer;
   }
 
-  .xflow-admin-item:hover {
+  .xflow-admin-status:hover {
     background: var(--xflow-hover);
     color: var(--xflow-text);
   }
 
-  .xflow-admin-item[aria-current='page'] {
-    background: var(--xflow-primary-bg-subtle);
-    color: var(--xflow-primary);
-    font-weight: 600;
+  .xflow-admin-status:focus-visible {
+    outline: 2px solid var(--xflow-focus-ring);
+    outline-offset: 2px;
   }
 
-  .xflow-admin-item-icon {
-    display: inline-flex;
+  .xflow-admin-status-dot {
+    width: 8px;
+    height: 8px;
+    flex: none;
+    border-radius: var(--xflow-radius-full);
+    background: var(--xflow-success);
+  }
+
+  .xflow-admin-status[data-tone='warn'] .xflow-admin-status-dot {
+    background: var(--xflow-warning);
+  }
+
+  .xflow-admin-status-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .xflow-admin[data-collapsed='true'] .xflow-admin-status {
+    justify-content: center;
+    padding: 0;
   }
 
   .xflow-admin-cluster {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    margin-top: auto;
-    padding: 10px;
-    border: 1px solid var(--xflow-border);
-    border-radius: var(--xflow-radius-md);
+    gap: var(--xflow-space-2);
+    min-width: 160px;
     font-size: var(--xflow-font-sm);
   }
 
   .xflow-admin-cluster > div {
     display: flex;
     justify-content: space-between;
-    gap: 8px;
+    gap: var(--xflow-space-2);
   }
 
   .xflow-admin-cluster [data-tone='ok'] {
@@ -115,15 +325,98 @@
     min-height: 0;
   }
 
+  /* Proposal C: a 48px global bar. Its inner row shares the body's 1440px
+     column so the breadcrumb lines up with the page content at 1920. */
   .xflow-admin-top {
+    flex: 0 0 auto;
+    background: var(--xflow-surface-panel);
+    border-bottom: 1px solid var(--xflow-border-subtle);
+  }
+
+  .xflow-admin-top-inner {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: var(--xflow-space-3);
+    width: 100%;
+    max-width: 1440px;
+    height: 48px;
     min-width: 0;
-    height: 52px;
-    padding: 0 20px;
-    background: var(--xflow-panel);
-    border-bottom: 1px solid var(--xflow-border);
+    margin-inline: auto;
+    padding: 0 var(--xflow-space-6);
+  }
+
+  @media (min-width: 1600px) {
+    .xflow-admin-top-inner {
+      padding-inline: var(--xflow-space-8);
+    }
+  }
+
+  .xflow-admin-crumbs {
+    display: flex;
+    align-items: center;
+    gap: var(--xflow-space-2);
+    min-width: 0;
+    overflow: hidden;
+    color: var(--xflow-text-secondary);
+    font-size: var(--xflow-font-md);
+    white-space: nowrap;
+  }
+
+  .xflow-admin-crumb-ns {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--xflow-text-tertiary);
+  }
+
+  .xflow-admin-crumb-sep {
+    color: var(--xflow-text-tertiary);
+  }
+
+  .xflow-admin-crumbs [aria-current='page'] {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--xflow-text);
+    font-weight: var(--xflow-font-weight-medium);
+  }
+
+  /* Global palette entry (AL-06): a button, not a text field, because typing
+     happens inside the palette. 280px matches the proposal's bar width. */
+  .xflow-admin-palette-trigger {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--xflow-space-2);
+    width: 280px;
+    max-width: 100%;
+    height: 32px;
+    flex: none;
+    padding: 0 var(--xflow-space-2);
+    border: 1px solid var(--xflow-border);
+    border-radius: var(--xflow-radius-sm);
+    background: var(--xflow-field);
+    color: var(--xflow-text-tertiary);
+    font-family: inherit;
+    font-size: var(--xflow-font-sm);
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .xflow-admin-palette-trigger:hover {
+    border-color: var(--xflow-border-strong);
+    color: var(--xflow-text-secondary);
+  }
+
+  .xflow-admin-palette-trigger:focus-visible {
+    outline: 2px solid var(--xflow-focus-ring);
+    outline-offset: 2px;
+  }
+
+  .xflow-admin-palette-trigger .xflow-icon {
+    height: 16px;
+    width: 16px;
+  }
+
+  .xflow-admin-palette-trigger-label {
+    flex: 1 1 auto;
   }
 
   .xflow-admin-grow {
@@ -131,79 +424,118 @@
   }
 
   .xflow-admin-search {
-    width: 360px;
+    width: 280px;
     max-width: 100%;
   }
 
   /* Mirrors the baseline Kbd (ui-preview .xflow-pv-kbd): 500 11px Inter. */
   .xflow-admin-kbd {
-    padding: 1px 5px;
+    padding: 1px calc(var(--xflow-space-1-5) - 1px);
     border: 1px solid var(--xflow-border);
     border-bottom-width: 2px;
     border-radius: var(--xflow-radius-xs);
     color: var(--xflow-text-tertiary);
-    font: 500 11px var(--xflow-font-sans);
+    font: var(--xflow-font-weight-medium) 11px var(--xflow-font-sans);
   }
 
-  /* Wrapper that keeps a disabled button's tooltip reachable (rule 16). */
-  .xflow-admin-control {
-    display: inline-flex;
-  }
-
+  /* AL-04: the content column is capped at 1440 and centred; 24px padding on
+     smaller screens, 32px once the viewport is wide enough to spend it. */
   .xflow-admin-body {
     display: flex;
+    flex: 1 1 auto;
     flex-direction: column;
-    gap: 16px;
+    gap: var(--xflow-space-4);
+    width: 100%;
+    max-width: 1440px;
     min-width: 0;
     min-height: 0;
-    padding: 20px;
+    margin-inline: auto;
+    padding: var(--xflow-space-6);
     overflow: auto;
+    box-sizing: border-box;
+  }
+
+  @media (min-width: 1600px) {
+    .xflow-admin-body {
+      padding: var(--xflow-space-8);
+    }
   }
 
   /* ---------- Workflow centre (§6.6, ruling 20): surfaces only ---------- */
 
   .xflow-admin-card {
-    background: var(--xflow-panel);
+    background: var(--xflow-surface-raised);
     border: 1px solid var(--xflow-border);
     border-radius: var(--xflow-radius-md);
+    box-shadow: var(--xflow-elev-1);
   }
 
-  .xflow-admin-card-icon {
-    display: grid;
-    place-items: center;
-    width: 28px;
-    height: 28px;
-    flex: none;
-    border-radius: var(--xflow-radius-sm);
-    background: var(--xflow-primary-bg-subtle);
-    color: var(--xflow-primary);
-    font-size: var(--xflow-font-xl);
+  /* AL-08: one compact KPI strip instead of three equal overview cards. Each
+     metric is a plain inline cell; a metric whose read is unavailable is not
+     rendered at all, and the strip disappears when nothing is readable. */
+  .xflow-admin-kpi {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0;
+    min-width: 0;
+    padding: var(--xflow-space-1) var(--xflow-space-2);
+    background: var(--xflow-surface-raised);
+    border: 1px solid var(--xflow-border);
+    border-radius: var(--xflow-radius-md);
+    box-shadow: var(--xflow-elev-1);
   }
 
-  /* 创建卡在活基准里用 CategoryIcon category="code"（accent），与状态卡区分。 */
-  .xflow-admin-card-icon--code {
-    background: var(--xflow-accent-bg-subtle);
-    color: var(--xflow-accent);
+  .xflow-admin-kpi-item {
+    display: flex;
+    align-items: baseline;
+    gap: var(--xflow-space-2);
+    min-width: 0;
+    padding: var(--xflow-space-1) var(--xflow-space-3);
   }
 
-  .xflow-admin-card-v {
-    display: block;
-    font-size: var(--xflow-font-xl);
-    font-weight: 600;
+  .xflow-admin-kpi-item + .xflow-admin-kpi-item {
+    border-left: 1px solid var(--xflow-border-subtle);
   }
 
-  .xflow-admin-card-l {
-    display: block;
+  .xflow-admin-kpi-icon {
+    display: inline-flex;
+    align-self: center;
+    color: var(--xflow-text-tertiary);
+    font-size: var(--xflow-font-lg);
+  }
+
+  .xflow-admin-kpi-value {
+    color: var(--xflow-text);
+    font-size: var(--xflow-font-lg);
+    font-weight: var(--xflow-font-weight-semibold);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .xflow-admin-kpi-label {
     color: var(--xflow-text-secondary);
     font-size: var(--xflow-font-sm);
+    white-space: nowrap;
   }
 
-  .xflow-admin-card-src {
-    margin-left: auto;
-    color: var(--xflow-text-tertiary);
-    font-family: var(--xflow-font-mono);
-    font-size: var(--xflow-font-xs);
+  /* Visually hidden page heading: one h1 per page for screen readers without a
+     second visible title beside the panel/top-bar heading. */
+  .xflow-admin-visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
     white-space: nowrap;
+    border: 0;
+  }
+
+  /* Result's default secondary copy measures 4.43:1 on the app ground; the
+     shell owns this line, so it takes the AA-safe semantic secondary. */
+  .xflow-admin-404-subtitle {
+    color: var(--xflow-text-secondary);
   }
 
   .xflow-admin-tablecard {
@@ -211,13 +543,143 @@
     overflow: hidden;
   }
 
+  /* Baseline `table.st`: 12px cells, 8px/12px padding, a 500-weight secondary
+   * header on the raised panel. AntD's small table is 13px/600 with 8px
+   * padding and a different header fill. */
+  .xflow-admin-table .ant-table-thead > tr > th {
+    padding: var(--xflow-space-2) var(--xflow-space-3);
+    background: var(--xflow-surface-sunken);
+    color: var(--xflow-text-secondary);
+    font-size: var(--xflow-font-sm);
+    font-weight: var(--xflow-font-weight-medium);
+  }
+
+  .xflow-admin-table .ant-table-tbody > tr > td {
+    padding: var(--xflow-space-2) var(--xflow-space-3);
+    font-size: var(--xflow-font-sm);
+  }
+
+  /* AL-23: the first cell's text starts at the same 16px as card content and
+     toolbar copy, so the card's left edge reads as one column. */
+  .xflow-admin-table .ant-table-thead > tr > th:first-child,
+  .xflow-admin-table .ant-table-tbody > tr > td:first-child {
+    padding-left: var(--xflow-space-4);
+  }
+
+  /* First-load skeleton: the surrounding Table still draws the header, so the
+     body holds fixed rows whose heights match the real ones (two-line name in
+     the workflow table, one compact line elsewhere). */
+  .xflow-admin-table .ant-table-tbody > tr > td.xflow-admin-skeleton-cell,
+  .xflow-admin-table .ant-table-tbody > tr > td .xflow-admin-table-skeleton {
+    text-align: left;
+  }
+
+  .xflow-admin-table-skeleton {
+    width: 100%;
+  }
+
+  /* AL-28: refresh indicator. A 2px track that overlaps the table's first
+     2px (negative margin, so rows never move); the moving segment sweeps the
+     track. The keyframes are listed before the reduced-motion block so the
+     block's `animation: none` wins on equal specificity. */
+  @keyframes xflow-admin-progress-sweep {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(250%);
+    }
+  }
+
+  .xflow-admin-table-progress {
+    position: relative;
+    z-index: 2;
+    height: var(--xflow-space-0-5);
+    margin-bottom: calc(var(--xflow-space-0-5) * -1);
+    overflow: hidden;
+    background: var(--xflow-primary-bg-subtle);
+    pointer-events: none;
+  }
+
+  .xflow-admin-table-progress::before {
+    content: '';
+    position: absolute;
+    inset-block: 0;
+    inset-inline-start: 0;
+    width: 40%;
+    background: var(--xflow-primary);
+    animation: xflow-admin-progress-sweep calc(var(--xflow-motion-duration-slow) * 5)
+      var(--xflow-motion-ease-standard) infinite;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .xflow-admin-table-progress::before {
+      width: 100%;
+      background: var(--xflow-primary-border);
+      animation: none;
+    }
+  }
+
+  .xflow-admin-skeleton-row {
+    display: flex;
+    align-items: center;
+    padding: var(--xflow-space-2) var(--xflow-space-4);
+  }
+
+  .xflow-admin-table-skeleton[data-density='two-line'] .xflow-admin-skeleton-row {
+    height: 56px;
+  }
+
+  .xflow-admin-table-skeleton[data-density='compact'] .xflow-admin-skeleton-row {
+    height: 37px;
+  }
+
+  .xflow-admin-skeleton-row .ant-skeleton-input {
+    width: 100%;
+  }
+
+  /* Baseline `.seg`: a 30px track with 26px, 13px/500 items. The execution
+   * filters are the same control as the editor's mode switch. */
+  .xflow-admin .xflow-admin-filter-seg {
+    border-radius: var(--xflow-radius-sm);
+    height: 30px;
+    min-height: 30px;
+    padding: var(--xflow-space-0-5);
+  }
+
+  .xflow-admin .xflow-admin-filter-seg__item {
+    border-radius: var(--xflow-radius-xs);
+    height: 26px;
+  }
+
+  .xflow-admin .xflow-admin-filter-seg__label {
+    display: inline-flex;
+    font-size: var(--xflow-font-md);
+    font-weight: var(--xflow-font-weight-medium);
+    height: 26px;
+    line-height: 26px;
+    padding-inline: var(--xflow-space-3);
+  }
+
+  /* LE-01/02: time-range and workflow dropdowns sit on the same 30px filter
+     row as the status segment. Width lives here so the row does not reflow. */
+  .xflow-admin .xflow-admin-filter-select {
+    width: 136px;
+    height: 30px;
+    font-size: var(--xflow-font-sm);
+  }
+
+  .xflow-admin .xflow-admin-filter-select--workflow {
+    width: 184px;
+  }
+
   .xflow-admin-panel-title {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--xflow-space-2);
     height: 40px;
-    padding: 0 8px 0 12px;
-    border-bottom: 1px solid var(--xflow-border);
+    padding: 0 var(--xflow-space-4);
+    border-bottom: 1px solid var(--xflow-border-subtle);
   }
 
   .xflow-admin-panel-icon {
@@ -229,7 +691,7 @@
   .xflow-admin-panel-heading {
     margin: 0;
     font-size: var(--xflow-font-lg);
-    font-weight: 600;
+    font-weight: var(--xflow-font-weight-semibold);
   }
 
   .xflow-admin-panel-count {
@@ -247,33 +709,159 @@
     color: var(--xflow-text-tertiary);
     font-family: var(--xflow-font-mono);
     font-size: var(--xflow-font-xs);
-    line-height: normal;
+    line-height: var(--xflow-line-height-sm);
+  }
+
+  /* AL-11: the second line carries only the short id. The full id stays in
+     `title`, and the control copies it without opening the row. */
+  .xflow-admin-short-id {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--xflow-space-1);
+    max-width: 100%;
+    padding: 0;
+    border: 0;
+    border-radius: var(--xflow-radius-xs);
+    background: none;
+    color: inherit;
+    font: inherit;
+    line-height: inherit;
+    cursor: pointer;
+  }
+
+  .xflow-admin-short-id:hover {
+    color: var(--xflow-text-secondary);
+  }
+
+  .xflow-admin-short-id:focus-visible {
+    outline: 2px solid var(--xflow-focus-ring);
+    outline-offset: 2px;
+  }
+
+  .xflow-admin-short-id .xflow-icon {
+    height: 11px;
+    width: 11px;
+    flex: none;
   }
 
   .xflow-admin-ops {
     display: inline-flex;
-    gap: 4px;
+    gap: var(--xflow-space-1);
+    flex-wrap: nowrap;
     justify-content: flex-end;
+  }
+
+  /* Ops buttons keep their label: never wrap, never shrink below the copy. */
+  .xflow-admin-ops > * {
+    flex: none;
+  }
+
+  /* Baseline `table.st .btn--sm`: 12px copy, 8px inline padding, 4px radius
+   * (the 24px `xs` step, stage 1c). AntD's small button is 13px with 7px
+   * padding and the same 4px radius. */
+  .xflow-admin .xflow-admin-op,
+  .xflow-admin .xflow-admin-filter-btn,
+  .xflow-admin .xflow-admin-btn-sm {
+    border-radius: var(--xflow-radius-xs);
+    padding: 0 var(--xflow-space-2);
+    font-size: var(--xflow-font-sm);
+    white-space: nowrap;
   }
 
   .xflow-admin-page {
     display: flex;
     align-items: center;
     justify-content: flex-end;
-    gap: 8px;
-    padding: 10px 12px;
+    gap: var(--xflow-space-2);
+    padding: var(--xflow-space-3) var(--xflow-space-4);
     color: var(--xflow-text-tertiary);
     font-size: var(--xflow-font-xs);
   }
 
   .xflow-admin-note {
     margin: 0;
-    color: var(--xflow-text-tertiary);
+    color: var(--xflow-admin-note-fg);
     font-size: var(--xflow-font-sm);
   }
 
   .xflow-admin-banner {
-    padding: 8px 12px;
+    padding: var(--xflow-space-3) var(--xflow-space-4);
+  }
+
+  /* AL-30: inline Alerts are one compact banner. A subtle tinted ground, a 3px
+     bar on the inline-start edge and the AntD icon (state is never colour
+     alone); no outline, no shadow. Title and description share one flowing
+     line (about 36px; wraps instead of growing a second block) so a failure
+     never becomes a large red slab over the table. */
+  .xflow-admin .xflow-admin-alert {
+    --xflow-admin-alert-bar: var(--xflow-info);
+    --xflow-admin-alert-bg: var(--xflow-info-bg-subtle);
+    --xflow-admin-alert-fg: var(--xflow-info-fg);
+    align-items: center;
+    padding: var(--xflow-space-2) var(--xflow-space-3);
+    background: var(--xflow-admin-alert-bg);
+    border: 0;
+    border-inline-start: 3px solid var(--xflow-admin-alert-bar);
+    border-radius: var(--xflow-radius-sm);
+    box-shadow: none;
+  }
+
+  .xflow-admin .xflow-admin-alert--success {
+    --xflow-admin-alert-bar: var(--xflow-success);
+    --xflow-admin-alert-bg: var(--xflow-success-bg-subtle);
+    --xflow-admin-alert-fg: var(--xflow-success-fg);
+  }
+
+  .xflow-admin .xflow-admin-alert--warning {
+    --xflow-admin-alert-bar: var(--xflow-warning);
+    --xflow-admin-alert-bg: var(--xflow-warning-bg-subtle);
+    --xflow-admin-alert-fg: var(--xflow-warning-fg);
+  }
+
+  .xflow-admin .xflow-admin-alert--error {
+    --xflow-admin-alert-bar: var(--xflow-danger);
+    --xflow-admin-alert-bg: var(--xflow-danger-bg-subtle);
+    --xflow-admin-alert-fg: var(--xflow-danger-fg);
+  }
+
+  .xflow-admin .xflow-admin-alert .xflow-admin-alert-icon {
+    align-self: flex-start;
+    margin-block-start: var(--xflow-space-0-5);
+    color: var(--xflow-admin-alert-fg);
+    font-size: var(--xflow-font-lg);
+  }
+
+  .xflow-admin .xflow-admin-alert .xflow-admin-alert-title,
+  .xflow-admin .xflow-admin-alert .xflow-admin-alert-description {
+    display: inline;
+    margin: 0;
+    font-size: var(--xflow-font-md);
+    line-height: var(--xflow-line-height-md);
+  }
+
+  .xflow-admin .xflow-admin-alert .xflow-admin-alert-title {
+    color: var(--xflow-text);
+    font-weight: var(--xflow-font-weight-medium);
+  }
+
+  .xflow-admin .xflow-admin-alert .xflow-admin-alert-description {
+    margin-inline-start: var(--xflow-space-2);
+    color: var(--xflow-text-secondary);
+  }
+
+  /* Opt-in single-line banner (<=48px): title and description stay on one line
+     and a copy too long for the row ends in an ellipsis; the full text stays in
+     the DOM. Alerts that do not set this class wrap and grow with their copy. */
+  .xflow-admin .xflow-admin-alert .xflow-admin-alert-section--clip {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .xflow-admin .xflow-admin-alert .xflow-admin-alert-actions {
+    align-self: center;
+    margin-inline-start: var(--xflow-space-3);
   }
 
   .xflow-admin-faint {
@@ -284,15 +872,20 @@
     font-family: var(--xflow-font-mono);
   }
 
-  /* ---------- Recent runs (ruling 26: three rows, cross-workflow) ---------- */
+  /* Counts and other numeric cells align by digit, not by glyph (AD-19). */
+  .xflow-admin-num {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ---------- Recent runs (AL-07: eight rows, cross-workflow) ---------- */
 
   .xflow-admin-run {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--xflow-space-2);
     min-width: 0;
-    padding: 8px 12px;
-    border-top: 1px solid var(--xflow-border);
+    padding: var(--xflow-space-2) var(--xflow-space-4);
+    border-top: 1px solid var(--xflow-border-subtle);
     font-size: var(--xflow-font-sm);
   }
 
@@ -317,77 +910,110 @@
     color: var(--xflow-text-tertiary);
   }
 
+  /* R2 recent failures: two lines per row — name + relative time, then the
+     error summary truncated to one line. A single-line three-column row left
+     the name too narrow to tell two e2e-* failures apart. */
+  .xflow-admin-run--failed {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      'name time'
+      'error error';
+    row-gap: var(--xflow-space-0-5);
+  }
+
+  .xflow-admin-run--failed .xflow-admin-run-name {
+    grid-area: name;
+    flex: none;
+    color: var(--xflow-text);
+  }
+
+  .xflow-admin-run-time {
+    grid-area: time;
+    flex: none;
+    color: var(--xflow-text-tertiary);
+    font-size: var(--xflow-font-xs);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .xflow-admin-run-error {
+    grid-area: error;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--xflow-text-tertiary);
+  }
+
   .xflow-admin-run-empty {
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: var(--xflow-space-1);
     margin: 0;
-    padding: 10px 12px;
+    padding: var(--xflow-space-3) var(--xflow-space-4);
     color: var(--xflow-text-tertiary);
     font-size: var(--xflow-font-sm);
   }
 
-  /* ---------- Create cards (§6.6) ---------- */
-
-  .xflow-admin-new h4 {
-    margin: 0 0 4px;
-    font-size: var(--xflow-font-md);
-  }
-
-  .xflow-admin-new p {
-    margin: 0 0 10px;
-    color: var(--xflow-text-secondary);
-    font-size: var(--xflow-font-sm);
+  /* No failures in the window is a positive state, not "no data". */
+  .xflow-admin-run-empty[data-tone='good'] {
+    color: var(--xflow-success-fg);
   }
 
   /* ---------- Status pill (§4) and 需新字段 marker (§6.7) ---------- */
 
   .xflow-admin-chip {
     --xflow-admin-chip-bg: var(--xflow-neutral-bg-subtle);
+    /* The raw neutral is 4.17:1 on the chip's own 12% tint; the -fg mix keeps
+       the tint recognisable and the 11px label above AA in light mode. */
     --xflow-admin-chip-fg: var(--xflow-neutral-fg);
     --xflow-admin-chip-border: color-mix(in srgb, var(--xflow-neutral) 55%, transparent);
     display: inline-flex;
     align-items: center;
-    gap: 4px;
+    gap: var(--xflow-space-1);
     height: 20px;
-    padding: 0 8px;
+    padding: 0 var(--xflow-space-2);
     flex: none;
     border: 1px solid var(--xflow-admin-chip-border);
-    border-radius: var(--xflow-radius-pill);
+    border-radius: var(--xflow-radius-full);
     background: var(--xflow-admin-chip-bg);
     color: var(--xflow-admin-chip-fg);
     font-size: var(--xflow-font-xs);
-    font-weight: 500;
+    font-weight: var(--xflow-font-weight-medium);
     white-space: nowrap;
   }
 
   .xflow-admin-chip[data-tone='info'] {
     --xflow-admin-chip-bg: var(--xflow-info-bg-subtle);
-    --xflow-admin-chip-fg: var(--xflow-info-fg);
+    --xflow-admin-chip-fg: var(--xflow-info);
     --xflow-admin-chip-border: color-mix(in srgb, var(--xflow-info) 55%, transparent);
   }
 
   .xflow-admin-chip[data-tone='success'] {
     --xflow-admin-chip-bg: var(--xflow-success-bg-subtle);
+    /* Raw success is 3.97:1 on the tint; the -fg mix clears AA. */
     --xflow-admin-chip-fg: var(--xflow-success-fg);
     --xflow-admin-chip-border: color-mix(in srgb, var(--xflow-success) 55%, transparent);
   }
 
   .xflow-admin-chip[data-tone='warning'] {
     --xflow-admin-chip-bg: var(--xflow-warning-bg-subtle);
+    /* Raw warning is 3.62:1 on the tint (the editor's 未保存 chip); -fg clears AA. */
     --xflow-admin-chip-fg: var(--xflow-warning-fg);
     --xflow-admin-chip-border: color-mix(in srgb, var(--xflow-warning) 55%, transparent);
   }
 
   .xflow-admin-chip[data-tone='danger'] {
     --xflow-admin-chip-bg: var(--xflow-danger-bg-subtle);
+    /* Raw danger is 4.15:1 on the tinted 失败 chip; the -fg mix clears AA. */
     --xflow-admin-chip-fg: var(--xflow-danger-fg);
     --xflow-admin-chip-border: color-mix(in srgb, var(--xflow-danger) 55%, transparent);
   }
 
   .xflow-admin-chip[data-tone='suspend'] {
     --xflow-admin-chip-bg: var(--xflow-suspend-bg-subtle);
-    --xflow-admin-chip-fg: var(--xflow-suspend-fg);
+    --xflow-admin-chip-fg: var(--xflow-suspend);
     --xflow-admin-chip-border: color-mix(in srgb, var(--xflow-suspend) 55%, transparent);
   }
 
@@ -409,13 +1035,13 @@
     display: inline-flex;
     align-items: center;
     height: 16px;
-    padding: 0 5px;
+    padding: 0 calc(var(--xflow-space-1-5) - 1px);
     border: 1px dashed color-mix(in srgb, var(--xflow-orange) 65%, transparent);
     border-radius: var(--xflow-radius-xs);
     background: color-mix(in srgb, var(--xflow-panel) 82%, transparent);
     color: var(--xflow-orange);
     font-size: var(--xflow-font-xs);
-    font-weight: 500;
+    font-weight: var(--xflow-font-weight-medium);
     line-height: 14px;
     white-space: nowrap;
     z-index: 5;
@@ -423,10 +1049,11 @@
 
   /* ---------- Execution list (§6.6 / §6.9) ---------- */
 
-  /* First line of a failure only; the full text stays in the tooltip. */
+  /* First line of a failure only; the full text stays in the tooltip. The cap
+   * is also bounded by the cell so the text never bleeds into the ops column. */
   .xflow-admin-err {
     display: inline-block;
-    max-width: 260px;
+    max-width: min(260px, 100%);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -439,9 +1066,19 @@
     background: var(--xflow-primary-bg-subtle);
   }
 
+  /* §6.6b: the whole row opens the execution in run-record mode. */
+  .xflow-admin-row-clickable {
+    cursor: pointer;
+  }
+
+  .xflow-admin-row-clickable:focus-visible {
+    outline: 2px solid var(--xflow-focus-ring);
+    outline-offset: -2px;
+  }
+
   .xflow-admin-field-label {
     font-size: var(--xflow-font-sm);
-    font-weight: 500;
+    font-weight: var(--xflow-font-weight-medium);
     color: var(--xflow-text-secondary);
   }
 
@@ -468,19 +1105,252 @@
     white-space: nowrap;
   }
 
-  /* Slot the executions page portals its filter row into (baseline top bar). */
-  .xflow-admin-top-slot {
-    display: flex;
-    flex: 1 1 auto;
-    align-items: center;
-    min-width: 0;
-  }
-
   /* Modal portals into .xflow-admin for the tokens; fixed keeps it out of the
      shell's grid flow while the native mask/wrap stay viewport-fixed. */
   .xflow-admin-modal-root {
     position: fixed;
     inset: 0;
     z-index: 1000;
+  }
+
+  /* ---------- Command palette (AL-06) ---------- */
+
+  .xflow-admin-palette-input {
+    height: 48px;
+    padding-inline: var(--xflow-space-4);
+    border-bottom: 1px solid var(--xflow-border-subtle);
+    font-size: var(--xflow-font-lg);
+  }
+
+  .xflow-admin-palette-input .xflow-icon {
+    height: 16px;
+    width: 16px;
+    color: var(--xflow-text-tertiary);
+  }
+
+  .xflow-admin-palette-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--xflow-space-1);
+    max-height: 360px;
+    padding: var(--xflow-space-2);
+    overflow: auto;
+  }
+
+  .xflow-admin-palette-item {
+    display: flex;
+    align-items: center;
+    gap: var(--xflow-space-2);
+    width: 100%;
+    height: 40px;
+    min-width: 0;
+    padding: 0 var(--xflow-space-2);
+    border: 0;
+    border-radius: var(--xflow-radius-sm);
+    background: transparent;
+    color: var(--xflow-text-secondary);
+    font-family: inherit;
+    font-size: var(--xflow-font-md);
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .xflow-admin-palette-item[data-active] {
+    background: var(--xflow-hover);
+    color: var(--xflow-text);
+  }
+
+  .xflow-admin-palette-item:focus-visible {
+    outline: 2px solid var(--xflow-focus-ring);
+    outline-offset: -2px;
+  }
+
+  .xflow-admin-palette-icon {
+    display: inline-flex;
+    flex: none;
+    color: var(--xflow-text-tertiary);
+    font-size: var(--xflow-font-lg);
+  }
+
+  .xflow-admin-palette-label {
+    min-width: 0;
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .xflow-admin-palette-hint {
+    flex: none;
+    color: var(--xflow-text-tertiary);
+    font-family: var(--xflow-font-mono);
+    font-size: var(--xflow-font-xs);
+  }
+
+  .xflow-admin-palette-empty {
+    margin: 0;
+    padding: var(--xflow-space-3) var(--xflow-space-2);
+    color: var(--xflow-text-tertiary);
+    font-size: var(--xflow-font-sm);
+  }
+
+  .xflow-admin-palette-foot {
+    display: flex;
+    align-items: center;
+    gap: var(--xflow-space-3);
+    padding: var(--xflow-space-2) var(--xflow-space-4);
+    border-top: 1px solid var(--xflow-border-subtle);
+    color: var(--xflow-text-tertiary);
+    font-size: var(--xflow-font-xs);
+  }
+
+  .xflow-admin-palette-foot span {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--xflow-space-1);
+  }
+
+  /* ---------- Workflow list summaries (§6.6) ---------- */
+
+  /* Long names and ids stay on one line inside the fixed table layout; the
+     full value is in the cell's title attribute. */
+  .xflow-admin .xflow-admin-name strong,
+  .xflow-admin .xflow-admin-name small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* AL-21: three weights only; the row name is 500, not the UA's 700. */
+  .xflow-admin .xflow-admin-name strong {
+    font-weight: var(--xflow-font-weight-medium);
+  }
+
+  /* Several trigger kinds wrap inside the fixed-width column instead of
+     widening it. */
+  .xflow-admin .xflow-admin-triggers {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--xflow-space-1);
+  }
+
+  /* The latest-run cell is one button (status pill + start time) that opens
+     the run record. Reset the UA button chrome so the pill keeps its chip look
+     and the cell reads like the rest of the table. */
+  .xflow-admin .xflow-admin-lastrun {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--xflow-space-2);
+    max-width: 100%;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    border-radius: var(--xflow-radius-xs);
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .xflow-admin .xflow-admin-lastrun:focus-visible {
+    outline: 2px solid var(--xflow-focus-ring);
+    outline-offset: 2px;
+  }
+
+  /* ---------- Import dialog (AD-15) ---------- */
+
+  /* Upload.Dragger's icon slot is designed for a 48px antd glyph; the shared
+     @xflow/icons box is 1em, so state the size here instead of at 1em. */
+  .xflow-admin .ant-upload-drag-icon .xflow-icon {
+    height: 32px;
+    width: 32px;
+  }
+
+  /* ---------- Node library / runner pages (LS-01, LS-02) ---------- */
+
+  /* ---------- Page header and table toolbar (提案 C) ---------- */
+
+  /* Every page's h1 shares this size and position (AL-05). */
+  .xflow-admin-page-title {
+    margin: 0;
+    font-size: var(--xflow-admin-page-title-size);
+    font-weight: var(--xflow-font-weight-semibold);
+    line-height: var(--xflow-admin-page-title-line);
+  }
+
+  .xflow-admin-page-desc {
+    margin: var(--xflow-space-1) 0 0;
+    color: var(--xflow-text-secondary);
+    font-size: var(--xflow-font-md);
+    line-height: var(--xflow-line-height-md);
+  }
+
+  /* Filter/search row under a panel title: wraps on narrow widths instead of
+     widening the card, and shares the table's 16px left edge (AL-23). */
+  .xflow-admin-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--xflow-space-2);
+    min-width: 0;
+    min-height: 48px;
+    padding: var(--xflow-space-2) var(--xflow-space-4);
+    border-bottom: 1px solid var(--xflow-border-subtle);
+  }
+
+  /* One-line description cell; the full text stays in the cell's title. */
+  .xflow-admin-node-desc {
+    display: block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--xflow-text-secondary);
+  }
+
+  /* ---------- Runner control writes (LS-02 drain/resume/revoke) ---------- */
+
+  /* Row actions wrap inside the cell instead of widening the card; the table
+     keeps its own horizontal scroll boundary, so narrow viewports never
+     overflow the page. */
+  .xflow-admin .xflow-admin-runner-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: var(--xflow-space-1);
+    min-width: 0;
+  }
+
+  /* Real runner ids are long; keep the dialog metadata on one line without
+     letting it push the modal open. */
+  .xflow-admin .xflow-admin-runner-dialog-id {
+    overflow-wrap: anywhere;
+  }
+
+  /* Byte counter and its hint share the line under the reason textarea. */
+  .xflow-admin .xflow-admin-reason-meta {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--xflow-space-2);
+    min-width: 0;
+  }
+
+  .xflow-admin .xflow-admin-reason-counter {
+    flex: none;
+    color: var(--xflow-text-tertiary);
+    font-family: var(--xflow-font-mono);
+    font-size: var(--xflow-font-xs);
+  }
+
+  .xflow-admin .xflow-admin-reason-counter[data-over-limit='true'] {
+    color: var(--xflow-danger);
+  }
+
+  .xflow-admin .xflow-admin-reason-error {
+    margin: 0;
+    color: var(--xflow-danger);
+    font-size: var(--xflow-font-sm);
   }
 }

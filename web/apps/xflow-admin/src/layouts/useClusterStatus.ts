@@ -22,12 +22,46 @@ export type ClusterStatus =
       leader?: boolean;
     };
 
-export function useClusterStatus(): ClusterStatus {
-  const [status, setStatus] = useState<ClusterStatus>({ state: 'loading' });
+/**
+ * The scopes each management read needs. The shell and the workflow overview
+ * only ask when the session actually holds one, so a console without the
+ * management module never fires a request the server is bound to reject — a
+ * permission failure is silent in the UI but still paints an error in the
+ * browser console.
+ */
+export const MANAGEMENT_READ_SCOPES = {
+  runners: 'management.runner.list',
+  pools: 'management.runner_pool.read',
+  leader: 'management.leader.read',
+} as const;
+
+export interface ClusterReadAccess {
+  runners: boolean;
+  leader: boolean;
+}
+
+/** Least-privilege default: nothing is read until the caller grants a scope. */
+const NO_ACCESS: ClusterReadAccess = { runners: false, leader: false };
+
+export function useClusterStatus(access: ClusterReadAccess = NO_ACCESS): ClusterStatus {
+  const { runners: canReadRunners, leader: canReadLeader } = access;
+  const [status, setStatus] = useState<ClusterStatus>(
+    canReadRunners || canReadLeader ? { state: 'loading' } : { state: 'hidden' },
+  );
 
   useEffect(() => {
+    if (!canReadRunners && !canReadLeader) {
+      setStatus({ state: 'hidden' });
+      return undefined;
+    }
     let cancelled = false;
-    Promise.allSettled([fetchRunners(), fetchLeader()]).then(([runners, leader]) => {
+    // A scope the caller lacks is a settled failure, not a request: it drops
+    // only its own row, exactly like a 403 from the server would.
+    const denied = (scope: string) => Object.assign(new Error(`missing ${scope}`), { status: 403 });
+    Promise.allSettled([
+      canReadRunners ? fetchRunners() : Promise.reject(denied(MANAGEMENT_READ_SCOPES.runners)),
+      canReadLeader ? fetchLeader() : Promise.reject(denied(MANAGEMENT_READ_SCOPES.leader)),
+    ]).then(([runners, leader]) => {
       if (cancelled) return;
       const fleet =
         runners.status === 'fulfilled'
@@ -46,7 +80,7 @@ export function useClusterStatus(): ClusterStatus {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [canReadRunners, canReadLeader]);
 
   return status;
 }

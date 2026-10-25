@@ -1,4 +1,4 @@
-import { foundationTokens, paletteTokens, type Appearance } from '@xflow/core';
+import { buildAntdTheme, paletteTokens, type AntdThemeOptions, type Appearance } from '@xflow/core';
 import { theme, type ThemeConfig } from 'antd';
 import { useEffect, useState } from 'react';
 
@@ -41,55 +41,76 @@ export function useSystemAppearance(): Appearance {
   return appearance;
 }
 
+const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
+
+function systemReducedMotion(): boolean {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+    return false;
+  }
+  return window.matchMedia(REDUCED_MOTION_QUERY).matches;
+}
+
 /**
- * Admin AntD theme. Colour and type values come from `@xflow/core` — the same
- * record that generates `tokens.css` for the `.xflow-admin` root — so AntD and
- * the `--xflow-*` custom properties cannot drift apart. Only the AntD-specific
- * mapping lives here; component tokens match the design baseline.
+ * Track the OS "reduce motion" switch. tokens.css zeroes the duration tokens
+ * on the same signal; this hook flips AntD's own `token.motion` off so its
+ * collapsed transitions match the CSS side.
  */
-export function adminThemeConfig(appearance: Appearance): ThemeConfig {
+export function useReducedMotion(): boolean {
+  const [reduced, setReduced] = useState(systemReducedMotion);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+      return undefined;
+    }
+
+    const mediaQuery = window.matchMedia(REDUCED_MOTION_QUERY);
+    const sync = () => setReduced(mediaQuery.matches);
+    sync();
+
+    if (typeof mediaQuery.addEventListener === 'function') {
+      mediaQuery.addEventListener('change', sync);
+      return () => mediaQuery.removeEventListener('change', sync);
+    }
+
+    mediaQuery.addListener?.(sync);
+    return () => mediaQuery.removeListener?.(sync);
+  }, []);
+
+  return reduced;
+}
+
+/**
+ * AL-30: semantic class hooks for the compact inline banner (admin.css). The
+ * tone class carries the colour variables; AntD still draws the icon, so the
+ * state is never colour alone. Passed to `ConfigProvider alert.classNames`, so
+ * every Alert below the admin shell takes it without repeating the classes.
+ */
+export const adminAlertClassNames = ({ props }: { props: { type?: string } }) => ({
+  root: `xflow-admin-alert xflow-admin-alert--${props.type ?? 'info'}`,
+  icon: 'xflow-admin-alert-icon',
+  title: 'xflow-admin-alert-title',
+  description: 'xflow-admin-alert-description',
+  actions: 'xflow-admin-alert-actions',
+});
+
+/**
+ * Admin AntD theme. Colour, focus, radius, type, elevation and motion come from
+ * `@xflow/core`'s `buildAntdTheme` — the same mapping the editor uses — so the
+ * console and the editor cannot drift. Only the admin's own component tokens
+ * (the vertical Form, its Segmented density) live here.
+ */
+export function adminThemeConfig(appearance: Appearance, options: AntdThemeOptions = {}): ThemeConfig {
   const palette = paletteTokens[appearance];
+  const shared = buildAntdTheme(appearance, options);
+
   return {
     algorithm: appearance === 'dark' ? theme.darkAlgorithm : theme.defaultAlgorithm,
     cssVar: { prefix: 'xflow-ant', key: `xflow-admin-${appearance}` },
-    token: {
-      fontFamily: foundationTokens.fontSans,
-      fontFamilyCode: foundationTokens.fontMono,
-      fontSize: 13,
-      fontSizeSM: 12,
-      borderRadius: 6,
-      borderRadiusSM: 4,
-      borderRadiusLG: 8,
-      controlHeight: 32,
-      controlHeightSM: 24,
-      colorPrimary: palette.primary,
-      colorInfo: palette.info,
-      colorSuccess: palette.success,
-      colorWarning: palette.warning,
-      colorError: palette.danger,
-      colorText: palette.text,
-      colorTextSecondary: palette.textSecondary,
-      colorTextTertiary: palette.textTertiary,
-      colorTextDescription: palette.textTertiary,
-      colorTextPlaceholder: palette.textTertiary,
-      colorBgLayout: palette.app,
-      colorBgContainer: palette.field,
-      colorBgElevated: palette.panel,
-      colorBorder: palette.border,
-      colorBorderSecondary: palette.border,
-      colorSplit: palette.border,
-      colorFillTertiary: palette.hover,
-      controlItemBgHover: palette.hover,
-      boxShadowSecondary: palette.elev2,
-    },
+    token: shared.token,
     components: {
-      Button: { defaultBg: palette.panel, defaultShadow: 'none', primaryShadow: 'none', dangerShadow: 'none' },
-      Modal: { borderRadiusLG: 12, contentBg: palette.panel, headerBg: palette.panel, footerBg: palette.panel },
+      ...shared.components,
       Form: { itemMarginBottom: 12, verticalLabelPadding: '0 0 4px', labelFontSize: 12, labelColor: palette.textSecondary },
-      Tabs: { horizontalItemGutter: 16, horizontalMargin: '0', itemColor: palette.textSecondary },
       Segmented: { itemSelectedBg: palette.panel, trackBg: palette.hover },
-      Table: { headerBg: palette.panelRaised, headerColor: palette.textSecondary, rowHoverBg: palette.hover, cellPaddingBlock: 10 },
-      Popover: { colorBgElevated: palette.panel },
     },
   };
 }
