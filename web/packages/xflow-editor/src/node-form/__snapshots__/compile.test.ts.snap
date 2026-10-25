@@ -1395,15 +1395,6 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.map sna
         "type": "Switch",
       },
       "f.parameters.expression": {
-        "checks": [
-          {
-            "args": {
-              "format": "expression",
-            },
-            "message": "需要表达式，例如 \${{ $input.x }}",
-            "type": "format",
-          },
-        ],
         "props": {
           "description": "Expression evaluated once per item over $item/$index/$items; mutually exclusive with body, and exactly one of the two is required",
           "expect": {
@@ -1423,13 +1414,6 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.map sna
           {
             "message": "必填",
             "type": "required",
-          },
-          {
-            "args": {
-              "format": "expression",
-            },
-            "message": "需要表达式，例如 \${{ $input.x }}",
-            "type": "format",
           },
         ],
         "props": {
@@ -1916,13 +1900,6 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.switch 
               "eq": "expression",
             },
           },
-          {
-            "args": {
-              "format": "expression",
-            },
-            "message": "需要表达式，例如 \${{ $input.x }}",
-            "type": "format",
-          },
         ],
         "props": {
           "description": "Expression for expression mode",
@@ -2087,15 +2064,6 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.switch 
         "type": "ArrayTable",
       },
       "f.parameters.rules[].condition": {
-        "checks": [
-          {
-            "args": {
-              "format": "expression",
-            },
-            "message": "需要表达式，例如 \${{ $input.x }}",
-            "type": "format",
-          },
-        ],
         "props": {
           "description": "Boolean expression; a rule with an empty condition is skipped",
           "expect": {
@@ -2184,13 +2152,6 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.transfo
           {
             "message": "必填",
             "type": "required",
-          },
-          {
-            "args": {
-              "format": "expression",
-            },
-            "message": "需要表达式，例如 \${{ $input.x }}",
-            "type": "format",
           },
         ],
         "props": {

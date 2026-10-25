@@ -11,7 +11,7 @@
 // - Doc C §3.2 shape guard: a value that is neither an expression string
 //   nor of the `expect` shape is shown read-only with "请在 JSON 页签修改".
 
-import { FunctionOutlined } from "@ant-design/icons";
+import { VarIcon } from "@xflow/icons";
 import { Button, Input as AntInput } from "antd";
 import { useState } from "react";
 import { z } from "zod";
@@ -29,6 +29,8 @@ export interface ExpressionInputProps extends ChromeProps {
 }
 
 const DEFAULT_PLACEHOLDER = "${{ $input.value }}";
+// Pure params take a bare expr-lang expression, not a `${{ }}` template.
+const PURE_PLACEHOLDER = "$input.value";
 
 function ExpressionField({ node, props, value, onChange, defaultHint, issues, readOnly, slots }: ComposerComponentProps<ExpressionInputProps>) {
   const literal = slots[EXPRESSION_LITERAL_SLOT];
@@ -58,7 +60,7 @@ function ExpressionField({ node, props, value, onChange, defaultHint, issues, re
       size="small"
       type={fx ? "primary" : "default"}
       className={cx(`${NODEFORM}-fx`, fx && "is-active")}
-      icon={<FunctionOutlined aria-hidden />}
+      icon={<VarIcon aria-hidden />}
       aria-pressed={fx}
       aria-label={fx ? `${props.label ?? "字段"}：切换为普通值` : `${props.label ?? "字段"}：切换为表达式`}
       title={fx ? "切换为普通值" : "切换为表达式"}
@@ -87,7 +89,11 @@ function ExpressionField({ node, props, value, onChange, defaultHint, issues, re
             id={ids.controlId}
             rootClassName={`${NODEFORM}-expression-editor`}
             value={typeof value === "string" ? value : ""}
-            placeholder={unset && defaultHint !== undefined ? hintText(defaultHint) : (props.placeholder ?? DEFAULT_PLACEHOLDER)}
+            placeholder={
+              unset && defaultHint !== undefined
+                ? hintText(defaultHint)
+                : (props.placeholder ?? (props.mode === "pure" ? PURE_PLACEHOLDER : DEFAULT_PLACEHOLDER))
+            }
             readOnly={readOnly}
             disabled={disabled}
             status={ids.status}

@@ -408,6 +408,42 @@ for (const kernel of kernels) {
       });
     });
 
+    describe("ExpressionInput placeholder", () => {
+      it("teaches a bare expression for pure params and a template otherwise", async () => {
+        const pure = mountComposer({
+          kernel,
+          registry,
+          spec: formSpec({ f: { type: "ExpressionInput", props: { label: "Condition", mode: "pure", value: { $bindState: "/v" } } } }),
+          value: {}
+        });
+        await pure.flush();
+        expect(textarea(fieldOf(pure.container, "f")).getAttribute("placeholder")).toBe("$input.value");
+        pure.unmount();
+
+        const template = mountComposer({
+          kernel,
+          registry,
+          spec: formSpec(
+            {
+              f: {
+                type: "ExpressionInput",
+                props: { label: "Value", mode: "template", fxToggle: true, value: { $bindState: "/v" }, expect: { type: "string" } },
+                slots: { literal: ["lit"] }
+              },
+              lit: { type: "Input", props: { label: "Value", value: { $bindState: "/v" } } }
+            },
+            ["f"]
+          ),
+          value: {}
+        });
+        await template.flush();
+        const field = fieldOf(template.container, "f");
+        clickButton(field, /切换为表达式$/);
+        await template.flush();
+        expect(textarea(field).getAttribute("placeholder")).toBe("${{ $input.value }}");
+      });
+    });
+
     describe("DurationInput display unit", () => {
       it("switching the unit re-expresses the value without writing; typing then uses the unit", async () => {
         const m = mountComposer({

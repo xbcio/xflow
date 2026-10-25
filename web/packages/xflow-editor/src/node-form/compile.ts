@@ -122,7 +122,6 @@ const MSG = {
 const FORMAT_MESSAGES: Readonly<Record<string, string>> = {
   duration: "需要 Go duration，例如 30s、5m",
   cron: "需要合法的 cron 表达式",
-  expression: "需要表达式，例如 ${{ $input.x }}",
   "sha256-digest": "需要 sha256:<64 位十六进制>",
   url: "需要完整的 URL",
   "host-port": "需要 host:port",
@@ -497,6 +496,12 @@ class Compiler {
         required = true;
         continue;
       }
+      // The backend's `expression` format means "the raw text compiles as an
+      // expr-lang expression" (engine/graph/param_validate.go); the composer
+      // has no expr compiler, and its FORMATS.expression tests the opposite
+      // `${{ }}` template form, which these params reject at run time. Emit no
+      // check rather than a wrong one.
+      if (rule.type === "format" && rule.format === "expression") continue;
       const compiled = compileRule(rule, type, warn);
       if (!compiled) continue;
       if (mode !== "template") {

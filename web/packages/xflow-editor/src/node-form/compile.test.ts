@@ -356,6 +356,19 @@ describe("expression modes (Doc C §4.1)", () => {
     expect(timeout.checks).toEqual([{ type: "format", args: { format: "duration", allowExpression: true }, message: expect.any(String) }]);
   });
 
+  it("pure: format expression compiles no check, so a bare expression is not reported", () => {
+    const { spec } = compile(mapSchema);
+    const items = outer(spec, "/parameters/items");
+    expect(items.props?.mode).toBe("pure");
+    // The backend format means "expr-lang compiles this", which the frontend
+    // cannot test; composer's FORMATS.expression is a different (template) notion.
+    expect(items.checks?.some((check) => check.type === "format" && check.args?.format === "expression")).toBe(false);
+    expect(issuesAt(spec, { parameters: { items: "$input.items" } }, "/parameters/items")).toEqual([]);
+    // Other formats keep their checks (non-pure behaviour is untouched).
+    const timeout = outer(compile(waitSchema).spec, "/parameters/timeout");
+    expect(timeout.checks).toEqual([{ type: "format", args: { format: "duration", allowExpression: true }, message: expect.any(String) }]);
+  });
+
   it("pure: evaluable params and sub-fields are ExpressionInput without toggle", () => {
     const map = compile(mapSchema).spec;
     expect(outer(map, "/parameters/items")).toMatchObject({ type: "ExpressionInput", props: { mode: "pure", fxToggle: false } });
