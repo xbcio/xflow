@@ -3,6 +3,7 @@ package local
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,6 +34,43 @@ func (deadlineParkHandler) OnResume(context.Context, *types.Input, *types.Signal
 	return &types.Output{}, nil
 }
 
+// expireProbeState records which executions the engine reads. The engine
+// re-checks the deadline itself and refuses a not-due execution without
+// changing it, so a sweeper that listed one too early is invisible in the
+// execution's status; the only trace it leaves is that the engine was asked.
+// Embedding the concrete store keeps every optional capability the engine
+// looks for (the deadline acknowledgement included).
+type expireProbeState struct {
+	*memoryState
+	mu    sync.Mutex
+	reads map[types.ExecutionID]int
+}
+
+func (s *expireProbeState) noteRead(id types.ExecutionID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.reads == nil {
+		s.reads = make(map[types.ExecutionID]int)
+	}
+	s.reads[id]++
+}
+
+func (s *expireProbeState) readCount(id types.ExecutionID) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reads[id]
+}
+
+func (s *expireProbeState) GetExecution(ctx context.Context, id types.ExecutionID) (*engine.ExecutionSnapshot, error) {
+	s.noteRead(id)
+	return s.memoryState.GetExecution(ctx, id)
+}
+
+func (s *expireProbeState) GetExecutionStatus(ctx context.Context, id types.ExecutionID) (types.ExecutionStatus, bool, error) {
+	s.noteRead(id)
+	return s.memoryState.GetExecutionStatus(ctx, id)
+}
+
 // waitForDeadlineIndexEmpty polls until the store holds no deadline entry. The
 // entry is acknowledged only after the cascade finished, so an empty index is
 // what "ExpireExecution completed" looks like from the outside.
@@ -60,14 +98,17 @@ func waitForDeadlineIndexEmpty(t *testing.T, state *memoryState, within time.Dur
 func TestBackendSweepsExecutionDeadlines(t *testing.T) {
 	ctx := context.Background()
 	b := New()
-	eng := engine.New(b.State(), b.Queue())
+	probe := &expireProbeState{memoryState: b.state}
+	eng := engine.New(probe, b.Queue())
 	g := nodeStateGraph(t)
 
 	overdue := types.ExecutionID("exec-overdue")
 	notDue := types.ExecutionID("exec-not-due")
 	for id, deadline := range map[types.ExecutionID]time.Time{
 		overdue: time.Now().UTC().Add(-time.Second),
-		notDue:  time.Now().UTC().Add(time.Hour),
+		// Inside the hour a sweep that lists ahead of the clock would reach,
+		// and far enough from now that no real tick finds it due.
+		notDue: time.Now().UTC().Add(30 * time.Minute),
 	} {
 		if err := b.state.CreateExecution(ctx, &engine.ExecutionSnapshot{
 			ID: id, Graph: g, Status: types.ExecutionStatusRunning, Deadline: deadline,
@@ -122,7 +163,7 @@ func TestBackendSweepsExecutionDeadlines(t *testing.T) {
 	}
 
 	// Several ticks have passed since the overdue one was handled; the one with
-	// an hour left must have been skipped by every one of them.
+	// time left must have been skipped by every one of them.
 	time.Sleep(30 * time.Millisecond)
 	snap, err = b.state.GetExecution(ctx, notDue)
 	if err != nil || snap == nil {
@@ -130,6 +171,15 @@ func TestBackendSweepsExecutionDeadlines(t *testing.T) {
 	}
 	if snap.Status != types.ExecutionStatusRunning {
 		t.Fatalf("not-yet-due execution status = %q, want it untouched (running)", snap.Status)
+	}
+	// The engine would refuse it as not due anyway, so a status check cannot
+	// tell a sweeper that listed it from one that did not. Whether the engine
+	// was ever asked about it can.
+	if reads := probe.readCount(notDue); reads != 0 {
+		t.Fatalf("the sweeper handed the not-yet-due execution to the engine (%d reads), want it never listed", reads)
+	}
+	if probe.readCount(overdue) == 0 {
+		t.Fatal("the probe saw no engine read of the overdue execution, so it is not observing the sweeper")
 	}
 	requireDeadlineIDs(t, listedDeadlines(t, b.state, time.Now().UTC().Add(2*time.Hour), 8), notDue)
 
@@ -204,4 +254,82 @@ func TestBackendExpiresASuspendedExecutionAtItsDeadline(t *testing.T) {
 
 	stop()
 	stopped = true
+}
+
+// blockingCompleteHooks parks the OnExecutionComplete hook on a channel the test
+// controls. ExpireExecution announces the timeout through that hook before it
+// cascades, so a sweeper stuck in it is a sweeper in the middle of an expiry.
+type blockingCompleteHooks struct {
+	engine.BaseHooks
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (h *blockingCompleteHooks) OnExecutionComplete(context.Context, types.ExecutionID, types.ExecutionStatus) {
+	h.once.Do(func() { close(h.entered) })
+	<-h.release
+}
+
+// TestBackendStopWaitsForTheDeadlineSweeper pins that the stop function does
+// not return while the deadline sweeper is still expiring an execution. The
+// sweeper writes to the store and cascades through the engine; a stop that
+// returned early would let the caller tear the backend down underneath it.
+func TestBackendStopWaitsForTheDeadlineSweeper(t *testing.T) {
+	reg := execution.NewRegistry()
+	reg.RegisterGlobal("test.deadline_park", deadlineParkHandler{})
+	b := New(WithConcurrency(1), WithRegistry(reg))
+	hooks := &blockingCompleteHooks{entered: make(chan struct{}), release: make(chan struct{})}
+	eng := engine.New(b.State(), b.Queue(), engine.WithHooks(hooks))
+	dispatcher := execution.NewEmbeddedDispatcher(eng, b.registry)
+	bound := b.bindHandlerWithOutbox(eng, dispatcher.HandleTask, 5*time.Millisecond)
+
+	// The hook is released and the backend stopped on every exit, and only once:
+	// stopping twice closes the queue's channel twice.
+	var releaseOnce, stopOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(hooks.release) }) }
+	stop := func() { stopOnce.Do(bound) }
+	t.Cleanup(func() {
+		release()
+		stop()
+	})
+
+	g, err := graph.Compile(&types.WorkflowDef{
+		Name:     "deadline-stop",
+		Version:  "v1",
+		Settings: &types.WorkflowSettings{Timezone: "UTC", Timeout: 50 * time.Millisecond},
+		Nodes:    []types.NodeDef{{Name: "park", Type: "test.deadline_park"}},
+	})
+	if err != nil {
+		t.Fatalf("Compile() error = %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := eng.Submit(ctx, g, nil); err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+
+	select {
+	case <-hooks.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the deadline sweeper never reached the OnExecutionComplete hook")
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		stop()
+	}()
+	select {
+	case <-stopped:
+		t.Fatal("the stop function returned while the deadline sweeper was still inside ExpireExecution")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	release()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stop function did not return after the sweeper was released")
+	}
 }

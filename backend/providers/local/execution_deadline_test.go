@@ -339,3 +339,148 @@ func TestMemoryDeadlineExpiresAQueuedExecution(t *testing.T) {
 	}
 	requireDeadlineIDs(t, listedDeadlines(t, state, deadlineBase, 8))
 }
+
+// TestMemoryDeadlineRejectedStatusWritesKeepTheIndex pins what a write the
+// store refuses does to the deadline index: nothing. The store refuses by
+// returning nil without applying anything, so the index must be read as it was
+// before the call. A timeout execution awaiting its acknowledgement and a
+// canceling one both stay listed however many late writes bounce off them; an
+// execution that already concluded was withdrawn when it concluded, and a late
+// write must neither bring it back nor trip over the missing entry.
+//
+// Two writers are covered. The status write is refused by its CAS guard. The
+// finish the commit paths run under their own lock is refused by its terminal
+// guard, which has no canceling arm (finishing a canceling execution is
+// accepted), so the canceling rows apply to the status write only.
+func TestMemoryDeadlineRejectedStatusWritesKeepTheIndex(t *testing.T) {
+	ctx := context.Background()
+	const lateReason = "late write"
+	rows := []struct {
+		from      types.ExecutionStatus
+		write     types.ExecutionStatus
+		listed    bool
+		viaFinish bool
+	}{
+		{types.ExecutionStatusTimeout, types.ExecutionStatusSuccess, true, true},
+		{types.ExecutionStatusTimeout, types.ExecutionStatusFailed, true, true},
+		{types.ExecutionStatusTimeout, types.ExecutionStatusCanceled, true, true},
+		{types.ExecutionStatusCanceling, types.ExecutionStatusSuccess, true, false},
+		{types.ExecutionStatusCanceling, types.ExecutionStatusFailed, true, false},
+		{types.ExecutionStatusCanceling, types.ExecutionStatusTimeout, true, false},
+		{types.ExecutionStatusSuccess, types.ExecutionStatusFailed, false, true},
+		{types.ExecutionStatusSuccess, types.ExecutionStatusTimeout, false, true},
+		{types.ExecutionStatusFailed, types.ExecutionStatusSuccess, false, true},
+		{types.ExecutionStatusCanceled, types.ExecutionStatusTimeout, false, true},
+	}
+	writers := []struct {
+		name  string
+		write func(state *memoryState, id types.ExecutionID, status types.ExecutionStatus) error
+	}{
+		{"status write", func(state *memoryState, id types.ExecutionID, status types.ExecutionStatus) error {
+			return state.UpdateExecutionStatus(ctx, id, status, lateReason)
+		}},
+		{"finish", func(state *memoryState, id types.ExecutionID, status types.ExecutionStatus) error {
+			state.mu.Lock()
+			defer state.mu.Unlock()
+			state.finishExecutionLocked(id, state.executions[id], status, lateReason)
+			return nil
+		}},
+	}
+	for _, row := range rows {
+		for _, writer := range writers {
+			if writer.name == "finish" && !row.viaFinish {
+				continue
+			}
+			t.Run(string(row.from)+"/"+writer.name+"/"+string(row.write), func(t *testing.T) {
+				state := newMemoryState()
+				newDeadlineExecution(t, state, "exec-rejected", deadlineBase)
+				reason := ""
+				if row.from == types.ExecutionStatusTimeout {
+					reason = engine.ExecutionDeadlineExceededError
+				}
+				if err := state.UpdateExecutionStatus(ctx, "exec-rejected", row.from, reason); err != nil {
+					t.Fatalf("UpdateExecutionStatus(%s) error = %v", row.from, err)
+				}
+				wantListed := []types.ExecutionID{}
+				if row.listed {
+					wantListed = append(wantListed, "exec-rejected")
+				}
+				// The precondition: the row starts from the index it claims to.
+				requireDeadlineIDs(t, listedDeadlines(t, state, deadlineBase, 8), wantListed...)
+
+				if err := writer.write(state, "exec-rejected", row.write); err != nil {
+					t.Fatalf("refused %s write error = %v, want it ignored without an error", row.write, err)
+				}
+				snap, err := state.GetExecution(ctx, "exec-rejected")
+				if err != nil || snap == nil {
+					t.Fatalf("GetExecution() = %+v, %v", snap, err)
+				}
+				if snap.Status != row.from || snap.Error != reason {
+					t.Fatalf("after the refused write: status %q error %q, want %q / %q (nothing applied)",
+						snap.Status, snap.Error, row.from, reason)
+				}
+				requireDeadlineIDs(t, listedDeadlines(t, state, deadlineBase, 8), wantListed...)
+				state.mu.Lock()
+				_, tracked := state.deadlines["exec-rejected"]
+				state.mu.Unlock()
+				if tracked != row.listed {
+					t.Fatalf("deadline entry tracked = %v after the refused write, want %v", tracked, row.listed)
+				}
+			})
+		}
+	}
+}
+
+// TestMemoryDeadlineRejectedCommitKeepsTheEntryOfATimedOutExecution drives the
+// finish writer through the real commit instead of calling it: a node that held
+// its lease when the execution timed out commits afterwards, and the commit is
+// refused as ExecutionInactive. Only the timeout's own acknowledgement may
+// withdraw the entry; a commit that was turned away must leave it.
+func TestMemoryDeadlineRejectedCommitKeepsTheEntryOfATimedOutExecution(t *testing.T) {
+	ctx := context.Background()
+	state := newMemoryState()
+	id := types.ExecutionID("exec-commit-after-timeout")
+	if err := state.CreateExecution(ctx, &engine.ExecutionSnapshot{
+		ID: id, Graph: nodeStateGraph(t), Status: types.ExecutionStatusRunning,
+		Deadline: deadlineBase,
+	}); err != nil {
+		t.Fatalf("CreateExecution() error = %v", err)
+	}
+	lease := privateOutputLease(id, "stateful", "lease-1", "token-1", engine.TaskTypeNodeExec)
+	if _, acquired, err := state.AcquireTaskLease(ctx, lease); err != nil || !acquired {
+		t.Fatalf("AcquireTaskLease() acquired=%v err=%v, want true/nil", acquired, err)
+	}
+	if err := state.UpdateExecutionStatus(ctx, id, types.ExecutionStatusTimeout, engine.ExecutionDeadlineExceededError); err != nil {
+		t.Fatalf("UpdateExecutionStatus(timeout) error = %v", err)
+	}
+	requireDeadlineIDs(t, listedDeadlines(t, state, deadlineBase, 8), id)
+
+	committed, err := state.CommitNode(ctx, engine.CommitNodeRequest{
+		ExecutionID: id,
+		NodeName:    "stateful",
+		LeaseID:     lease.LeaseID,
+		LeaseToken:  lease.LeaseToken,
+		Attempt:     1,
+		Status:      types.NodeStatusSuccess,
+	})
+	if err != nil {
+		t.Fatalf("CommitNode() error = %v", err)
+	}
+	if committed.Outcome != engine.CommitOutcomeExecutionInactive || committed.Applied || committed.ExecutionDone {
+		t.Fatalf("CommitNode() after the timeout = %+v, want a refused ExecutionInactive commit", committed)
+	}
+	snap, err := state.GetExecution(ctx, id)
+	if err != nil || snap == nil {
+		t.Fatalf("GetExecution() = %+v, %v", snap, err)
+	}
+	if snap.Status != types.ExecutionStatusTimeout || snap.Error != engine.ExecutionDeadlineExceededError {
+		t.Fatalf("after the refused commit: status %q error %q, want timeout / %q",
+			snap.Status, snap.Error, engine.ExecutionDeadlineExceededError)
+	}
+	requireDeadlineIDs(t, listedDeadlines(t, state, deadlineBase, 8), id)
+
+	if err := state.AckDeadlineExpired(ctx, id); err != nil {
+		t.Fatalf("AckDeadlineExpired() error = %v", err)
+	}
+	requireDeadlineIDs(t, listedDeadlines(t, state, deadlineBase, 8))
+}
