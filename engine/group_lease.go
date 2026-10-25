@@ -89,6 +89,13 @@ func (e *Engine) BuildGroupLease(ctx context.Context, t *Task) (*TaskLease, *Gro
 		return nil, nil, fmt.Errorf("build group entry input: %w", err)
 	}
 
+	// Read before the lease is written: a read failure here must not leave a
+	// group lease behind with nothing to release it.
+	execDeadline, err := e.executionDeadline(ctx, t.ExecutionID, g)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build group lease: %w", err)
+	}
+
 	leaseID, leaseToken := newLeaseCredentials()
 	issuedAt := time.Now().UTC()
 	ttl := e.defaultLeaseTTL
@@ -148,6 +155,11 @@ func (e *Engine) BuildGroupLease(ctx context.Context, t *Task) (*TaskLease, *Gro
 	if gm.Timeout > 0 {
 		deadline = issuedAt.Add(gm.Timeout)
 	}
+	// And to the execution's own deadline (settings.timeout), which also bounds
+	// a group that declares no timeout of its own. The payload deadline is what
+	// the runner's inner engine receives as WithOuterDeadline, so this is how the
+	// execution budget reaches every member lease of the group.
+	deadline = clampToExecutionDeadline(execDeadline, deadline)
 
 	payload := &GroupLeasePayload{
 		ProtocolVersion: 1,
@@ -196,6 +208,10 @@ func (e *Engine) RecoverGroupLease(ctx context.Context, execID types.ExecutionID
 	}
 
 	gm := g.GroupMetaAt(unitIdx)
+	execDeadline, err := e.executionDeadline(ctx, execID, g)
+	if err != nil {
+		return nil, nil, fmt.Errorf("recover group lease: %w", err)
+	}
 	pkg, pkgHash, err := graph.ProjectGroupPackage(g, unitIdx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("project group package for recovery: %w", err)
@@ -205,6 +221,10 @@ func (e *Engine) RecoverGroupLease(ctx context.Context, execID types.ExecutionID
 	if gm.Timeout > 0 {
 		deadline = lease.IssuedAt.Add(gm.Timeout)
 	}
+	// And to the execution's own deadline, same as BuildGroupLease: recovery
+	// replays the original lease, so the clamp must hold on this path too or a
+	// recovered group would run past the execution budget.
+	deadline = clampToExecutionDeadline(execDeadline, deadline)
 
 	taskLease := &TaskLease{
 		LeaseID:    lease.LeaseID,
@@ -378,6 +398,21 @@ func (e *Engine) RenewGroupLease(ctx context.Context, lease *TaskLease, extend t
 		return false, fmt.Errorf("state store does not support group leases")
 	}
 	newDeadline := time.Now().UTC().Add(extend)
+	// A renewal must not push the lease past the execution's own deadline, same
+	// as RenewTaskLease. An execution deadline that is already past is not
+	// refused here: the store is handed that past instant, which makes the lease
+	// immediately reclaimable.
+	if g, err := e.loadGraph(ctx, lease.Task.ExecutionID); err != nil {
+		return false, fmt.Errorf("renew group lease %q/%d: %w", lease.Task.ExecutionID, lease.Task.UnitIdx, err)
+	} else if g != nil {
+		execDeadline, err := e.executionDeadline(ctx, lease.Task.ExecutionID, g)
+		if err != nil {
+			return false, fmt.Errorf("renew group lease %q/%d: %w", lease.Task.ExecutionID, lease.Task.UnitIdx, err)
+		}
+		if !execDeadline.IsZero() && execDeadline.Before(newDeadline) {
+			newDeadline = execDeadline
+		}
+	}
 	start := time.Now()
 	renewed, err := gs.RenewGroupLease(ctx, lease.Task.ExecutionID, lease.Task.UnitIdx, lease.LeaseToken, newDeadline)
 	d := time.Since(start)
