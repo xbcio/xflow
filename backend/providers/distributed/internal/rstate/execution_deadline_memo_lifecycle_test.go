@@ -3,8 +3,13 @@ package rstate
 import (
 	"context"
 	"errors"
+	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
@@ -250,4 +255,108 @@ func TestDurableModeMarkerOutlivesALongBudgetExecution(t *testing.T) {
 		}
 		requireMarkerCovers(t, srv, id, deadline, "after a commit on another replica")
 	})
+}
+
+// TestCreationReplacesAStaleMemo: what a creation path writes is authoritative, so
+// it replaces whatever the memo held. The case is an ID reused after an earlier
+// execution under it was only ever read on this replica: the replica memoized the
+// old deadline, never concluded that execution (so nothing evicted the entry), and
+// now creates a new one under the same ID. Keeping the old value would size every
+// later status write from a deadline that no longer exists.
+func TestCreationReplacesAStaleMemo(t *testing.T) {
+	ctx := context.Background()
+	srv, rdb, creator := newMiniredisStore(t)
+	id := types.ExecutionID("memo-reused-id")
+	stale := time.Now().Add(replicaBudget)
+	createWithDeadline(t, creator, ctx, id, stale)
+
+	replica := newReplica(rdb)
+	replica.getExecTTL(ctx, id)
+	if memo := requireMemo(t, replica, id, true); memo.UnixMilli() != stale.UnixMilli() {
+		t.Fatalf("precondition: memoized deadline = %v, want the stored %v", memo, stale)
+	}
+
+	srv.FlushAll() // the old execution is gone from Redis; this replica never learned of it
+	fresh := time.Now().Add(72 * time.Hour)
+	createWithDeadline(t, replica, ctx, id, fresh)
+
+	if memo := requireMemo(t, replica, id, true); memo.UnixMilli() != fresh.UnixMilli() {
+		t.Fatalf("memoized deadline after the re-creation = %v, want the new %v: the creation path kept the stale entry", memo, fresh)
+	}
+}
+
+// roundTripRecorder records, per round trip to Redis, the names of the commands it
+// carried: a single command is one entry, a pipeline or transaction is one entry
+// for the whole batch.
+type roundTripRecorder struct {
+	mu    sync.Mutex
+	trips [][]string
+}
+
+func (r *roundTripRecorder) record(names []string) {
+	r.mu.Lock()
+	r.trips = append(r.trips, names)
+	r.mu.Unlock()
+}
+
+func (r *roundTripRecorder) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (r *roundTripRecorder) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		r.record([]string{cmd.Name()})
+		return next(ctx, cmd)
+	}
+}
+
+func (r *roundTripRecorder) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		names := make([]string, 0, len(cmds))
+		for _, cmd := range cmds {
+			names = append(names, cmd.Name())
+		}
+		r.record(names)
+		return next(ctx, cmds)
+	}
+}
+
+// TestDeadlineReadIsOneTransactionOnOneSlot pins the shape of the memo-miss read:
+// one round trip, one MULTI/EXEC, the existence check ahead of the deadline read.
+// One transaction is what makes the pair a single snapshot (two round trips can
+// straddle a creation), and it is also the only form that stays on one slot of a
+// Redis Cluster, which the shared {id} hash tag guarantees for both keys.
+func TestDeadlineReadIsOneTransactionOnOneSlot(t *testing.T) {
+	ctx := context.Background()
+	_, rdb, creator := newMiniredisStore(t)
+	id := types.ExecutionID("memo-one-trip")
+	createWithDeadline(t, creator, ctx, id, time.Now().Add(replicaBudget))
+
+	rec := &roundTripRecorder{}
+	rdb.AddHook(rec)
+	newReplica(rdb).execDeadline(ctx, id)
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	want := []string{"multi", "exists", "get", "exec"}
+	if len(rec.trips) != 1 || !slices.Equal(rec.trips[0], want) {
+		t.Fatalf("a memo miss made the round trips %v, want exactly one carrying %v", rec.trips, want)
+	}
+
+	status, deadlineKey := execKey(namespace.Default, id, "status"), execKey(namespace.Default, id, "deadline_ms")
+	if hashTag(status) == "" || hashTag(status) != hashTag(deadlineKey) {
+		t.Fatalf("status key %q and deadline key %q do not share a hash tag, so a transaction over both is not one cluster slot", status, deadlineKey)
+	}
+}
+
+// hashTag returns the part of the key Redis Cluster hashes: the text between the
+// first "{" and the next "}", when that is non-empty.
+func hashTag(key string) string {
+	open := strings.Index(key, "{")
+	if open < 0 {
+		return ""
+	}
+	end := strings.Index(key[open+1:], "}")
+	if end <= 0 {
+		return ""
+	}
+	return key[open+1 : open+1+end]
 }
