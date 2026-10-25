@@ -2,22 +2,32 @@ import type { Position, WorkflowDef, WorkflowNode, WireWorkflowDef, WireWorkflow
 
 /**
  * The editor-only sibling of a wire `WorkflowDef` (ADR-D4 §2.2-§2.3): visual
- * node positions, canvas viewport, per-node UI theme/configuration, and
- * author notes. Mirrors Go's `types.WorkflowEditorMetadata`
+ * node positions, canvas viewport, per-node UI theme/configuration, author
+ * notes, and visual canvas sections. Mirrors Go's `types.WorkflowEditorMetadata`
  * (`types/editor_metadata.go`) field for field, including the lack of a
  * `pinData` field (ADR-D4 "Deviations" item 1: `pin_data` has no runtime
  * consumer, so it is read directly off the returned `WorkflowDef.pin_data`
  * rather than cached here too).
  *
- * Every node-keyed map (`positions`, `ui`, `notes`) is keyed by the stable
- * node identity: `WorkflowNode.id` when the node has one, else
- * `WorkflowNode.name` (ADR §2.4).
+ * Every node-keyed map (`positions`, `ui`, `notes`) and every
+ * `WorkflowEditorSection.node_keys` entry is keyed by the stable node
+ * identity: `WorkflowNode.id` when the node has one, else `WorkflowNode.name`
+ * (ADR §2.4).
  */
 export interface WorkflowEditorMetadata {
   positions?: Record<string, Position>;
   viewport?: Viewport;
   ui?: Record<string, unknown>;
   notes?: Record<string, string>;
+  /**
+   * Visual canvas sections. Declared last so adding the field does not
+   * reorder the JSON encoding of any pre-existing field: with Go's
+   * `omitempty` a metadata value that has no sections encodes byte-identically
+   * to before this field existed. The frontend keeps that promise by omitting
+   * an empty array rather than sending `[]` (plain `JSON.stringify` would not
+   * omit it; `@xflow/api`'s save path drops it explicitly).
+   */
+  sections?: WorkflowEditorSection[];
 }
 
 /** The editor canvas pan/zoom state. Mirrors Go's `types.Viewport`. */
@@ -25,6 +35,43 @@ export interface Viewport {
   x?: number;
   y?: number;
   zoom?: number;
+}
+
+/**
+ * One purely visual grouping box drawn behind the canvas nodes: a dashed
+ * border plus a title label. Mirrors Go's `types.CanvasSection`. It has no
+ * execution effect -- the engine never reads it, it is excluded from the
+ * runtime conflict hash, and it participates only in the audit fingerprint
+ * because it lives in editor metadata.
+ *
+ * `node_keys` uses the same stable node identity as `positions` and `ui`:
+ * `WorkflowNode.id` when the node has one, else `WorkflowNode.name`. The
+ * server drops keys that match no node, drops a section left with no keys,
+ * and drops sections with an empty or duplicate `id`.
+ *
+ * A section is deliberately NOT a `GroupDef` (`WorkflowDef.groups`): groups
+ * are scheduling semantics -- they co-locate members on one runner and carry
+ * a `runner_selector` and group-level `on_error` -- while a section only
+ * tells the editor which nodes to draw inside one visual box. Never reuse one
+ * for the other.
+ *
+ * No colour is stored: the editor derives a section's accent bar from the
+ * dominant category of its member nodes, keeping the palette a frontend
+ * concern.
+ *
+ * The property names are the wire names (Go JSON tags), matching the rest of
+ * this type: `WorkflowEditorMetadata` doubles as the `editor_metadata` wire
+ * shape, so `node_keys` must not be camelCased here -- the server's
+ * `json.Unmarshal` would silently drop an unknown `nodeKeys` key.
+ */
+export interface WorkflowEditorSection {
+  id?: string;
+  title?: string;
+  node_keys?: string[];
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
 }
 
 /**

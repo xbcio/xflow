@@ -5,6 +5,7 @@ import {
   splitEditorMetadata,
   type WorkflowDef,
   type WorkflowEditorMetadata,
+  type WorkflowEditorSection,
   type WireWorkflowDef
 } from "./index";
 
@@ -132,5 +133,61 @@ describe("splitEditorMetadata", () => {
     const def: WorkflowDef = { nodes: [] };
     const { metadata } = splitEditorMetadata(def);
     expect(metadata.viewport).toBeUndefined();
+  });
+});
+
+/**
+ * `WorkflowEditorMetadata` doubles as the `editor_metadata` wire shape, so
+ * these pin the JSON encoding against Go's `types.WorkflowEditorMetadata`
+ * tags (`types/editor_metadata.go`). A renamed property here would not fail
+ * typecheck -- it would be dropped by the server's `json.Unmarshal` as an
+ * unknown key, silently losing editor state.
+ */
+describe("WorkflowEditorMetadata serialization", () => {
+  const sections: WorkflowEditorSection[] = [
+    {
+      id: "s-approval",
+      title: "VIP approval",
+      node_keys: ["node-approve", "node-notify"],
+      x: 40,
+      y: 80,
+      width: 360,
+      height: 200
+    },
+    { id: "s-plain", node_keys: ["node-plain"] }
+  ];
+
+  it("round-trips sections through JSON unchanged", () => {
+    const metadata: WorkflowEditorMetadata = {
+      positions: { "node-approve": { x: 10, y: 20 } },
+      viewport: { x: 0, y: 0, zoom: 1 },
+      notes: { "node-approve": "ask before approving" },
+      sections
+    };
+
+    const encoded = JSON.stringify(metadata);
+
+    // The section keys use Go's wire names: `node_keys`, never `nodeKeys`.
+    expect(encoded).toContain('"node_keys":["node-approve","node-notify"]');
+    expect(JSON.parse(encoded)).toEqual(metadata);
+  });
+
+  it("encodes byte-identically to the pre-sections shape when sections is absent", () => {
+    const metadata: WorkflowEditorMetadata = { positions: { "node-1": { x: 1, y: 2 } } };
+
+    // The new optional field adds no key when unset, so a save that carries no
+    // sections produces exactly the bytes older clients sent.
+    expect(JSON.stringify(metadata)).toBe('{"positions":{"node-1":{"x":1,"y":2}}}');
+    expect(JSON.stringify(splitEditorMetadata({ nodes: [{ id: "node-1", position: { x: 1, y: 2 } }] }).metadata)).toBe(
+      '{"positions":{"node-1":{"x":1,"y":2}}}'
+    );
+  });
+
+  it("keeps an explicit empty sections array when plain-serialized", () => {
+    // `omitempty` is a Go encoder rule, not a JavaScript one: plain
+    // `JSON.stringify` emits `"sections":[]`. The save path in `@xflow/api`
+    // drops the empty array explicitly so the wire matches the Go encoding.
+    const metadata: WorkflowEditorMetadata = { sections: [] };
+    expect(JSON.stringify(metadata)).toBe('{"sections":[]}');
   });
 });
