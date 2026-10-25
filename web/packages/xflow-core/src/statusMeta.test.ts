@@ -126,9 +126,12 @@ describe("workflowStatusMeta", () => {
     expect(ops("running")).toEqual(["pause", "cancel"]);
     expect(ops("paused")).toEqual(["resume", "cancel"]);
     expect(ops("canceling")).toEqual([]);
-    for (const terminal of ["success", "failed", "canceled", "timeout"] as const) {
-      expect(ops(terminal), terminal).toEqual(["rerun"]);
-    }
+    // Ruling 2026-10-21 (design list-exec): only failed and timeout rerun; a
+    // successful or canceled source offers no row action.
+    expect(ops("failed")).toEqual(["rerun"]);
+    expect(ops("timeout")).toEqual(["rerun"]);
+    expect(ops("success")).toEqual([]);
+    expect(ops("canceled")).toEqual([]);
   });
 
   it("marks exactly success, failed, canceled and timeout as terminal", () => {

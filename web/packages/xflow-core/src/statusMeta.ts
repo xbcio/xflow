@@ -125,8 +125,8 @@ export const workflowStatusMeta: Record<ExecutionStatusKey, WorkflowStatusMeta> 
   running: { label: "运行中", tone: "info", icon: "loading", ops: ["pause", "cancel"], terminal: false },
   paused: { label: "已暂停", tone: "warning", icon: "pause", ops: ["resume", "cancel"], terminal: false },
   canceling: { label: "取消中", tone: "neutral", icon: "loading", ops: [], terminal: false },
-  success: { label: "成功", tone: "success", icon: "check", ops: ["rerun"], terminal: true },
+  success: { label: "成功", tone: "success", icon: "check", ops: [], terminal: true },
   failed: { label: "失败", tone: "danger", icon: "close", ops: ["rerun"], terminal: true },
-  canceled: { label: "已取消", tone: "neutral", icon: "stop", ops: ["rerun"], terminal: true },
+  canceled: { label: "已取消", tone: "neutral", icon: "stop", ops: [], terminal: true },
   timeout: { label: "超时", tone: "danger", icon: "clock-close", ops: ["rerun"], terminal: true },
 };
