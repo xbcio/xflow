@@ -1065,15 +1065,32 @@ func validateWorkflowRegistrationDefinition(def *types.WorkflowDef) error {
 // for the handler so their established validation and audit behavior is
 // unchanged; a valid FAF definition is refused before authzWrap writes an
 // admission audit row.
+//
+// The read is bounded by MaxRequestBodyBytes with the same http.MaxBytesReader
+// guard decodeJSON uses. This hook runs BEFORE the handler's decoder, so an
+// unbounded read here would buffer an over-limit body first and make the
+// decodeJSON cap unreachable. Overflow is refused here with decodeJSON's exact
+// 413 (fixed code and message, no size echo), and the body is deliberately not
+// restored: nothing downstream may resume reading it.
 func rejectFAFWorkflowRegistrationBeforeAdmission(w http.ResponseWriter, r *http.Request) bool {
 	if r.Body == nil {
 		return true
 	}
 	body := r.Body
-	raw, err := io.ReadAll(body)
+	raw, readErr := io.ReadAll(http.MaxBytesReader(w, body, MaxRequestBodyBytes))
 	_ = body.Close()
+	if readErr != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(readErr, &tooLarge) {
+			writeFail(w, r, http.StatusRequestEntityTooLarge, "request_too_large", "request body too large")
+			return false
+		}
+	}
+	// Non-overflow reads keep the pre-existing contract: the handler sees the
+	// bytes read so far (for a mid-stream read error, decodeJSON then reports
+	// the malformed body). The overflow path above returned before this point.
 	r.Body = io.NopCloser(bytes.NewReader(raw))
-	if err != nil {
+	if readErr != nil {
 		return true
 	}
 
@@ -3401,18 +3418,52 @@ func parseWaitTimeout(r *http.Request) time.Duration {
 // shape next to the seed's other bare errorResponse bodies
 // (stale_generation / workflow_unknown / internal server error). A malformed
 // seed body yields the same bare errorResponse shape as those, via writeJSON.
+//
+// The raw body is bounded by MaxRequestBodyBytes with the same
+// http.MaxBytesReader guard decodeJSON uses, so an unbounded seed body cannot
+// be buffered before decoding. Overflow answers 413 in this face's own bare
+// shape — {"error":"request_too_large"}, the same stable code the enveloped
+// routes use — not the enveloped body, for the reason above. The runner
+// protocol client already maps a 413 to ErrRunnerRequestTooLarge and stops
+// resending, so this answer is the contract it expects.
 func decodeSeedJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	defer func() { _ = r.Body.Close() }()
-	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes)).Decode(dst); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, errorResponse{Error: "request_too_large"})
+			return false
+		}
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid JSON"})
 		return false
 	}
 	return true
 }
 
+// MaxRequestBodyBytes caps every request body decoded through decodeJSON.
+//
+// 8 MiB covers a registration carrying an inline WorkflowDef plus a 1 MiB
+// editor_metadata blob, with headroom for execution parameters. This is a
+// denial-of-service bound, NOT business validation: a body under the cap can
+// still be refused by the field-level rules each handler applies.
+const MaxRequestBodyBytes int64 = 8 << 20
+
+// decodeJSON decodes a JSON request body, refusing bodies above
+// MaxRequestBodyBytes before they are buffered in full.
+//
+// Over-limit bodies answer 413 request_too_large with a fixed message: the
+// response never echoes the limit, the body, or the reader's internal error, so
+// a caller learns only that its request was too large. Exceeding the cap is the
+// documented reason http.MaxBytesReader marks the connection non-reusable;
+// that is standard net/http behavior and is deliberately not worked around.
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	defer func() { _ = r.Body.Close() }()
-	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes)).Decode(dst); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeFail(w, r, http.StatusRequestEntityTooLarge, "request_too_large", "request body too large")
+			return false
+		}
 		writeFail(w, r, http.StatusBadRequest, "bad_request", "invalid JSON")
 		return false
 	}

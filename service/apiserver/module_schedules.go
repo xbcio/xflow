@@ -294,10 +294,19 @@ func parseIfMatch(w http.ResponseWriter, r *http.Request) (*uint64, bool) {
 // malformed request: "does revision N still hold" is a question the If-Match
 // header can ask on its own, and answering it with 400 would make the
 // precondition unusable without inventing a body.
+//
+// The read carries the same MaxRequestBodyBytes cap as decodeJSON: a patch is
+// small, and an unbounded body here would let a caller buffer arbitrarily much
+// before any field validation runs. Overflow answers decodeJSON's exact 413.
 func decodeSchedulePatch(w http.ResponseWriter, r *http.Request) (control.SchedulePatch, bool) {
 	defer func() { _ = r.Body.Close() }()
 	var fields map[string]*string
-	if err := json.NewDecoder(r.Body).Decode(&fields); err != nil && !errors.Is(err, io.EOF) {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes)).Decode(&fields); err != nil && !errors.Is(err, io.EOF) {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeFail(w, r, http.StatusRequestEntityTooLarge, "request_too_large", "request body too large")
+			return control.SchedulePatch{}, false
+		}
 		writeFail(w, r, http.StatusBadRequest, "bad_request", "invalid JSON")
 		return control.SchedulePatch{}, false
 	}

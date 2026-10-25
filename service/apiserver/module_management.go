@@ -544,18 +544,31 @@ const maxRunnerControlReasonBytes = 512
 // intentionally permissive for older routes; using it here would let two
 // syntactically different bodies share a receipt while silently ignoring extra
 // fields, which makes later API evolution unsafe.
+//
+// The raw body is bounded by MaxRequestBodyBytes with the same
+// http.MaxBytesReader guard decodeJSON uses, and overflow answers the same 413.
+// That cap is a transport-size bound; the reason-length check in the handler is
+// field validation on the decoded value and stays separate — it rejects a body
+// well under the cap whose reason alone is too long.
 func decodeRunnerControlBody(w http.ResponseWriter, r *http.Request, dst *runnerControlBody) bool {
 	defer func() { _ = r.Body.Close() }()
-	decoder := json.NewDecoder(r.Body)
+	failDecode := func(err error) bool {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeFail(w, r, http.StatusRequestEntityTooLarge, "request_too_large", "request body too large")
+		} else {
+			writeFail(w, r, http.StatusBadRequest, "bad_request", "invalid JSON")
+		}
+		return false
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dst); err != nil {
-		writeFail(w, r, http.StatusBadRequest, "bad_request", "invalid JSON")
-		return false
+		return failDecode(err)
 	}
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		writeFail(w, r, http.StatusBadRequest, "bad_request", "invalid JSON")
-		return false
+		return failDecode(err)
 	}
 	return true
 }

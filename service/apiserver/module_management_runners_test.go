@@ -810,3 +810,129 @@ func TestRevokeRunnerIdentityNotImplementedWhenStoreNil(t *testing.T) {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNotImplemented)
 	}
 }
+
+// newRunnerControlTestServer wires the real drain/resume routes with the two
+// scopes each requires (its operation scope plus the platform-only
+// control_global scope) and one registered runner, so a body that survives
+// decoding reaches the directory instead of failing on authorization or lookup.
+func newRunnerControlTestServer(t *testing.T) http.Handler {
+	t.Helper()
+	cp := fakeControlPlaneForAuthz(t)
+	if _, err := cp.RunnerDirectory().Register(context.Background(), control.RegisterRunnerRequest{
+		RunnerID: "runner-a",
+		Capacity: 1,
+	}); err != nil {
+		t.Fatalf("register runner: %v", err)
+	}
+	m := newManagementModule(cp)
+	m.principalAuth = staticPrincipalAuth{principal: Principal{
+		Subject:   "ops",
+		Namespace: "namespaceA",
+		Scopes: []string{
+			scopeForOperation(OpManagementRunnerDrain),
+			scopeForOperation(OpManagementRunnerResume),
+			ScopeManagementRunnerControlGlobal,
+		},
+	}}
+	m.authorizer = ScopeAuthorizer{}
+	m.audit = NewInMemoryAuditSink()
+	mux := http.NewServeMux()
+	m.RegisterHTTP(mux)
+	return mux
+}
+
+// runnerControlBodyOfSize builds a syntactically valid drain/resume body of
+// exactly n bytes by padding the reason. A valid body matters: a malformed one
+// would also be refused, and the point is to show the transport cap fired.
+func runnerControlBodyOfSize(t *testing.T, n int64) string {
+	t.Helper()
+	const overhead = int64(len(`{"reason":""}`))
+	if n <= overhead {
+		t.Fatalf("requested runner control body size %d does not fit the JSON overhead", n)
+	}
+	body := `{"reason":"` + strings.Repeat("a", int(n-overhead)) + `"}`
+	if int64(len(body)) != n {
+		t.Fatalf("built runner control body is %d bytes, want exactly %d", len(body), n)
+	}
+	return body
+}
+
+func serveRunnerControl(h http.Handler, path, requestID, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("X-Request-Id", requestID)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestRunnerControlBodyLimit pins the size cap on POST
+// /v1/management/runners/{id}/drain and /resume. The decoder used to read the
+// body with no bound and only validated the DECODED reason, so a caller could
+// make the server buffer an arbitrarily large body first. Both layers are
+// asserted here: an ordinary body is accepted, the field-level 512-byte reason
+// rule still answers 400 on a small body, and an over-limit raw body answers
+// decodeJSON's exact 413 without being buffered.
+func TestRunnerControlBodyLimit(t *testing.T) {
+	h := newRunnerControlTestServer(t)
+	paths := []struct{ name, path string }{
+		{"drain", strings.Replace(PathManagementRunnerDrain, "{id}", "runner-a", 1)},
+		{"resume", strings.Replace(PathManagementRunnerResume, "{id}", "runner-a", 1)},
+	}
+	for _, tc := range paths {
+		t.Run(tc.name, func(t *testing.T) {
+			// Regression: an ordinary body is accepted end to end.
+			rec := serveRunnerControl(h, tc.path, "req-"+tc.name+"-ok", `{"reason":"maintenance"}`)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("normal body status = %d, want 200 (body=%s)", rec.Code, rec.Body.Bytes())
+			}
+
+			// The reason-length rule is field validation, not the body cap: a
+			// SMALL body carrying an over-long reason is still 400, so moving
+			// the cap in must not have swallowed the existing check.
+			longReason := `{"reason":"` + strings.Repeat("a", maxRunnerControlReasonBytes+1) + `"}`
+			rec = serveRunnerControl(h, tc.path, "req-"+tc.name+"-reason", longReason)
+			raw := rec.Body.Bytes()
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("over-long reason status = %d, want 400 (body=%s)", rec.Code, raw)
+			}
+			var env envelope
+			if err := json.Unmarshal(raw, &env); err != nil {
+				t.Fatalf("decode response envelope: %v (body=%s)", err, raw)
+			}
+			if env.Success || env.Code != "bad_request" || env.Message != "reason is too long" {
+				t.Fatalf("envelope = %+v, want 400 bad_request with the reason-length message", env)
+			}
+
+			const total = MaxRequestBodyBytes + (1 << 20) // 1 MiB over the cap
+			body := &countingReadCloser{r: strings.NewReader(runnerControlBodyOfSize(t, total))}
+			req := httptest.NewRequest(http.MethodPost, tc.path, nil)
+			req.Header.Set("X-Request-Id", "req-"+tc.name+"-big")
+			req.Body = body
+			bigRec := httptest.NewRecorder()
+			h.ServeHTTP(bigRec, req)
+
+			// http.MaxBytesReader may consume one probe byte past the limit to
+			// detect overflow; buffering the body would show up near total here.
+			if body.n > MaxRequestBodyBytes+1 {
+				t.Fatalf("runner control read %d bytes, want at most %d", body.n, MaxRequestBodyBytes+1)
+			}
+			if body.n >= total {
+				t.Fatalf("runner control buffered the entire %d-byte body", total)
+			}
+			t.Logf("%s read %d bytes of the %d-byte body", tc.name, body.n, total)
+
+			raw = bigRec.Body.Bytes()
+			if bigRec.Code != http.StatusRequestEntityTooLarge {
+				t.Fatalf("status = %d, want 413 (body=%s)", bigRec.Code, raw)
+			}
+			env = envelope{}
+			if err := json.Unmarshal(raw, &env); err != nil {
+				t.Fatalf("decode response envelope: %v (body=%s)", err, raw)
+			}
+			if env.Success || env.Code != "request_too_large" || env.Message != "request body too large" {
+				t.Fatalf("envelope = %+v, want 413 request_too_large with the fixed message", env)
+			}
+			assertNo413Internals(t, raw)
+		})
+	}
+}

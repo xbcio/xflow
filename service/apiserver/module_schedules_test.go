@@ -928,3 +928,66 @@ func TestDeregisterWorkflowClearsScheduleOverrides(t *testing.T) {
 	f.do(http.MethodGet, scheduleTokenFull, f.schedulesPath(), "", nil).
 		wantFail(t, http.StatusNotFound, "workflow_not_found")
 }
+
+// schedulePatchBodyOfSize builds a syntactically valid PATCH body of exactly n
+// bytes by padding the expression override's value. A valid body matters: a
+// merely malformed one would also be refused, and the point is to show the size
+// cap fired rather than the decoder tripping over garbage.
+func schedulePatchBodyOfSize(t *testing.T, n int64) string {
+	t.Helper()
+	const overhead = int64(len(`{"expression":""}`))
+	if n <= overhead {
+		t.Fatalf("requested schedule patch size %d does not fit the JSON overhead", n)
+	}
+	body := `{"expression":"` + strings.Repeat("a", int(n-overhead)) + `"}`
+	if int64(len(body)) != n {
+		t.Fatalf("built schedule patch body is %d bytes, want exactly %d", len(body), n)
+	}
+	return body
+}
+
+// TestPatchScheduleBodyLimit pins the size cap on PATCH
+// /v1/workflows/{id}/schedules/{node}. The patch decoder used to read the body
+// with no bound, so a caller could make the server buffer arbitrary input
+// before any validation ran. This asserts the observable contract: an ordinary
+// patch still lands, an over-limit one answers decodeJSON's exact 413, and the
+// counting body shows the read stopped at the cap instead of buffering the
+// whole thing.
+func TestPatchScheduleBodyLimit(t *testing.T) {
+	f := newScheduleAPIFixture(t, nil)
+
+	// Regression: an ordinary (well under the cap) patch is still accepted.
+	f.do(http.MethodPatch, scheduleTokenWrite, f.nodePath("nightly", ""), `{"expression":"0 3 * * *"}`, nil).
+		want(t, http.StatusOK)
+
+	const total = MaxRequestBodyBytes + (1 << 20) // 1 MiB over the cap
+	body := &countingReadCloser{r: strings.NewReader(schedulePatchBodyOfSize(t, total))}
+	req := httptest.NewRequest(http.MethodPatch, f.nodePath("nightly", ""), nil)
+	req.Header.Set("Authorization", "Bearer "+scheduleTokenWrite)
+	req.Body = body
+	rec := httptest.NewRecorder()
+	f.mux.ServeHTTP(rec, req)
+
+	// http.MaxBytesReader may consume one probe byte past the limit to detect
+	// overflow; buffering the body would show up as a count near total here.
+	if body.n > MaxRequestBodyBytes+1 {
+		t.Fatalf("PATCH read %d bytes, want at most %d", body.n, MaxRequestBodyBytes+1)
+	}
+	if body.n >= total {
+		t.Fatalf("PATCH buffered the entire %d-byte body", total)
+	}
+	t.Logf("PATCH schedule read %d bytes of the %d-byte body", body.n, total)
+
+	raw := rec.Body.Bytes()
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413 (body=%s)", rec.Code, raw)
+	}
+	var env envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("decode response envelope: %v (body=%s)", err, raw)
+	}
+	if env.Success || env.Code != "request_too_large" || env.Message != "request body too large" {
+		t.Fatalf("envelope = %+v, want 413 request_too_large with the fixed message", env)
+	}
+	assertNo413Internals(t, raw)
+}
