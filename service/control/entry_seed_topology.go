@@ -6,6 +6,7 @@ import (
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/types"
 )
 
 // deriveEntrySeedTopology resolves the entry unit index and the downstream unit
@@ -90,6 +91,25 @@ func deriveEntrySeedTopology(g *graph.Graph, entryUnitID string, exits []engine.
 		downstream = append(downstream, byDst[d])
 	}
 	return entryUnitIdx, downstream, nil
+}
+
+// entryTriggerKind derives an entry unit's trigger kind from the authoritative
+// compiled graph: the entry unit's node type, when that unit is a single
+// trigger node. A group entry has no trigger node type (its members are
+// approval/notification steps), so it answers "" — UNKNOWN — rather than
+// guessing a kind the graph does not support.
+func entryTriggerKind(g *graph.Graph, entryUnitIdx int) string {
+	if g == nil || entryUnitIdx < 0 || entryUnitIdx >= g.UnitCount() {
+		return ""
+	}
+	if g.UnitKindAt(entryUnitIdx) == graph.UnitGroup {
+		return ""
+	}
+	nodeIdx := g.UnitNodeIndex(entryUnitIdx)
+	if nodeIdx < 0 || nodeIdx >= g.NodeCount() {
+		return ""
+	}
+	return types.TriggerKindFromNodeType(g.NodeAt(nodeIdx).Type)
 }
 
 // boundaryPortKey builds a lookup key from a node index and port name for

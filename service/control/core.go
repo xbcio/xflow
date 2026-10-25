@@ -1493,6 +1493,9 @@ func (c *Core) resolveEntrySeedTopology(ctx context.Context, req *engine.SeedExe
 	req.Graph = rec.Graph
 	req.EntryUnitIdx = idx
 	req.Downstream = downstream
+	// The trigger kind is derived from the same authoritative graph and always
+	// overwritten: it is control-plane metadata, never a runner-supplied value.
+	req.TriggerKind = entryTriggerKind(rec.Graph, idx)
 	return rec.Definition, nil
 }
 
