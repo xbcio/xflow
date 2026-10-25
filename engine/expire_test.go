@@ -1524,3 +1524,27 @@ func TestExpireExecutionEvictsAfterASuccessfulCascade(t *testing.T) {
 		})
 	}
 }
+
+// TestExpireExecutionTimeoutWithoutAReasonIsNotThisMechanisms pins the other
+// edge of the reason check. A timeout carrying no reason at all is not the
+// deadline's own write (that one always carries ExecutionDeadlineExceededError),
+// so it is neither cascaded nor announced; only the entry is acknowledged.
+func TestExpireExecutionTimeoutWithoutAReasonIsNotThisMechanisms(t *testing.T) {
+	rig := newExpireRig(t, true)
+	rig.start(t)
+	rig.setDeadline(pastDeadline)
+	rig.force(types.ExecutionStatusTimeout, "")
+
+	rig.expire(t, ExpireOutcomeAlreadyTerminal)
+
+	if got := rig.snapshot(t); got.Status != types.ExecutionStatusTimeout || got.Error != "" {
+		t.Fatalf("snapshot = (%q, %q), want the reasonless timeout kept", got.Status, got.Error)
+	}
+	rig.log.requireExactly(t, "ack")
+	if got := rig.hooks.completions(); len(got) != 0 {
+		t.Fatalf("completion hooks = %v, want none", got)
+	}
+	if got := rig.nodeStatus(t); got != types.NodeStatusSuspended {
+		t.Fatalf("node status = %q, want suspended: nothing may cascade", got)
+	}
+}
