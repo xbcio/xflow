@@ -70,13 +70,11 @@ const defaultCancelingExecutionReapBatch = 64
 
 // defaultExecutionDeadlineBatch bounds how many executions one deadline pass
 // drives into timeout.
-const defaultExecutionDeadlineBatch = 100
+const defaultExecutionDeadlineBatch = engine.DefaultDeadlineSweepBatch
 
 // executionDeadlineFetchFactor caps the deadline pass's over-fetch at this
-// multiple of its batch. Candidates still backing off are listed beyond the
-// batch so they cannot hold every slot of the page; the cap keeps that read
-// bounded when many of them are.
-const executionDeadlineFetchFactor = 10
+// multiple of its batch (see engine.DeadlineSweep).
+const executionDeadlineFetchFactor = engine.DefaultDeadlineSweepFetchFactor
 
 // LeaseLister is the subset of engine.StateStore used by the sweeper to find
 // candidates for reclamation. The full StateStore interface satisfies this
@@ -98,9 +96,7 @@ type CancelingExecutionCanceler interface {
 // execution whose settings.timeout deadline has passed. *engine.Engine
 // implements it; like CancelingExecutionCanceler it is reached through an
 // optional assertion on the narrower execution.Engine.
-type ExecutionExpirer interface {
-	ExpireExecution(ctx context.Context, id types.ExecutionID) (engine.ExpireOutcome, error)
-}
+type ExecutionExpirer = engine.ExecutionExpirer
 
 // LeaseIndexRepairer is an optional backend capability that reconciles lease
 // expiry discovery indexes from authoritative running-node metadata. Backends
@@ -187,9 +183,9 @@ type LeaseSweeper struct {
 	deadlineMu      sync.Mutex
 	lastDeadline    time.Time
 	deadlineBackoff *engine.ExpireBackoff
-	// deadlineSaturated is set while the backoff set alone fills the page the
-	// pass can read, so the warning is logged once per episode, not every pass.
-	deadlineSaturated bool
+	// deadlineSweep is built on the first pass that has both capabilities and
+	// then reused, so its once-per-episode saturation warning keeps its state.
+	deadlineSweep *engine.DeadlineSweep
 }
 
 // SweepObserver receives lease-sweep outcomes so observability layers can
@@ -911,10 +907,12 @@ func (s *LeaseSweeper) ReapStuckCancelingExecutionsOnce(ctx context.Context) int
 // The deadline is the threshold, so the scan asks for everything at or before
 // now with no stuck-after margin.
 //
-// Every outcome ExpireExecution reports without an error is a handled candidate.
-// Expired and Resumed are what the pass released; NotDue, AlreadyTerminal,
-// Canceling and Gone are benign (someone else owns or finished the execution),
-// as is ErrExecutionInactive. Only another error is a failure.
+// The candidate loop is engine.DeadlineSweep, shared with the in-process and
+// embedded backends' sweepers. Expired and Resumed are what the pass released;
+// NotDue, AlreadyTerminal and Gone are benign (someone else finished the
+// execution), as is ErrExecutionInactive. Canceling is benign too but the entry
+// stays listed until the cancel concludes, so that execution is set aside for a
+// window like a failing one. Only another error is a failure.
 //
 // Failures are spaced out per execution (engine.ExpireBackoff). The index lists
 // the oldest deadlines first, so without that an execution that keeps failing
@@ -947,19 +945,24 @@ func (s *LeaseSweeper) ReapExpiredExecutionsOnce(ctx context.Context) int {
 		return 0
 	}
 	s.lastDeadline = now
-	limit, capped := s.executionDeadlineFetchLimit(now)
-	warnSaturated := capped && !s.deadlineSaturated
-	s.deadlineSaturated = capped
+	if s.deadlineSweep == nil {
+		s.deadlineSweep = engine.NewDeadlineSweep(engine.DeadlineSweepConfig{
+			Lister:        lister,
+			Expirer:       expirer,
+			Backoff:       s.deadlineBackoff,
+			Batch:         s.deadlineBatch,
+			FetchFactor:   executionDeadlineFetchFactor,
+			Clock:         func() time.Time { return s.clock() },
+			Logger:        s.log,
+			Continue:      func() bool { return !leaderLost(s.elector) },
+			ContinueEvery: leaderRecheckInterval,
+			OnExpired:     func(execCtx context.Context, _ engine.DeadlineExpiredExecution) { s.observeDeadlineExpired(execCtx) },
+		})
+	}
+	sweep := s.deadlineSweep
 	s.deadlineMu.Unlock()
 
-	if warnSaturated && s.log != nil {
-		s.log.Warn("execution deadline scan is saturated by executions that keep failing to expire",
-			"backing_off", s.deadlineBackoff.Waiting(now),
-			"batch", s.deadlineBatch,
-			"fetch_limit", limit,
-		)
-	}
-	candidates, err := lister.ListDeadlineExceededExecutions(ctx, now, limit)
+	swept, err := sweep.Sweep(ctx)
 	if err != nil {
 		if s.log != nil {
 			s.log.Error("list executions past their deadline", "err", err)
@@ -967,109 +970,28 @@ func (s *LeaseSweeper) ReapExpiredExecutionsOnce(ctx context.Context) int {
 		s.observePass(ctx, SweepPassExecutionDeadline, SweepPassOutcomeError, ReapResult{})
 		return 0
 	}
-	var result ReapResult
-	backingOff := 0
-	for i, candidate := range candidates {
+	result := ReapResult{Inspected: swept.Attempted, Released: swept.Released}
+	if swept.Stop == engine.DeadlineSweepStopLeadershipLost {
 		// A demoted replica must stop expiring cluster-wide executions; the new
 		// leader will pick the remainder up on its own pass.
-		if i > 0 && i%leaderRecheckInterval == 0 && leaderLost(s.elector) {
-			s.observePass(ctx, SweepPassExecutionDeadline, SweepPassOutcomeSkippedNotLeader, result)
-			return result.Released
-		}
-		select {
-		case <-ctx.Done():
-			s.observePass(ctx, SweepPassExecutionDeadline, SweepPassOutcomeRan, result)
-			return result.Released
-		default:
-		}
-		if result.Inspected >= s.deadlineBatch {
-			break
-		}
-		key := executionDeadlineKey(candidate)
-		if !s.deadlineBackoff.Allow(key, now) {
-			backingOff++
-			continue
-		}
-		result.Inspected++
-		// The candidate names the namespace its keys live under; the sweeper's
-		// own context is namespace-less because the scan spans every namespace
-		// the process serves.
-		execCtx := ctx
-		if candidate.Namespace != "" {
-			execCtx = namespace.WithNamespace(ctx, candidate.Namespace)
-		}
-		outcome, err := expirer.ExpireExecution(execCtx, candidate.ExecutionID)
-		switch {
-		case err == nil:
-			s.deadlineBackoff.Success(key)
-			if outcome == engine.ExpireOutcomeExpired || outcome == engine.ExpireOutcomeResumed {
-				result.Released++
-			}
-			// Only the call that wrote the timeout counts as the transition; a
-			// resumed cascade is the same expiry finished, not a second one.
-			if outcome == engine.ExpireOutcomeExpired {
-				s.observeDeadlineExpired(execCtx)
-			}
-		case errors.Is(err, engine.ErrExecutionInactive):
-			// The execution concluded between the list and the call.
-			s.deadlineBackoff.Success(key)
-		case ctx.Err() != nil:
-			// The sweeper is shutting down: that is not this execution's failure.
-			s.observePass(ctx, SweepPassExecutionDeadline, SweepPassOutcomeRan, result)
-			return result.Released
-		default:
-			failures := s.deadlineBackoff.Failure(key, now)
-			if s.log != nil && executionDeadlineAlertAt(failures) {
-				s.log.Warn("execution keeps failing to expire past its deadline",
-					"ns", string(candidate.Namespace),
-					"exec", string(candidate.ExecutionID),
-					"deadline", candidate.Deadline,
-					"consecutive_failures", failures,
-					"err", err,
-				)
-			}
-		}
+		s.observePass(ctx, SweepPassExecutionDeadline, SweepPassOutcomeSkippedNotLeader, result)
+		return result.Released
 	}
 	if result.Released > 0 && s.log != nil {
 		s.log.Info("expired executions past their deadline",
 			"expired", result.Released,
-			"backing_off", backingOff,
+			"backing_off", swept.SkippedBackoff,
+			"deferred", swept.Deferred,
 		)
 	}
 	s.observePass(ctx, SweepPassExecutionDeadline, SweepPassOutcomeRan, result)
 	return result.Released
 }
 
-// executionDeadlineFetchLimit is how many candidates one deadline pass reads: the
-// batch it may attempt plus one slot per execution still inside a backoff
-// window at now, so those cannot crowd the batch out. capped reports that the
-// bound clipped the read, in which case backing-off executions can still take
-// attempts from the page.
-func (s *LeaseSweeper) executionDeadlineFetchLimit(now time.Time) (limit int, capped bool) {
-	limit = s.deadlineBatch + s.deadlineBackoff.Waiting(now)
-	if ceiling := s.deadlineBatch * executionDeadlineFetchFactor; limit > ceiling {
-		return ceiling, true
-	}
-	return limit, false
-}
-
-// executionDeadlineKey is the backoff key of a candidate. It carries the
-// namespace as well as the ID because the same execution ID may exist under two
-// namespaces, and one tenant's failures must not delay another's.
+// executionDeadlineKey is the backoff key of a candidate: it carries the
+// namespace as well as the ID, so one tenant's failures never delay another's.
 func executionDeadlineKey(candidate engine.DeadlineExpiredExecution) string {
-	return string(candidate.Namespace) + "\x00" + string(candidate.ExecutionID)
-}
-
-// executionDeadlineAlertAt reports whether a consecutive failure count is one
-// the pass escalates. Failures are retried with growing waits, so these counts
-// land minutes to hours apart: a stuck execution warns a handful of times in a
-// day rather than on every retry.
-func executionDeadlineAlertAt(failures int) bool {
-	switch failures {
-	case 5, 20, 100:
-		return true
-	}
-	return false
+	return engine.DeadlineSweepKey(candidate)
 }
 
 // ReapLegacyLeaseMetaOnce drains orphaned pre-U-7 assignment lease metadata at
