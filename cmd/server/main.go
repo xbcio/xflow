@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/backend/providers/distributed"
+	"github.com/xbcio/xflow/cmd/internal/xbcinfra"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
 	// Blank import: the server compiles, validates and (A6) describes workflows
@@ -201,6 +202,16 @@ type serverConfig struct {
 	// audit projection). Empty keeps the in-memory store + in-memory audit
 	// (dev / single-process preview only).
 	mysqlDSN string
+	// xbcConfig, when non-empty, names an xbc configuration file that owns
+	// logging, metrics, tracing, and/or the durable database. Each section is
+	// opted in independently; flags that would contradict a configured
+	// section are rejected rather than silently ignored.
+	xbcConfig string
+	// setFlags records the flags the operator supplied, distinguishing an
+	// explicit --trace=disabled (a decision) from the default value (an
+	// absence). It is populated by parseServerConfig and nil for a
+	// serverConfig assembled directly, which treats every flag as default.
+	setFlags map[string]bool
 	// mode selects the runtime posture: "dev" or "production". Production
 	// (the default, fail-closed) requires PrincipalAuthenticator (--auth-tokens-
 	// file), Authorizer, a durable AuditSink (--mysql-dsn), and a running
@@ -295,6 +306,9 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	fs.Float64Var(&cfg.traceRatio, "trace-ratio", 1.0, "Sampling ratio for --trace-sampler=traceidratio, in [0,1]")
 	fs.BoolVar(&cfg.traceBaggage, "trace-baggage", false, "Propagate W3C baggage in addition to tracecontext (opt-in; bound accepted keys)")
 	fs.StringVar(&cfg.mysqlDSN, "mysql-dsn", "", "MySQL DSN for durable execution state + durable SQL audit sink (parseTime=true required). Empty = in-memory store + in-memory audit (dev only)")
+	fs.StringVar(&cfg.xbcConfig, "xbc-config", "",
+		"Path to an xbc configuration file that provides logging, metrics, tracing, and/or the durable database. "+
+			"Sections: log, plugins.metrics, plugins.tracing, plugins.gorm.default; XFLOW_XBC_* environment variables override the file")
 	fs.StringVar(&cfg.mode, "mode", "production", "Runtime posture: dev|production. Production (default, fail-closed) requires --auth-tokens-file + --mysql-dsn + reconciler. Dev allows in-memory audit + single-token with a stderr warning.")
 	if args == nil {
 		args = os.Args[1:]
@@ -302,6 +316,10 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	if err := fs.Parse(args); err != nil {
 		return serverConfig{}, err
 	}
+	cfg.setFlags = make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) {
+		cfg.setFlags[f.Name] = true
+	})
 	if err := applyAPILimitEnv(&cfg.apiLimits, os.LookupEnv); err != nil {
 		return serverConfig{}, err
 	}
@@ -697,9 +715,37 @@ func buildServerOptions(cfg serverConfig, deps serverDeps) []xflowsdk.ServerOpti
 // SIGINT/SIGTERM. A test passes a cancellable ctx so it can drive the same
 // graceful-shutdown path without sending the test binary a real signal.
 func runServer(ctx context.Context, cfg serverConfig) error {
-	logger, err := buildLogger(cfg)
+	infra, err := xbcinfra.Load(cfg.xbcConfig)
 	if err != nil {
 		return err
+	}
+	if err := validateXBCConfig(cfg, infra); err != nil {
+		return err
+	}
+	var logger engine.Logger
+	if infra != nil && infra.HasLog() {
+		// xbc owns the process-wide facade; the engine.Logger adapter writes
+		// through the same backend, so xflow's structured records inherit its
+		// masking, rotation, and level filtering.
+		logger, err = xbcinfra.NewLogger(infra.Log)
+	} else {
+		logger, err = buildLogger(cfg)
+	}
+	if err != nil {
+		return err
+	}
+	if infra != nil && infra.HasLog() {
+		// Flush rotated files and other sink state on every exit path,
+		// including a failed startup after this point.
+		defer func() {
+			if closeErr := xbcinfra.CloseLog(); closeErr != nil {
+				log.Printf("xflow-server: close xbc log: %v", closeErr)
+			}
+		}()
+	}
+	if infra != nil {
+		log.Printf("xflow-server: xbc infrastructure from %q (log=%t metrics=%t tracing=%t gorm=%t)",
+			cfg.xbcConfig, infra.HasLog(), infra.HasMetrics(), infra.HasTracing(), infra.HasGORM())
 	}
 	auth, err := buildAuthenticator(cfg)
 	if err != nil {
@@ -707,19 +753,33 @@ func runServer(ctx context.Context, cfg serverConfig) error {
 	}
 
 	var m *metrics.Metrics
-	if cfg.metricsAddr != "" {
+	switch {
+	case infra != nil && infra.HasMetrics():
+		// The registry is xbc's private one. xflow's collector registers into
+		// it through the standard adapter, and the scrape listener below still
+		// comes from --metrics-addr.
+		if _, m, err = xbcinfra.NewMetrics(infra.Metrics); err != nil {
+			return err
+		}
+	case cfg.metricsAddr != "":
 		m = metrics.New()
 	}
 
-	tracer, shutdownTracing, err := tracing.NewTracerProvider(context.Background(), tracing.ProviderConfig{
-		Mode:        cfg.traceMode,
-		Endpoint:    cfg.traceEndpoint,
-		Insecure:    cfg.traceInsecure,
-		ServiceName: "xflow-server",
-		Sampler:     tracing.SamplerMode(cfg.traceSampler),
-		SampleRatio: cfg.traceRatio,
-		Baggage:     cfg.traceBaggage,
-	})
+	var tracer tracing.Tracer
+	var shutdownTracing func(context.Context)
+	if infra != nil && infra.HasTracing() {
+		tracer, shutdownTracing, err = xbcinfra.NewTracer(infra.Tracing)
+	} else {
+		tracer, shutdownTracing, err = tracing.NewTracerProvider(context.Background(), tracing.ProviderConfig{
+			Mode:        cfg.traceMode,
+			Endpoint:    cfg.traceEndpoint,
+			Insecure:    cfg.traceInsecure,
+			ServiceName: "xflow-server",
+			Sampler:     tracing.SamplerMode(cfg.traceSampler),
+			SampleRatio: cfg.traceRatio,
+			Baggage:     cfg.traceBaggage,
+		})
+	}
 	if err != nil {
 		return fmt.Errorf("tracing: %w", err)
 	}
@@ -792,7 +852,25 @@ func runServer(ctx context.Context, cfg serverConfig) error {
 	var artifactStore *store.ArtifactStore
 	var audit apiserver.AuditSink
 	durableAudit := false
-	if cfg.mysqlDSN != "" {
+	switch {
+	case infra != nil && infra.HasGORM():
+		db, closeDB, err := xbcinfra.OpenDatabase(ctx, infra.GORM)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if closeErr := closeDB(); closeErr != nil {
+				log.Printf("xflow-server: close xbc database: %v", closeErr)
+			}
+		}()
+		p := sqlstore.New(db, sqlstore.WithSupplyEncryption(supplyAtRest))
+		sqlStore = p
+		enrollDB = db
+		artifactStore = store.NewArtifactStore(p.ArtifactObjects(), p.ArtifactIndex())
+		audit = apiserver.NewSQLAuditSink(p)
+		durableAudit = true
+		log.Printf("xflow-server: durable SQL store + audit sink enabled (xbc gorm %s)", infra.GORM.Driver)
+	case cfg.mysqlDSN != "":
 		p, err := mysqlstore.New(cfg.mysqlDSN, mysqlstore.WithSupplyEncryption(supplyAtRest))
 		if err != nil {
 			return fmt.Errorf("open mysql store: %w", err)
@@ -803,9 +881,9 @@ func runServer(ctx context.Context, cfg serverConfig) error {
 		audit = apiserver.NewSQLAuditSink(p)
 		durableAudit = true
 		log.Println("xflow-server: durable SQL store + audit sink enabled (MySQL)")
-	} else {
+	default:
 		audit = apiserver.NewInMemoryAuditSink()
-		log.Println("xflow-server: WARNING --mysql-dsn not set; using in-memory store + in-memory audit (dev only; not production)")
+		log.Println("xflow-server: WARNING neither --mysql-dsn nor --xbc-config plugins.gorm.default is set; using in-memory store + in-memory audit (dev only; not production)")
 	}
 
 	redisConfig, err := buildRedisConfig(cfg)
@@ -922,6 +1000,33 @@ func runServer(ctx context.Context, cfg serverConfig) error {
 
 	// Run starts the reconcile worker along with the transports.
 	return srv.Run(ctx)
+}
+
+// validateXBCConfig rejects a flag that would contradict a capability the xbc
+// file already owns. The alternative -- letting one silently win -- makes a
+// deployment's effective logging, tracing, or database source depend on an
+// order the operator cannot see. Flags that choose a listener (--metrics-addr)
+// are not in conflict: the xbc sections provide the registry, not the socket.
+func validateXBCConfig(cfg serverConfig, infra *xbcinfra.Config) error {
+	if infra == nil {
+		return nil
+	}
+	if infra.HasLog() && cfg.setFlags["log-format"] {
+		return fmt.Errorf("--log-format conflicts with the log section in --xbc-config; configure log.console.format instead")
+	}
+	if infra.HasTracing() {
+		for _, name := range []string{
+			"trace", "trace-endpoint", "trace-insecure", "trace-sampler", "trace-ratio", "trace-baggage",
+		} {
+			if cfg.setFlags[name] {
+				return fmt.Errorf("--%s conflicts with the tracing section in --xbc-config; configure plugins.tracing instead", name)
+			}
+		}
+	}
+	if infra.HasGORM() && cfg.setFlags["mysql-dsn"] {
+		return fmt.Errorf("--mysql-dsn conflicts with plugins.gorm.%s in --xbc-config; keep one database source", xbcinfra.GORMInstance)
+	}
+	return nil
 }
 
 func buildLogger(cfg serverConfig) (engine.Logger, error) {
@@ -1082,9 +1187,9 @@ var productionFlagHint = map[apiserver.ProductionRequirement]string{
 	apiserver.RequirePrincipalAuth:           "--auth-tokens-file",
 	apiserver.RequireMultiTokenPrincipalAuth: "--auth-tokens-file (--api-auth-token is a single shared token and is dev-only)",
 	apiserver.RequireAuthorizer:              "no flag: this binary always wires one, so reaching this is a bug worth reporting",
-	apiserver.RequireAuditSink:               "--mysql-dsn",
-	apiserver.RequireDurableAudit:            "--mysql-dsn (the in-memory sink is dev-only)",
-	apiserver.RequireAuditReconciler:         "--mysql-dsn",
+	apiserver.RequireAuditSink:               "--mysql-dsn or plugins.gorm.default in --xbc-config",
+	apiserver.RequireDurableAudit:            "--mysql-dsn or plugins.gorm.default in --xbc-config (the in-memory sink is dev-only)",
+	apiserver.RequireAuditReconciler:         "--mysql-dsn or plugins.gorm.default in --xbc-config",
 	apiserver.RequireSupplyEncryptionAtRest:  "XFLOW_MASTER_KEY or --master-key-file (generate with: openssl rand -base64 32)",
 }
 
