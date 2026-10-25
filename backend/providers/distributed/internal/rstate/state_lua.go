@@ -748,8 +748,15 @@ return nil
 // Returns 0 (not complete), 1 (success), -1 (failed).
 // The early-return guard checks terminal states AND canceling/timeout to prevent
 // a concurrent completion from overwriting a cancel/timeout already in progress.
+// An absent execution status key also returns 0: it means the execution does not
+// exist (or has expired) even while node keys outlive it, and the final status
+// written below would be a bare key with no deadline_ms beside it (see
+// updateExecutionStatusLua).
 var checkCompletionLua = redis.NewScript(`
 local execStatus = redis.call('GET', KEYS[1])
+if not execStatus then
+    return 0
+end
 if execStatus == 'success' or execStatus == 'failed' or execStatus == 'canceled' or execStatus == 'timeout' or execStatus == 'canceling' then
     return 0
 end
