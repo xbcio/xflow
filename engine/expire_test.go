@@ -1657,6 +1657,76 @@ func TestExpireExecutionLinkReadFailureIsResumable(t *testing.T) {
 	}
 }
 
+// TestExpireExecutionLinkReadFailureDoesNotStopTheOtherChildren pins that a link
+// that cannot be read costs only its own child: the cascade records the failure
+// and goes on to the next sub-workflow node, so a child further down the walk is
+// still stopped by the call that failed. Returning at the first unreadable link
+// would leave that child running with the entry still listed only because of the
+// other one. The one-shot fault fails the first link read, which is the first
+// sub-workflow node in graph order (rig.nodes lists them in that order), so the
+// test follows rig.nodes rather than naming a node. The replay finds the
+// remaining child, acknowledges once, and does not repeat the completion hook.
+func TestExpireExecutionLinkReadFailureDoesNotStopTheOtherChildren(t *testing.T) {
+	ctx := context.Background()
+	def := subWorkflowParentDef()
+	def.Nodes = append(def.Nodes, types.NodeDef{
+		Name:       "sub2",
+		Type:       types.SubWorkflowNodeType,
+		Parameters: map[string]any{"workflow": "child"},
+	})
+	g, err := graph.CompileWithResolver(ctx, def, subWorkflowStubResolver(t))
+	if err != nil {
+		t.Fatalf("CompileWithResolver: %v", err)
+	}
+	rig := newExpireSubWorkflowRigOf(t, g)
+	if len(rig.nodes) != 2 {
+		t.Fatalf("parked nodes = %v, want two", rig.nodes)
+	}
+	unread, other := rig.nodes[0], rig.nodes[1]
+	unreadChild := rig.links[unread].ChildExecutionID
+	otherChild := rig.links[other].ChildExecutionID
+	injected := errors.New("injected: read sub-workflow link failed")
+	rig.state.failLinkRead(injected)
+
+	got, err := rig.eng.ExpireExecution(ctx, rig.parentID)
+	if !errors.Is(err, injected) {
+		t.Fatalf("ExpireExecution() = (%q, %v), want an error wrapping %v", got, err, injected)
+	}
+	child, err := rig.state.GetExecution(ctx, otherChild)
+	if err != nil || child == nil || child.Status != types.ExecutionStatusCanceled {
+		t.Fatalf("child of %q = %+v (err %v), want canceled: an unreadable link must not stop the others", other, child, err)
+	}
+	child, err = rig.state.GetExecution(ctx, unreadChild)
+	if err != nil || child == nil || child.Status != types.ExecutionStatusRunning {
+		t.Fatalf("child of %q = %+v (err %v), want it still running: its link could not be read", unread, child, err)
+	}
+	if n := rig.log.count("ack"); n != 0 {
+		t.Fatalf("acked %d times after an unreadable link, want 0: the entry must stay listed", n)
+	}
+	if got := rig.hooks.completions(); len(got) != 1 {
+		t.Fatalf("completion hooks after the failed call = %v, want exactly one", got)
+	}
+
+	rig.expire(t, rig.parentID, ExpireOutcomeResumed)
+
+	for _, name := range rig.nodes {
+		child, err := rig.state.GetExecution(ctx, rig.links[name].ChildExecutionID)
+		if err != nil || child == nil || child.Status != types.ExecutionStatusCanceled {
+			t.Fatalf("child of %q = %+v (err %v), want canceled after the replay", name, child, err)
+		}
+	}
+	if n := rig.log.count("ack"); n != 1 {
+		t.Fatalf("acked %d times after the replay, want 1", n)
+	}
+	if got := rig.hooks.completions(); len(got) != 1 || got[0] != types.ExecutionStatusTimeout {
+		t.Fatalf("completion hooks after the replay = %v, want still exactly [timeout]", got)
+	}
+	if n := rig.log.count("write:timeout"); n != 1 {
+		t.Fatalf("timeout was written %d times, want once: the replay must not rewrite it", n)
+	}
+	rig.log.requireLast(t, "ack")
+}
+
 // TestExpireExecutionOneFailingChildDoesNotStopTheOthers pins the cascade's
 // join: the children of a parent's sub-workflow nodes are each cancelled even
 // when an earlier one could not be, and the error that comes back names every
