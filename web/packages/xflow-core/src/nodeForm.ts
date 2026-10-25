@@ -185,7 +185,14 @@ export interface NodeFormSchema {
   node_version: number;
   kind: NodeFormKind;
   display_name?: string;
+  /** One-line, author-facing summary of the node (OpenAPI `description`). */
   description?: string;
+  /**
+   * Minimal parameter sets the editor can offer as starting points. Values are
+   * DSL values: a pure expression param carries the bare expression
+   * (`$input.amount >= 100`), never a template. Absent means none declared.
+   */
+  examples?: NodeFormExample[];
   docs?: string;
   capabilities?: string[];
   credentials?: string[];
@@ -216,6 +223,19 @@ export interface NodeFormSchema {
 
 /** NodeFormSchema.source: where a schema came from; absent = server registry. */
 export type NodeFormSource = "runner";
+
+/**
+ * One NodeFormSchema example (OpenAPI `NodeFormExample`): a minimal, valid
+ * parameter set in DSL form.
+ */
+export interface NodeFormExample {
+  /** Short label the editor shows for this example. */
+  name?: string;
+  /** One-line explanation of what the example demonstrates. */
+  description?: string;
+  /** Top-level parameter values, keyed by param name. */
+  params: Record<string, unknown>;
+}
 
 /** Server-side param validation mode (Doc A §2.4, Doc C §1 rule 3). */
 export type ParamValidationMode = "off" | "warn" | "enforce";
