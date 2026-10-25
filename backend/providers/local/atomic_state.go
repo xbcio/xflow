@@ -951,6 +951,7 @@ func (s *memoryState) finishExecutionLocked(id types.ExecutionID, entry *execEnt
 	if status == types.ExecutionStatusFailed && errMsg != "" {
 		entry.snap.Error = errMsg
 	}
+	s.withdrawDeadlineLocked(id, status)
 	s.releaseWorkflowSlotLocked(id)
 	if !entry.closed {
 		entry.closed = true
