@@ -27,6 +27,7 @@ var memoryCapabilities = []statestoretest.Capability{
 	statestoretest.CapabilityDurableSignalDeliverer,
 	statestoretest.CapabilityNodeLeaseRenewer,
 	statestoretest.CapabilityCancelingExecutionLister,
+	statestoretest.CapabilityExecutionDeadlineExpirer,
 	statestoretest.CapabilityBatchOutputReader,
 	statestoretest.CapabilityExecutionInputContextReader,
 	statestoretest.CapabilityExecutionTraceCarrierReader,
