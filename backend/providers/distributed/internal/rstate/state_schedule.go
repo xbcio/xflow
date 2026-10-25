@@ -56,11 +56,11 @@ func (s *Store) CheckCompletion(ctx context.Context, id types.ExecutionID, total
 		// is another terminal transition that never passes through
 		// UpdateExecutionStatus and has to record the marker itself.
 		s.markExecutionTerminalBestEffort(ctx, id, types.ExecutionStatusSuccess)
-		s.releaseWorkflowSlotAfterTerminal(ctx, id, types.ExecutionStatusSuccess)
+		s.afterExecutionTerminal(ctx, id, types.ExecutionStatusSuccess)
 		return true, false, nil
 	case -1:
 		s.markExecutionTerminalBestEffort(ctx, id, types.ExecutionStatusFailed)
-		s.releaseWorkflowSlotAfterTerminal(ctx, id, types.ExecutionStatusFailed)
+		s.afterExecutionTerminal(ctx, id, types.ExecutionStatusFailed)
 		return true, true, nil
 	default:
 		return false, false, nil

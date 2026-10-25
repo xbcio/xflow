@@ -133,6 +133,17 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 		s.ttlMu.Unlock()
 	}
 
+	// The time budget is a retention rule too: the keys have to outlive the
+	// deadline, or the status expires before the expiry that the deadline exists
+	// to trigger can act on it. Applied after the queue wait so it only ever
+	// lengthens, and recorded like the wait so a later writer does not shorten it.
+	if want := retentionPastDeadline(ttl, e.Deadline); want > ttl {
+		ttl = want
+		s.ttlMu.Lock()
+		s.execTTLs[e.ID] = ttl
+		s.ttlMu.Unlock()
+	}
+
 	// Serialize graph for persistence (allows recovery after queue consumer restart).
 	graphJSON, err := json.Marshal(e.Graph)
 	if err != nil {
@@ -208,6 +219,13 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 	pipe.Set(ctx, createdKey, createdAtMs, ttl)
 	pipe.Set(ctx, updatedKey, createdAtMs, ttl)
 	keys = append(keys, createdKey, updatedKey)
+	// The execution's time budget, written only when it has one: an absent key
+	// reads back as a zero Deadline, which is "no budget" (see GetExecution).
+	// Immutable like the identity keys below, so it is written once, here.
+	if !e.Deadline.IsZero() {
+		pipe.Set(ctx, execKey(t, e.ID, "deadline_ms"), e.Deadline.UnixMilli(), ttl)
+		keys = append(keys, execKey(t, e.ID, "deadline_ms"))
+	}
 	// The registration namespace rides with the execution's immutable metadata.
 	// Dispatch reads it back because the queue worker's ctx starts from
 	// context.Background() and names the deployment, not the registration.
@@ -363,9 +381,19 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 		pipe.Expire(ctx, bodyKey, ttl)
 		keys = append(keys, readyKey, bodyKey)
 	}
+	// Register the deadline before the transaction makes the execution visible:
+	// an execution with a deadline and no index entry is one the sweep can never
+	// find. A failure here fails the creation, which nothing has been written for
+	// yet (execution_deadline_index.go has the full argument).
+	if err := s.registerExecutionDeadline(ctx, t, e.ID, e.Deadline, false); err != nil {
+		return err
+	}
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("create execution %q: %w", e.ID, err)
 	}
+	// The deadline just written is remembered so this replica's first getExecTTL
+	// does not read it back; a zero one is remembered too, as "no time budget".
+	s.rememberExecDeadline(e.ID, e.Deadline)
 	if err := s.refreshTransientTTL(ctx, e.ID, keys...); err != nil {
 		return err
 	}
@@ -390,6 +418,7 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 func (s *Store) cleanupCreatedExecution(ctx context.Context, e *engine.ExecutionSnapshot) {
 	s.ttlMu.Lock()
 	delete(s.execTTLs, e.ID)
+	delete(s.execDeadlines, e.ID)
 	s.ttlMu.Unlock()
 
 	t := namespace.FromContext(ctx)
@@ -521,9 +550,12 @@ func (s *Store) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID,
 		// clock for the inspect payload (§6.8 duration = updated − created).
 		s.touchExecutionUpdatedAt(ctx, id)
 	}
-	// Clean up timeout ZSET entries when execution is canceled.
+	// Clean up timeout ZSET entries when execution is canceled or timed out.
 	if applied == 1 && status == types.ExecutionStatusCanceled {
 		s.cleanupOnCancel(ctx, id)
+	}
+	if applied == 1 && status == types.ExecutionStatusTimeout {
+		s.cleanupOnTimeout(ctx, id)
 	}
 	if applied == 1 && types.IsTerminalExecutionStatus(status) {
 		if err := s.shortenTransientCompletionTTL(ctx, id, keys...); err != nil {
@@ -545,7 +577,7 @@ func (s *Store) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID,
 		// never before: a slot freed while the execution is still winding down
 		// would admit a replacement that overlaps it, which is exactly what the
 		// limit exists to prevent.
-		s.releaseWorkflowSlotAfterTerminal(ctx, id, status)
+		s.afterExecutionTerminal(ctx, id, status)
 		// The execution can no longer be stuck in canceling, so its registration
 		// is retired. Best-effort: a leftover member is repaired by the next
 		// ListCancelingExecutions that reads it (canceling_index.go).
@@ -1094,6 +1126,7 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 	workflowVersionCmd := pipe.Get(ctx, execKey(t, id, "workflow_version"))
 	createdAtCmd := pipe.Get(ctx, execKey(t, id, "created_at_ms"))
 	updatedAtCmd := pipe.Get(ctx, execKey(t, id, "updated_at_ms"))
+	deadlineCmd := pipe.Get(ctx, execKey(t, id, "deadline_ms"))
 	namespaceCmd := pipe.Get(ctx, execKey(t, id, "namespace"))
 	// Exec surfaces the first command error, and redis.Nil is the expected answer
 	// for most of these keys. The per-command results below are authoritative.
@@ -1239,6 +1272,15 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 	} else if err != redis.Nil {
 		return nil, fmt.Errorf("get execution updated_at %q: %w", id, err)
 	}
+	// The time budget's absolute deadline. Absent when the execution has none --
+	// including every execution created before settings.timeout existed -- which
+	// reads back as a zero time, i.e. "no budget".
+	var deadline time.Time
+	if raw, err := deadlineCmd.Int64(); err == nil {
+		deadline = time.UnixMilli(raw).UTC()
+	} else if err != redis.Nil {
+		return nil, fmt.Errorf("get execution deadline %q: %w", id, err)
+	}
 	// The registration namespace; absent on executions created before it was
 	// persisted, which readers must treat as "fall back to the ctx namespace".
 	var namespaceVal string
@@ -1258,6 +1300,7 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 		WorkflowVersion: workflowVersion,
 		CreatedAt:       createdAt,
 		UpdatedAt:       updatedAt,
+		Deadline:        deadline,
 		TestRun:         testRun,
 		TraceID:         traceID,
 		SpanID:          spanID,
