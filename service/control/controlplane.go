@@ -985,6 +985,21 @@ func (cp *ControlPlane) RunnerDirectory() RunnerDirectory {
 	return cp.runners
 }
 
+// RunnerDescriptorDirectory exposes the descriptor capability of the RAW runner
+// directory for management projections. RunnerDirectory() may return a
+// metrics-decorated facade whose embedded interface carries only the
+// RunnerDirectory surface, so asserting the capability there would silently
+// fail whenever metrics are enabled; LiveRunnerNodeTypes reads cp.runners for
+// the same reason. Nil means the configured directory does not record
+// descriptors (and therefore has no pool attribution to project).
+func (cp *ControlPlane) RunnerDescriptorDirectory() RunnerDescriptorDirectory {
+	dir, ok := cp.runners.(RunnerDescriptorDirectory)
+	if !ok {
+		return nil
+	}
+	return dir
+}
+
 // Backend exposes the backend provider for management modules that need a
 // capability of the StateStore beyond the engine facade — e.g. the
 // DeadLetterStore capability for the dead-letter list/replay management API.
