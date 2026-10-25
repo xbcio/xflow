@@ -389,6 +389,13 @@ func (s *Store) SeedExecution(ctx context.Context, req engine.SeedExecutionReque
 	// must be readable from the instant the Lua makes the execution leasable --
 	// and it stays outside the Lua so that script's key and argument positions
 	// do not move.
+	//
+	// The deadline is registered in the namespace's index first, and a failure
+	// fails the seed: an execution with a deadline and no entry is one the sweep
+	// can never find (execution_deadline_index.go).
+	if err := s.registerExecutionDeadline(ctx, t, execID, req.Execution.Deadline, false); err != nil {
+		return engine.SeedExecutionResponse{}, err
+	}
 	if req.Execution.ParentID != "" || req.Execution.RerunFrom != "" ||
 		req.Execution.ParentNode != "" || req.Execution.Depth > 0 ||
 		req.Execution.WorkflowID != "" || req.Execution.WorkflowVersion != "" ||
@@ -579,7 +586,7 @@ func (s *Store) SeedExecution(ctx context.Context, req engine.SeedExecutionReque
 
 	s.markOutboxReadyIndex(ctx, t, execID)
 	s.markExecutionTerminalBestEffort(ctx, execID, finalStatus)
-	s.releaseWorkflowSlotAfterTerminal(ctx, execID, finalStatus)
+	s.afterExecutionTerminal(ctx, execID, finalStatus)
 	if req.Admission != nil {
 		s.completePromotions(ctx, t, concTag, admit.promoted)
 	}

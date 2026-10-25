@@ -360,7 +360,7 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 		s.shortenTransientGroupCompletionTTLBestEffort(ctx, req.ExecutionID)
 		s.markExecutionTerminalBestEffort(ctx, req.ExecutionID, out.ExecutionStatus)
 		s.evictExecutionCaches(req.ExecutionID)
-		s.releaseWorkflowSlotAfterTerminal(ctx, req.ExecutionID, out.ExecutionStatus)
+		s.afterExecutionTerminal(ctx, req.ExecutionID, out.ExecutionStatus)
 	}
 	// isTransient, not s.transient: req.Output is the node's payload, so a
 	// per-workflow transient execution must skip this even when the control

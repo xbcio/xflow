@@ -310,6 +310,19 @@ func cancelingIndexKey(t namespace.Namespace) string {
 	return fmt.Sprintf("xflow:ns:%s:cancel:index", t)
 }
 
+// executionDeadlineIndexKey is the namespace-scoped ZSET of executions that carry
+// a settings.timeout deadline: member = execution ID, score = the deadline in
+// unix milliseconds (the same value deadline_ms stores).
+//
+// Like cancelingIndexKey it carries no execution hash tag, so it can never be a
+// KEYS entry of a per-execution Lua script: it is registered by an ordinary ZADD
+// before the execution is written and withdrawn by an ordinary ZREM after a
+// terminal write (execution_deadline_index.go has the full argument). The name
+// does not match the `exec:{*}:` SCAN pattern.
+func executionDeadlineIndexKey(t namespace.Namespace) string {
+	return fmt.Sprintf("xflow:ns:%s:exec_deadlines", t)
+}
+
 // timeoutZSetKey is the execution-scoped timeout index keyed by the node
 // timeout deadline. It shares the execution hash tag ({id}) so that
 // suspend/deliver/resume state and the timeout index can be updated in one

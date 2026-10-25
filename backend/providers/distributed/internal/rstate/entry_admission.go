@@ -413,8 +413,16 @@ func (s *Store) seedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 	// replica reads it back. SetNX for the same reason as the namespace: a
 	// duplicate admission must keep the deadline of the original, not push it out.
 	// A graph with no budget writes nothing, which reads back as "no budget".
+	//
+	// The index entry goes in first and a failure fails the admission: an
+	// execution with a deadline and no entry is one the sweep can never find
+	// (execution_deadline_index.go). NX keeps a redelivered admission's original
+	// score, matching the SetNX below.
 	if req.Graph != nil && req.Graph.Timeout() > 0 {
 		deadlineMs := nowMs + req.Graph.Timeout().Milliseconds()
+		if err := s.registerExecutionDeadline(ctx, t, execID, time.UnixMilli(deadlineMs), true); err != nil {
+			return engine.SeedExecutionFromEntryResponse{}, err
+		}
 		if err := s.rdb.SetNX(ctx, execKey(t, execID, "deadline_ms"), deadlineMs, ttl).Err(); err != nil {
 			return engine.SeedExecutionFromEntryResponse{}, fmt.Errorf("persist deadline for %q: %w", execID, err)
 		}
@@ -636,7 +644,7 @@ func (s *Store) seedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 		// fully resolved by the admission itself; record the terminal marker for
 		// the same reason the commit paths do.
 		s.markExecutionTerminalBestEffort(ctx, execID, finalStatus)
-		s.releaseWorkflowSlotAfterTerminal(ctx, execID, finalStatus)
+		s.afterExecutionTerminal(ctx, execID, finalStatus)
 		s.projectSeededExecution(ctx, execID, finalStatus, req)
 		resp := engine.SeedExecutionFromEntryResponse{
 			State:       engine.AdmissionStateAccepted,

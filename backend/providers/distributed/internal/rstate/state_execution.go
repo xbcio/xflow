@@ -370,6 +370,13 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 		pipe.Expire(ctx, bodyKey, ttl)
 		keys = append(keys, readyKey, bodyKey)
 	}
+	// Register the deadline before the transaction makes the execution visible:
+	// an execution with a deadline and no index entry is one the sweep can never
+	// find. A failure here fails the creation, which nothing has been written for
+	// yet (execution_deadline_index.go has the full argument).
+	if err := s.registerExecutionDeadline(ctx, t, e.ID, e.Deadline, false); err != nil {
+		return err
+	}
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("create execution %q: %w", e.ID, err)
 	}
@@ -552,7 +559,7 @@ func (s *Store) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID,
 		// never before: a slot freed while the execution is still winding down
 		// would admit a replacement that overlaps it, which is exactly what the
 		// limit exists to prevent.
-		s.releaseWorkflowSlotAfterTerminal(ctx, id, status)
+		s.afterExecutionTerminal(ctx, id, status)
 		// The execution can no longer be stuck in canceling, so its registration
 		// is retired. Best-effort: a leftover member is repaired by the next
 		// ListCancelingExecutions that reads it (canceling_index.go).
