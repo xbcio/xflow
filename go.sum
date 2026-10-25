@@ -96,6 +96,14 @@ github.com/ledongthuc/pdf v0.0.0-20220302134840-0c2507a12d80 h1:6Yzfa6GP0rIo/kUL
 github.com/ledongthuc/pdf v0.0.0-20220302134840-0c2507a12d80/go.mod h1:imJHygn/1yfhB7XSJJKlFZKl/J+dCPAknuiaGOshXAs=
 github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 h1:C3w9PqII01/Oq1c1nUAm88MOHcQC9l5mIlSMApZMrHA=
 github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822/go.mod h1:+n7T8mK8HuQTcFwEeznm/DIxMOiR9yIdICNftLE1DvQ=
+github.com/ncruces/go-sqlite3 v0.35.6 h1:0JGlMne89YzKNP2CJBuiH21EEzSQNuB7pfvCbKBn0Jg=
+github.com/ncruces/go-sqlite3 v0.35.6/go.mod h1:6MfWBOFbHJVSJxmTCIUKCJdLl4TKkgO895RHerlDVo8=
+github.com/ncruces/go-sqlite3-wasm/v6 v6.3.35304 h1:dBSZlcEFdtBMvNRg34y50mConBPO/petSddSwGQVlSI=
+github.com/ncruces/go-sqlite3-wasm/v6 v6.3.35304/go.mod h1:YvoJzbJpX6phd3BGdtiXu2NuD5RX6G8zsUdzt47GgOY=
+github.com/ncruces/go-sqlite3/gormlite v0.34.0 h1:QLlOy/i7OabsFUQ+d5KyXmq2hw9sMh/CRW435+eQMRY=
+github.com/ncruces/go-sqlite3/gormlite v0.34.0/go.mod h1:CMv+6YhqLmPBXYACiQtrWA0q/JLIMTKB4E65SUfLgF0=
+github.com/ncruces/julianday v1.0.0 h1:fH0OKwa7NWvniGQtxdJRxAgkBMolni2BjDHaWTxqt7M=
+github.com/ncruces/julianday v1.0.0/go.mod h1:Dusn2KvZrrovOMJuOt0TNXL6tB7U2E8kvza5fFc9G7g=
 github.com/oasdiff/yaml v0.1.1 h1:6nHx+pn9gBRM6YpBlFZFQGCCd1nuvqOBtTD3KKTgGxY=
 github.com/oasdiff/yaml v0.1.1/go.mod h1:EYJNoyktvWMJ0Hmhx+6qTaqMOsalUaRGT8Sj1hNcegU=
 github.com/oasdiff/yaml3 v0.0.14 h1:aLJee3hxBK2H5wdXd9iPcIXb93Nty1Ge0pT171eHtkw=

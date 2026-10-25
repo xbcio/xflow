@@ -98,6 +98,60 @@ func (b *jsonBytes) Scan(src any) error {
 	return nil
 }
 
+// aggregateTime scans the result of an aggregate over a time column, such as
+// MIN(created_at). MySQL keeps the column type through the aggregate and the
+// driver hands back a time.Time, but SQLite's aggregates carry no declared
+// type, so the same value arrives as the text the column was stored as.
+// Both shapes scan to the same instant; NULL (no rows) scans to the zero time.
+type aggregateTime struct {
+	time.Time
+}
+
+// aggregateTimeLayouts are the SQL datetime text forms accepted, all read as
+// UTC when they carry no zone -- the zone SQLite's date functions assume.
+var aggregateTimeLayouts = []string{
+	"2006-01-02 15:04:05.999999999Z07:00",
+	"2006-01-02 15:04:05.999999999",
+	time.RFC3339Nano,
+	"2006-01-02T15:04:05.999999999",
+}
+
+// Value lets GORM treat aggregateTime as a scalar column; it is only ever
+// scanned, but GORM's schema parser requires both halves.
+func (t aggregateTime) Value() (driver.Value, error) {
+	if t.IsZero() {
+		return nil, nil
+	}
+	return t.Time, nil
+}
+
+func (t *aggregateTime) Scan(src any) error {
+	switch v := src.(type) {
+	case nil:
+		t.Time = time.Time{}
+		return nil
+	case time.Time:
+		t.Time = v
+		return nil
+	case string:
+		return t.parse(v)
+	case []byte:
+		return t.parse(string(v))
+	default:
+		return fmt.Errorf("sqlstore: cannot scan %T into aggregateTime", src)
+	}
+}
+
+func (t *aggregateTime) parse(s string) error {
+	for _, layout := range aggregateTimeLayouts {
+		if v, err := time.ParseInLocation(layout, s, time.UTC); err == nil {
+			t.Time = v
+			return nil
+		}
+	}
+	return fmt.Errorf("sqlstore: cannot parse %q as an aggregate time", s)
+}
+
 // dbSupply is the GORM persistence type for store.SupplyResource.
 type dbSupply struct {
 	ID          uint64     `gorm:"column:id;primaryKey;autoIncrement"`

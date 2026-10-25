@@ -345,8 +345,8 @@ func (r *auditRepo) createOutcomeIfAbsent(ctx context.Context, d *dbAuditEvent) 
 // unbounded Indeterminate backlog.
 func (r *auditRepo) CountUnreconciledAdmissions(ctx context.Context, before time.Time) (int, time.Time, error) {
 	type result struct {
-		Cnt    int       `gorm:"column:cnt"`
-		Oldest time.Time `gorm:"column:oldest"`
+		Cnt    int           `gorm:"column:cnt"`
+		Oldest aggregateTime `gorm:"column:oldest"`
 	}
 	var res result
 	err := r.db.WithContext(ctx).Raw(`
@@ -361,7 +361,7 @@ WHERE a.phase = ? AND a.outcome = ? AND a.created_at < ?
 	if err := wrapDBErr("count unreconciled admissions", err); err != nil {
 		return 0, time.Time{}, err
 	}
-	return res.Cnt, res.Oldest, nil
+	return res.Cnt, res.Oldest.Time, nil
 }
 
 // CountUnreconciledAdmissionsIn is CountUnreconciledAdmissions restricted to
@@ -374,8 +374,8 @@ func (r *auditRepo) CountUnreconciledAdmissionsIn(ctx context.Context, owned []n
 		return 0, time.Time{}, nil
 	}
 	type result struct {
-		Cnt    int       `gorm:"column:cnt"`
-		Oldest time.Time `gorm:"column:oldest"`
+		Cnt    int           `gorm:"column:cnt"`
+		Oldest aggregateTime `gorm:"column:oldest"`
 	}
 	var res result
 	err := r.db.WithContext(ctx).Raw(`
@@ -391,5 +391,5 @@ WHERE a.phase = ? AND a.outcome = ? AND a.created_at < ?
 	if err := wrapDBErr("count unreconciled admissions in scope", err); err != nil {
 		return 0, time.Time{}, err
 	}
-	return res.Cnt, res.Oldest, nil
+	return res.Cnt, res.Oldest.Time, nil
 }

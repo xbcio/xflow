@@ -27,6 +27,8 @@ require (
 require (
 	github.com/getkin/kin-openapi v0.142.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
+	github.com/ncruces/go-sqlite3 v0.35.6
+	github.com/ncruces/go-sqlite3/gormlite v0.34.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
 	github.com/prometheus/common v0.66.1
@@ -44,6 +46,8 @@ require (
 	github.com/gobwas/httphead v0.1.0 // indirect
 	github.com/gobwas/pool v0.2.1 // indirect
 	github.com/gobwas/ws v1.4.0 // indirect
+	github.com/ncruces/go-sqlite3-wasm/v6 v6.3.35304 // indirect
+	github.com/ncruces/julianday v1.0.0 // indirect
 )
 
 require (

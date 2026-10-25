@@ -8,6 +8,7 @@ import (
 
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
+	"gorm.io/gorm/schema"
 
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/store/objectstore"
@@ -212,5 +213,31 @@ var autoMigrateModels = []any{
 // AutoMigrate creates or updates tables. Use only for development/testing;
 // production schema is managed via db/xflow_schema.sql.
 func AutoMigrate(db *gorm.DB) error {
+	return AutoMigrateWith(db, nil)
+}
+
+// AutoMigrateWith is AutoMigrate with a per-model schema preparation hook.
+//
+// Each model's GORM schema is parsed and handed to prepare (when non-nil)
+// before any DDL is generated. A dialect entry point uses this to rewrite
+// annotations that only its own database understands -- SQLite, for example,
+// accepts neither MySQL's CHARACTER SET clauses nor its collation names in a
+// column type -- without teaching this dialect-agnostic package about that
+// dialect. GORM caches parsed schemas on the *gorm.Config the connection was
+// opened with, so the mutation is visible to the migration that follows and to
+// every connection sharing that Config; a dialect entry point that rewrites
+// types must open on a Config of its own (sqlitestore.New does).
+func AutoMigrateWith(db *gorm.DB, prepare func(*schema.Schema) error) error {
+	if prepare != nil {
+		for _, model := range autoMigrateModels {
+			stmt := &gorm.Statement{DB: db}
+			if err := stmt.Parse(model); err != nil {
+				return fmt.Errorf("parse schema for %T: %w", model, err)
+			}
+			if err := prepare(stmt.Schema); err != nil {
+				return fmt.Errorf("prepare schema for %T: %w", model, err)
+			}
+		}
+	}
 	return db.AutoMigrate(autoMigrateModels...)
 }
