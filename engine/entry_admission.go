@@ -117,11 +117,16 @@ type SeedExecutionFromEntryRequest struct {
 	WorkflowVersion string
 	EntryUnitID     string
 	EntryUnitIdx    int
-	Graph           *graph.Graph
-	Outcome         GroupOutcome
-	Exits           []BoundaryExit
-	Error           string
-	ResultHash      ResultHash
+	// TriggerKind names the trigger node type that delivered this entry
+	// activation (types.TriggerKind* constants). The control plane derives it
+	// from the authoritative graph; it is never taken from the runner body.
+	// Empty means UNKNOWN and is stored as such rather than defaulted.
+	TriggerKind string
+	Graph       *graph.Graph
+	Outcome     GroupOutcome
+	Exits       []BoundaryExit
+	Error       string
+	ResultHash  ResultHash
 	// Downstream arrivals to schedule after the entry unit is admitted.
 	Downstream []DownstreamArrival
 	// Params for the created execution (optional metadata).

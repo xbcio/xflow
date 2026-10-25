@@ -327,10 +327,11 @@ func (e *Engine) Submit(ctx context.Context, g *graph.Graph, params map[string]a
 	}
 	id := start.id
 	snap := &ExecutionSnapshot{
-		ID:     id,
-		Graph:  g,
-		Status: types.ExecutionStatusRunning,
-		Params: cloneMap(params),
+		ID:          id,
+		Graph:       g,
+		Status:      types.ExecutionStatusRunning,
+		Params:      cloneMap(params),
+		TriggerKind: types.TriggerKindAPI,
 	}
 	attachSubmissionMetadata(ctx, snap)
 	if len(runtime) > 0 {
@@ -368,10 +369,11 @@ func (e *Engine) Invoke(ctx context.Context, g *graph.Graph, entryName string, p
 	}
 	id := start.id
 	snap := &ExecutionSnapshot{
-		ID:     id,
-		Graph:  g,
-		Status: types.ExecutionStatusRunning,
-		Params: cloneMap(params),
+		ID:          id,
+		Graph:       g,
+		Status:      types.ExecutionStatusRunning,
+		Params:      cloneMap(params),
+		TriggerKind: types.TriggerKindAPI,
 	}
 	attachSubmissionMetadata(ctx, snap)
 	if len(runtime) > 0 {

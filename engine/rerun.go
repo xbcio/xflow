@@ -200,6 +200,9 @@ func (e *Engine) seedRerun(ctx context.Context, seeder ExecutionSeeder, req Reru
 		// rerun traceable after the parent's keys expire.
 		ParentID:  req.ExecutionID,
 		RerunFrom: req.FromNode,
+		// Recorded explicitly rather than inferred from ParentID: a rerun is a
+		// different act from a sub-workflow child, and both carry a parent.
+		TriggerKind: types.TriggerKindRerun,
 	}
 	attachSubmissionMetadata(ctx, snap)
 	// A rerun resolves its graph from the parent's stored definition, so the

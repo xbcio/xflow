@@ -353,6 +353,12 @@ type ExecutionSnapshot struct {
 	// Empty on snapshots written before this field existed; readers must fall
 	// back to the ctx namespace in that case.
 	Namespace string `json:"namespace,omitempty"`
+	// TriggerKind names the path that started this execution (types.TriggerKind*
+	// constants). It is server-derived at creation; an entry-unit trigger
+	// stamps the node type that delivered the activation. Empty means UNKNOWN
+	// (a snapshot written before the field existed, or a creation path that had
+	// no source to record), never a default source.
+	TriggerKind string `json:"trigger_kind,omitempty"`
 	// Error is the execution-level failure reason recorded by
 	// UpdateExecutionStatus. It is the ONLY carrier when no node holds the
 	// reason: a cyclic execution that trips MaxAutoDepth fails with every node
@@ -368,6 +374,30 @@ type ExecutionSnapshot struct {
 	// when this is true. Backends must persist it with the snapshot, since the
 	// gate is evaluated at dispatch time, possibly on another replica.
 	TestRun bool `json:"test_run,omitempty"`
+}
+
+// ExecutionTriggerKind resolves the trigger kind to persist for a new
+// execution: the snapshot's explicit value when a creation path recorded one,
+// otherwise the lineage the snapshot carries. Both backends consult this one
+// function, so "what started this execution" cannot differ between them.
+//
+// A direct creation is "api" because Submit/Invoke and the execute face are the
+// same act in-process. A rerun is checked before a sub-workflow because a rerun
+// carries both ParentID and RerunFrom, and the rerun is the more specific fact.
+func ExecutionTriggerKind(s *ExecutionSnapshot) string {
+	if s == nil {
+		return ""
+	}
+	if s.TriggerKind != "" {
+		return s.TriggerKind
+	}
+	if s.RerunFrom != "" {
+		return types.TriggerKindRerun
+	}
+	if s.ParentID != "" {
+		return types.TriggerKindSubWorkflow
+	}
+	return types.TriggerKindAPI
 }
 
 // TerminalExecutionError picks the execution-level failure reason to persist

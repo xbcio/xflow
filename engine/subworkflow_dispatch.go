@@ -495,6 +495,9 @@ func (e *Engine) startSubWorkflowChild(ctx context.Context, task *Task, g *graph
 		ParentID:   task.ExecutionID,
 		ParentNode: task.NodeName,
 		Depth:      child.Depth,
+		// Recorded explicitly: the child was started by a subworkflow node, not
+		// by the execute face.
+		TriggerKind: types.TriggerKindSubWorkflow,
 		// The child is registered under the same namespace as its parent: the
 		// binding that created it was resolved in that namespace.
 		Namespace: snap.Namespace,
