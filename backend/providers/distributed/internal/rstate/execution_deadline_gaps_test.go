@@ -17,11 +17,38 @@ import (
 // grace to within a couple of minutes, in both directions. requireOutlivesDeadline
 // only bounds it from below, which a TTL that overshoots by hours or days would
 // also satisfy.
+//
+// The grace is written as a literal hour on purpose. Every other helper derives
+// its expectation from deadlineGrace, so a change to that constant moves the
+// expectation with it and nothing notices; this one is the fixed reference.
 func requireTTLNearDeadline(t *testing.T, got time.Duration, deadline time.Time, what string) {
 	t.Helper()
-	want := time.Until(deadline) + deadlineGrace
+	want := time.Until(deadline) + time.Hour
 	if diff := got - want; diff < -2*time.Minute || diff > 2*time.Minute {
-		t.Fatalf("%s TTL = %v, want about %v (the deadline plus the %v grace)", what, got, want, deadlineGrace)
+		t.Fatalf("%s TTL = %v, want about %v (the deadline plus one hour of grace)", what, got, want)
+	}
+}
+
+// TestRetentionPastDeadlineAddsOneHourOfGrace pins the grace itself, against a
+// literal rather than the constant: a deadline past the retention gets the time
+// left to it plus an hour, and one already behind us is still covered for the
+// part of the hour that remains.
+func TestRetentionPastDeadlineAddsOneHourOfGrace(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name     string
+		deadline time.Time
+		want     time.Duration
+	}{
+		{"deadline ahead", now.Add(3 * time.Hour), 4 * time.Hour},
+		{"deadline just passed", now.Add(-10 * time.Minute), 50 * time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := retentionPastDeadline(time.Minute, tc.deadline)
+			if diff := got - tc.want; diff < -time.Minute || diff > time.Minute {
+				t.Fatalf("retentionPastDeadline(1m) = %v, want about %v", got, tc.want)
+			}
+		})
 	}
 }
 

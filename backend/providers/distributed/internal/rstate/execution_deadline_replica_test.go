@@ -235,31 +235,42 @@ func TestPausedThenResumedExecutionStillTimesOut(t *testing.T) {
 	requireListed(t, due, id)
 }
 
-// deadlineReadHook counts GETs of any execution's deadline_ms key and can fail
-// the first few of them. Counting at the client is the point: getExecTTL sits on
-// the hot path of every state write, and an extra Redis round trip per call
-// would show up here and nowhere else.
+// deadlineReadHook counts reads of any execution's deadline_ms key and can fail
+// the first few of them. A read is either a plain GET or, as getExecTTL does it,
+// a transaction that carries that GET next to an EXISTS of the status key.
+// Counting at the client is the point: getExecTTL sits on the hot path of every
+// state write, and an extra Redis round trip per call would show up here and
+// nowhere else.
 type deadlineReadHook struct {
 	reads    atomic.Int64
 	failures int64 // the first N reads fail with an injected error
+}
+
+func isDeadlineGet(cmd redis.Cmder) bool {
+	args := cmd.Args()
+	return cmd.Name() == "get" && len(args) > 1 && strings.HasSuffix(fmt.Sprint(args[1]), ":deadline_ms")
 }
 
 func (h *deadlineReadHook) DialHook(next redis.DialHook) redis.DialHook { return next }
 
 func (h *deadlineReadHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 	return func(ctx context.Context, cmd redis.Cmder) error {
-		args := cmd.Args()
-		if cmd.Name() == "get" && len(args) > 1 && strings.HasSuffix(fmt.Sprint(args[1]), ":deadline_ms") {
-			if h.reads.Add(1) <= h.failures {
-				return errors.New("injected deadline read failure")
-			}
+		if isDeadlineGet(cmd) && h.reads.Add(1) <= h.failures {
+			return errors.New("injected deadline read failure")
 		}
 		return next(ctx, cmd)
 	}
 }
 
 func (h *deadlineReadHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
-	return next
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		for _, cmd := range cmds {
+			if isDeadlineGet(cmd) && h.reads.Add(1) <= h.failures {
+				return errors.New("injected deadline read failure")
+			}
+		}
+		return next(ctx, cmds)
+	}
 }
 
 // TestGetExecTTLReadsTheDeadlineOncePerReplica pins the cost of folding the
@@ -341,12 +352,32 @@ func TestCreationPathsRememberTheDeadline(t *testing.T) {
 			hook := &deadlineReadHook{}
 			rdb.AddHook(hook)
 			id := tc.create(t, state)
-			hook.reads.Store(0)
+			// Reads made while the execution is being created count too: a creation
+			// path that sizes its retention through getExecTTL reads deadline_ms
+			// before it has written it, which is a wasted round trip at best and
+			// the wrong answer at worst.
+			if got := hook.reads.Load(); got != 0 {
+				t.Fatalf("creating the execution read deadline_ms %d times, want 0: the creation path holds the deadline it writes", got)
+			}
 			for i := 0; i < 5; i++ {
 				state.getExecTTL(ctx, id)
 			}
 			if got := hook.reads.Load(); got != 0 {
 				t.Fatalf("the creating replica read deadline_ms %d times after creation, want 0: it already knows the deadline", got)
+			}
+
+			// What the replica remembers is what was stored, not merely something.
+			memo := requireMemo(t, state, id, true)
+			stored, err := rdb.Get(ctx, execKey(namespace.Default, id, "deadline_ms")).Int64()
+			switch {
+			case errors.Is(err, redis.Nil):
+				if !memo.IsZero() {
+					t.Fatalf("no deadline_ms was stored but the replica remembers %v, want the zero deadline", memo)
+				}
+			case err != nil:
+				t.Fatalf("read the stored deadline: %v", err)
+			case memo.UnixMilli() != stored:
+				t.Fatalf("the replica remembers deadline %d ms, want the stored %d ms", memo.UnixMilli(), stored)
 			}
 		})
 	}

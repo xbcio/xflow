@@ -254,22 +254,30 @@ return nodeName
 //   - canceling blocks any non-canceled write, so a concurrent completeExecution
 //     (→ success/failed) cannot stomp the in-flight cancellation.
 //   - canceled→canceled and running→canceling/canceled proceed normally.
+//   - An absent status key means the execution does not exist (or has expired),
+//     and nothing is written. A bare status key with none of the keys a creation
+//     writes beside it would read as "no time budget" to executionDeadline, and
+//     a creation that lands later would inherit a replica's memo of that. This
+//     matches the local backend, which ignores a status write for a missing
+//     execution.
 //
 // KEYS[1] = status key, KEYS[2] = error key (optional; omitted when errMsg is empty)
 // ARGV[1] = new status, ARGV[2] = error message ("" = none), ARGV[3] = ttl seconds
-// Returns 1 (applied) or 0 (skipped: fenced by a terminal/canceling status).
+// Returns 1 (applied) or 0 (skipped: absent execution, or fenced by a
+// terminal/canceling status).
 var updateExecutionStatusLua = redis.NewScript(`
 local terminal = function(v)
     return v == 'success' or v == 'failed' or v == 'canceled' or v == 'timeout'
 end
 local current = redis.call('GET', KEYS[1])
-if current then
-    if terminal(current) then
-        return 0
-    end
-    if current == 'canceling' and ARGV[1] ~= 'canceled' then
-        return 0
-    end
+if not current then
+    return 0
+end
+if terminal(current) then
+    return 0
+end
+if current == 'canceling' and ARGV[1] ~= 'canceled' then
+    return 0
 end
 local ttl = tonumber(ARGV[3])
 redis.call('SET', KEYS[1], ARGV[1], 'EX', ttl)
@@ -740,8 +748,15 @@ return nil
 // Returns 0 (not complete), 1 (success), -1 (failed).
 // The early-return guard checks terminal states AND canceling/timeout to prevent
 // a concurrent completion from overwriting a cancel/timeout already in progress.
+// An absent execution status key also returns 0: it means the execution does not
+// exist (or has expired) even while node keys outlive it, and the final status
+// written below would be a bare key with no deadline_ms beside it (see
+// updateExecutionStatusLua).
 var checkCompletionLua = redis.NewScript(`
 local execStatus = redis.call('GET', KEYS[1])
+if not execStatus then
+    return 0
+end
 if execStatus == 'success' or execStatus == 'failed' or execStatus == 'canceled' or execStatus == 'timeout' or execStatus == 'canceling' then
     return 0
 end
