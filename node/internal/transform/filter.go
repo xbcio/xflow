@@ -26,7 +26,15 @@ func (n *FilterNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.transform.filter",
 		DisplayName: "Filter",
+		Description: "按表达式筛选数组元素，只保留条件为真的项。",
 		Category:    "transform",
+		Examples: []types.DescriptorExample{{
+			Name: "筛选大额订单",
+			Params: map[string]any{
+				"items":     "$input.orders",
+				"condition": "$item.amount >= 100",
+			},
+		}},
 		CardSummary: []string{"items", "condition"},
 		Params: []types.ParamSpec{
 			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to filter",

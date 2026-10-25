@@ -195,7 +195,17 @@ func (n *Node) Descriptor() types.Descriptor {
 		Type:        "xflow.trigger.redis",
 		Kind:        types.NodeKindTrigger,
 		DisplayName: "Redis Trigger",
+		Description: "消费 Redis Stream 或订阅 Pub/Sub 频道并触发工作流。",
 		Category:    "trigger",
+		Examples: []types.DescriptorExample{{
+			Name: "消费订单流",
+			Params: map[string]any{
+				"addr":   "127.0.0.1:6379",
+				"mode":   "stream",
+				"stream": "orders",
+				"group":  "xflow-orders",
+			},
+		}},
 		CardSummary: []string{"addr", "stream+channel"},
 		Params: []types.ParamSpec{
 			{Name: "addr", DisplayName: "Address", Type: types.ParamString, Required: true, Description: "Redis server address, host:port. Credentials are not params: attach a supply with username/password to the node.",

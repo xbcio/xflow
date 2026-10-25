@@ -308,7 +308,16 @@ func (n *Node) Descriptor() types.Descriptor {
 		Type:        "xflow.trigger.kafka",
 		Kind:        types.NodeKindTrigger,
 		DisplayName: "Kafka Trigger",
+		Description: "消费 Kafka 主题消息并触发工作流，支持分区批量聚合。",
 		Category:    "trigger",
+		Examples: []types.DescriptorExample{{
+			Name: "消费订单主题",
+			Params: map[string]any{
+				"brokers": []string{"127.0.0.1:9092"},
+				"topic":   "orders",
+				"group":   "xflow-orders",
+			},
+		}},
 		CardSummary: []string{"brokers", "topic+group"},
 		Params: []types.ParamSpec{
 			{Name: "brokers", DisplayName: "Brokers", Type: types.ParamArray, Required: true,

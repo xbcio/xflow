@@ -24,7 +24,12 @@ func (n *LimitNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.transform.limit",
 		DisplayName: "Limit",
+		Description: "截取数组前 N 项，用于限制后续处理的数据量。",
 		Category:    "transform",
+		Examples: []types.DescriptorExample{{
+			Name:   "保留前 10 项",
+			Params: map[string]any{"items": "$input.orders", "max": 10},
+		}},
 		CardSummary: []string{"items", "max"},
 		Params: []types.ParamSpec{
 			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to limit",

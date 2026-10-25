@@ -84,7 +84,15 @@ func (n *MapNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.map",
 		DisplayName: "Map",
+		Description: "对数组逐项执行子图或表达式，返回结果数组。",
 		Category:    "control",
+		Examples: []types.DescriptorExample{{
+			Name: "提取订单号",
+			Params: map[string]any{
+				"items":      "$input.orders",
+				"expression": "$item.order_id",
+			},
+		}},
 		CardSummary: []string{"items", "batch_size"},
 		Params: []types.ParamSpec{
 			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to iterate",

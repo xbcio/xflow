@@ -68,7 +68,12 @@ func (n *Node) Descriptor() types.Descriptor {
 		Type:        "xflow.trigger.webhook",
 		Kind:        types.NodeKindTrigger,
 		DisplayName: "Webhook Trigger",
+		Description: "由入站 HTTP 请求触发，可配置 HMAC 签名校验。",
 		Category:    "trigger",
+		Examples: []types.DescriptorExample{{
+			Name:   "接收订单回调",
+			Params: map[string]any{"method": "POST", "path": "/hooks/orders"},
+		}},
 		CardSummary: []string{"method+path", "secret_supply"},
 		Params: []types.ParamSpec{
 			{Name: "method", DisplayName: "Method", Type: types.ParamString, Required: true},

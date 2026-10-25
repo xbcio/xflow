@@ -70,7 +70,15 @@ func (n *SubWorkflowNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        SubWorkflowNodeType,
 		DisplayName: "Sub-workflow",
+		Description: "在同一命名空间内调用另一个工作流，并映射其输入与输出。",
 		Category:    "control",
+		Examples: []types.DescriptorExample{{
+			Name: "调用子工作流",
+			Params: map[string]any{
+				"workflow": "order-fulfillment",
+				"input":    map[string]any{"order_id": "$input.order_id"},
+			},
+		}},
 		CardSummary: []string{"workflow+version", "entry"},
 		Params: []types.ParamSpec{
 			{Name: "workflow", DisplayName: "Workflow", Type: types.ParamString, Required: true, Description: "Name of the workflow to run, in the same namespace"},

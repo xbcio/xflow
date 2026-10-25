@@ -46,7 +46,15 @@ func (n *AggregateNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.transform.aggregate",
 		DisplayName: "Aggregate",
+		Description: "对数组做计数、求和或平均值等聚合，输出结果字段。",
 		Category:    "transform",
+		Examples: []types.DescriptorExample{{
+			Name: "订单金额求和",
+			Params: map[string]any{
+				"items":      "$input.orders",
+				"operations": []any{map[string]any{"kind": "sum", "field": "amount", "as": "total"}},
+			},
+		}},
 		CardSummary: []string{"items", "operations"},
 		Params: []types.ParamSpec{
 			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to aggregate",

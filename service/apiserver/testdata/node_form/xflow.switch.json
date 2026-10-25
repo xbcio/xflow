@@ -4,10 +4,30 @@
   "node_version": 1,
   "kind": "action",
   "display_name": "Switch",
+  "description": "按规则或表达式结果选择输出端口，未命中时走默认端口。",
   "category": "control",
   "card_summary": [
     "rules",
     "expression"
+  ],
+  "examples": [
+    {
+      "name": "按金额分流",
+      "params": {
+        "default_output": "low",
+        "mode": "rules",
+        "outputs": [
+          "high",
+          "low"
+        ],
+        "rules": [
+          {
+            "condition": "$input.amount \u003e= 100",
+            "output": "high"
+          }
+        ]
+      }
+    }
   ],
   "ports": {
     "inputs": [

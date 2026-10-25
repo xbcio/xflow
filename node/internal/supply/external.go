@@ -50,7 +50,12 @@ func (n *ExternalNode) Descriptor() types.Descriptor {
 		Type:        "xflow.supply.external",
 		Kind:        types.NodeKindSupply,
 		DisplayName: "External Supply",
+		Description: "声明由外部系统写入的供应值，工作流运行前必须就绪。",
 		Category:    "unknown",
+		Examples: []types.DescriptorExample{{
+			Name:   "外部供应",
+			Params: map[string]any{"resource": "approval-keys"},
+		}},
 		CardSummary: []string{"resource"},
 		Params: []types.ParamSpec{
 			{Name: xsupply.ParamResource, DisplayName: "Resource", Type: types.ParamString,

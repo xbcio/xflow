@@ -96,10 +96,18 @@ func BrowserCDP(params map[string]any) *CDPNode {
 
 func (n *CDPNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
-		Type:         browserCDPNodeType,
-		Kind:         types.NodeKindAction,
-		DisplayName:  "Browser Harvest (CDP)",
-		Category:     "action",
+		Type:        browserCDPNodeType,
+		Kind:        types.NodeKindAction,
+		DisplayName: "Browser Harvest (CDP)",
+		Description: "通过 Chrome DevTools 协议登录站点，按导航计划采集会话与凭据数据。",
+		Category:    "action",
+		Examples: []types.DescriptorExample{{
+			Name: "采集会话",
+			Params: map[string]any{
+				"debugging_url": "http://127.0.0.1:9222",
+				"entry_url":     "https://example.com/login",
+			},
+		}},
 		CardSummary:  []string{"entry_url", "target_host"},
 		Capabilities: []string{"browser.cdp.v1"},
 		Params: []types.ParamSpec{

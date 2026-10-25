@@ -9,7 +9,9 @@ package node_test
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
+	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -146,5 +148,67 @@ func TestBuiltinCardSummaryMatchesPreviewBaseline(t *testing.T) {
 		if strings.Join(desc.CardSummary, "|") != strings.Join(rows, "|") {
 			t.Errorf("%s card_summary = %v, want %v", typ, desc.CardSummary, rows)
 		}
+	}
+}
+
+// TestBuiltinDescriptorsDeclareDescriptionAndExamples guards the two fields the
+// editor node library reads (design §4): every builtin type must carry a
+// one-line description, and at least one example whose params pass the real
+// param validator. An example naming a param that does not exist would pass
+// validation silently -- ValidateParams ignores unknown keys -- so that is
+// checked separately here.
+func TestBuiltinDescriptorsDeclareDescriptionAndExamples(t *testing.T) {
+	for _, d := range builtinDescriptors(t) {
+		desc := d.desc
+		t.Run(desc.Type, func(t *testing.T) {
+			if strings.TrimSpace(desc.Description) == "" {
+				t.Errorf("description is empty; the node library renders it in place of the missing-summary dash")
+			}
+			if desc.Description != strings.TrimSpace(desc.Description) {
+				t.Errorf("description has leading or trailing whitespace: %q", desc.Description)
+			}
+			if n := utf8.RuneCountInString(desc.Description); n > 120 {
+				t.Errorf("description has %d characters, want at most 120: %q", n, desc.Description)
+			}
+			if len(desc.Examples) == 0 {
+				t.Errorf("no examples declared; every builtin type offers at least one")
+			}
+
+			topLevel := make(map[string]types.ParamSpec, len(desc.Params))
+			for _, p := range desc.Params {
+				topLevel[p.Name] = p
+			}
+			names := map[string]bool{}
+			for i, ex := range desc.Examples {
+				if ex.Name == "" {
+					t.Errorf("examples[%d] has an empty name", i)
+				} else if names[ex.Name] {
+					t.Errorf("examples[%d] repeats name %q", i, ex.Name)
+				}
+				names[ex.Name] = true
+				if ex.Params == nil {
+					t.Errorf("examples[%d] (%q) has nil params; an empty set is an empty map", i, ex.Name)
+					continue
+				}
+				for key, value := range ex.Params {
+					spec, ok := topLevel[key]
+					if !ok {
+						t.Errorf("examples[%d] (%q) names %q, not a top-level param", i, ex.Name, key)
+						continue
+					}
+					// Format "expression" params are compiled as exprs, never
+					// rendered as templates: a "{{ }}" there is a syntax
+					// error at run time (descriptor-contract design).
+					if spec.Constraints != nil && spec.Constraints.Format == graph.FormatExpression {
+						if s, ok := value.(string); ok && strings.Contains(s, "{{") {
+							t.Errorf("examples[%d] (%q) writes a template into expression param %q; use the bare expression", i, ex.Name, key)
+						}
+					}
+				}
+				if issues := graph.ValidateParams(desc, ex.Params); graph.HasParamErrors(issues) {
+					t.Errorf("examples[%d] (%q) fails param validation: %v", i, ex.Name, issues)
+				}
+			}
+		})
 	}
 }

@@ -40,7 +40,12 @@ func (n *FunctionNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.function",
 		DisplayName: "Function",
+		Description: "执行已注册的 Go 函数或内联表达式，并把结果传给下游。",
 		Category:    "code",
+		Examples: []types.DescriptorExample{{
+			Name:   "内联表达式",
+			Params: map[string]any{"code": "$input.amount * 2"},
+		}},
 		CardSummary: []string{"function_name", "code"},
 		Params: []types.ParamSpec{
 			{Name: "function_name", DisplayName: "Function Name", Type: types.ParamString, Required: false, Description: "Name of a pre-registered Go function to call"},

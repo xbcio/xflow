@@ -61,7 +61,16 @@ func (n *WaitNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        WaitNodeType,
 		DisplayName: "Wait",
+		Description: "等待外部信号或定时器到期后继续，可按超时走单独端口。",
 		Category:    "control",
+		Examples: []types.DescriptorExample{{
+			Name: "等待审批信号",
+			Params: map[string]any{
+				"mode":        "signal",
+				"signal_name": "manager-approval",
+				"timeout":     "24h",
+			},
+		}},
 		CardSummary: []string{"mode", "signal_name", "timeout"},
 		Params: []types.ParamSpec{
 			{Name: "mode", DisplayName: "Mode", Type: types.ParamString, Required: false, Default: "signal", Description: "Trigger mode: \"signal\" (default) or \"timer\"",

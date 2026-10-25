@@ -28,7 +28,12 @@ func (n *MergeNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.merge",
 		DisplayName: "Merge",
+		Description: "汇合多条上游分支，等待全部分支或只取最先到达的分支。",
 		Category:    "control",
+		Examples: []types.DescriptorExample{{
+			Name:   "等待全部分支",
+			Params: map[string]any{"mode": "wait_all"},
+		}},
 		CardSummary: []string{"mode", "on_others"},
 		Params: []types.ParamSpec{
 			{Name: "mode", DisplayName: "Mode", Type: types.ParamString, Required: true, Description: "Merge strategy: \"wait_all\" or \"wait_any\"",

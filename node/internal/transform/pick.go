@@ -25,7 +25,12 @@ func (n *PickNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.transform.pick",
 		DisplayName: "Pick",
+		Description: "只保留指定字段，其余字段从输出中移除。",
 		Category:    "transform",
+		Examples: []types.DescriptorExample{{
+			Name:   "保留订单字段",
+			Params: map[string]any{"fields": []string{"order_id", "amount"}},
+		}},
 		CardSummary: []string{"fields"},
 		Params: []types.ParamSpec{
 			{Name: "fields", DisplayName: "Fields", Type: types.ParamArray, Required: true,

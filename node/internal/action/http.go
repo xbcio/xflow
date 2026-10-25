@@ -156,7 +156,16 @@ func (n *HTTPNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.http",
 		DisplayName: "HTTP Request",
+		Description: "发起 HTTP 请求，支持 JSON 或原始报文、认证、查询参数与重试。",
 		Category:    "action",
+		Examples: []types.DescriptorExample{{
+			Name: "基础调用",
+			Params: map[string]any{
+				"method": "POST",
+				"url":    "https://api.example.com/orders",
+				"body":   map[string]any{"order_id": "A-1"},
+			},
+		}},
 		CardSummary: []string{"method+url", "authentication"},
 		Credentials: []string{"http_auth"},
 		Params: []types.ParamSpec{

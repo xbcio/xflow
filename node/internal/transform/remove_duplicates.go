@@ -26,7 +26,15 @@ func (n *RemoveDuplicatesNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.transform.remove_duplicates",
 		DisplayName: "Remove Duplicates",
+		Description: "按指定字段对数组去重，未指定时比较整个元素。",
 		Category:    "transform",
+		Examples: []types.DescriptorExample{{
+			Name: "按订单号去重",
+			Params: map[string]any{
+				"items":  "$input.orders",
+				"fields": []string{"order_id"},
+			},
+		}},
 		CardSummary: []string{"items", "fields"},
 		Params: []types.ParamSpec{
 			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to deduplicate",

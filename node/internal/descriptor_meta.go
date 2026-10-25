@@ -11,6 +11,7 @@ import "github.com/xbcio/xflow/types"
 const (
 	WidgetCode             = "code"
 	WidgetBase64           = "base64"
+	WidgetRadio            = "radio"
 	WidgetDuration         = "duration"
 	WidgetDateTime         = "datetime"
 	WidgetCron             = "cron"

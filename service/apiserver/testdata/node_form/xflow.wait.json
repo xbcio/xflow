@@ -4,11 +4,22 @@
   "node_version": 1,
   "kind": "action",
   "display_name": "Wait",
+  "description": "等待外部信号或定时器到期后继续，可按超时走单独端口。",
   "category": "control",
   "card_summary": [
     "mode",
     "signal_name",
     "timeout"
+  ],
+  "examples": [
+    {
+      "name": "等待审批信号",
+      "params": {
+        "mode": "signal",
+        "signal_name": "manager-approval",
+        "timeout": "24h"
+      }
+    }
   ],
   "ports": {
     "inputs": [

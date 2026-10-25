@@ -37,7 +37,9 @@ func (n *StartNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.start",
 		DisplayName: "Start",
+		Description: "工作流入口，接收触发或调用方提交的初始数据。",
 		Category:    "control",
+		Examples:    []types.DescriptorExample{{Name: "无参数", Params: map[string]any{}}},
 		Kind:        "action",
 		Outputs:     []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 	}

@@ -318,6 +318,39 @@ func TestBuiltinLinkagesDeclared(t *testing.T) {
 	}
 }
 
+// TestApprovalModeWidgetIsRadio pins the editor control for the approval
+// mode: a radio group over exactly the three modes. The mockup draws only two
+// options, but "sequential" is a real mode and must stay offered.
+func TestApprovalModeWidgetIsRadio(t *testing.T) {
+	var d types.Descriptor
+	found := false
+	for _, vd := range builtinDescriptors(t) {
+		if vd.desc.Type == "xflow.approval" && vd.version == 1 {
+			d, found = vd.desc, true
+		}
+	}
+	if !found {
+		t.Fatal("xflow.approval@1 is not registered")
+	}
+	p, ok := findParam(d, "mode")
+	if !ok {
+		t.Fatal("xflow.approval has no mode param")
+	}
+	if p.Widget != "radio" {
+		t.Errorf("mode Widget = %q, want radio", p.Widget)
+	}
+	if got, want := enumValues(p.Enum), []any{"any", "all", "sequential"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("mode Enum = %v, want %v", got, want)
+	}
+	// Adding the widget must not disturb the wire contract.
+	if p.Default != "any" {
+		t.Errorf("mode Default = %#v, want \"any\"", p.Default)
+	}
+	if p.Required {
+		t.Error("mode is required, want optional with default any")
+	}
+}
+
 func enumValues(opts []types.EnumOption) []any {
 	out := make([]any, len(opts))
 	for i, o := range opts {

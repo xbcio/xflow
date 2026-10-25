@@ -120,7 +120,16 @@ func (n *ScriptNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.script",
 		DisplayName: "Script",
+		Description: "运行 JavaScript 或 WebAssembly 脚本，可读取输入、变量与已声明的凭据。",
 		Category:    "code",
+		Examples: []types.DescriptorExample{{
+			Name: "JavaScript 脚本",
+			Params: map[string]any{
+				"language": "js",
+				"runtime":  "goja",
+				"code":     "return { ok: true };",
+			},
+		}},
 		CardSummary: []string{"language+runtime", "code"},
 		Params: []types.ParamSpec{
 			{Name: "language", DisplayName: "Language", Type: types.ParamString, Required: true, Description: "Language family: js | wasm (no default — choose explicitly)",

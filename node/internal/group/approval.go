@@ -132,12 +132,21 @@ func (n *ApprovalNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        ApprovalNodeType,
 		DisplayName: "Approval",
+		Description: "等待人工审批，按任一、全部或顺序模式放行、拒绝或超时。",
 		Category:    "human",
+		Examples: []types.DescriptorExample{{
+			Name: "任一审批人通过",
+			Params: map[string]any{
+				"approvers": []string{"alice", "bob"},
+				"mode":      "any",
+			},
+		}},
 		CardSummary: []string{"approvers", "mode+timeout"},
 		Params: []types.ParamSpec{
 			{Name: "approvers", DisplayName: "Approvers", Type: types.ParamArray, Required: true, Description: "List of approver identifiers",
 				Item: nodeinternal.StringItem(), Constraints: &types.Constraints{MinItems: &minApprovers}},
 			{Name: "mode", DisplayName: "Mode", Type: types.ParamString, Required: false, Default: "any", Description: "Approval mode: \"any\", \"all\", or \"sequential\"",
+				Widget: nodeinternal.WidgetRadio,
 				Enum: []types.EnumOption{
 					{Value: string(ApprovalAny), DisplayName: "Any", Description: "The first approver's decision closes the gate"},
 					{Value: string(ApprovalAll), DisplayName: "All", Description: "Every approver must approve"},

@@ -36,7 +36,12 @@ func (n *Node) Descriptor() types.Descriptor {
 		Type:        "xflow.trigger.timer",
 		Kind:        types.NodeKindTrigger,
 		DisplayName: "Timer Trigger",
+		Description: "按固定间隔周期性触发工作流。",
 		Category:    "trigger",
+		Examples: []types.DescriptorExample{{
+			Name:   "每 30 秒触发",
+			Params: map[string]any{"interval": "30s"},
+		}},
 		CardSummary: []string{"interval"},
 		Params: []types.ParamSpec{
 			{Name: "interval", DisplayName: "Interval", Type: types.ParamString, Required: true, Description: "Positive tick interval (e.g. \"1m\")",

@@ -4,10 +4,20 @@
   "node_version": 1,
   "kind": "action",
   "display_name": "Map",
+  "description": "对数组逐项执行子图或表达式，返回结果数组。",
   "category": "control",
   "card_summary": [
     "items",
     "batch_size"
+  ],
+  "examples": [
+    {
+      "name": "提取订单号",
+      "params": {
+        "expression": "$item.order_id",
+        "items": "$input.orders"
+      }
+    }
   ],
   "ports": {
     "inputs": [

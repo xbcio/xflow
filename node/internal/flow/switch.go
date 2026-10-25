@@ -47,7 +47,19 @@ func (n *SwitchNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.switch",
 		DisplayName: "Switch",
+		Description: "按规则或表达式结果选择输出端口，未命中时走默认端口。",
 		Category:    "control",
+		Examples: []types.DescriptorExample{{
+			Name: "按金额分流",
+			Params: map[string]any{
+				"mode":           "rules",
+				"outputs":        []string{"high", "low"},
+				"default_output": "low",
+				"rules": []any{
+					map[string]any{"condition": "$input.amount >= 100", "output": "high"},
+				},
+			},
+		}},
 		CardSummary: []string{"rules", "expression"},
 		Params: []types.ParamSpec{
 			{Name: "mode", DisplayName: "Mode", Type: types.ParamString, Required: true, Description: "Routing mode: \"rules\" or \"expression\"",

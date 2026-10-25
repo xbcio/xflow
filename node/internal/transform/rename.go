@@ -23,7 +23,12 @@ func (n *RenameNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.transform.rename",
 		DisplayName: "Rename",
+		Description: "按映射表重命名字段，未列出的字段保持不变。",
 		Category:    "transform",
+		Examples: []types.DescriptorExample{{
+			Name:   "重命名字段",
+			Params: map[string]any{"mapping": map[string]any{"order_id": "id"}},
+		}},
 		CardSummary: []string{"mapping"},
 		Params: []types.ParamSpec{
 			{Name: "mapping", DisplayName: "Mapping", Type: types.ParamObject, Required: true, Description: "Old field name to new field name mapping",

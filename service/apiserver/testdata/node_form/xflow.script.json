@@ -4,10 +4,21 @@
   "node_version": 1,
   "kind": "action",
   "display_name": "Script",
+  "description": "运行 JavaScript 或 WebAssembly 脚本，可读取输入、变量与已声明的凭据。",
   "category": "code",
   "card_summary": [
     "language+runtime",
     "code"
+  ],
+  "examples": [
+    {
+      "name": "JavaScript 脚本",
+      "params": {
+        "code": "return { ok: true };",
+        "language": "js",
+        "runtime": "goja"
+      }
+    }
   ],
   "ports": {
     "inputs": [

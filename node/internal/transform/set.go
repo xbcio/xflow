@@ -31,7 +31,15 @@ func (n *SetNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.transform.set",
 		DisplayName: "Set",
+		Description: "向上游数据写入字面量或表达式计算出的字段。",
 		Category:    "transform",
+		Examples: []types.DescriptorExample{{
+			Name: "写入状态字段",
+			Params: map[string]any{
+				"fields":      map[string]any{"status": "done"},
+				"expressions": map[string]any{"total": "$input.amount * 2"},
+			},
+		}},
 		CardSummary: []string{"fields", "expressions"},
 		Params: []types.ParamSpec{
 			{Name: "fields", DisplayName: "Fields", Type: types.ParamObject, Required: false, Description: "Literal fields to assign"},

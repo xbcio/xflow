@@ -4,10 +4,23 @@
   "node_version": 1,
   "kind": "trigger",
   "display_name": "Kafka Trigger",
+  "description": "消费 Kafka 主题消息并触发工作流，支持分区批量聚合。",
   "category": "trigger",
   "card_summary": [
     "brokers",
     "topic+group"
+  ],
+  "examples": [
+    {
+      "name": "消费订单主题",
+      "params": {
+        "brokers": [
+          "127.0.0.1:9092"
+        ],
+        "group": "xflow-orders",
+        "topic": "orders"
+      }
+    }
   ],
   "ports": {
     "outputs": [

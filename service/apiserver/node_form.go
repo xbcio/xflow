@@ -35,20 +35,22 @@ type nodeTypesResponse struct {
 }
 
 type nodeFormSchema struct {
-	Spec         string          `json:"spec"`
-	NodeType     string          `json:"node_type"`
-	NodeVersion  int             `json:"node_version"`
-	Kind         types.NodeKind  `json:"kind"`
-	DisplayName  string          `json:"display_name,omitempty"`
-	Category     string          `json:"category,omitempty"`
-	CardSummary  []string        `json:"card_summary,omitempty"`
-	Docs         string          `json:"docs,omitempty"`
-	Capabilities []string        `json:"capabilities,omitempty"`
-	Credentials  []string        `json:"credentials,omitempty"`
-	Ports        *nodeFormPorts  `json:"ports,omitempty"`
-	Groups       []nodeFormGroup `json:"groups,omitempty"`
-	OneOf        []nodeFormOneOf `json:"one_of,omitempty"`
-	Fields       []nodeFormField `json:"fields"`
+	Spec         string            `json:"spec"`
+	NodeType     string            `json:"node_type"`
+	NodeVersion  int               `json:"node_version"`
+	Kind         types.NodeKind    `json:"kind"`
+	DisplayName  string            `json:"display_name,omitempty"`
+	Description  string            `json:"description,omitempty"`
+	Category     string            `json:"category,omitempty"`
+	CardSummary  []string          `json:"card_summary,omitempty"`
+	Examples     []nodeFormExample `json:"examples,omitempty"`
+	Docs         string            `json:"docs,omitempty"`
+	Capabilities []string          `json:"capabilities,omitempty"`
+	Credentials  []string          `json:"credentials,omitempty"`
+	Ports        *nodeFormPorts    `json:"ports,omitempty"`
+	Groups       []nodeFormGroup   `json:"groups,omitempty"`
+	OneOf        []nodeFormOneOf   `json:"one_of,omitempty"`
+	Fields       []nodeFormField   `json:"fields"`
 	// Source is nodeFormSourceRunner for a schema live runners reported;
 	// absent means the server's own registry.
 	Source string `json:"source,omitempty"`
@@ -59,6 +61,15 @@ type nodeFormSchema struct {
 
 // nodeFormSourceRunner is NodeFormSchema.source for runner-reported types.
 const nodeFormSourceRunner = "runner"
+
+// nodeFormExample is one DescriptorExample: a minimal, valid parameter set in
+// DSL form. Params keys are top-level param names; expression params carry
+// bare expressions, never "{{ }}" templates.
+type nodeFormExample struct {
+	Name        string         `json:"name,omitempty"`
+	Description string         `json:"description,omitempty"`
+	Params      map[string]any `json:"params"`
+}
 
 type nodeFormPort struct {
 	Name        string `json:"name"`
@@ -208,6 +219,7 @@ func projectNodeForm(rd registry.RegisteredDescriptor, fallbacks nodeFormFallbac
 		NodeVersion:  rd.Version,
 		Kind:         kind,
 		DisplayName:  d.DisplayName,
+		Description:  d.Description,
 		Category:     d.Category,
 		CardSummary:  d.CardSummary,
 		Docs:         d.Docs,
@@ -226,6 +238,9 @@ func projectNodeForm(rd registry.RegisteredDescriptor, fallbacks nodeFormFallbac
 	}
 	for _, g := range d.OneOf {
 		s.OneOf = append(s.OneOf, nodeFormOneOf{Params: g.Params, Mode: g.Mode})
+	}
+	for _, e := range d.Examples {
+		s.Examples = append(s.Examples, nodeFormExample{Name: e.Name, Description: e.Description, Params: e.Params})
 	}
 	for i := range d.Params {
 		spec := &d.Params[i]

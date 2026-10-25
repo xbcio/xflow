@@ -29,7 +29,12 @@ func (n *StaticNode) Descriptor() types.Descriptor {
 		Type:        "xflow.supply.static",
 		Kind:        types.NodeKindSupply,
 		DisplayName: "Static Supply",
+		Description: "声明随工作流定义一起保存的静态供应值。",
 		Category:    "unknown",
+		Examples: []types.DescriptorExample{{
+			Name:   "静态配置",
+			Params: map[string]any{"content": `{"region":"cn-north"}`},
+		}},
 		CardSummary: []string{"content"},
 		Params: []types.ParamSpec{
 			{Name: xsupply.ParamContent, DisplayName: "Content", Type: types.ParamString, Required: true,

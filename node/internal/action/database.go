@@ -44,7 +44,18 @@ func (n *DatabaseNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.database",
 		DisplayName: "Database",
+		Description: "对数据库执行 select/insert/update/delete 操作，更新与删除必须带条件。",
 		Category:    "action",
+		Examples: []types.DescriptorExample{{
+			Name: "查询数据",
+			Params: map[string]any{
+				"operation":  "select",
+				"table":      "orders",
+				"credential": "mysql-prod",
+				"where":      map[string]any{"status": "paid"},
+				"limit":      100,
+			},
+		}},
 		CardSummary: []string{"operation+table", "credential", "where"},
 		Credentials: []string{"db_conn"},
 		Params: []types.ParamSpec{

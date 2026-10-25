@@ -70,7 +70,12 @@ func (n *PullNode) Descriptor() types.Descriptor {
 		Type:        xsupply.NodeTypeHTTPPull,
 		Kind:        types.NodeKindSupply,
 		DisplayName: "HTTP Supply (Runner Pull)",
+		Description: "声明由 runner 定期从 HTTPS 地址拉取的供应值。",
 		Category:    "unknown",
+		Examples: []types.DescriptorExample{{
+			Name:   "拉取远程配置",
+			Params: map[string]any{"url": "https://config.example.com/keys.json"},
+		}},
 		CardSummary: []string{"url", "authentication", "poll_interval"},
 		Params: []types.ParamSpec{
 			{Name: xsupply.ParamURL, DisplayName: "URL", Type: types.ParamString, Required: true,

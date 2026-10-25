@@ -73,7 +73,17 @@ func (n *GRPCNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.grpc",
 		DisplayName: "gRPC Call",
+		Description: "调用 gRPC 服务方法，请求与响应均为结构化对象。",
 		Category:    "action",
+		Examples: []types.DescriptorExample{{
+			Name: "基础调用",
+			Params: map[string]any{
+				"service": "inventory.InventoryService",
+				"method":  "Get",
+				"host":    "127.0.0.1:50051",
+				"request": map[string]any{"id": "A-1"},
+			},
+		}},
 		CardSummary: []string{"service+method", "host"},
 		Params: []types.ParamSpec{
 			{Name: "service", DisplayName: "Service", Type: types.ParamString, Required: true, Description: "Fully-qualified service name (e.g. inventory.InventoryService)",

@@ -30,7 +30,12 @@ func (n *IfNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.if",
 		DisplayName: "IF Condition",
+		Description: "按布尔表达式分流，条件成立走 true 端口，否则走 false 端口。",
 		Category:    "control",
+		Examples: []types.DescriptorExample{{
+			Name:   "金额判断",
+			Params: map[string]any{"condition": "$input.amount >= 100"},
+		}},
 		CardSummary: []string{"condition"},
 		Params: []types.ParamSpec{
 			{Name: "condition", DisplayName: "Condition", Type: types.ParamString, Required: true, Description: "Boolean expression to evaluate",

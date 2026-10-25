@@ -34,7 +34,15 @@ func (n *SortNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.transform.sort",
 		DisplayName: "Sort",
+		Description: "按一个或多个字段对数组排序，可指定降序。",
 		Category:    "transform",
+		Examples: []types.DescriptorExample{{
+			Name: "按金额降序",
+			Params: map[string]any{
+				"items":  "$input.orders",
+				"fields": []any{map[string]any{"field": "amount", "desc": true}},
+			},
+		}},
 		CardSummary: []string{"items", "fields"},
 		Params: []types.ParamSpec{
 			{Name: "items", DisplayName: "Items", Type: types.ParamString, Required: true, Description: "Expression that evaluates to the array to sort",

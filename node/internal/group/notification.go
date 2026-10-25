@@ -49,7 +49,16 @@ func (n *NotificationNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.notification",
 		DisplayName: "Notification",
+		Description: "发送通知的占位节点；当前执行返回未实现，请改用 HTTP 节点。",
 		Category:    "action",
+		Examples: []types.DescriptorExample{{
+			Name: "发送邮件通知",
+			Params: map[string]any{
+				"channel": "email",
+				"to":      "ops@example.com",
+				"subject": "订单处理完成",
+			},
+		}},
 		CardSummary: []string{"channel", "to"},
 		Params: []types.ParamSpec{
 			{Name: "channel", DisplayName: "Channel", Type: types.ParamString, Required: true, Description: "Notification channel such as email, sms, slack, webhook"},

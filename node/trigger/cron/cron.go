@@ -80,7 +80,15 @@ func (n *Node) Descriptor() types.Descriptor {
 		Type:        "xflow.trigger.cron",
 		Kind:        types.NodeKindTrigger,
 		DisplayName: "Cron Trigger",
+		Description: "按 cron 表达式定时触发，支持时区、补跑与重叠策略。",
 		Category:    "trigger",
+		Examples: []types.DescriptorExample{{
+			Name: "每天 9 点触发",
+			Params: map[string]any{
+				"expression": "0 9 * * *",
+				"timezone":   "Asia/Shanghai",
+			},
+		}},
 		CardSummary: []string{"expression", "timezone"},
 		Params: []types.ParamSpec{
 			// Parsed by robfig/cron's standard parser: five fields plus the

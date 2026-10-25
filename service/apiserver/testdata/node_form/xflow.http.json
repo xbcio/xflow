@@ -4,10 +4,23 @@
   "node_version": 1,
   "kind": "action",
   "display_name": "HTTP Request",
+  "description": "发起 HTTP 请求，支持 JSON 或原始报文、认证、查询参数与重试。",
   "category": "action",
   "card_summary": [
     "method+url",
     "authentication"
+  ],
+  "examples": [
+    {
+      "name": "基础调用",
+      "params": {
+        "body": {
+          "order_id": "A-1"
+        },
+        "method": "POST",
+        "url": "https://api.example.com/orders"
+      }
+    }
   ],
   "credentials": [
     "http_auth"

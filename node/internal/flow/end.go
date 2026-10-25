@@ -26,7 +26,9 @@ func (n *EndNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.end",
 		DisplayName: "End",
+		Description: "工作流出口，结束当前执行并汇总最终输出。",
 		Category:    "control",
+		Examples:    []types.DescriptorExample{{Name: "无参数", Params: map[string]any{}}},
 		Kind:        "action",
 		Inputs:      []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 		Outputs:     []types.PortSpec{},
