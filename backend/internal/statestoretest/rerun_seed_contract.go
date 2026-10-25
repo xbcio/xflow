@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
@@ -66,6 +67,9 @@ func RunExecutionSeedContract(t *testing.T, newStore ConcurrencyStoreFactory) {
 	})
 	t.Run("ParksAQueuedAdmission", func(t *testing.T) {
 		seedParksAQueuedAdmission(t, newStore(t))
+	})
+	t.Run("PersistsTheDeadline", func(t *testing.T) {
+		seedPersistsTheDeadline(t, newStore(t))
 	})
 }
 
@@ -593,4 +597,69 @@ func taskTypeName(taskType engine.TaskType) string {
 		return "group"
 	}
 	return "unknown"
+}
+
+// seedPersistsTheDeadline pins that a rerun keeps the execution budget the
+// engine stamped on its snapshot. The engine stamps a rerun's Deadline before
+// the store sees it (a rerun gets a fresh budget from its own creation), so the
+// store only has to carry it. A seed path that dropped the field would read the
+// rerun back with no budget, and the zero time means "no timeout": the rerun
+// would never be expired and nothing would report it. A parked seed carries it
+// too, and a snapshot without one stays without.
+func seedPersistsTheDeadline(t *testing.T, state engine.StateStore) {
+	ctx := context.Background()
+	g := seedContractGraph(t, "seed-deadline")
+	seeder := seedCapability(t, state)
+	// Not a whole second, so a store that truncated to seconds would fail.
+	deadline := time.Date(2030, 1, 1, 12, 0, 1, int(500*time.Millisecond), time.UTC)
+
+	seed := func(snap *engine.ExecutionSnapshot, admission *engine.ConcurrencyAdmission) engine.SeedExecutionResponse {
+		t.Helper()
+		res, err := seeder.SeedExecution(ctx, engine.SeedExecutionRequest{
+			Execution: snap,
+			Units:     []engine.SeedUnit{seedUnitResolving(t, g, "start", "main", map[string]any{"value": 1}, "mid")},
+			Admission: admission,
+		})
+		if err != nil {
+			t.Fatalf("SeedExecution(%q) error = %v", snap.ID, err)
+		}
+		return res
+	}
+	readDeadline := func(id types.ExecutionID) time.Time {
+		t.Helper()
+		loaded, err := state.GetExecution(ctx, id)
+		if err != nil || loaded == nil {
+			t.Fatalf("GetExecution(%q) = (%v, %v), want the seeded execution", id, loaded, err)
+		}
+		return loaded.Deadline
+	}
+
+	running := seedSnapshot(t, g)
+	running.Deadline = deadline
+	seed(running, nil)
+	got := readDeadline(running.ID)
+	if got.IsZero() || got.UnixMilli() != deadline.UnixMilli() {
+		t.Fatalf("Deadline of a seeded rerun = %v, want %v (compared at the millisecond)", got, deadline)
+	}
+
+	unbounded := seedSnapshot(t, g)
+	seed(unbounded, nil)
+	if got := readDeadline(unbounded.ID); !got.IsZero() {
+		t.Fatalf("Deadline of a seeded rerun without a budget = %v, want the zero time", got)
+	}
+
+	admission := queueAdmissionFor(t, g, 1, 8, 0)
+	holder, _ := concurrencySnapshot(t, g)
+	if _, err := concurrencyCapability(t, state).CreateExecutionWithConcurrency(ctx, holder, nil, admission); err != nil {
+		t.Fatalf("CreateExecutionWithConcurrency(holder) error = %v", err)
+	}
+	parked := seedSnapshot(t, g)
+	parked.Deadline = deadline
+	if res := seed(parked, &admission); !res.Queued {
+		t.Fatalf("SeedExecution() = %+v, want it parked behind the holder", res)
+	}
+	got = readDeadline(parked.ID)
+	if got.IsZero() || got.UnixMilli() != deadline.UnixMilli() {
+		t.Fatalf("Deadline of a parked rerun = %v, want %v (compared at the millisecond)", got, deadline)
+	}
 }
