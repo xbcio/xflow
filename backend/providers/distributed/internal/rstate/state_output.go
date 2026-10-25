@@ -177,6 +177,10 @@ func (s *Store) extendExecTTL(ctx context.Context, id types.ExecutionID, nodeNam
 	// timestamps expired reports no start line and no duration.
 	pipe.Expire(ctx, execKey(t, id, "created_at_ms"), ttl)
 	pipe.Expire(ctx, execKey(t, id, "updated_at_ms"), ttl)
+	// The time budget is written once with the execution as well. If it lapsed
+	// while status lived on, GetExecution would read back a zero Deadline and
+	// ExpireExecution would report the execution as never due: a silent failure.
+	pipe.Expire(ctx, execKey(t, id, "deadline_ms"), ttl)
 	pipe.Expire(ctx, suspendedNodesKey(t, id), ttl)
 	pipe.Expire(ctx, timeoutZSetKey(t, id), ttl)
 	for _, key := range suspendNodeTTLKeys(t, id, nodeName, spec) {

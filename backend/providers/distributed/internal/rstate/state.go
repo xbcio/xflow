@@ -570,6 +570,9 @@ func createdExecutionKeys(t namespace.Namespace, id types.ExecutionID, g *graph.
 		execKey(t, id, "workflow_version"),
 		execKey(t, id, "created_at_ms"),
 		execKey(t, id, "updated_at_ms"),
+		// The absolute deadline of the execution's time budget; written once with
+		// the execution, and only when it has a budget.
+		execKey(t, id, "deadline_ms"),
 		execKey(t, id, "parent"),
 		execKey(t, id, "parent_node"),
 		execKey(t, id, "depth"),

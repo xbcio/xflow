@@ -384,12 +384,19 @@ func (s *Store) SeedExecution(ctx context.Context, req engine.SeedExecutionReque
 	// rides along for the same reason: a seeded rerun must name the definition
 	// it runs without the definition being re-read. The registration namespace
 	// is immutable metadata too, and the seed path is the only one a rerun
-	// takes — a rerun's dispatch resolves its sub-workflows from it.
+	// takes — a rerun's dispatch resolves its sub-workflows from it. The time
+	// budget's deadline rides along too: it is immutable and, like the rest, it
+	// must be readable from the instant the Lua makes the execution leasable --
+	// and it stays outside the Lua so that script's key and argument positions
+	// do not move.
 	if req.Execution.ParentID != "" || req.Execution.RerunFrom != "" ||
 		req.Execution.ParentNode != "" || req.Execution.Depth > 0 ||
 		req.Execution.WorkflowID != "" || req.Execution.WorkflowVersion != "" ||
-		req.Execution.Namespace != "" {
+		req.Execution.Namespace != "" || !req.Execution.Deadline.IsZero() {
 		linkPipe := s.rdb.TxPipeline()
+		if !req.Execution.Deadline.IsZero() {
+			linkPipe.Set(ctx, execKey(t, execID, "deadline_ms"), req.Execution.Deadline.UnixMilli(), ttl)
+		}
 		if req.Execution.ParentID != "" {
 			linkPipe.Set(ctx, execKey(t, execID, "parent"), string(req.Execution.ParentID), ttl)
 		}
