@@ -1,14 +1,14 @@
 import {
-  AppstoreOutlined,
-  ArrowLeftOutlined,
-  CaretRightOutlined,
-  ClockCircleOutlined,
-  CopyOutlined,
-  FunctionOutlined,
-  HistoryOutlined,
-  MoreOutlined,
-  SlidersOutlined,
-} from '@ant-design/icons';
+  BackIcon,
+  ClockIcon,
+  CopyIcon,
+  GridIcon,
+  HistoryIcon,
+  MoreIcon,
+  PlayIcon,
+  SlidersIcon,
+  VarIcon,
+} from '@xflow/icons';
 import { Button, Segmented, Tabs, Tooltip } from 'antd';
 import { Fragment, useRef, useState, type ReactNode } from 'react';
 
@@ -215,7 +215,7 @@ function ExecList() {
   return (
     <aside className="xflow-pv-lib xflow-pv-lib-pane" aria-label="执行列表">
       <PanelTitle
-        icon={<HistoryOutlined />}
+        icon={<HistoryIcon />}
         title="执行"
         className="xflow-pv-panel-title--bar"
         count={
@@ -261,15 +261,15 @@ function RunInspector() {
   const meta = nodeStatusMeta[wbRunDetail.status];
   return (
     <aside className="xflow-pv-insp" aria-label="执行详情">
-      <PanelTitle icon={<SlidersOutlined />} title="属性" className="xflow-pv-panel-title--bar" />
+      <PanelTitle icon={<SlidersIcon />} title="属性" className="xflow-pv-panel-title--bar" />
       <div className="xflow-pv-insp-head">
         <CategoryIcon category="code" icon="code" />
         <span className="xflow-pv-insp-node" title={wbRunDetail.nodeLabel}>
           {wbRunDetail.nodeLabel}
         </span>
         <StatusChip tone={meta.tone} icon={meta.icon} label={meta.label} />
-        <IconButton small label="复制节点" icon={<CopyOutlined />} />
-        <IconButton small label="更多操作" icon={<MoreOutlined />} />
+        <IconButton small label="复制节点" icon={<CopyIcon />} />
+        <IconButton small label="更多操作" icon={<MoreIcon />} />
         <div className="xflow-pv-insp-type" title={`${wbRunDetail.nodeId} · ${wbRunDetail.nodeType}`}>
           {wbRunDetail.nodeId} · {wbRunDetail.nodeType}
         </div>
@@ -332,7 +332,7 @@ function RunInspector() {
         </div>
       </div>
       <div className="xflow-pv-insp-foot">
-        <Button block icon={<CaretRightOutlined />}>
+        <Button block icon={<PlayIcon />}>
           从此节点重跑
         </Button>
       </div>
@@ -344,10 +344,10 @@ export function RunsSection() {
   return (
     <div className="xflow-pv-wb xflow-pv-wb--runs">
       <header className="xflow-pv-top">
-        <Button type="text" className="xflow-pv-icon-btn" aria-label="返回工作流列表" icon={<ArrowLeftOutlined />} />
+        <Button type="text" className="xflow-pv-icon-btn" aria-label="返回工作流列表" icon={<BackIcon />} />
         <div className="xflow-pv-title">
           <strong title={`${wbWorkflow.id} · ${wbWorkflow.version}`}>{wbWorkflow.name}</strong>
-          <StatusChip tone="neutral" icon={<ClockCircleOutlined />} label={`运行版本 ${wbRunReplay.version}`} />
+          <StatusChip tone="neutral" icon={<ClockIcon />} label={`运行版本 ${wbRunReplay.version}`} />
         </div>
         <span className="mx-auto">
           <Todo label="需新字段">
@@ -365,18 +365,18 @@ export function RunsSection() {
             重跑自 {wbRunReplay.lineage.from} · 起点 {wbRunReplay.lineage.startNode}
           </span>
           <VerticalSep />
-          <Button type="primary" icon={<CaretRightOutlined />}>
+          <Button type="primary" icon={<PlayIcon />}>
             重跑…
           </Button>
-          <IconButton label="更多操作" icon={<MoreOutlined />} />
+          <IconButton label="更多操作" icon={<MoreIcon />} />
         </div>
       </header>
 
       <div className="xflow-pv-wb-body">
         <nav className="xflow-pv-rail" aria-label="侧栏">
-          <RailButton icon={<AppstoreOutlined />} text="节点" label="节点与大纲" />
-          <RailButton icon={<HistoryOutlined />} text="执行" label="执行记录" active />
-          <RailButton icon={<FunctionOutlined />} text="变量" label="变量" />
+          <RailButton icon={<GridIcon />} text="节点" label="节点与大纲" />
+          <RailButton icon={<HistoryIcon />} text="执行" label="执行记录" active />
+          <RailButton icon={<VarIcon />} text="变量" label="变量" />
         </nav>
         <ExecList />
         <ReplayCanvas />

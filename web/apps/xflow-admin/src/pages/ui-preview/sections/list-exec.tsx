@@ -1,4 +1,4 @@
-import { CloseOutlined, HistoryOutlined, DownOutlined } from '@ant-design/icons';
+import { DownIcon, HistoryIcon, XMarkIcon } from '@xflow/icons';
 import { Button, Checkbox, Radio, Segmented, Table, Tooltip } from 'antd';
 
 import { AdminShell } from '../components/AdminShell';
@@ -130,7 +130,7 @@ function RerunDialog({ row }: { row: AdminExecRow }) {
             {row.id} · {wbRunReplay.version}
           </span>
         </span>
-        <IconButton small label="关闭" icon={<CloseOutlined />} />
+        <IconButton small label="关闭" icon={<XMarkIcon />} />
       </header>
       <div className="xflow-pv-dialog-body">
         <div className="xflow-pv-field" data-field="origin">
@@ -179,7 +179,7 @@ function RerunSuccessDialog({ row }: { row: AdminExecRow }) {
             {row.id} · {wbRunReplay.version}
           </span>
         </span>
-        <IconButton small label="关闭" icon={<CloseOutlined />} />
+        <IconButton small label="关闭" icon={<XMarkIcon />} />
       </header>
       <div className="xflow-pv-dialog-body">
         <div className="xflow-pv-field" data-field="origin">
@@ -215,7 +215,7 @@ export function ListExecSection() {
       top={
         <>
           <Segmented size="small" value={adminExecFilters[0]} options={adminExecFilters} />
-          <Button size="small" icon={<DownOutlined />} iconPosition="end">
+          <Button size="small" icon={<DownIcon />} iconPosition="end">
             最近 24 小时
           </Button>
           {/*
@@ -223,7 +223,7 @@ export function ListExecSection() {
            * 被 `.xflow-pv-admin` 的圆角裁剪吃掉 —— 看不见的标记等于没有标记。
            */}
           <Todo label="需新字段" placement="inline" title="执行列表接口没有按工作流筛选的参数（§6.6）">
-            <Button size="small" icon={<DownOutlined />} iconPosition="end">
+            <Button size="small" icon={<DownIcon />} iconPosition="end">
               工作流：全部
             </Button>
           </Todo>
@@ -236,7 +236,7 @@ export function ListExecSection() {
       <div className="xflow-pv-admin-cols">
         <div className="xflow-pv-card xflow-pv-admin-tablecard" data-table="executions">
           <PanelTitle
-            icon={<HistoryOutlined />}
+            icon={<HistoryIcon />}
             title="运行记录"
             className="xflow-pv-panel-title--bar"
             count={adminExecutions.length}
@@ -257,7 +257,7 @@ export function ListExecSection() {
           <RerunDialog row={rerunRow} />
           <RerunSuccessDialog row={rerunSuccessRow} />
           <div className="xflow-pv-card xflow-pv-admin-tablecard" data-panel="filters">
-            <PanelTitle icon={<HistoryOutlined />} title="筛选与分页" className="xflow-pv-panel-title--bar" />
+            <PanelTitle icon={<HistoryIcon />} title="筛选与分页" className="xflow-pv-panel-title--bar" />
             <p className="xflow-pv-hint xflow-pv-admin-page">
               状态筛选：{adminExecFilters.length - 1} 个状态（只列出现过的）；每页 {adminPageSize} 行，共{' '}
               {adminExecutions.length} 行。
@@ -267,7 +267,7 @@ export function ListExecSection() {
       </div>
 
       <div className="xflow-pv-card xflow-pv-admin-tablecard" data-state="loading">
-        <PanelTitle icon={<HistoryOutlined />} title="空态与加载态" className="xflow-pv-panel-title--bar" />
+        <PanelTitle icon={<HistoryIcon />} title="空态与加载态" className="xflow-pv-panel-title--bar" />
         <div className="xflow-pv-admin-state">
           <p className="xflow-pv-admin-state-label">请求中：行高与列宽按上一页保留，行操作不可用（§6.6）。</p>
           <ExecTable rows={adminExecutions.slice(0, 3)} loading />

@@ -239,7 +239,7 @@ export default function UiPreviewPage() {
                 <span className="xflow-pv-legend">
                   标出 <i>待接入</i> / <i>需新字段</i>
                 </span>
-                <Switch size="small" checked={todoVisible} onChange={setTodoVisible} />
+                <Switch className="xflow-pv-switch" size="small" checked={todoVisible} onChange={setTodoVisible} />
                 <Segmented
                   value={appearance}
                   onChange={(value) => setAppearance(value as Appearance)}

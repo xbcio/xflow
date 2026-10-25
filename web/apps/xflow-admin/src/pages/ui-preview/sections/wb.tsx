@@ -1,30 +1,30 @@
 import {
-  AimOutlined,
-  AppstoreOutlined,
-  ArrowLeftOutlined,
-  BgColorsOutlined,
-  CaretRightOutlined,
-  CheckOutlined,
-  CopyOutlined,
-  DownOutlined,
-  FunctionOutlined,
-  HistoryOutlined,
-  MenuFoldOutlined,
-  MenuUnfoldOutlined,
-  MoreOutlined,
-  NodeIndexOutlined,
-  PlusOutlined,
-  QuestionCircleOutlined,
-  RedoOutlined,
-  SafetyCertificateOutlined,
-  SearchOutlined,
-  SlidersOutlined,
-  UndoOutlined,
-  UnorderedListOutlined,
-  VerticalAlignBottomOutlined,
-  VerticalAlignTopOutlined,
-  WarningOutlined,
-} from '@ant-design/icons';
+  BackIcon,
+  CheckIcon,
+  CopyIcon,
+  DockDownIcon,
+  DockMaxIcon,
+  DownIcon,
+  GridIcon,
+  HelpIcon,
+  HistoryIcon,
+  LocateIcon,
+  MoreIcon,
+  NodeIndexIcon,
+  OutlineIcon,
+  PlayIcon,
+  PlusIcon,
+  RedoIcon,
+  SearchIcon,
+  ShieldIcon,
+  SideLeftIcon,
+  SideRightIcon,
+  SlidersIcon,
+  ThemeIcon,
+  UndoIcon,
+  VarIcon,
+  WarnIcon,
+} from '@xflow/icons';
 import { Button, Collapse, Input, Segmented, Select, Tabs } from 'antd';
 import { Fragment, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 
@@ -146,7 +146,7 @@ function InspectorConfig() {
       className="xflow-pv-secs"
       defaultActiveKey={['request']}
       expandIconPlacement="start"
-      expandIcon={({ isActive }) => <DownOutlined rotate={isActive ? 0 : -90} />}
+      expandIcon={({ isActive }) => <DownIcon style={{ transform: isActive ? undefined : 'rotate(-90deg)' }} />}
       classNames={{ header: 'xflow-pv-sec-head', body: 'xflow-pv-sec-body p-0' }}
       items={[
         {
@@ -159,7 +159,7 @@ function InspectorConfig() {
           label: (
             <span className="xflow-pv-sec-label">
               <span className="xflow-pv-sec-title">请求</span>
-              <StatusChip tone="success" icon={<CheckOutlined />} label="有效" />
+              <StatusChip tone="success" icon={<CheckIcon />} label="有效" />
             </span>
           ),
           children: (
@@ -202,7 +202,7 @@ function InspectorConfig() {
           label: (
             <span className="xflow-pv-sec-label">
               <span className="xflow-pv-sec-title">请求头与查询</span>
-              <StatusChip tone="neutral" icon={<UnorderedListOutlined />} label="3 项" />
+              <StatusChip tone="neutral" icon={<OutlineIcon />} label="3 项" />
             </span>
           ),
           children: null,
@@ -221,11 +221,11 @@ function StatusBar() {
   return (
     <div className="xflow-pv-statusbar">
       <span className="xflow-pv-status-ok">
-        <CheckOutlined className="xflow-pv-status-icon" />
+        <CheckIcon className="xflow-pv-status-icon" />
         校验通过
       </span>
       <span className="xflow-pv-status-warn">
-        <WarningOutlined className="xflow-pv-status-icon" />
+        <WarnIcon className="xflow-pv-status-icon" />
         {wbIssues.filter((issue) => issue.severity === 'warning').length} 警告
       </span>
       <VerticalSep />
@@ -246,7 +246,7 @@ function Diagnostics({ idPrefix }: { idPrefix: string }) {
   return (
     <div className="xflow-pv-drawer">
       <div className="xflow-pv-drawer-head">
-        <PanelTitle icon={<NodeIndexOutlined />} title="诊断台" titleId={`${idPrefix}-diag`} />
+        <PanelTitle icon={<NodeIndexIcon />} title="诊断台" titleId={`${idPrefix}-diag`} />
         <Tabs
           size="small"
           className="xflow-pv-drawer-tabs"
@@ -260,18 +260,17 @@ function Diagnostics({ idPrefix }: { idPrefix: string }) {
           ]}
         />
         <span className="xflow-pv-drawer-actions">
-          <IconButton small label="扩展到画布高度" icon={<VerticalAlignTopOutlined />} />
-          <IconButton small label="收起诊断台 ⌘J" icon={<VerticalAlignBottomOutlined />} />
+          <IconButton small label="扩展到画布高度" icon={<DockMaxIcon />} />
+          <IconButton small label="收起诊断台 ⌘J" icon={<DockDownIcon />} />
         </span>
       </div>
       <div className="xflow-pv-issues">
         {wbIssues.map((issue) => (
           <div key={issue.id} className="xflow-pv-issue" data-tone={issue.severity}>
-            {/* The wrapper carries the tone colour: `@ant-design/icons` injects an
-             * unlayered `.anticon { color: inherit }`, which outranks every layer,
-             * so a colour set on the icon element itself would be lost. */}
+            {/* The wrapper carries the tone; `.xflow-icon` strokes in
+             * `currentColor`, so the wrapper's colour reaches the glyph. */}
             <span className="xflow-pv-issue-sev">
-              <WarningOutlined />
+              <WarnIcon />
             </span>
             <span>{issue.target}</span>
             <span>{issue.text}</span>
@@ -282,7 +281,7 @@ function Diagnostics({ idPrefix }: { idPrefix: string }) {
         ))}
         <div className="xflow-pv-issue-pass">
           <span className="xflow-pv-issue-ok">
-            <CheckOutlined />
+            <CheckIcon />
           </span>
           {wbChecksPassed}
           <Button type="link" size="small" className="ml-auto">
@@ -413,13 +412,13 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
       data-right={rightDocked ? undefined : rightOpen ? 'drawer' : 'collapsed'}
     >
       <header className="xflow-pv-top">
-        <Button type="text" className="xflow-pv-icon-btn" aria-label="返回工作流列表" icon={<ArrowLeftOutlined />} />
+        <Button type="text" className="xflow-pv-icon-btn" aria-label="返回工作流列表" icon={<BackIcon />} />
         <div className="xflow-pv-title">
           <strong title={`${wbWorkflow.id} · ${wbWorkflow.version}`}>{wbWorkflow.name}</strong>
           {/* 未保存数 = 草稿差异数组的长度，与发布对话框的差异行数是同一份（S10）。 */}
           <StatusChip
             tone="warning"
-            icon={<WarningOutlined />}
+            icon={<WarnIcon />}
             label={`未保存 ${wbPendingChanges.length} 处 · 基于 ${wbWorkflow.version}`}
           />
         </div>
@@ -443,22 +442,22 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
            * a narrow screen. The title keeps its 160px minimum either way.
            */}
           {compactLeft ? (
-            <IconButton label="更多操作" icon={<MoreOutlined />} />
+            <IconButton label="更多操作" icon={<MoreIcon />} />
           ) : (
             <>
-              <IconButton label="撤销" icon={<UndoOutlined />} />
-              <IconButton label="重做" icon={<RedoOutlined />} />
+              <IconButton label="撤销" icon={<UndoIcon />} />
+              <IconButton label="重做" icon={<RedoIcon />} />
               <VerticalSep />
-              <Button type="text" className="xflow-pv-top-text" icon={<SafetyCertificateOutlined />}>
+              <Button type="text" className="xflow-pv-top-text" icon={<ShieldIcon />}>
                 校验
               </Button>
-              <IconButton label="主题设置" icon={<BgColorsOutlined />} />
+              <IconButton label="主题设置" icon={<ThemeIcon />} />
               {/*
                * 沉浸布局 / 新建工作流 live in this menu at every width (user
                * ruling 2026-10-17); it is the last item before 保存, as the
                * compact ⋯ is, so collapsing the cluster does not move it.
                */}
-              <IconButton label="更多操作" icon={<MoreOutlined />} />
+              <IconButton label="更多操作" icon={<MoreIcon />} />
               <VerticalSep />
             </>
           )}
@@ -466,14 +465,14 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
             保存 <Kbd>⌘S</Kbd>
           </Button>
           <span className="xflow-pv-split">
-            <Button type="primary" className="xflow-pv-split-btn" icon={<CaretRightOutlined />}>
+            <Button type="primary" className="xflow-pv-split-btn" icon={<PlayIcon />}>
               运行
             </Button>
             <Button
               type="primary"
               className="xflow-pv-split-btn"
               aria-label="运行选项"
-              icon={<DownOutlined />}
+              icon={<DownIcon />}
             />
           </span>
           <Todo label="待接入">
@@ -485,32 +484,32 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
       <div className="xflow-pv-wb-body">
         <nav className="xflow-pv-rail" aria-label="侧栏">
           <RailButton
-            icon={<AppstoreOutlined />}
+            icon={<GridIcon />}
             text="节点"
             label="节点与大纲"
             active={leftOpen}
             onClick={() => setLeftOpen((open) => !open)}
           />
-          <RailButton icon={<HistoryOutlined />} text="执行" label="执行记录" />
-          <RailButton icon={<FunctionOutlined />} text="变量" label="变量" />
+          <RailButton icon={<HistoryIcon />} text="执行" label="执行记录" />
+          <RailButton icon={<VarIcon />} text="变量" label="变量" />
           <span className="flex-1" />
           {/* Compact: the inspector has no column left, so the rail opens it as an overlay. */}
           {compactRight ? (
             <RailButton
-              icon={<SlidersOutlined />}
+              icon={<SlidersIcon />}
               text="属性"
               label="属性面板"
               active={rightOpen}
               onClick={() => setRightOpen((open) => !open)}
             />
           ) : null}
-          <RailButton icon={<QuestionCircleOutlined />} text="帮助" label="快捷键与帮助" />
+          <RailButton icon={<HelpIcon />} text="帮助" label="快捷键与帮助" />
         </nav>
 
         <aside className="xflow-pv-lib" aria-label="节点与大纲">
           <section className="xflow-pv-lib-pane">
             <PanelTitle
-              icon={<AppstoreOutlined />}
+              icon={<GridIcon />}
               title="节点"
               count={wbLibraryTotal}
               className="xflow-pv-panel-title--bar"
@@ -518,7 +517,7 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
               <IconButton
                 small
                 label="收起左栏 ⌘B"
-                icon={<MenuFoldOutlined />}
+                icon={<SideLeftIcon />}
                 active={leftOpen}
                 onClick={() => setLeftOpen(false)}
               />
@@ -526,7 +525,7 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
             <div className="px-3 pb-2.5">
               <Input
                 className="xflow-pv-search"
-                prefix={<SearchOutlined />}
+                prefix={<SearchIcon />}
                 placeholder="搜索 Webhook / If / HTTP…"
                 suffix={<Kbd>/</Kbd>}
               />
@@ -571,13 +570,13 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
               title="画布分区（入口 / VIP 审批 / 普通客户）在 DSL 里没有声明字段；已有的分组字段是 groups[]（组放置与调度语义，见同机执行框），不是这套视觉分区"
             >
               <PanelTitle
-                icon={<UnorderedListOutlined />}
+                icon={<OutlineIcon />}
                 title="大纲"
                 count={wbOutlineTotal}
                 className="xflow-pv-panel-title--bar"
               >
-                <IconButton small label="定位选中节点" icon={<AimOutlined />} />
-                <IconButton small label="搜索大纲" icon={<SearchOutlined />} />
+                <IconButton small label="定位选中节点" icon={<LocateIcon />} />
+                <IconButton small label="搜索大纲" icon={<SearchIcon />} />
               </PanelTitle>
             </Todo>
             <div className="xflow-pv-outline" role="tree" aria-label="工作流大纲">
@@ -633,14 +632,14 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
         <main className="xflow-pv-canvas" aria-label="画布" ref={canvasRef}>
           <div className="xflow-pv-float-row">
             <Float className="xflow-pv-addnode">
-              <Button size="small" type="text" icon={<PlusOutlined />} aria-label="添加节点 (A)">
+              <Button size="small" type="text" icon={<PlusIcon />} aria-label="添加节点 (A)">
                 添加节点
               </Button>
               {/*
                * ⌘K locate has no topbar search box (user ruling 2026-10-17); this
                * is its mouse entry, beside the other canvas-level action.
                */}
-              <IconButton small label="定位节点 ⌘K" icon={<SearchOutlined />} />
+              <IconButton small label="定位节点 ⌘K" icon={<SearchIcon />} />
             </Float>
             <RunBar variant={wbRun} onLocate={setSelectedId} />
             {rightOpen ? null : (
@@ -648,7 +647,7 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
                 <Button
                   size="small"
                   type="text"
-                  icon={<MenuUnfoldOutlined />}
+                  icon={<SideRightIcon />}
                   aria-label="展开属性面板"
                   title="展开属性面板 ⌥⌘B"
                   onClick={() => setRightOpen(true)}
@@ -753,7 +752,7 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
 
         <aside className="xflow-pv-insp" aria-labelledby={`${idPrefix}-props`}>
           <PanelTitle
-            icon={<SlidersOutlined />}
+            icon={<SlidersIcon />}
             title="属性"
             titleId={`${idPrefix}-props`}
             className="xflow-pv-panel-title--bar"
@@ -761,7 +760,7 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
             <IconButton
               small
               label="收起属性面板 ⌥⌘B"
-              icon={<MenuUnfoldOutlined />}
+              icon={<SideRightIcon />}
               active={rightOpen}
               onClick={() => setRightOpen(false)}
             />
@@ -769,9 +768,9 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
           <div className="xflow-pv-insp-head">
             <CategoryIcon category="action" icon="globe" />
             <span className="xflow-pv-insp-node">fetch_profile</span>
-            <StatusChip tone="success" icon={<CheckOutlined />} label="成功" />
-            <IconButton small label="复制节点" icon={<CopyOutlined />} />
-            <IconButton small label="更多操作" icon={<MoreOutlined />} />
+            <StatusChip tone="success" icon={<CheckIcon />} label="成功" />
+            <IconButton small label="复制节点" icon={<CopyIcon />} />
+            <IconButton small label="更多操作" icon={<MoreIcon />} />
             {/*
              * The type id gets a row of its own instead of sharing one with the
              * name and the chip: three items and two icon buttons in a 360px
@@ -813,7 +812,7 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
           />
           <div className="xflow-pv-insp-foot">
             <Todo label="宿主未接 onRunNode">
-              <Button block icon={<CaretRightOutlined />}>
+              <Button block icon={<PlayIcon />}>
                 测试此节点
               </Button>
             </Todo>

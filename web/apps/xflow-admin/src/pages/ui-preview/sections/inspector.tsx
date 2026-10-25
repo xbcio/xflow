@@ -1,14 +1,14 @@
 import {
-  CheckOutlined,
-  CopyOutlined,
-  DownOutlined,
-  MoreOutlined,
-  PlusOutlined,
-  SearchOutlined,
-  SlidersOutlined,
-  UnorderedListOutlined,
-  WarningOutlined,
-} from '@ant-design/icons';
+  CheckIcon,
+  CopyIcon,
+  DownIcon,
+  MoreIcon,
+  OutlineIcon,
+  PlusIcon,
+  SearchIcon,
+  SlidersIcon,
+  WarnIcon,
+} from '@xflow/icons';
 import { Button, Collapse, Input, Tabs, Tooltip } from 'antd';
 import { Fragment, type ReactNode } from 'react';
 
@@ -48,7 +48,7 @@ function Sections({
       className="xflow-pv-secs"
       defaultActiveKey={items.filter((item) => item.defaultActive !== false).map((item) => item.key)}
       expandIconPlacement="start"
-      expandIcon={({ isActive }) => <DownOutlined rotate={isActive ? 0 : -90} />}
+      expandIcon={({ isActive }) => <DownIcon style={{ transform: isActive ? undefined : 'rotate(-90deg)' }} />}
       classNames={{ header: 'xflow-pv-sec-head', body: 'xflow-pv-sec-body p-0' }}
       items={items.map((item) => ({
         key: item.key,
@@ -138,7 +138,7 @@ function InspPanel({
   return (
     <aside className="xflow-pv-insp" aria-label={title}>
       <PanelTitle
-        icon={<SlidersOutlined />}
+        icon={<SlidersIcon />}
         title={title}
         count={titleCount}
         className="xflow-pv-panel-title--bar"
@@ -210,12 +210,12 @@ function NodeHead({
 }) {
   const copy = (
     <Tooltip title="复制节点">
-      <Button type="text" size="small" className="xflow-pv-tool" icon={<CopyOutlined />} aria-label="复制节点" />
+      <Button type="text" size="small" className="xflow-pv-tool" icon={<CopyIcon />} aria-label="复制节点" />
     </Tooltip>
   );
   const more = (
     <Tooltip title="更多操作">
-      <Button type="text" size="small" className="xflow-pv-tool" icon={<MoreOutlined />} aria-label="更多操作" />
+      <Button type="text" size="small" className="xflow-pv-tool" icon={<MoreIcon />} aria-label="更多操作" />
     </Tooltip>
   );
   return (
@@ -281,7 +281,7 @@ export function InspectorSection() {
                   key: 'rules',
                   label: (
                     <SectionLabel title="条件规则">
-                      <StatusChip tone="success" icon={<CheckOutlined />} label="有效" />
+                      <StatusChip tone="success" icon={<CheckIcon />} label="有效" />
                     </SectionLabel>
                   ),
                   children: (
@@ -289,7 +289,7 @@ export function InspectorSection() {
                       {inspSwitch.rules.map((rule) => (
                         <Rule key={rule.id} rule={rule} />
                       ))}
-                      <Button size="small" icon={<PlusOutlined />} className="xflow-pv-add-row">
+                      <Button size="small" icon={<PlusIcon />} className="xflow-pv-add-row">
                         新增规则
                       </Button>
                     </>
@@ -300,7 +300,7 @@ export function InspectorSection() {
           }
           foot={
             <Todo label="宿主未接 onRunNode">
-              <Button block icon={<CheckOutlined />}>
+              <Button block icon={<CheckIcon />}>
                 测试此节点
               </Button>
             </Todo>
@@ -371,7 +371,7 @@ export function InspectorSection() {
               sub="fetch_profile · xflow.http"
               category="action"
               icon="globe"
-              chip={<StatusChip tone="success" icon={<CheckOutlined />} label="成功" />}
+              chip={<StatusChip tone="success" icon={<CheckIcon />} label="成功" />}
             />
           }
           body={
@@ -402,7 +402,7 @@ export function InspectorSection() {
                             type="text"
                             size="small"
                             className="xflow-pv-tool"
-                            icon={<CopyOutlined />}
+                            icon={<CopyIcon />}
                             aria-label="复制输出"
                           />
                         </Tooltip>
@@ -418,7 +418,7 @@ export function InspectorSection() {
             <>
               <Button block>固定为测试数据</Button>
               <Todo label="宿主未接 onRunNode">
-                <Button block icon={<CheckOutlined />}>
+                <Button block icon={<CheckIcon />}>
                   重新运行
                 </Button>
               </Todo>
@@ -439,7 +439,7 @@ export function InspectorSection() {
               category="action"
               icon="bell"
               renaming
-              chip={<StatusChip tone="danger" icon={<WarningOutlined />} label="失败" />}
+              chip={<StatusChip tone="danger" icon={<WarnIcon />} label="失败" />}
             />
           }
           body={<Sections items={[{ key: 'base', label: <SectionLabel title="基础信息" />, children: fields(inspSwitch.base.slice(0, 1)) }]} />}
@@ -469,7 +469,7 @@ export function InspectorSection() {
                       align="start"
                       icon={<CategoryIcon category="trigger" icon="link" size="sm" />}
                       action={
-                        <Button size="small" icon={<SearchOutlined />}>
+                        <Button size="small" icon={<SearchIcon />}>
                           定位
                         </Button>
                       }
@@ -493,7 +493,7 @@ export function InspectorSection() {
                   defaultActive: false,
                   label: (
                     <SectionLabel title="错误与重试" extra="节点默认继承">
-                      <StatusChip tone="neutral" icon={<UnorderedListOutlined />} label={`${wfSettings.retry.length} 项`} />
+                      <StatusChip tone="neutral" icon={<OutlineIcon />} label={`${wfSettings.retry.length} 项`} />
                     </SectionLabel>
                   ),
                   children: <div className="xflow-pv-field-grid">{fields(wfSettings.retry)}</div>,
@@ -503,7 +503,7 @@ export function InspectorSection() {
                   defaultActive: false,
                   label: (
                     <SectionLabel title="高级" extra="调度 · 实验">
-                      <StatusChip tone="neutral" icon={<UnorderedListOutlined />} label={`${wfSettings.advanced.length} 项`} />
+                      <StatusChip tone="neutral" icon={<OutlineIcon />} label={`${wfSettings.advanced.length} 项`} />
                     </SectionLabel>
                   ),
                   children: <div className="xflow-pv-field-grid">{fields(wfSettings.advanced)}</div>,
@@ -526,7 +526,7 @@ export function InspectorSection() {
               sub={`${inspInvalid.nodeName} · ${inspInvalid.type}`}
               category={inspInvalid.category}
               icon={inspInvalid.icon}
-              chip={<StatusChip tone="danger" icon={<WarningOutlined />} label={`${inspInvalid.badge} 个错误`} />}
+              chip={<StatusChip tone="danger" icon={<WarnIcon />} label={`${inspInvalid.badge} 个错误`} />}
             />
           }
           body={
@@ -536,7 +536,7 @@ export function InspectorSection() {
                 label: (
                   <SectionLabel title={section.title} extra={section.extra}>
                     {section.errors ? (
-                      <StatusChip tone="danger" icon={<WarningOutlined />} label={`${section.errors} 个错误`} />
+                      <StatusChip tone="danger" icon={<WarnIcon />} label={`${section.errors} 个错误`} />
                     ) : null}
                   </SectionLabel>
                 ),

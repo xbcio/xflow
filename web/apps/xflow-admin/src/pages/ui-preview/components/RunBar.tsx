@@ -1,11 +1,11 @@
 import {
-  AimOutlined,
-  CaretRightOutlined,
-  CloseOutlined,
-  PauseOutlined,
-  ReloadOutlined,
-  StopOutlined,
-} from '@ant-design/icons';
+  LocateIcon,
+  PauseIcon,
+  PlayIcon,
+  RedoIcon,
+  StopIcon,
+  XMarkIcon,
+} from '@xflow/icons';
 import { Button, Popconfirm, Tooltip, Typography } from 'antd';
 import type { ReactNode } from 'react';
 
@@ -16,10 +16,10 @@ import { Float, StatusChip, VerticalSep } from './primitives';
 import { Todo } from './Todo';
 
 const opMeta: Record<ExecutionOp, { label: string; icon: ReactNode; danger?: boolean }> = {
-  pause: { label: '暂停', icon: <PauseOutlined /> },
-  resume: { label: '继续', icon: <CaretRightOutlined /> },
-  cancel: { label: '取消', icon: <StopOutlined />, danger: true },
-  rerun: { label: '重跑…', icon: <ReloadOutlined /> },
+  pause: { label: '暂停', icon: <PauseIcon /> },
+  resume: { label: '继续', icon: <PlayIcon /> },
+  cancel: { label: '取消', icon: <StopIcon />, danger: true },
+  rerun: { label: '重跑…', icon: <RedoIcon /> },
 };
 
 /**
@@ -93,7 +93,7 @@ export function RunBar({
             <Button
               size="small"
               type="text"
-              icon={<AimOutlined />}
+              icon={<LocateIcon />}
               className="xflow-pv-count"
               data-tone="suspend"
               onClick={() => onLocate?.('manager_approval')}
@@ -107,7 +107,7 @@ export function RunBar({
             <Button
               size="small"
               type="text"
-              icon={<AimOutlined />}
+              icon={<LocateIcon />}
               className="xflow-pv-count"
               data-tone="danger"
               onClick={() => onLocate?.('enrich_score')}
@@ -133,7 +133,7 @@ export function RunBar({
                 <Button
                   type="text"
                   size="small"
-                  icon={<CloseOutlined />}
+                  icon={<XMarkIcon />}
                   aria-label="关闭运行条"
                   className="xflow-pv-tool"
                 />

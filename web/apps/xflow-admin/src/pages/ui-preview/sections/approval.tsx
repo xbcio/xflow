@@ -1,4 +1,4 @@
-import { CloseOutlined } from '@ant-design/icons';
+import { XMarkIcon } from '@xflow/icons';
 import { Button, Input, Segmented, Select } from 'antd';
 import { NodeCard } from '../components/NodeCard';
 import { CategoryIcon, IconButton, SectionLabel, StatusChip } from '../components/primitives';
@@ -32,7 +32,7 @@ function DialogHead({ id, title, sub }: { id: string; title: string; sub?: strin
         <h3 id={id}>{title}</h3>
         {sub ? <span className="xflow-pv-dialog-sub xflow-pv-mono">{sub}</span> : null}
       </span>
-      <IconButton small label="关闭" icon={<CloseOutlined />} />
+      <IconButton small label="关闭" icon={<XMarkIcon />} />
     </header>
   );
 }

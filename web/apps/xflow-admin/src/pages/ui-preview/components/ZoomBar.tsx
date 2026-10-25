@@ -1,11 +1,11 @@
 import {
-  ApartmentOutlined,
-  ColumnWidthOutlined,
-  ExpandOutlined,
-  MinusOutlined,
-  PictureOutlined,
-  PlusOutlined,
-} from '@ant-design/icons';
+  FitIcon,
+  LayoutIcon,
+  MapIcon,
+  MinusIcon,
+  PlusIcon,
+  RulerIcon,
+} from '@xflow/icons';
 import { Slider } from 'antd';
 
 import { Float, FloatButton, VerticalSep } from './primitives';
@@ -38,7 +38,7 @@ export function ZoomBar({
     <Float className="xflow-pv-zoombar">
       <FloatButton
         label="缩小"
-        icon={<MinusOutlined />}
+        icon={<MinusIcon />}
         onClick={() => onScaleChange(Math.max(0.1, (percent - 10) / 100))}
       />
       <Slider
@@ -52,21 +52,21 @@ export function ZoomBar({
       <span className="xflow-pv-zoom-value">{percent}%</span>
       <FloatButton
         label="放大"
-        icon={<PlusOutlined />}
+        icon={<PlusIcon />}
         onClick={() => onScaleChange(Math.min(2, (percent + 10) / 100))}
       />
       <VerticalSep />
-      <FloatButton label="适应画布" icon={<ExpandOutlined />} onClick={onFit} />
-      <FloatButton label="自动布局" icon={<ApartmentOutlined />} />
+      <FloatButton label="适应画布" icon={<FitIcon />} onClick={onFit} />
+      <FloatButton label="自动布局" icon={<LayoutIcon />} />
       <FloatButton
         label="标尺 (⇧R)"
-        icon={<ColumnWidthOutlined />}
+        icon={<RulerIcon />}
         active={ruler}
         onClick={() => onRulerChange(!ruler)}
       />
       <FloatButton
         label="缩略图 (⇧M)"
-        icon={<PictureOutlined />}
+        icon={<MapIcon />}
         active={minimap}
         onClick={() => onMinimapChange(!minimap)}
       />

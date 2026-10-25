@@ -1,4 +1,4 @@
-import { CheckOutlined, DeleteOutlined, DownOutlined, PlusOutlined, WarningOutlined } from '@ant-design/icons';
+import { CheckIcon, DownIcon, PlusIcon, TrashIcon, WarnIcon } from '@xflow/icons';
 import { Button, Collapse, Input } from 'antd';
 
 import { SectionLabel, StatusChip } from '../components/primitives';
@@ -18,7 +18,7 @@ function KeyValueRows() {
             type="text"
             size="small"
             className="xflow-pv-tool"
-            icon={<DeleteOutlined />}
+            icon={<TrashIcon />}
             aria-label={`删除第 ${index + 1} 行`}
           />
         </div>
@@ -26,12 +26,12 @@ function KeyValueRows() {
       {composerHeaders.map((row, index) =>
         row.error ? (
           <span className="xflow-pv-err" data-tone="danger" key={`${row.id}-error`}>
-            <WarningOutlined className="xflow-pv-err-icon" />
+            <WarnIcon className="xflow-pv-err-icon" />
             第 {index + 1} 行：{row.error}
           </span>
         ) : null
       )}
-      <Button size="small" icon={<PlusOutlined />} className="xflow-pv-add-row">
+      <Button size="small" icon={<PlusIcon />} className="xflow-pv-add-row">
         添加
       </Button>
     </div>
@@ -46,7 +46,7 @@ function CollapsedWithCounts() {
         ghost
         className="xflow-pv-secs"
         expandIconPlacement="start"
-        expandIcon={() => <DownOutlined rotate={-90} />}
+        expandIcon={() => <DownIcon style={{ transform: 'rotate(-90deg)' }} />}
         classNames={{ header: 'xflow-pv-sec-head' }}
         items={composerCollapsed.map((section) => ({
           key: section.id,
@@ -57,7 +57,7 @@ function CollapsedWithCounts() {
           extra: (
             <StatusChip
               tone={section.chip.tone}
-              icon={section.chip.tone === 'danger' ? <WarningOutlined /> : <CheckOutlined />}
+              icon={section.chip.tone === 'danger' ? <WarnIcon /> : <CheckIcon />}
               label={section.chip.label}
             />
           ),

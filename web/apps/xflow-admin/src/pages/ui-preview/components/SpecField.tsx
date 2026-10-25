@@ -1,4 +1,4 @@
-import { WarningOutlined } from '@ant-design/icons';
+import { WarnIcon } from '@xflow/icons';
 import { Button, Input, InputNumber, Segmented, Select, Slider, Switch, Tooltip } from 'antd';
 import type { ReactNode } from 'react';
 
@@ -50,6 +50,7 @@ export function SpecControl({ field }: { field: FieldSpec }) {
       return (
         <Select
           className={controlClass}
+          classNames={{ item: 'xflow-pv-tag-item' }}
           mode="multiple"
           status={status}
           defaultValue={field.options}
@@ -164,7 +165,7 @@ export function SpecField({ field, suffix }: { field: FieldSpec; suffix?: ReactN
       {field.hint ? <span className="xflow-pv-hint">{field.hint}</span> : null}
       {field.error ? (
         <span className="xflow-pv-err" data-tone={field.error.tone}>
-          <WarningOutlined className="xflow-pv-err-icon" />
+          <WarnIcon className="xflow-pv-err-icon" />
           {field.error.text}
         </span>
       ) : null}

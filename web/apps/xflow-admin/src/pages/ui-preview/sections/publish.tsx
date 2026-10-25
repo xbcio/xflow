@@ -1,4 +1,4 @@
-import { AimOutlined, CloseOutlined, HistoryOutlined, ReloadOutlined } from '@ant-design/icons';
+import { HistoryIcon, LocateIcon, RedoIcon, XMarkIcon } from '@xflow/icons';
 import { Button, Input, Tooltip } from 'antd';
 
 import { Banner } from '../components/Banner';
@@ -108,7 +108,7 @@ function DialogHead({ id, title, sub, big }: { id: string; title: string; sub: s
         <h3 id={id}>{title}</h3>
         <span className="xflow-pv-dialog-sub xflow-pv-mono">{sub}</span>
       </span>
-      <IconButton small label="关闭" icon={<CloseOutlined />} />
+      <IconButton small label="关闭" icon={<XMarkIcon />} />
     </header>
   );
 }
@@ -256,7 +256,7 @@ function SaveFailedDialog() {
             {failureNode.label}（<span className="xflow-pv-mono">{failureNode.id}</span>）·{' '}
             {wbSaveFailure.label}
           </span>
-          <Button size="small" icon={<AimOutlined />}>
+          <Button size="small" icon={<LocateIcon />}>
             定位节点
           </Button>
         </div>
@@ -267,7 +267,7 @@ function SaveFailedDialog() {
             服务端已经拒了，读者这时要办的是那一件事，再挂一句本地警告只会分心（H2）。 */}
       </div>
       <footer className="xflow-pv-dialog-foot">
-        <Button size="small" icon={<ReloadOutlined />}>
+        <Button size="small" icon={<RedoIcon />}>
           重试保存
         </Button>
         <Button size="small">取消</Button>
@@ -357,7 +357,7 @@ export function PublishSection() {
 
         <div className="xflow-pv-card xflow-pv-admin-tablecard" style={{ alignSelf: 'start' }}>
           <PanelTitle
-            icon={<HistoryOutlined />}
+            icon={<HistoryIcon />}
             title="版本历史"
             className="xflow-pv-panel-title--bar"
             count={wbVersions.length}

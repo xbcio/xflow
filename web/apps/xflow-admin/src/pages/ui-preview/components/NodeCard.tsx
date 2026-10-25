@@ -1,4 +1,4 @@
-import { KeyOutlined, PushpinOutlined } from '@ant-design/icons';
+import { KeyIcon, PinIcon } from '@xflow/icons';
 import { Button } from 'antd';
 import { Fragment } from 'react';
 
@@ -36,10 +36,10 @@ function SummaryValueView({ value }: { value: SummaryValue }) {
     case 'ref':
       return (
         <span className="xflow-pv-ref">
-          {/* Colour on the wrapper, not on the icon: @ant-design/icons injects an
-           * unlayered `.anticon { color: inherit }` that outranks every layer. */}
+          {/* Colour on the wrapper, not on the icon: `.xflow-icon` strokes in
+           * `currentColor`, so the tint cascades from the wrapper. */}
           <span className="xflow-pv-ref-icon">
-            <KeyOutlined />
+            <KeyIcon />
           </span>
           {value.text}
         </span>
@@ -106,7 +106,7 @@ export function NodeCard({
     >
       {node.pinned ? (
         <span className="xflow-pv-pin">
-          <PushpinOutlined />
+          <PinIcon />
         </span>
       ) : null}
       {node.badge ? <span className="xflow-pv-badge-err">{node.badge}</span> : null}

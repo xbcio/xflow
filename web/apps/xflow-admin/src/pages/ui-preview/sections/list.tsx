@@ -1,4 +1,4 @@
-import { AppstoreOutlined, HistoryOutlined, PlusOutlined, SearchOutlined, UploadOutlined } from '@ant-design/icons';
+import { GridIcon, HistoryIcon, PlusIcon, SearchIcon, UploadIcon } from '@xflow/icons';
 import { Button, Input, Table } from 'antd';
 
 import { AdminShell } from '../components/AdminShell';
@@ -106,14 +106,14 @@ export function ListSection() {
             size="small"
             readOnly
             placeholder="按名称或 ID 搜索工作流"
-            prefix={<SearchOutlined />}
+            prefix={<SearchIcon />}
             suffix={<Kbd>/</Kbd>}
           />
           <span className="xflow-pv-grow" />
-          <Button size="small" icon={<UploadOutlined />}>
+          <Button size="small" icon={<UploadIcon />}>
             导入 DSL
           </Button>
-          <Button size="small" type="primary" icon={<PlusOutlined />}>
+          <Button size="small" type="primary" icon={<PlusIcon />}>
             新建工作流
           </Button>
         </>
@@ -135,7 +135,7 @@ export function ListSection() {
       <div className="xflow-pv-admin-cols">
         <div className="xflow-pv-card xflow-pv-admin-tablecard" data-table="workflows">
           <PanelTitle
-            icon={<AppstoreOutlined />}
+            icon={<GridIcon />}
             title="工作流"
             className="xflow-pv-panel-title--bar"
             count={adminWorkflows.length}
@@ -167,7 +167,7 @@ export function ListSection() {
 
           <div className="xflow-pv-card xflow-pv-admin-tablecard" data-panel="recent-runs">
             <PanelTitle
-              icon={<HistoryOutlined />}
+              icon={<HistoryIcon />}
               title="最近运行"
               className="xflow-pv-panel-title--bar"
               count={adminRecentRuns.length}
@@ -197,7 +197,7 @@ export function ListSection() {
        * 挤成逐字换行 —— 那就不是列表本来的样子了。
        */}
       <div className="xflow-pv-card xflow-pv-admin-tablecard" data-state="loading">
-        <PanelTitle icon={<AppstoreOutlined />} title="加载态" className="xflow-pv-panel-title--bar" />
+        <PanelTitle icon={<GridIcon />} title="加载态" className="xflow-pv-panel-title--bar" />
         <div className="xflow-pv-admin-state">
           <p className="xflow-pv-admin-state-label">请求中：表格保留加载前的高度，操作按钮在此期间不可用（§6.6）。</p>
           <WorkflowTable rows={adminWorkflows.slice(0, 2)} loading />

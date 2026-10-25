@@ -1,6 +1,9 @@
 import { foundationTokens as foundation, paletteTokens as palettes, type Appearance } from '@xflow/core';
 import { theme, type ThemeConfig } from 'antd';
 
+/** AntD tokens take numbers; the shared radius scale is the single source. */
+const radiusPx = (token: string) => Number.parseInt(token, 10);
+
 /**
  * The preview's AntD theme. Colour and size values come from @xflow/core — the
  * same record that generates `tokens.css` — so AntD and the `--xflow-*`
@@ -16,9 +19,10 @@ export function themeConfig(appearance: Appearance): ThemeConfig {
       fontFamilyCode: foundation.fontMono,
       fontSize: 13,
       fontSizeSM: 12,
-      borderRadius: 6,
-      borderRadiusSM: 4,
-      borderRadiusLG: 8,
+      borderRadius: radiusPx(foundation.radiusSm),
+      borderRadiusSM: radiusPx(foundation.radiusSm),
+      borderRadiusLG: radiusPx(foundation.radiusMd),
+      borderRadiusXS: radiusPx(foundation.radiusXs),
       controlHeight: 32,
       controlHeightSM: 24,
       colorPrimary: p.primary,
@@ -43,7 +47,7 @@ export function themeConfig(appearance: Appearance): ThemeConfig {
     },
     components: {
       Button: { defaultBg: p.panel, defaultShadow: 'none', primaryShadow: 'none', dangerShadow: 'none' },
-      Modal: { borderRadiusLG: 12, contentBg: p.panel, headerBg: p.panel, footerBg: p.panel },
+      Modal: { borderRadiusLG: radiusPx(foundation.radiusLg), contentBg: p.panel, headerBg: p.panel, footerBg: p.panel },
       Form: { itemMarginBottom: 12, verticalLabelPadding: '0 0 4px', labelFontSize: 12, labelColor: p.textSecondary },
       Tabs: { horizontalItemGutter: 16, horizontalMargin: '0', itemColor: p.textSecondary },
       Segmented: { itemSelectedBg: p.panel, trackBg: p.hover },
