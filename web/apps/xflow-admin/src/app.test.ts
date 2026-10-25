@@ -39,6 +39,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.unstubAllGlobals();
   delete process.env.XFLOW_AUTH_LOGIN_URL;
+  delete process.env.XFLOW_DEV_PROXY_AUTH;
   mocks.history.location.pathname = '/';
   mocks.getToken.mockReturnValue('bearer-token');
   mocks.fetchCurrentUser.mockResolvedValue(identity);
@@ -75,6 +76,31 @@ describe('getInitialState', () => {
 
     expect(mocks.fetchCurrentUser).toHaveBeenCalledTimes(1);
     expect(state.currentUser).toEqual(identity);
+  });
+
+  it('开发代理承诺认证且无令牌时仍拉取 current-user', async () => {
+    // config/config.ts 的 define 在 dev 产物里把该标志替换成字面量 true；
+    // 测试没有经过 define，读到的是环境变量字符串。
+    process.env.XFLOW_DEV_PROXY_AUTH = 'true';
+    mocks.getToken.mockReturnValue(null);
+    mocks.history.location.pathname = '/workflows';
+    const { getInitialState } = await loadApp();
+
+    const state = await getInitialState();
+
+    expect(mocks.fetchCurrentUser).toHaveBeenCalledTimes(1);
+    expect(state.currentUser).toEqual(identity);
+  });
+
+  it('无令牌且开发代理不认证时不请求 current-user', async () => {
+    mocks.getToken.mockReturnValue(null);
+    mocks.history.location.pathname = '/workflows';
+    const { getInitialState } = await loadApp();
+
+    const state = await getInitialState();
+
+    expect(mocks.fetchCurrentUser).not.toHaveBeenCalled();
+    expect(state.currentUser).toBeUndefined();
   });
 });
 

@@ -4,6 +4,7 @@ import { history } from '@umijs/max';
 import type { ReactNode } from 'react';
 
 import { isAuthEntryPath } from './auth';
+import { hasDevProxyAuth } from './devAuth';
 import { handleRequestError } from './requestError';
 import { getToken } from './services/token';
 import type { CurrentIdentity } from './services/user';
@@ -20,10 +21,13 @@ export interface InitialState {
  *
  * 入口页（未授权说明页 / 网关登录入口）没有可恢复的身份，直接跳过拉取——
  * 判定见 src/auth.ts 的 isAuthEntryPath。
+ *
+ * 浏览器没有令牌时，只有开发代理承诺替我们补 Bearer（见 src/devAuth.ts）才继续
+ * 请求；生产构建里该标志恒为 false，无令牌就不请求的行为不变。
  */
 export async function getInitialState(): Promise<InitialState> {
   const fetchUserInfo = async (): Promise<CurrentIdentity | undefined> => {
-    if (!getToken()) {
+    if (!getToken() && !hasDevProxyAuth()) {
       return undefined;
     }
     try {

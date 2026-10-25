@@ -39,6 +39,14 @@ function resolveDevToken(): string | undefined {
 
 const devToken = resolveDevToken();
 
+/**
+ * 代理是否会在服务端为 /v1 请求补 Bearer。
+ *
+ * config/config.ts 只把这个布尔量注入前端（编译期标志 XFLOW_DEV_PROXY_AUTH），
+ * 令牌值本身不进 define、不进前端产物。
+ */
+export const devProxyAuthConfigured = devToken !== undefined;
+
 export const proxy = {
   '/v1': {
     target: process.env.XFLOW_API_TARGET ?? 'http://127.0.0.1:8080',
