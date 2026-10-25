@@ -344,6 +344,14 @@ func (s *Store) SeedExecution(ctx context.Context, req engine.SeedExecutionReque
 		s.ttlMu.Unlock()
 	}
 
+	// The keys must also outlive the execution's deadline; see createExecution.
+	if want := retentionPastDeadline(ttl, req.Execution.Deadline); want > ttl {
+		ttl = want
+		s.ttlMu.Lock()
+		s.execTTLs[execID] = ttl
+		s.ttlMu.Unlock()
+	}
+
 	// Persist the retention record for the same reason createExecution does:
 	// GetExecutionRetention treats its absence as "window unknown", so a creation
 	// path that skips the record degrades every later no-evidence drop on this

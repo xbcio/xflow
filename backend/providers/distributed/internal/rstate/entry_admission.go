@@ -371,6 +371,20 @@ func (s *Store) seedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 		s.ttlMu.Unlock()
 	}
 
+	// The keys must also outlive the deadline this admission derives from the
+	// graph's time budget (see createExecution). The deadline itself is stamped
+	// further down, from a clock read a few writes later; the grace covers that
+	// gap, so the retention is sized from the same budget here, before the first
+	// write that carries a TTL.
+	if req.Graph != nil && req.Graph.Timeout() > 0 {
+		if want := retentionPastDeadline(ttl, time.Now().Add(req.Graph.Timeout())); want > ttl {
+			ttl = want
+			s.ttlMu.Lock()
+			s.execTTLs[execID] = ttl
+			s.ttlMu.Unlock()
+		}
+	}
+
 	// The explicit durable marker, written before the Lua creates the execution
 	// for the same reason the transient marker above is: from the instant the
 	// execution exists another replica can lease a node. Without a marker that

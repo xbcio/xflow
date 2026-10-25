@@ -133,6 +133,17 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 		s.ttlMu.Unlock()
 	}
 
+	// The time budget is a retention rule too: the keys have to outlive the
+	// deadline, or the status expires before the expiry that the deadline exists
+	// to trigger can act on it. Applied after the queue wait so it only ever
+	// lengthens, and recorded like the wait so a later writer does not shorten it.
+	if want := retentionPastDeadline(ttl, e.Deadline); want > ttl {
+		ttl = want
+		s.ttlMu.Lock()
+		s.execTTLs[e.ID] = ttl
+		s.ttlMu.Unlock()
+	}
+
 	// Serialize graph for persistence (allows recovery after queue consumer restart).
 	graphJSON, err := json.Marshal(e.Graph)
 	if err != nil {
