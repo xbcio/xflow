@@ -37,14 +37,26 @@ interface Insets {
 const intersects = (a: FitRect, b: FitRect) =>
   a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
 
+/** The px a numeric padding takes off one side of `size`, as xyflow computes it. */
+function paddingPx(size: number, padding: number): number {
+  return Math.floor(size - size / (1 + padding));
+}
+
+/** The zoom at which `bounds` fills `area` (ignoring floating layers). */
+function fittedZoom(bounds: FitRect, area: { width: number; height: number }, padding: number): number {
+  const padX = paddingPx(area.width, padding);
+  const padY = paddingPx(area.height, padding);
+  return Math.min((area.width - 2 * padX) / bounds.width, (area.height - 2 * padY) / bounds.height);
+}
+
 /**
  * Centres `bounds` in a `width` x `height` box. A numeric padding means what it means
  * to xyflow's fitBounds (`floor(v - v / (1 + p))` px per side), so a canvas with no
  * floating layers lands exactly where the plain fit used to put it.
  */
 function centredViewport(bounds: FitRect, width: number, height: number, options: FitOptions): FitViewport {
-  const padX = Math.floor(width - width / (1 + options.padding));
-  const padY = Math.floor(height - height / (1 + options.padding));
+  const padX = paddingPx(width, options.padding);
+  const padY = paddingPx(height, options.padding);
   const fitted = Math.min((width - 2 * padX) / bounds.width, (height - 2 * padY) / bounds.height);
   const zoom = Math.min(Math.max(fitted, options.minZoom), options.maxZoom);
   return {
@@ -117,6 +129,77 @@ export function fitViewportClearOf(
   };
 
   if (bounds.width <= 0 || bounds.height <= 0) return undefined;
+
+  // A graph that cannot fit at minZoom stays readable: it is anchored at its
+  // top-left (the entry column) instead of centred, so the user sees where the
+  // flow starts rather than its middle. The floating layers cannot all stay
+  // clear of content this large; the padding still keeps it off the top/left
+  // rulers, and panning brings the rest into view.
+  const padX = paddingPx(area.width, options.padding);
+  const padY = paddingPx(area.height, options.padding);
+  const fitted = Math.min(
+    (area.width - 2 * padX) / bounds.width,
+    (area.height - 2 * padY) / bounds.height
+  );
+  if (fitted < options.minZoom) {
+    const zoom = Math.min(options.minZoom, options.maxZoom);
+    return { x: padX - bounds.x * zoom, y: padY - bounds.y * zoom, zoom };
+  }
+
   choose(0, { top: 0, right: 0, bottom: 0, left: 0 }, []);
   return best?.viewport;
+}
+
+/** Whether the content at `viewport` is inside the pane and clear of every layer. */
+function contentFits(
+  viewport: FitViewport,
+  bounds: FitRect,
+  area: { width: number; height: number },
+  layers: readonly FitRect[]
+): boolean {
+  const content = {
+    x: viewport.x + bounds.x * viewport.zoom,
+    y: viewport.y + bounds.y * viewport.zoom,
+    width: bounds.width * viewport.zoom,
+    height: bounds.height * viewport.zoom
+  };
+  if (
+    content.x < -0.5 || content.y < -0.5
+    || content.x + content.width > area.width + 0.5
+    || content.y + content.height > area.height + 0.5
+  ) return false;
+  return !layers
+    .filter((layer) => layer.width > 0 && layer.height > 0)
+    .some((layer) => intersects(
+      { x: layer.x - FLOAT_GAP, y: layer.y - FLOAT_GAP, width: layer.width + 2 * FLOAT_GAP, height: layer.height + 2 * FLOAT_GAP },
+      content
+    ));
+}
+
+/**
+ * The viewport a locate should use. Panning wins when the canvas is already at
+ * a readable zoom (inside [minZoom, maxZoom]) and the target fits at that zoom:
+ * the node is centred without changing scale, so the surrounding graph does not
+ * jump. Otherwise the usual layer-aware fit picks a zoom inside the band.
+ */
+export function locateViewportClearOf(
+  bounds: FitRect,
+  area: { width: number; height: number },
+  layers: readonly FitRect[],
+  options: FitOptions & { currentZoom: number }
+): FitViewport | undefined {
+  if (bounds.width <= 0 || bounds.height <= 0) return undefined;
+  const current = options.currentZoom;
+  // "Read first": at 158% the old locate dropped the user into an unreadable
+  // close-up; at 80% it is already a readable pan, so keep it.
+  if (
+    Number.isFinite(current)
+    && current >= options.minZoom
+    && current <= options.maxZoom
+    && fittedZoom(bounds, area, options.padding) >= current
+  ) {
+    const pan = fitViewportClearOf(bounds, area, layers, { ...options, minZoom: current, maxZoom: current });
+    if (pan && contentFits(pan, bounds, area, layers)) return pan;
+  }
+  return fitViewportClearOf(bounds, area, layers, options);
 }

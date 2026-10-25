@@ -1,6 +1,12 @@
 import { getViewportForBounds } from "@xyflow/react";
 import { describe, expect, it } from "vitest";
-import { FLOAT_GAP, fitViewportClearOf, type FitRect, type FitViewport } from "./fit";
+import {
+  FLOAT_GAP,
+  fitViewportClearOf,
+  locateViewportClearOf,
+  type FitRect,
+  type FitViewport
+} from "./fit";
 
 const options = { minZoom: 0.1, maxZoom: 2, padding: 0.18 };
 const area = { width: 1200, height: 700 };
@@ -91,5 +97,71 @@ describe("fitViewportClearOf", () => {
     expect(fitViewportClearOf(bounds, area, [{ x: 10, y: 10, width: 0, height: 0 }], options)).toEqual(plain);
     expect(fitViewportClearOf(bounds, area, [{ x: 2000, y: 2000, width: 50, height: 50 }], options)).toEqual(plain);
     expect(fitViewportClearOf({ x: 0, y: 0, width: 0, height: 0 }, area, [], options)).toBeUndefined();
+  });
+
+  it("never zooms below minZoom when the graph cannot fit, anchoring its top-left", () => {
+    const readable = { ...options, minZoom: 0.62 };
+    const huge = { x: 48, y: 96, width: 6000, height: 1200 };
+    const viewport = fitViewportClearOf(huge, area, [corner, rulerX, rulerY, zoomBar, minimap], readable)!;
+    expect(viewport.zoom).toBe(0.62);
+    // The entry column (the bounds' top-left) is on screen, not the graph's middle,
+    // and the padding keeps it off the pane's top/left edge.
+    const content = screenBox(viewport, huge);
+    expect(content.x).toBeGreaterThanOrEqual(0);
+    expect(content.y).toBeGreaterThanOrEqual(0);
+    expect(content.x).toBeLessThan(area.width / 4);
+    expect(content.y).toBeLessThan(area.height / 4);
+  });
+
+  it("still fits a graph that can hold minZoom without anchoring it at the edge", () => {
+    const readable = { ...options, minZoom: 0.62 };
+    const viewport = fitViewportClearOf({ x: 0, y: 0, width: 800, height: 400 }, area, [], readable)!;
+    expect(viewport.zoom).toBeGreaterThanOrEqual(0.62);
+    const content = screenBox(viewport, { x: 0, y: 0, width: 800, height: 400 });
+    // Centred, so it keeps a margin on both sides rather than hugging the left.
+    expect(content.x).toBeGreaterThan(40);
+    expect(content.x + content.width).toBeLessThan(area.width - 40);
+  });
+});
+
+describe("locateViewportClearOf", () => {
+  const locate = { minZoom: 0.62, maxZoom: 1, padding: 0.28 };
+  const node = { x: 1600, y: 900, width: 240, height: 96 };
+
+  it("pans without zooming when the current zoom is readable and the node fits", () => {
+    const viewport = locateViewportClearOf(node, area, [], { ...locate, currentZoom: 0.9 })!;
+    // 只平移: the scale the user chose is kept, only the position moves.
+    expect(viewport.zoom).toBe(0.9);
+    const content = screenBox(viewport, node);
+    expect(content.x).toBeGreaterThan(0);
+    expect(content.x + content.width).toBeLessThan(area.width);
+    expect(content.y).toBeGreaterThan(0);
+    expect(content.y + content.height).toBeLessThan(area.height);
+  });
+
+  it("will not pan at a zoom outside the readable band", () => {
+    // A 158% locate used to fill the canvas with one card; it is capped at 100%.
+    const close = locateViewportClearOf(node, area, [], { ...locate, currentZoom: 1.58 })!;
+    expect(close.zoom).toBeLessThanOrEqual(1);
+    expect(close.zoom).toBeGreaterThanOrEqual(0.62);
+
+    // A 33% fit stays readable rather than shrinking further.
+    const far = locateViewportClearOf(node, area, [], { ...locate, currentZoom: 0.33 })!;
+    expect(far.zoom).toBeGreaterThanOrEqual(0.62);
+    expect(far.zoom).toBeLessThanOrEqual(1);
+  });
+
+  it("keeps a located node clear of the floating chrome", () => {
+    const layers = [rulerX, rulerY, zoomBar, minimap];
+    const edge = { x: 0, y: 0, width: 900, height: 500 };
+    const viewport = locateViewportClearOf(edge, area, layers, { ...locate, currentZoom: 0.62 })!;
+    const content = screenBox(viewport, edge);
+    for (const layer of layers) {
+      expect(gapBetween(content, layer)).toBeGreaterThanOrEqual(FLOAT_GAP - 1e-9);
+    }
+  });
+
+  it("reports no viewport for empty bounds", () => {
+    expect(locateViewportClearOf({ x: 0, y: 0, width: 0, height: 0 }, area, [], { ...locate, currentZoom: 1 })).toBeUndefined();
   });
 });
