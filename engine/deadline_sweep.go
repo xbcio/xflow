@@ -139,8 +139,10 @@ type DeadlineSweep struct {
 	cfg DeadlineSweepConfig
 
 	mu sync.Mutex
-	// saturated is set while the executions set aside alone fill the page the
-	// sweep can read, so the warning is logged once per episode, not every pass.
+	// saturated is set once the executions set aside fill the page the sweep can
+	// read, and cleared only when they fall to half of it. Backoff windows expire
+	// and renew all the time, so the count hovers around the cap; clearing at the
+	// cap itself would log the warning again every few passes.
 	saturated bool
 }
 
@@ -213,7 +215,12 @@ func (s *DeadlineSweep) Sweep(ctx context.Context) (DeadlineSweepResult, error) 
 	limit, capped := s.fetchLimit(now)
 	s.mu.Lock()
 	warnSaturated := capped && !s.saturated
-	s.saturated = capped
+	switch {
+	case capped:
+		s.saturated = true
+	case limit <= s.cfg.Batch*s.cfg.FetchFactor/2:
+		s.saturated = false
+	}
 	s.mu.Unlock()
 	if warnSaturated && s.cfg.Logger != nil {
 		s.cfg.Logger.Warn("execution deadline scan is saturated by executions that keep failing to expire",

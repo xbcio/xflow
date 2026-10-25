@@ -413,6 +413,67 @@ func TestDeadlineSweepWarnsOnceWhenFailuresSaturateTheScan(t *testing.T) {
 	}
 }
 
+// TestDeadlineSweepSaturationWarningDoesNotFlap pins the hysteresis: with more
+// failing executions than the scan can read, the count of those backing off
+// hovers around the cap as windows expire and renew. Re-arming the warning at
+// the cap itself logged it again every few passes (25 times in these 200).
+func TestDeadlineSweepSaturationWarningDoesNotFlap(t *testing.T) {
+	h := newSweepHarness(100, nil)
+	for _, id := range h.index.add("broken", 1200, sweepEpoch.Add(-time.Hour)) {
+		h.expirer.setErr(id, errSweepStoreDown)
+	}
+
+	for round := 0; round < 200; round++ {
+		h.sweep(t)
+		h.advance(time.Second)
+	}
+
+	if got := len(h.log.withMsg(sweepSaturatedMsg)); got != 1 {
+		t.Fatalf("saturation warnings = %d, want exactly 1 for the episode", got)
+	}
+}
+
+// TestDeadlineSweepSaturationWarningRearmsOnceTheBackoffDrains pins the other
+// half: when the executions set aside have mostly cleared, the next saturation is
+// a new episode and warns again.
+func TestDeadlineSweepSaturationWarningRearmsOnceTheBackoffDrains(t *testing.T) {
+	const batch = 2
+	h := newSweepHarness(batch, nil)
+	first := h.index.add("first", 30, sweepEpoch.Add(-time.Hour))
+	for _, id := range first {
+		h.expirer.setErr(id, errSweepStoreDown)
+	}
+	for round := 0; round < 16; round++ {
+		h.sweep(t)
+		h.advance(time.Millisecond)
+	}
+	if got := len(h.log.withMsg(sweepSaturatedMsg)); got != 1 {
+		t.Fatalf("saturation warnings in the first episode = %d, want 1", got)
+	}
+
+	// The store recovers: past the longest backoff every sweep attempts a batch,
+	// and the 30 executions are expired two at a time.
+	for _, id := range first {
+		h.expirer.setErr(id, nil)
+	}
+	h.advance(10 * time.Minute)
+	for h.index.listed() > 0 {
+		h.sweep(t)
+	}
+	h.sweep(t)
+
+	for _, id := range h.index.add("second", 30, sweepEpoch.Add(-time.Minute)) {
+		h.expirer.setErr(id, errSweepStoreDown)
+	}
+	for round := 0; round < 16; round++ {
+		h.sweep(t)
+		h.advance(time.Millisecond)
+	}
+	if got := len(h.log.withMsg(sweepSaturatedMsg)); got != 2 {
+		t.Fatalf("saturation warnings after a second episode = %d, want 2", got)
+	}
+}
+
 func TestDeadlineSweepFetchesPastWhatIsBackingOff(t *testing.T) {
 	const batch = 4
 	h := newSweepHarness(batch, nil)
