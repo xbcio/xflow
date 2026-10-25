@@ -28,6 +28,12 @@ func (d Descriptor) Clone() Descriptor {
 		g.Params = cloneStrings(g.Params)
 		return g
 	})
+	out.Examples = cloneSlice(d.Examples, func(e DescriptorExample) DescriptorExample {
+		if e.Params != nil {
+			e.Params = cloneParamValue(e.Params).(map[string]any)
+		}
+		return e
+	})
 	return out
 }
 

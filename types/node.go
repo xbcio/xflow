@@ -250,6 +250,16 @@ type Descriptor struct {
 	// Groups declares the editor sections ParamSpec.Group refers to, in
 	// display order.
 	Groups []GroupSpec
+	// Description is the editor-facing one-line summary of what the node does,
+	// for a workflow author. Keep it short (at most 120 characters); Docs is
+	// the long-form Markdown field.
+	Description string
+	// Examples are minimal parameter sets an editor can offer as a starting
+	// point. Each Params map must pass engine/graph.ValidateParams for this
+	// descriptor; node/descriptor_category_test.go enforces that for every
+	// builtin, and the values are real DSL values (a pure expression param
+	// carries a bare expression, e.g. "$input.amount >= 100").
+	Examples []DescriptorExample
 	// Docs is long-form documentation for the node type (Markdown).
 	Docs string
 	// OneOf declares cross-parameter "set" cardinality rules over top-level
@@ -262,6 +272,20 @@ type Descriptor struct {
 	// editor metadata: the engine routes by whatever port a handler returns
 	// and does not read it.
 	DynamicOutputsFrom string
+}
+
+// DescriptorExample is one minimal, valid parameter set for a node type. The
+// editor offers these as starting points when a node is dropped on the canvas.
+//
+// Params holds top-level parameter values in DSL form, not editor form: an
+// expression param carries the bare expression ("$input.amount >= 100"), never
+// a "{{ }}" template, because pure expression params are evaluated as exprs
+// and a template there fails to parse. Template mode ("{{ }}") is only for
+// params documented as templated.
+type DescriptorExample struct {
+	Name        string         `json:"name,omitempty"`
+	Description string         `json:"description,omitempty"`
+	Params      map[string]any `json:"params"`
 }
 
 // ParamSpec defines the schema for a single node parameter.

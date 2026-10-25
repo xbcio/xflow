@@ -16,6 +16,8 @@
         "Outputs": null,
         "Capabilities": null,
         "Groups": null,
+        "Description": "",
+        "Examples": null,
         "Docs": "",
         "OneOf": null,
         "DynamicOutputsFrom": ""
@@ -252,6 +254,8 @@
             "Collapsed": true
           }
         ],
+        "Description": "",
+        "Examples": null,
         "Docs": "# Analyse\nRuns the analysis.",
         "OneOf": [
           {

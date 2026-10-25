@@ -91,15 +91,16 @@ func TestDescriptorClonePreservesNilSlices(t *testing.T) {
 // extending the matching clone (and routing any any-typed field through
 // cloneParamValue).
 var cloneFieldCounts = map[reflect.Type]int{
-	reflect.TypeOf(Descriptor{}):      14,
-	reflect.TypeOf(ParamSpec{}):       18,
-	reflect.TypeOf(PortSpec{}):        2,
-	reflect.TypeOf(EnumOption{}):      3,
-	reflect.TypeOf(ConditionalEnum{}): 2,
-	reflect.TypeOf(Constraints{}):     9,
-	reflect.TypeOf(Condition{}):       7,
-	reflect.TypeOf(OneOfGroup{}):      2,
-	reflect.TypeOf(GroupSpec{}):       4,
+	reflect.TypeOf(Descriptor{}):        16,
+	reflect.TypeOf(DescriptorExample{}): 3,
+	reflect.TypeOf(ParamSpec{}):         18,
+	reflect.TypeOf(PortSpec{}):          2,
+	reflect.TypeOf(EnumOption{}):        3,
+	reflect.TypeOf(ConditionalEnum{}):   2,
+	reflect.TypeOf(Constraints{}):       9,
+	reflect.TypeOf(Condition{}):         7,
+	reflect.TypeOf(OneOfGroup{}):        2,
+	reflect.TypeOf(GroupSpec{}):         4,
 }
 
 // reachableStructs collects every struct type reachable from t through
@@ -166,8 +167,8 @@ func fillAnyValue() any {
 }
 
 // fill sets every field reachable from v to a non-zero value (subject to
-// mode for slices). Each struct type may appear at most twice on a path,
-// which bounds the recursive types (ParamSpec.Item/Fields, Condition.Not/AllOf/AnyOf).
+// mode for slices and maps). Each struct type may appear at most twice on a
+// path, which bounds the recursive types (ParamSpec.Item/Fields, Condition.Not/AllOf/AnyOf).
 func fill(v reflect.Value, mode fillMode, depth map[reflect.Type]int) {
 	switch v.Kind() {
 	case reflect.String:
@@ -203,6 +204,19 @@ func fill(v reflect.Value, mode fillMode, depth map[reflect.Type]int) {
 			fill(s.Index(i), mode, depth)
 		}
 		v.Set(s)
+	case reflect.Map:
+		// Only fillFull builds maps; the nilness modes leave them nil, which
+		// Clone must preserve (DescriptorExample.Params is the only map field).
+		if mode != fillFull {
+			return
+		}
+		m := reflect.MakeMap(v.Type())
+		k := reflect.New(v.Type().Key()).Elem()
+		fill(k, mode, depth)
+		e := reflect.New(v.Type().Elem()).Elem()
+		fill(e, mode, depth)
+		m.SetMapIndex(k, e)
+		v.Set(m)
 	case reflect.Struct:
 		depth[v.Type()]++
 		for i := 0; i < v.NumField(); i++ {
