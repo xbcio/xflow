@@ -16,8 +16,9 @@ const (
 )
 
 type expireBackoffEntry struct {
-	failures int
-	retryAt  time.Time
+	failures  int
+	deferrals int
+	retryAt   time.Time
 }
 
 // ExpireBackoff spaces out the retries of ExpireExecution calls that keep
@@ -65,14 +66,29 @@ func (b *ExpireBackoff) Failure(key string, now time.Time) int {
 	if b.entries == nil {
 		b.entries = make(map[string]expireBackoffEntry)
 	}
-	e, ok := b.entries[key]
-	if !ok && len(b.entries) >= b.capacity() {
-		b.evictEarliestLocked()
-	}
+	e := b.entryLocked(key)
 	e.failures++
 	e.retryAt = now.Add(expireBackoffDelay(e.failures))
 	b.entries[key] = e
 	return e.failures
+}
+
+// Defer sets key aside until its next window at now, without recording a
+// failure. It is for an execution that is not broken but cannot be settled yet
+// (a cancel owns it and will withdraw its entry), so it must stop holding a slot
+// of every page while it waits. The window follows the same doubling schedule as
+// Failure, counted separately, so the failure count and anything keyed off it
+// stay untouched: Failures does not move.
+func (b *ExpireBackoff) Defer(key string, now time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.entries == nil {
+		b.entries = make(map[string]expireBackoffEntry)
+	}
+	e := b.entryLocked(key)
+	e.deferrals++
+	e.retryAt = now.Add(expireBackoffDelay(e.deferrals))
+	b.entries[key] = e
 }
 
 // Success forgets key. It is a no-op for a key with no record.
@@ -107,11 +123,21 @@ func (b *ExpireBackoff) Waiting(now time.Time) int {
 }
 
 // Failures returns key's consecutive failure count, or zero for a key with no
-// record.
+// record. A key that was only deferred has none.
 func (b *ExpireBackoff) Failures(key string) int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.entries[key].failures
+}
+
+// entryLocked returns key's record, making room first when key is new and the
+// set is full.
+func (b *ExpireBackoff) entryLocked(key string) expireBackoffEntry {
+	e, ok := b.entries[key]
+	if !ok && len(b.entries) >= b.capacity() {
+		b.evictEarliestLocked()
+	}
+	return e
 }
 
 func (b *ExpireBackoff) capacity() int {

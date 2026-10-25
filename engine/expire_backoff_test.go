@@ -199,3 +199,63 @@ func TestExpireBackoffIsSafeForConcurrentUse(t *testing.T) {
 		t.Fatalf("Len() = %d, want at most the capacity 16", got)
 	}
 }
+
+func TestExpireBackoffDeferSetsAKeyAsideWithoutCountingAFailure(t *testing.T) {
+	b := NewExpireBackoff()
+	b.Defer("exec-1", backoffEpoch)
+
+	if b.Allow("exec-1", backoffEpoch.Add(999*time.Millisecond)) {
+		t.Fatal("Allow() inside the deferral window = true, want false")
+	}
+	if !b.Allow("exec-1", backoffEpoch.Add(time.Second)) {
+		t.Fatal("Allow() once the window elapsed = false, want true")
+	}
+	if got := b.Failures("exec-1"); got != 0 {
+		t.Fatalf("Failures() after a deferral = %d, want 0: a deferral is not a failure", got)
+	}
+	if got := b.Waiting(backoffEpoch); got != 1 {
+		t.Fatalf("Waiting() = %d, want the deferred key counted", got)
+	}
+}
+
+func TestExpireBackoffDeferWindowDoublesWithEachDeferral(t *testing.T) {
+	b := NewExpireBackoff()
+	now := backoffEpoch
+	for i, want := range []time.Duration{time.Second, 2 * time.Second, 4 * time.Second} {
+		b.Defer("exec-1", now)
+		if b.Allow("exec-1", now.Add(want-time.Nanosecond)) {
+			t.Fatalf("deferral %d: Allow() just short of %v = true, want false", i+1, want)
+		}
+		if !b.Allow("exec-1", now.Add(want)) {
+			t.Fatalf("deferral %d: Allow() at %v = false, want true", i+1, want)
+		}
+		now = now.Add(want)
+	}
+}
+
+func TestExpireBackoffSuccessClearsADeferral(t *testing.T) {
+	b := NewExpireBackoff()
+	b.Defer("exec-1", backoffEpoch)
+	b.Success("exec-1")
+
+	if !b.Allow("exec-1", backoffEpoch) {
+		t.Fatal("Allow() after Success = false, want the deferral forgotten")
+	}
+	if got := b.Len(); got != 0 {
+		t.Fatalf("Len() = %d, want 0", got)
+	}
+}
+
+func TestExpireBackoffDeferAtCapacityEvictsTheEarliestDue(t *testing.T) {
+	b := &ExpireBackoff{maxEntries: 2}
+	b.Defer("a", backoffEpoch)
+	b.Defer("b", backoffEpoch.Add(time.Second))
+	b.Defer("c", backoffEpoch.Add(2*time.Second))
+
+	if got := b.Len(); got != 2 {
+		t.Fatalf("Len() = %d, want it held at the capacity 2", got)
+	}
+	if !b.Allow("a", backoffEpoch) {
+		t.Fatal("the earliest-due record should have been evicted")
+	}
+}
