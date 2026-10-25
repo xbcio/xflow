@@ -237,3 +237,98 @@ describe("buildOutline", () => {
     });
   });
 });
+
+// WB-02: `editor_metadata.sections` (visual canvas sections) become outline
+// groups. Everything not covered by one keeps the derived 入口 / 流程 / 结束
+// grouping, and a workflow with no sections is byte-for-byte the old outline.
+describe("buildOutline visual sections (WB-02)", () => {
+  const chain: WorkflowDef = {
+    nodes: [node("finish", "xflow.end"), node("fetch"), node("start", "xflow.start", { kind: "trigger" }), node("map", "xflow.function")],
+    connections: {
+      start: { main: [{ node: "fetch" }] },
+      fetch: { main: [{ node: "map" }] },
+      map: { main: [{ node: "finish" }] }
+    }
+  };
+
+  it("groups a covered node under its section title and leaves the rest in the derived buckets", () => {
+    const rows = buildOutline(chain, undefined, [
+      { id: "sec-fetch", title: "取数", node_keys: ["fetch"], x: 0, y: 0, width: 100, height: 100 }
+    ]);
+
+    expect(shape(rows)).toEqual([
+      "# 入口 1",
+      "start:0",
+      "# 取数 1",
+      "fetch:0",
+      "# 流程 1",
+      "map:0",
+      "# 结束 1",
+      "finish:0"
+    ]);
+    const fetch = rows.find((row) => row.kind === "section" && row.section === "visual");
+    expect(fetch).toMatchObject({ sectionId: "sec-fetch", label: "取数", category: "action", count: 1 });
+  });
+
+  it("keeps the derived rows exactly as they were when no section covers a node", () => {
+    const before = buildOutline(chain);
+    const after = buildOutline(chain, undefined, [
+      { id: "sec-gone", title: "已删除", node_keys: ["missing"], x: 0, y: 0, width: 100, height: 100 },
+      { id: "sec-empty", title: "空", node_keys: [], x: 0, y: 0, width: 100, height: 100 }
+    ]);
+
+    expect(after).toEqual(before);
+  });
+
+  it("emits the same rows for an empty sections array as for no sections", () => {
+    expect(buildOutline(chain, undefined, [])).toEqual(buildOutline(chain));
+  });
+
+  it("keys members by the stable node identity (id first) and draws each node once", () => {
+    const workflow: WorkflowDef = {
+      nodes: [
+        { id: "start-id", name: "start", type: "xflow.start", kind: "trigger" },
+        { id: "fetch-id", name: "fetch", type: "xflow.http" },
+        { id: "end-id", name: "done", type: "xflow.end" }
+      ],
+      connections: {
+        start: { main: [{ node: "fetch" }] },
+        fetch: { main: [{ node: "done" }] }
+      }
+    };
+
+    const rows = buildOutline(workflow, undefined, [
+      { id: "sec-a", title: "A", node_keys: ["fetch-id"], x: 0, y: 0, width: 10, height: 10 },
+      { id: "sec-b", title: "B", node_keys: ["fetch-id", "fetch"], x: 0, y: 0, width: 10, height: 10 }
+    ]);
+
+    // First section listing the node wins; the second covers nothing new.
+    expect(shape(rows)).toEqual([
+      "# 入口 1",
+      "start:0",
+      "# A 1",
+      "fetch:0",
+      "# 结束 1",
+      "done:0"
+    ]);
+    expect(rows.filter((row) => row.kind === "item" && row.name === "fetch")).toHaveLength(1);
+  });
+
+  it("takes the heading category and count from the section's own members", () => {
+    const rows = buildOutline(chain, undefined, [
+      { id: "sec-fetch", title: "取数", node_keys: ["fetch", "map"], x: 0, y: 0, width: 10, height: 10 }
+    ]);
+
+    const heading = rows.find((row) => row.kind === "section" && row.section === "visual");
+    // fetch is action, map is code: a tie goes to the first member seen.
+    expect(heading).toMatchObject({ label: "取数", count: 2, category: "action" });
+  });
+
+  it("falls back to a neutral heading for a section without a title", () => {
+    const rows = buildOutline(chain, undefined, [
+      { id: "sec-untitled", node_keys: ["fetch"], x: 0, y: 0, width: 10, height: 10 }
+    ]);
+    const heading = rows.find((row) => row.kind === "section" && row.section === "visual");
+    expect(heading?.label).toBe("未命名分区");
+  });
+});

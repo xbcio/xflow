@@ -1,11 +1,12 @@
-import type { NodeCategory, WorkflowDef } from "@xflow/core";
+import type { NodeCategory, WorkflowDef, WorkflowEditorSection } from "@xflow/core";
 import { categoryOf } from "@xflow/core";
 import { connectionTypeFor, nodeKey, nodeLabel, nodeName, targetsFor } from "./workflowOps";
 
 /**
  * The outline's rows (spec §6.0.1): the workflow's nodes in execution order,
- * grouped under three derived sections. A pure function of the workflow, so the
- * order is testable without a DOM and the panel only has to draw it.
+ * grouped under derived sections -- 入口 / 流程 / 结束 -- or, when the workflow
+ * carries visual canvas sections (`editor_metadata.sections`), under those
+ * author-named sections with the derived ones filling in around them.
  *
  * Order. The graph is walked depth-first from every node that has no incoming
  * data edge, and a node is placed only once every predecessor has been placed,
@@ -24,6 +25,14 @@ import { connectionTypeFor, nodeKey, nodeLabel, nodeName, targetsFor } from "./w
  * edge; 结束 holds the rest that have no outgoing data edge, or are
  * `xflow.end`; 流程 holds everything else. A section with no member has no row.
  * Dependency edges are not data flow and take no part in any of this.
+ *
+ * Visual sections (§6.2 / WB-02) are read from the third argument. When at
+ * least one of them covers a live node, a node listed by a visual section
+ * moves under that section's title (the first section listing it wins, so no
+ * node is drawn twice); a node no section lists stays in its derived bucket.
+ * Groups keep topological order: a group appears where its first member is
+ * met. With no sections, or none covering a node, the rows are exactly the
+ * derived ones -- the pre-sections behaviour.
  */
 
 export type OutlineSectionId = "entry" | "middle" | "end";
@@ -31,7 +40,10 @@ export type OutlineSectionId = "entry" | "middle" | "end";
 export interface OutlineSectionRow {
   kind: "section";
   id: string;
-  section: OutlineSectionId;
+  /** A derived bucket, or `visual` for an author-defined canvas section. */
+  section: OutlineSectionId | "visual";
+  /** The stored section id (`WorkflowEditorSection.id`) when `section` is `visual`. */
+  sectionId?: string;
   label: string;
   /** Items in the section. */
   count: number;
@@ -71,6 +83,27 @@ const sectionLabel: Record<OutlineSectionId, string> = {
   end: "结束"
 };
 
+/** The category most of `members` belong to; the first seen wins a tie. */
+function dominantCategory(
+  members: readonly number[],
+  categoryOfNode: (index: number) => NodeCategory
+): NodeCategory {
+  const tally = new Map<NodeCategory, number>();
+  for (const index of members) {
+    const category = categoryOfNode(index);
+    tally.set(category, (tally.get(category) ?? 0) + 1);
+  }
+  let category: NodeCategory = "unknown";
+  let best = 0;
+  for (const [candidate, count] of tally) {
+    if (count > best) {
+      best = count;
+      category = candidate;
+    }
+  }
+  return category;
+}
+
 interface Edge {
   port: string;
   to: number;
@@ -89,12 +122,13 @@ function isEndType(type: string | undefined): boolean {
 
 export function buildOutline(
   workflow: WorkflowDef,
-  nodeCategories?: Readonly<Record<string, string>>
+  nodeCategories?: Readonly<Record<string, string>>,
+  sections?: readonly WorkflowEditorSection[]
 ): OutlineRow[] {
   const nodes = workflow.nodes ?? [];
   if (nodes.length === 0) return [];
-  const categoryOfNode = (node: (typeof nodes)[number]): NodeCategory =>
-    categoryOf(node.type, node.type ? nodeCategories?.[node.type] : undefined);
+  const categoryOfNode = (index: number): NodeCategory =>
+    categoryOf(nodes[index].type, nodes[index].type ? nodeCategories?.[nodes[index].type] : undefined);
 
   // Connections are keyed by node name; a repeated name resolves to its first node.
   const indexByName = new Map<string, number>();
@@ -222,46 +256,131 @@ export function buildOutline(
 
   const sectionOf = (index: number): OutlineSectionId => {
     const node = nodes[index];
-    if (categoryOfNode(node) === "trigger" || !hasIn[index]) return "entry";
+    if (categoryOfNode(index) === "trigger" || !hasIn[index]) return "entry";
     if (out[index].length === 0 || isEndType(node.type)) return "end";
     return "middle";
   };
-  const buckets: Record<OutlineSectionId, Placement[]> = { entry: [], middle: [], end: [] };
-  for (const placement of placed) buckets[sectionOf(placement.index)].push(placement);
+
+  const itemRow = (index: number, depth: number): OutlineItemRow => {
+    const node = nodes[index];
+    return {
+      kind: "item",
+      id: `item:${index}`,
+      key: nodeKey(node, index),
+      name: nodeName(node, index),
+      label: nodeLabel(node, index),
+      type: node.type ?? "",
+      category: categoryOfNode(index),
+      indent: depth,
+      disabled: node.disabled ?? false
+    };
+  };
+
+  const pushMembers = (target: OutlineRow[], members: Placement[]): void => {
+    for (const { index, depth, port } of members) {
+      if (port !== undefined) target.push({ kind: "port", id: `port:${index}`, port, indent: depth });
+      target.push(itemRow(index, depth));
+    }
+  };
 
   const rows: OutlineRow[] = [];
-  for (const section of sectionOrder) {
-    const members = buckets[section];
-    if (members.length === 0) continue;
-    const tally = new Map<NodeCategory, number>();
-    for (const { index } of members) {
-      const category = categoryOfNode(nodes[index]);
-      tally.set(category, (tally.get(category) ?? 0) + 1);
+
+  // WB-02: a visual section owns the live nodes it lists. The first section
+  // listing a node wins, so a key repeated across sections never draws the
+  // node twice; a section covering no live node is not drawn at all (the
+  // server drops it, and a hand-written definition can still carry one).
+  const liveKeys = new Set(nodes.map((node, index) => nodeKey(node, index)));
+  const visualByNode = new Map<string, string>();
+  const visuals = new Map<string, { id?: string; label: string }>();
+  for (const [index, section] of (sections ?? []).entries()) {
+    const keys = Array.isArray(section.node_keys) ? section.node_keys : [];
+    const covered: string[] = [];
+    for (const key of keys) {
+      if (typeof key !== "string" || !liveKeys.has(key) || visualByNode.has(key)) continue;
+      covered.push(key);
     }
-    let category: NodeCategory = "unknown";
-    let best = 0;
-    for (const [candidate, count] of tally) {
-      if (count > best) {
-        best = count;
-        category = candidate;
-      }
-    }
-    rows.push({ kind: "section", id: `section:${section}`, section, label: sectionLabel[section], count: members.length, category });
-    for (const { index, depth, port } of members) {
-      const node = nodes[index];
-      if (port !== undefined) rows.push({ kind: "port", id: `port:${index}`, port, indent: depth });
+    if (covered.length === 0) continue;
+    const groupKey = `visual:${index}`;
+    visuals.set(groupKey, {
+      id: section.id,
+      label: typeof section.title === "string" && section.title.trim() ? section.title.trim() : "未命名分区"
+    });
+    for (const key of covered) visualByNode.set(key, groupKey);
+  }
+
+  if (visuals.size === 0) {
+    // No visual section covers anything: the rows are exactly the pre-sections
+    // ones, in the fixed 入口 / 流程 / 结束 order.
+    const buckets: Record<OutlineSectionId, Placement[]> = { entry: [], middle: [], end: [] };
+    for (const placement of placed) buckets[sectionOf(placement.index)].push(placement);
+
+    for (const section of sectionOrder) {
+      const members = buckets[section];
+      if (members.length === 0) continue;
       rows.push({
-        kind: "item",
-        id: `item:${index}`,
-        key: nodeKey(node, index),
-        name: nodeName(node, index),
-        label: nodeLabel(node, index),
-        type: node.type ?? "",
-        category: categoryOfNode(node),
-        indent: depth,
-        disabled: node.disabled ?? false
+        kind: "section",
+        id: `section:${section}`,
+        section,
+        label: sectionLabel[section],
+        count: members.length,
+        category: dominantCategory(members.map(({ index }) => index), categoryOfNode)
       });
+      pushMembers(rows, members);
     }
+    return rows;
+  }
+
+  // A group appears where its first member is met, keeping the tree in
+  // topological order while never splitting one group into two blocks. An
+  // uncovered node keeps its derived bucket, so 入口 / 流程 / 结束 fill in
+  // around the author's sections.
+  interface Group {
+    key: string;
+    heading: OutlineSectionRow;
+    members: Placement[];
+  }
+  const groups: Group[] = [];
+  const groupByKey = new Map<string, Group>();
+  for (const placement of placed) {
+    const key = nodeKey(nodes[placement.index], placement.index);
+    const visualKey = visualByNode.get(key);
+    const groupKey = visualKey ?? sectionOf(placement.index);
+    let group = groupByKey.get(groupKey);
+    if (!group) {
+      const visual = visualKey === undefined ? undefined : visuals.get(visualKey);
+      group = {
+        key: groupKey,
+        heading: visual
+          ? {
+            kind: "section",
+            id: `section:${groupKey}`,
+            section: "visual",
+            sectionId: visual.id,
+            label: visual.label,
+            count: 0,
+            category: "unknown"
+          }
+          : {
+            kind: "section",
+            id: `section:${groupKey}`,
+            section: groupKey as OutlineSectionId,
+            label: sectionLabel[groupKey as OutlineSectionId],
+            count: 0,
+            category: "unknown"
+          },
+        members: []
+      };
+      groupByKey.set(groupKey, group);
+      groups.push(group);
+    }
+    group.members.push(placement);
+  }
+
+  for (const group of groups) {
+    group.heading.count = group.members.length;
+    group.heading.category = dominantCategory(group.members.map(({ index }) => index), categoryOfNode);
+    rows.push(group.heading);
+    pushMembers(rows, group.members);
   }
   return rows;
 }

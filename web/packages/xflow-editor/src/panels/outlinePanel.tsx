@@ -1,7 +1,7 @@
 import * as React from "react";
-import { AimOutlined, SearchOutlined, UnorderedListOutlined } from "@ant-design/icons";
+import { LocateIcon, OutlineIcon, SearchIcon } from "@xflow/icons";
 import { Button, Tooltip } from "antd";
-import type { RuntimeSnapshot, WorkflowDef } from "@xflow/core";
+import type { RuntimeSnapshot, WorkflowDef, WorkflowEditorSection } from "@xflow/core";
 import { nodeCategoryMeta, nodeStatusMeta, type NodeStatusKey } from "@xflow/core";
 import { NodeCategoryIcon } from "./categoryIcon";
 import { buildOutline, type OutlineItemRow, type OutlineRow } from "./outline";
@@ -15,6 +15,7 @@ import { EditorPanel, editorTooltipClassNames } from "./shared";
 export function OutlinePanel({
   workflow,
   nodeCategories,
+  sections,
   runtime,
   selectedKey,
   canLocate,
@@ -27,6 +28,12 @@ export function OutlinePanel({
   workflow: WorkflowDef;
   /** Declared descriptor category per node type (spec §6.13), from the host's schemas. */
   nodeCategories?: Readonly<Record<string, string>>;
+  /**
+   * The workflow's visual canvas sections (`editor_metadata.sections`). When
+   * one covers a node, the tree groups that node under the section's title
+   * (§6.0.1 / WB-02); uncovered nodes stay in the derived buckets.
+   */
+  sections?: readonly WorkflowEditorSection[];
   /** The run the canvas cards show; absent when there is none. */
   runtime?: RuntimeSnapshot;
   /** The canvas selection; the tree highlights it and follows it. */
@@ -46,7 +53,10 @@ export function OutlinePanel({
    */
   onFocusLost?: () => void;
 }): React.ReactElement {
-  const rows = React.useMemo(() => buildOutline(workflow, nodeCategories), [workflow, nodeCategories]);
+  const rows = React.useMemo(
+    () => buildOutline(workflow, nodeCategories, sections),
+    [workflow, nodeCategories, sections]
+  );
   const count = (workflow.nodes ?? []).length;
   return (
     <EditorPanel
@@ -60,7 +70,7 @@ export function OutlinePanel({
                 className="xflow-editor-panel-collapse"
                 color="default"
                 disabled={!canLocate}
-                icon={<AimOutlined />}
+                icon={<LocateIcon />}
                 size="small"
                 variant="text"
                 onClick={onLocate}
@@ -75,7 +85,7 @@ export function OutlinePanel({
                 className="xflow-editor-panel-collapse"
                 color="default"
                 disabled={count === 0}
-                icon={<SearchOutlined />}
+                icon={<SearchIcon />}
                 size="small"
                 variant="text"
                 onClick={(event) => onSearch(event.currentTarget)}
@@ -88,7 +98,8 @@ export function OutlinePanel({
       bodyClassName="xflow-editor-outline__body"
       className="xflow-editor-outline"
       count={count}
-      icon={<UnorderedListOutlined />}
+      divider={false}
+      icon={<OutlineIcon />}
       title="大纲"
     >
       <OutlineTree
@@ -265,9 +276,18 @@ function OutlineTree({
   return (
     <div aria-label="工作流大纲" className="xflow-editor-outline__list" ref={treeRef} role="tree">
       {groups.map(({ heading, body }) => {
-        const headingId = `${baseId}-${heading.section}`;
+        // `heading.id` is unique per row (`section:entry` or `section:visual:N`);
+        // the old `heading.section` would collide across several visual sections.
+        const headingId = `${baseId}-${heading.id}`;
         return (
-          <div aria-labelledby={headingId} className="xflow-editor-outline__section" data-section={heading.section} key={heading.id} role="group">
+          <div
+            aria-labelledby={headingId}
+            className="xflow-editor-outline__section"
+            data-section={heading.section}
+            data-section-id={heading.sectionId}
+            key={heading.id}
+            role="group"
+          >
             <div
               className="xflow-editor-outline__heading"
               id={headingId}
