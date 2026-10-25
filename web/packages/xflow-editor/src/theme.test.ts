@@ -29,26 +29,33 @@ describe("createEditorThemeConfig", () => {
 
       it("takes surfaces, text and borders from the core palette", () => {
         expect(token).toMatchObject({
-          colorBgBase: palette.app,
-          colorBgLayout: palette.app,
-          colorBgContainer: palette.field,
-          colorBgElevated: palette.panel,
+          colorBgBase: palette.surfaceApp,
+          colorBgLayout: palette.surfaceApp,
+          colorBgContainer: palette.surfacePanel,
+          colorBgElevated: palette.surfaceOverlay,
           colorFillAlter: palette.field,
           colorFillTertiary: palette.hover,
           colorBorder: palette.border,
-          colorSplit: palette.border,
+          colorSplit: palette.borderSubtle,
           colorText: palette.text,
           colorTextSecondary: palette.textSecondary,
           colorTextTertiary: palette.textTertiary,
           colorTextPlaceholder: palette.textTertiary,
           controlItemBgHover: palette.hover,
-          boxShadowSecondary: palette.elev2
+          boxShadowSecondary: palette.elev3
         });
       });
 
       it("takes the semantic colours from the core palette", () => {
         expect(token).toMatchObject({
-          colorPrimary: palette.primary,
+          colorPrimary: palette.primarySolid,
+          colorPrimaryHover: palette.primarySolidHover,
+          colorPrimaryActive: palette.primarySolidActive,
+          // The dark generator deepens a seed, so dark links are seeded with the
+          // light interactive blue instead of the solid fill.
+          colorLink: appearance === "dark" ? palette.focusRing : palette.primarySolid,
+          colorLinkHover: appearance === "dark" ? palette.focusRing : palette.primarySolidHover,
+          colorLinkActive: appearance === "dark" ? palette.focusRing : palette.primarySolidActive,
           colorInfo: palette.info,
           colorSuccess: palette.success,
           colorWarning: palette.warning,
@@ -56,9 +63,13 @@ describe("createEditorThemeConfig", () => {
         });
       });
 
-      it("derives the focus outline from the primary colour, not a literal", () => {
-        expect(token.controlOutline).toBe(`${palette.primary}33`);
-        expect(config.components?.Input?.activeShadow).toBe(`0 0 0 2px ${palette.primary}33`);
+      it("draws the keyboard ring from the opaque focus token and keeps the soft ring for glows", () => {
+        expect(token.controlOutline).toBe(palette.focusRing);
+        expect(token.controlOutlineWidth).toBe(2);
+        expect(token.colorPrimaryBorder).toBe(palette.focusRing);
+        expect(token.lineWidthFocus).toBe(2);
+        // 25% primary, the same wash as --xflow-primary-ring.
+        expect(config.components?.Input?.activeShadow).toBe(`0 0 0 3px ${palette.primary}40`);
       });
 
       it("uses the shared 32 / 13 control scale", () => {
@@ -67,12 +78,30 @@ describe("createEditorThemeConfig", () => {
           fontFamilyCode: foundationTokens.fontMono,
           fontSize: 13,
           fontSizeSM: 12,
-          borderRadius: 6,
-          borderRadiusSM: 4,
-          borderRadiusLG: 8,
+          borderRadius: Number.parseInt(foundationTokens.radiusSm, 10),
+          borderRadiusSM: Number.parseInt(foundationTokens.radiusXs, 10),
+          borderRadiusLG: Number.parseInt(foundationTokens.radiusMd, 10),
+          borderRadiusXS: Number.parseInt(foundationTokens.radiusXs, 10),
           controlHeight: 32,
           controlHeightSM: 24
         });
+      });
+
+      it("keeps AntD body text on the 20px rhythm and the shared elevation scale", () => {
+        expect(token.fontSize * (token.lineHeight ?? 0)).toBeCloseTo(20, 10);
+        expect(token.fontSizeSM * (token.lineHeightSM ?? 0)).toBeCloseTo(18, 10);
+        expect(token.boxShadow).toBe(palette.elev4);
+        expect(token.boxShadowSecondary).toBe(palette.elev3);
+        expect(token.boxShadowTertiary).toBe(palette.elev1);
+      });
+
+      it("adopts the shared motion tokens", () => {
+        expect(token.motion).toBe(true);
+        expect(token.motionDurationFast).toBe(foundationTokens.motionDurationFast);
+        expect(token.motionDurationMid).toBe(foundationTokens.motionDurationBase);
+        expect(token.motionDurationSlow).toBe(foundationTokens.motionDurationSlow);
+        expect(token.motionEaseInOut).toBe(foundationTokens.motionEaseStandard);
+        expect(token.motionEaseOut).toBe(foundationTokens.motionEaseEmphasized);
       });
 
       it("drops the 12px-era component overrides", () => {
@@ -92,7 +121,7 @@ describe("createEditorThemeConfig", () => {
 
       it("maps component surfaces onto the same palette record", () => {
         const components = config.components ?? {};
-        expect(components.Button).toMatchObject({ defaultBg: palette.panel });
+        expect(components.Button).toMatchObject({ defaultBg: palette.surfacePanel });
         // Hover stays on AntD's default (the baseline sets only defaultBg); a
         // palette hover fill and primary text made every default button turn grey.
         expect(components.Button).not.toHaveProperty("defaultHoverBg");
@@ -100,11 +129,13 @@ describe("createEditorThemeConfig", () => {
         expect(components.Button).not.toHaveProperty("defaultHoverBorderColor");
         expect(components.Segmented).toMatchObject({
           itemSelectedBg: palette.panel,
-          trackBg: palette.hover
+          trackBg: palette.hover,
+          // The selected thumb carries the baseline elevation, not AntD's flatter default.
+          boxShadowTertiary: palette.elev1
         });
         expect(components.Select).toMatchObject({ selectorBg: palette.field });
-        expect(components.Card).toMatchObject({ headerBg: palette.panelRaised });
-        expect(components.Popover).toMatchObject({ colorBgElevated: palette.panel });
+        expect(components.Card).toMatchObject({ headerBg: palette.surfaceSunken });
+        expect(components.Popover).toMatchObject({ colorBgElevated: palette.surfaceOverlay });
       });
 
       it("sets the Inspector Tabs token to the baseline's: 16px gutter, no nav margin, secondary labels", () => {
@@ -125,6 +156,18 @@ describe("createEditorThemeConfig", () => {
     });
   }
 
+  it("turns AntD's own motion off when the OS asks for reduced motion", () => {
+    expect(createEditorThemeConfig("light").token?.motion).toBe(true);
+    expect(createEditorThemeConfig("light", { reducedMotion: true }).token?.motion).toBe(false);
+    expect(createEditorThemeConfig("dark", { reducedMotion: true }).token?.motion).toBe(false);
+    // The host's ConfigProvider must carry the 0s durations, not the base scale:
+    // AntD's component CSS transitions read them directly.
+    const reduced = createEditorThemeConfig("light", { reducedMotion: true }).token;
+    expect(reduced?.motionDurationFast).toBe("0s");
+    expect(reduced?.motionDurationMid).toBe("0s");
+    expect(reduced?.motionDurationSlow).toBe("0s");
+  });
+
   it("gives light and dark distinct scopes and surfaces", () => {
     const light = createEditorThemeConfig("light");
     const dark = createEditorThemeConfig("dark");
@@ -135,7 +178,7 @@ describe("createEditorThemeConfig", () => {
   it("writes no colour literal of its own: every colour value traces to the palette", () => {
     for (const appearance of appearances) {
       const palette = paletteTokens[appearance];
-      const known = new Set<string>([...Object.values(palette), `${palette.primary}33`]);
+      const known = new Set<string>([...Object.values(palette), `${palette.primary}40`]);
       const strays: string[] = [];
       const walk = (path: string, value: unknown) => {
         if (typeof value === "string" && /^(#[0-9a-f]{3,8}|rgba?\()/i.test(value) && !known.has(value)) {
