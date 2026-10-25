@@ -1,7 +1,11 @@
 // Package metrics provides xflow's Prometheus instrumentation primitives and
 // observers. New creates an isolated registry; NewWithRegistry attaches the
-// collector to a caller-owned Prometheus registry. Metrics.Registry returns the
-// registry to expose through a host's scrape endpoint.
+// collector to a caller-owned Prometheus registry; NewWithRegisterer attaches
+// it to a host registration/gathering pair that need not be a
+// *prometheus.Registry (for example an application-private xbc registry).
+// Metrics.Registry returns the concrete registry when there is one, and
+// Metrics.Gatherer returns the gatherer to expose through a host's scrape
+// endpoint in every case.
 //
 // A control plane configured with service/control.Config.Metrics automatically
 // wires runner-control observation when its runner directory supports operation
