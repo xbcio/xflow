@@ -76,6 +76,11 @@ type managementModule struct {
 	// roster, with directory members reported offline because no fresh heartbeat
 	// can be confirmed.
 	snapshots runnerSnapshotter
+	// descriptorPools is the optional directory capability behind the roster's
+	// pool attribution (pool_id/pool_name). It is read once per list request —
+	// the directory's interface is a batch read — and a failure omits the pool
+	// fields rather than failing the roster.
+	descriptorPools control.RunnerDescriptorDirectory
 }
 
 // runnerLister is the structural probe for a runner directory that can
@@ -104,6 +109,9 @@ func newManagementModule(cp *control.ControlPlane) *managementModule {
 		if s, ok := dir.(runnerSnapshotter); ok {
 			m.snapshots = s
 		}
+	}
+	if dir := cp.RunnerDescriptorDirectory(); !isNilValue(dir) {
+		m.descriptorPools = dir
 	}
 	return m
 }
@@ -372,6 +380,16 @@ func (m *managementModule) handleRunner(w http.ResponseWriter, r *http.Request) 
 
 // runnerListItem is the JSON projection for one entry in GET
 // PathManagementRunners.
+//
+// The placement fields (capacity, in_flight, labels, namespaces) come from the
+// same directory snapshot the roster already reads for liveness, so listing
+// them costs no extra IO. They are pointers/slices rather than zero-valued
+// scalars because a directory member with no snapshot has UNKNOWN placement,
+// not zero capacity: absence means "not reported", and a snapshot that
+// genuinely reports 0 capacity still serializes 0.
+//
+// pool_id/pool_name are a separate optional capability (RunnerDescriptorDirectory):
+// they are present only for a live runner whose registration recorded a pool.
 type runnerListItem struct {
 	RunnerID string `json:"runner_id"`
 	// Enrolled reports whether this runner's credential came from the enrollment
@@ -391,6 +409,19 @@ type runnerListItem struct {
 	RevokedAt time.Time `json:"revoked_at,omitzero"`
 	// DesiredState is the runner control intent when the directory exposes it.
 	DesiredState string `json:"desired_state,omitzero"`
+	// Capacity and InFlight are the reported placement numbers. Nil when no
+	// snapshot exists; 0 is a real report.
+	Capacity *int `json:"capacity,omitempty"`
+	InFlight *int `json:"in_flight,omitempty"`
+	// Labels are the registration labels task placement matches on.
+	Labels map[string]string `json:"labels,omitempty"`
+	// Namespaces are the namespaces this runner is entitled to serve.
+	Namespaces []namespace.Namespace `json:"namespaces,omitempty"`
+	// PoolID/PoolName attribute the runner to the pool its identity is bound
+	// to. Both are empty for a static-token runner and for any runner whose
+	// directory did not record descriptors.
+	PoolID   string `json:"pool_id,omitempty"`
+	PoolName string `json:"pool_name,omitempty"`
 }
 
 const (
@@ -480,6 +511,10 @@ func (m *managementModule) handleListRunners(w http.ResponseWriter, r *http.Requ
 	// Keep roster liveness exactly aligned with the scheduler's production
 	// default rather than maintaining a second threshold here.
 	selector := control.DefaultRunnerSelector()
+	// Pool attribution is one batch read for the whole page, not one per row.
+	// A failure/absent capability degrades to "no pool fields", never to a 500:
+	// the roster itself is the answer and pool attribution is one column of it.
+	poolsByRunner := m.runnerPoolAttribution(r.Context(), now)
 	out := make([]runnerListItem, 0, len(ids)+len(issuedByID))
 	seen := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
@@ -505,7 +540,16 @@ func (m *managementModule) handleListRunners(w http.ResponseWriter, r *http.Requ
 				if snapshot.Control != nil {
 					item.DesiredState = string(snapshot.Control.DesiredState)
 				}
+				capacity, inFlight := snapshot.Capacity, snapshot.InFlight
+				item.Capacity = &capacity
+				item.InFlight = &inFlight
+				item.Labels = snapshot.Labels
+				item.Namespaces = snapshot.Namespaces
 			}
+		}
+		if pool, ok := poolsByRunner[id]; ok {
+			item.PoolID = pool.PoolID
+			item.PoolName = pool.PoolName
 		}
 		out = append(out, item)
 	}
@@ -527,6 +571,29 @@ func (m *managementModule) handleListRunners(w http.ResponseWriter, r *http.Requ
 		})
 	}
 	writeData(w, r, http.StatusOK, out)
+}
+
+// runnerPoolAttribution reads the directory's per-runner pool attribution once
+// for a roster page. Only live sessions whose registration recorded a pool are
+// represented; a directory that cannot answer (capability absent, or the read
+// failed) yields nil, and the caller omits the fields. Pool attribution is
+// editor/ops metadata, never a reason to fail the roster.
+func (m *managementModule) runnerPoolAttribution(ctx context.Context, now time.Time) map[string]control.RunnerDescriptorRecord {
+	if m.descriptorPools == nil {
+		return nil
+	}
+	records, err := m.descriptorPools.LiveRunnerDescriptors(ctx, now)
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]control.RunnerDescriptorRecord, len(records))
+	for _, record := range records {
+		if record.PoolID == "" && record.PoolName == "" {
+			continue
+		}
+		out[record.RunnerID] = record
+	}
+	return out
 }
 
 // runnerControlBody is intentionally small: a reason is the complete mutation

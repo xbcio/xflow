@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/backend/providers/local"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/service/control"
 	"github.com/xbcio/xflow/store"
 )
@@ -188,6 +189,109 @@ func TestRunnersListBuildsMergedRoster(t *testing.T) {
 	}
 	if _, ok := rawByID["runner-never-connected"]["desired_state"]; ok {
 		t.Fatalf("issued-only item serializes desired_state: %s", rawByID["runner-never-connected"]["desired_state"])
+	}
+}
+
+// TestRunnersListProjectsPlacementAndPool pins the placement columns that are
+// available from the directory snapshot the roster already reads (capacity,
+// in_flight, labels, namespaces) and the separately-read pool attribution.
+// Unknown is absence, not zero: a runner with no snapshot omits capacity and
+// in_flight entirely, while a snapshot that genuinely reports 0 serializes 0.
+func TestRunnersListProjectsPlacementAndPool(t *testing.T) {
+	now := time.Now().UTC()
+	lister := &stubRunnerLister{
+		ids: []string{"runner-pooled", "runner-static", "runner-offline"},
+		snapshots: map[string]control.RunnerSnapshot{
+			"runner-pooled": {
+				RunnerID:      "runner-pooled",
+				LastHeartbeat: now.Add(-time.Second),
+				Capacity:      8,
+				InFlight:      3,
+				Labels:        map[string]string{"zone": "us-east-1"},
+				Namespaces:    []namespace.Namespace{"namespaceA"},
+			},
+			"runner-static": {
+				RunnerID:      "runner-static",
+				LastHeartbeat: now.Add(-time.Second),
+				Capacity:      2,
+			},
+		},
+		pools: map[string]control.RunnerDescriptorRecord{
+			"runner-pooled":  {RunnerID: "runner-pooled", PoolID: "pool-1", PoolName: "sas-runners"},
+			"runner-unknown": {RunnerID: "runner-unknown", PoolID: "pool-2", PoolName: "not-in-roster"},
+		},
+	}
+	h := newRunnerListTestServer(t, lister)
+	defer h.srv.Close()
+
+	byID := runnerRosterByID(t, h.roster(t))
+
+	pooled := byID["runner-pooled"]
+	if pooled.Capacity == nil || *pooled.Capacity != 8 || pooled.InFlight == nil || *pooled.InFlight != 3 {
+		t.Fatalf("pooled placement = %v/%v, want 8/3", pooled.Capacity, pooled.InFlight)
+	}
+	if pooled.Labels["zone"] != "us-east-1" || len(pooled.Namespaces) != 1 || pooled.Namespaces[0] != "namespaceA" {
+		t.Fatalf("pooled labels/namespaces = %v/%v", pooled.Labels, pooled.Namespaces)
+	}
+	if pooled.PoolID != "pool-1" || pooled.PoolName != "sas-runners" {
+		t.Fatalf("pooled pool = %q/%q, want pool-1/sas-runners", pooled.PoolID, pooled.PoolName)
+	}
+
+	static := byID["runner-static"]
+	if static.Capacity == nil || *static.Capacity != 2 || static.InFlight == nil || *static.InFlight != 0 {
+		t.Fatalf("static placement = %v/%v, want a real 2/0 report", static.Capacity, static.InFlight)
+	}
+	if static.PoolID != "" || static.PoolName != "" {
+		t.Fatalf("static pool = %q/%q, want none (no pool was recorded)", static.PoolID, static.PoolName)
+	}
+
+	offline := byID["runner-offline"]
+	if offline.Capacity != nil || offline.InFlight != nil {
+		t.Fatalf("offline placement = %v/%v, want absent (no snapshot means unknown)", offline.Capacity, offline.InFlight)
+	}
+
+	// Wire-level: absence must be an omitted key, not a serialized null/zero.
+	body := h.doJSON(t, http.MethodGet, PathManagementRunners, "", http.StatusOK)
+	var raw struct {
+		Data []map[string]json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(body), &raw); err != nil {
+		t.Fatalf("unmarshal roster: %v", err)
+	}
+	for _, item := range raw.Data {
+		var id string
+		if err := json.Unmarshal(item["runner_id"], &id); err != nil {
+			t.Fatalf("unmarshal runner_id: %v", err)
+		}
+		if id != "runner-offline" {
+			continue
+		}
+		if _, ok := item["capacity"]; ok {
+			t.Fatalf("offline runner serializes capacity: %s", body)
+		}
+		if _, ok := item["in_flight"]; ok {
+			t.Fatalf("offline runner serializes in_flight: %s", body)
+		}
+	}
+}
+
+// TestRunnersListDegradesWhenPoolAttributionFails pins that pool attribution
+// is a column, not a precondition: a failing descriptor read still serves the
+// roster, with the pool fields omitted.
+func TestRunnersListDegradesWhenPoolAttributionFails(t *testing.T) {
+	lister := &stubRunnerLister{
+		ids:      []string{"runner-a"},
+		poolsErr: errors.New("descriptor backend unreachable"),
+	}
+	h := newRunnerListTestServer(t, lister)
+	defer h.srv.Close()
+
+	items := h.roster(t)
+	if len(items) != 1 || items[0].RunnerID != "runner-a" {
+		t.Fatalf("roster = %+v, want the runner despite the pool read error", items)
+	}
+	if items[0].PoolID != "" || items[0].PoolName != "" {
+		t.Fatalf("pool = %q/%q, want omitted after a failed read", items[0].PoolID, items[0].PoolName)
 	}
 }
 
@@ -399,6 +503,10 @@ type stubRunnerLister struct {
 	ids       []string
 	err       error
 	snapshots map[string]control.RunnerSnapshot
+	// pools is the optional descriptor projection: runner id -> pool
+	// attribution. poolsErr makes the batch read fail.
+	pools    map[string]control.RunnerDescriptorRecord
+	poolsErr error
 }
 
 func (s *stubRunnerLister) ListRunners(context.Context) ([]string, error) {
@@ -411,6 +519,17 @@ func (s *stubRunnerLister) ListRunners(context.Context) ([]string, error) {
 func (s *stubRunnerLister) Runner(_ context.Context, runnerID string) (control.RunnerSnapshot, bool) {
 	snapshot, ok := s.snapshots[runnerID]
 	return snapshot, ok
+}
+
+func (s *stubRunnerLister) LiveRunnerDescriptors(context.Context, time.Time) ([]control.RunnerDescriptorRecord, error) {
+	if s.poolsErr != nil {
+		return nil, s.poolsErr
+	}
+	out := make([]control.RunnerDescriptorRecord, 0, len(s.pools))
+	for _, record := range s.pools {
+		out = append(out, record)
+	}
+	return out, nil
 }
 
 // stubIssuedIdentityLister is a minimal control.IssuedIdentityStore test
@@ -475,6 +594,10 @@ func newRunnerListTestServer(t *testing.T, lister runnerLister) *runnerListTestS
 	m.snapshots = nil
 	if snapshots, ok := lister.(runnerSnapshotter); ok {
 		m.snapshots = snapshots
+	}
+	m.descriptorPools = nil
+	if pools, ok := lister.(control.RunnerDescriptorDirectory); ok {
+		m.descriptorPools = pools
 	}
 	issued := &stubIssuedIdentityLister{}
 	m.issued = issued
