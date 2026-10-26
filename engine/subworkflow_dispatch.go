@@ -244,6 +244,16 @@ func (e *Engine) executeSubWorkflow(ctx context.Context, task *Task, g *graph.Gr
 		return nil
 	}
 	if nodeTimeout > 0 && resumed && !time.Now().UTC().Before(prev.WaitDeadline) {
+		// The parked wait end may be the execution's own deadline (waitEnd is
+		// clamped to it above), so an over wait does not say which budget ran
+		// out. The execution's deadline wins a tie: it is settled as the
+		// execution's timeout, which cancels the child itself, and on_error never
+		// sees it. A graph without settings.timeout is not read at all.
+		if handled, err := e.expireIfExecutionDeadlineReached(ctx, task.ExecutionID, g, time.Now()); err != nil {
+			return err
+		} else if handled {
+			return nil
+		}
 		// The wait has used up the node timeout while the child is still
 		// running: fail the node through the ordinary pipeline — the conclusion
 		// a runner-executed node reaches when its handler outlives the same
