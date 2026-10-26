@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -40,6 +42,16 @@ func subWorkflowDeadlineGraph(t *testing.T, onError string, nodeTimeout time.Dur
 // node and hands the same intent to the engine again.
 func redeliverSubWorkflowNode(t *testing.T, rig *expireSubWorkflowRig, g *graph.Graph) {
 	t.Helper()
+	handled, err := redeliverSubWorkflowNodeResult(t, rig, g)
+	if err != nil || !handled {
+		t.Fatalf("redeliver the sub-workflow node: handled=%v err=%v", handled, err)
+	}
+}
+
+// redeliverSubWorkflowNodeResult is redeliverSubWorkflowNode for a test that
+// asserts on the dispatch's own result instead of requiring it to succeed.
+func redeliverSubWorkflowNodeResult(t *testing.T, rig *expireSubWorkflowRig, g *graph.Graph) (bool, error) {
+	t.Helper()
 	ctx := context.Background()
 	node, err := rig.state.GetNode(ctx, rig.parentID, "sub")
 	if err != nil || node == nil {
@@ -52,7 +64,7 @@ func redeliverSubWorkflowNode(t *testing.T, rig *expireSubWorkflowRig, g *graph.
 	if !ok {
 		t.Fatal(`the graph has no node named "sub"`)
 	}
-	handled, err := rig.eng.handleSystemTask(ctx, &Task{
+	return rig.eng.handleSystemTask(ctx, &Task{
 		ExecutionID:  rig.parentID,
 		NodeName:     "sub",
 		NodeIdx:      idx,
@@ -60,9 +72,6 @@ func redeliverSubWorkflowNode(t *testing.T, rig *expireSubWorkflowRig, g *graph.
 		Type:         TaskTypeSubWorkflow,
 		ActivationID: 1,
 	}, true)
-	if err != nil || !handled {
-		t.Fatalf("redeliver the sub-workflow node: handled=%v err=%v", handled, err)
-	}
 }
 
 // TestSubWorkflowWaitEndingAtTheExecutionDeadlineExpiresTheExecution pins the
@@ -184,5 +193,67 @@ func TestSubWorkflowFinishedChildBeatsTheExecutionDeadline(t *testing.T) {
 	}
 	if got := rig.hooks.completions(); len(got) != 0 {
 		t.Fatalf("completion hooks = %v, want none: the execution is not concluded", got)
+	}
+}
+
+// timeoutWriteFailState fails the first write of the execution's timeout status
+// and passes every other call through. It is the fault the guard's own step
+// needs: the existing expiry fakes fail the acknowledgement and the cascade, but
+// not the status write ExpireExecution makes before either.
+type timeoutWriteFailState struct {
+	*expireAckState
+	mu  sync.Mutex
+	err error
+}
+
+func (s *timeoutWriteFailState) UpdateExecutionStatus(ctx context.Context, id types.ExecutionID, status types.ExecutionStatus, reason string) error {
+	if status == types.ExecutionStatusTimeout {
+		s.mu.Lock()
+		err := s.err
+		s.err = nil
+		s.mu.Unlock()
+		if err != nil {
+			return err
+		}
+	}
+	return s.expireAckState.UpdateExecutionStatus(ctx, id, status, reason)
+}
+
+// TestSubWorkflowWaitGuardErrorIsReturned pins that an error inside the guard
+// (here the execution's timeout write) comes back from the dispatch as it is. It
+// must not be swallowed into the node-timeout path: that path commits the parked
+// node through on_error, which would fail a node whose wait the execution's
+// deadline may still own. The delivery is retried instead, and the retry finds
+// the execution still running and settles it.
+func TestSubWorkflowWaitGuardErrorIsReturned(t *testing.T) {
+	ctx := context.Background()
+	g := subWorkflowDeadlineGraph(t, "", time.Minute)
+	rig := newExpireSubWorkflowRigOf(t, g)
+	injected := errors.New("injected: write the execution timeout failed")
+	failing := &timeoutWriteFailState{expireAckState: &expireAckState{expireState: rig.state}, err: injected}
+	rig.eng = New(failing, &fakeQueue{}, WithHooks(rig.hooks), WithSubWorkflowResolver(subWorkflowStubResolver(t)))
+
+	handled, err := redeliverSubWorkflowNodeResult(t, rig, g)
+	if !errors.Is(err, injected) {
+		t.Fatalf("dispatch = (handled %v, %v), want the guard's error %v returned as it is", handled, err, injected)
+	}
+
+	if got := rig.nodeStatus(t); got != types.NodeStatusWaiting {
+		t.Fatalf("sub node = %q, want waiting: a guard error must not fall into the on_error commit", got)
+	}
+	parent, err := rig.state.GetExecution(ctx, rig.parentID)
+	if err != nil || parent == nil || parent.Status != types.ExecutionStatusRunning {
+		t.Fatalf("parent = %+v (err %v), want running: the timeout write failed", parent, err)
+	}
+	child, err := rig.state.GetExecution(ctx, rig.link.ChildExecutionID)
+	if err != nil || child == nil || child.Status == types.ExecutionStatusCanceled {
+		t.Fatalf("child = %+v (err %v), want it left alone: nothing settled the wait", child, err)
+	}
+
+	// The fault was one-shot: the retried delivery settles the execution.
+	redeliverSubWorkflowNode(t, rig, g)
+	parent, err = rig.state.GetExecution(ctx, rig.parentID)
+	if err != nil || parent == nil || parent.Status != types.ExecutionStatusTimeout {
+		t.Fatalf("parent after the retry = %+v (err %v), want timeout", parent, err)
 	}
 }
