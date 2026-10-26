@@ -194,13 +194,15 @@ func deadlineSweepAlertAt(failures int) bool {
 // candidate was attempted.
 //
 // Every outcome ExpireExecution reports without an error is a handled candidate.
-// Expired and Resumed are what the sweep released. NotDue, AlreadyTerminal and
-// Gone are benign (someone else owns or finished the execution), as is
-// ErrExecutionInactive. Canceling is not a failure either, but the entry stays
-// listed until the cancel concludes, so the execution is set aside for a window
-// (ExpireBackoff.Defer) and cannot hold a slot of every page meanwhile. Any other
-// error is a failure: it is set aside the same way and counted toward the
-// consecutive-failure warning.
+// Expired and Resumed are what the sweep released. NotDue and AlreadyTerminal are
+// benign (the execution is not due, or someone else finished it), as is
+// ErrExecutionInactive. Canceling and Gone are not failures either, but neither
+// withdraws the entry, so it stays listed: a cancel will withdraw its own, and a
+// Gone one is an entry whose execution keys are missing (the state, or the graph,
+// may be a replica lag away from reappearing, so it is not acknowledged). Both are
+// set aside for a window (ExpireBackoff.Defer) and cannot hold a slot of every
+// page meanwhile. Any other error is a failure: it is set aside the same way and
+// counted toward the consecutive-failure warning.
 //
 // The scan reads the batch plus however many executions are set aside, up to
 // FetchFactor times the batch, and the sweep attempts at most one batch.
@@ -290,8 +292,12 @@ func (s *DeadlineSweep) Sweep(ctx context.Context) (DeadlineSweepResult, error) 
 }
 
 // record settles one attempt that came back without an error.
+//
+// Canceling and Gone leave the entry listed (ExpireExecution acknowledges neither),
+// so they are set aside rather than forgotten: Success would let the same entry
+// head the next page again, every round.
 func (s *DeadlineSweep) record(ctx context.Context, candidate DeadlineExpiredExecution, key string, outcome ExpireOutcome, now time.Time, result *DeadlineSweepResult) {
-	if outcome == ExpireOutcomeCanceling {
+	if outcome == ExpireOutcomeCanceling || outcome == ExpireOutcomeGone {
 		s.cfg.Backoff.Defer(key, now)
 		result.Deferred++
 		return

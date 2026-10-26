@@ -80,8 +80,8 @@ func (f *sweepFakeIndex) listed() int {
 }
 
 // sweepFakeExpirer answers ExpireExecution from tables. A call that returns no
-// error acknowledges the entry unless the outcome leaves it listed, the way the
-// engine does.
+// error acknowledges the entry unless the outcome leaves it listed (Canceling and
+// Gone), the way the engine does.
 type sweepFakeExpirer struct {
 	mu       sync.Mutex
 	index    *sweepFakeIndex
@@ -114,7 +114,7 @@ func (e *sweepFakeExpirer) ExpireExecution(ctx context.Context, id types.Executi
 	if !ok {
 		outcome = ExpireOutcomeExpired
 	}
-	if outcome != ExpireOutcomeCanceling {
+	if outcome != ExpireOutcomeCanceling && outcome != ExpireOutcomeGone {
 		_ = e.index.AckDeadlineExpired(ctx, id)
 	}
 	return outcome, nil
@@ -246,7 +246,7 @@ func TestDeadlineSweepMapsEveryOutcome(t *testing.T) {
 
 	got := h.sweep(t)
 
-	want := DeadlineSweepResult{Listed: 8, Attempted: 8, Released: 2, Expired: 1, Failed: 1, Deferred: 1}
+	want := DeadlineSweepResult{Listed: 8, Attempted: 8, Released: 2, Expired: 1, Failed: 1, Deferred: 2}
 	if got != want {
 		t.Fatalf("Sweep() = %+v, want %+v", got, want)
 	}
@@ -334,6 +334,51 @@ func TestDeadlineSweepCancelingDoesNotStarveNewEntries(t *testing.T) {
 	}
 	if got := h.index.listed(); got != batch+30 {
 		t.Fatalf("entries still listed = %d, want only the canceling ones (%d)", got, batch+30)
+	}
+}
+
+// TestDeadlineSweepGoneDoesNotStarveNewEntries is the same regression for
+// entries whose execution keys are missing: ExpireExecution reports Gone without
+// acknowledging the entry (the keys may only be a replica lag away from
+// reappearing), so only a deferral keeps 40 of them from holding every slot of a
+// 10-wide page ahead of a fresh one, and from being retried on every round.
+func TestDeadlineSweepGoneDoesNotStarveNewEntries(t *testing.T) {
+	const batch = 10
+	h := newSweepHarness(batch, nil)
+	base := sweepEpoch.Add(-time.Hour)
+	goneIDs := h.index.add("gone", batch+30, base)
+	for _, id := range goneIDs {
+		h.expirer.outcomes[id] = ExpireOutcomeGone
+	}
+	fresh := h.index.add("fresh", 1, base.Add(time.Minute))[0]
+
+	var deferred, released int
+	for round := 0; round < 12 && h.expirer.callsFor(fresh) == 0; round++ {
+		result := h.sweep(t)
+		deferred += result.Deferred
+		released += result.Released
+		if result.Failed != 0 {
+			t.Fatalf("round %d: Failed = %d, want gone not to count as a failure", round, result.Failed)
+		}
+		h.advance(10 * time.Millisecond)
+	}
+
+	if got := h.expirer.callsFor(fresh); got != 1 {
+		t.Fatalf("the fresh execution was expired %d times, want exactly 1: gone entries starved it", got)
+	}
+	if released != 1 {
+		t.Fatalf("released %d executions, want only the fresh one: gone must not count as released", released)
+	}
+	if deferred != batch+30 {
+		t.Fatalf("deferred %d executions, want each of the %d gone ones set aside once", deferred, batch+30)
+	}
+	for _, id := range goneIDs {
+		if got := h.expirer.callsFor(id); got != 1 {
+			t.Fatalf("%s was attempted %d times, want 1: a gone entry must wait out its window", id, got)
+		}
+	}
+	if got := h.index.listed(); got != batch+30 {
+		t.Fatalf("entries still listed = %d, want only the gone ones (%d): the sweep must not acknowledge them", got, batch+30)
 	}
 }
 
