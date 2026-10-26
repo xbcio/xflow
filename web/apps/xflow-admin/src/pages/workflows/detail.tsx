@@ -147,6 +147,10 @@ export default function WorkflowDetailPage() {
     execFromSearch(history.location.search)
   ));
   const [selectedExecution, setSelectedExecution] = useState<ExecutionDetail>();
+  // Read by selectExecution to tell a re-click on the selected row from a switch,
+  // without putting the selection in its dependencies.
+  const selectedExecutionIdRef = useRef(selectedExecutionId);
+  selectedExecutionIdRef.current = selectedExecutionId;
   const [executionList, setExecutionList] = useState<XFlowExecutionListState>();
   const [snapshotWorkflow, setSnapshotWorkflow] = useState<WorkflowDef>();
   const [snapshotStale, setSnapshotStale] = useState(false);
@@ -578,10 +582,15 @@ export default function WorkflowDetailPage() {
     // An explicit pick is a retry: let the poll ask once more even if this id
     // was already reported as gone.
     failedExecutionIdsRef.current.delete(executionId);
-    setSelectedExecutionId(executionId);
-    setSelectedExecution(undefined);
-    setSnapshotWorkflow(undefined);
-    setSnapshotStale(false);
+    // Re-picking the row that is already selected changes no effect dependency,
+    // so nothing would refetch what is cleared here (a terminal run's poll timer
+    // is long gone): keep the loaded detail and snapshot, only restore ?exec=.
+    if (executionId !== selectedExecutionIdRef.current) {
+      setSelectedExecutionId(executionId);
+      setSelectedExecution(undefined);
+      setSnapshotWorkflow(undefined);
+      setSnapshotStale(false);
+    }
     replaceExec(executionId);
   }, [replaceExec]);
   const handleModeChange = useCallback((next: XFlowEditorMode) => {

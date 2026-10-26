@@ -1316,6 +1316,87 @@ describe('run records mode (§6.8)', () => {
     }
   });
 
+  it('keeps the replay when a selected terminal row is clicked again', async () => {
+    await mounted();
+    vi.useFakeTimers();
+    try {
+      host.api.listExecutions.mockResolvedValue({
+        list: [listRow('exec-1'), listRow('exec-2', 'failed')],
+        total: 2,
+      });
+      host.api.getExecution.mockResolvedValue({
+        executionId: 'exec-1',
+        status: 'success',
+        workflowId: 'wf-1',
+        workflowVersion: '3',
+      });
+      host.api.getWorkflowVersion.mockResolvedValue({ workflow: { ...stored, name: 'Orders v3', id: undefined } });
+
+      await act(async () => editor().onModeChange?.('runs'));
+      await act(async () => {
+        editor().onSelectExecution?.('exec-1');
+      });
+      await act(async () => {});
+      await act(async () => {});
+      expect(editor().executionSnapshotWorkflow?.name).toBe('Orders v3');
+      expect(editor().selectedExecution?.status).toBe('success');
+
+      host.api.getExecution.mockClear();
+      // Clicking the already-selected terminal row must not blank the canvas:
+      // its poll timer is gone, so clearing the loaded detail never gets
+      // re-fetched and the replay would stay empty.
+      await act(async () => {
+        editor().onSelectExecution?.('exec-1');
+      });
+      await act(async () => {});
+
+      expect(editor().selectedExecution?.executionId).toBe('exec-1');
+      expect(editor().executionSnapshotWorkflow?.name).toBe('Orders v3');
+      expect(host.replace).toHaveBeenLastCalledWith('/workflows/wf-1?exec=exec-1');
+
+      // Clicking a different row still switches and fetches the new detail.
+      host.api.getExecution.mockResolvedValue({ executionId: 'exec-2', status: 'failed', workflowId: 'wf-1' });
+      await act(async () => {
+        editor().onSelectExecution?.('exec-2');
+      });
+      await act(async () => {});
+      expect(editor().selectedExecution?.executionId).toBe('exec-2');
+      expect(host.api.getExecution).toHaveBeenCalledWith('exec-2');
+      expect(host.replace).toHaveBeenLastCalledWith('/workflows/wf-1?exec=exec-2');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('re-clicking a row whose detail failed retries the read', async () => {
+    await mounted();
+    vi.useFakeTimers();
+    try {
+      // No list rows: nothing is auto-selected, every read is a direct pick.
+      host.api.getExecution.mockRejectedValue(Object.assign(new Error('not found'), { status: 404 }));
+      await act(async () => editor().onModeChange?.('runs'));
+      await act(async () => {
+        editor().onSelectExecution?.('exec-1');
+      });
+      await act(async () => {});
+      expect(host.api.getExecution).toHaveBeenCalledTimes(1);
+      expect(editor().selectedExecution).toBeUndefined();
+
+      host.api.getExecution.mockResolvedValue({ executionId: 'exec-1', status: 'success' });
+      await act(async () => {
+        editor().onSelectExecution?.('exec-1');
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(2000);
+      });
+      // §6.8: an explicit pick is a retry — the row must load this time.
+      expect(host.api.getExecution).toHaveBeenCalledTimes(2);
+      expect(editor().selectedExecution?.executionId).toBe('exec-1');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('skips the selected execution poll while the page is hidden', async () => {
     await mounted();
     vi.useFakeTimers();
@@ -1463,6 +1544,32 @@ describe('run records mode (§6.8)', () => {
     expect(editor().mode).toBe('runs');
     await waitFor(() => expect(editor().selectedExecution?.executionId).toBe('exec-2'));
     expect(host.replace).toHaveBeenCalledWith('/workflows/wf-1?exec=exec-2');
+  });
+
+  it('reopens the replay of the run already selected in memory from 查看运行记录', async () => {
+    host.api.getExecution.mockResolvedValue({ executionId: 'exec-2', status: 'queued' });
+    host.api.rerunExecution.mockResolvedValue({ executionId: 'exec-2', status: 'queued' });
+    await mounted();
+    await act(async () => {
+      await editor().onRerun?.({
+        executionId: 'exec-1',
+        fromNode: 'start',
+        includeSuccess: true,
+        idempotencyKey: 'key-reopen',
+      });
+    });
+    await waitFor(() => expect(editor().execution?.executionId).toBe('exec-2'));
+    await act(async () => editor().onOpenRunHistory?.());
+    await waitFor(() => expect(editor().selectedExecution?.executionId).toBe('exec-2'));
+
+    await act(async () => editor().onModeChange?.('edit'));
+    await act(async () => editor().onOpenRunHistory?.());
+
+    // The selection is the same id, so the host keeps it instead of blanking
+    // the replay; mode flips back to 运行记录 and ?exec= is restored.
+    expect(editor().mode).toBe('runs');
+    await waitFor(() => expect(editor().selectedExecution?.executionId).toBe('exec-2'));
+    expect(host.replace).toHaveBeenLastCalledWith('/workflows/wf-1?exec=exec-2');
   });
 
   it('drops ?exec= when returning to 编辑 and keeps the selection in memory', async () => {
