@@ -145,7 +145,7 @@
   padding: 0 var(--xflow-space-1-5);
   border-radius: var(--xflow-radius-full);
   background: var(--xflow-warning-bg-subtle);
-  color: var(--xflow-warning);
+  color: var(--xflow-warning-fg);
   font-size: var(--xflow-font-xs);
   font-weight: var(--xflow-font-weight-medium);
   line-height: var(--xflow-line-height-xs);

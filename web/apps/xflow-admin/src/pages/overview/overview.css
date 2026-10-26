@@ -362,7 +362,7 @@
 }
 
 .xflow-ov-fail-count {
-  color: var(--xflow-danger);
+  color: var(--xflow-danger-fg);
   font-size: var(--xflow-font-xs);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;

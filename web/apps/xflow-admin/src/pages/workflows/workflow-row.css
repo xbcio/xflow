@@ -217,7 +217,7 @@
 
 /* Filled star tracks the icon, so the filter reads as a toggle too. */
 .xflow-row-fav-filter[data-active='true'] {
-  color: var(--xflow-warning);
+  color: var(--xflow-warning-fg);
 }
 
 /* ---------- Row-end ⋯ menu: quiet until the row is pointed at ---------- */

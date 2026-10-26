@@ -315,7 +315,7 @@
   }
 
   .xflow-admin-cluster [data-tone='ok'] {
-    color: var(--xflow-success);
+    color: var(--xflow-success-fg);
   }
 
   .xflow-admin-main {
@@ -1039,7 +1039,7 @@
     border: 1px dashed color-mix(in srgb, var(--xflow-orange) 65%, transparent);
     border-radius: var(--xflow-radius-xs);
     background: color-mix(in srgb, var(--xflow-panel) 82%, transparent);
-    color: var(--xflow-orange);
+    color: var(--xflow-orange-fg);
     font-size: var(--xflow-font-xs);
     font-weight: var(--xflow-font-weight-medium);
     line-height: 14px;
@@ -1345,12 +1345,12 @@
   }
 
   .xflow-admin .xflow-admin-reason-counter[data-over-limit='true'] {
-    color: var(--xflow-danger);
+    color: var(--xflow-danger-fg);
   }
 
   .xflow-admin .xflow-admin-reason-error {
     margin: 0;
-    color: var(--xflow-danger);
+    color: var(--xflow-danger-fg);
     font-size: var(--xflow-font-sm);
   }
 }
