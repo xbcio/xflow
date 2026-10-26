@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -121,5 +122,88 @@ func TestMarkerStaysOutOfEveryBatchItemShape(t *testing.T) {
 	placeholder, isMap := items[2].(map[string]any)
 	if !isMap || len(placeholder) != 2 {
 		t.Fatalf("item 2 = %v, want exactly {%s, _index}", items[2], batchErrorKey)
+	}
+}
+
+// firstReadFaultState fails the first GetExecution it is asked for and then
+// behaves as the store it wraps. Failing only once is what separates the guard's
+// own read from every later one: a guard that swallowed its error would carry on
+// into a commit whose reads all succeed, and the injected error could not reach
+// the caller by any other route.
+type firstReadFaultState struct {
+	*batchReasonState
+	err   error
+	fired bool
+}
+
+func (s *firstReadFaultState) GetExecution(ctx context.Context, id types.ExecutionID) (*ExecutionSnapshot, error) {
+	if !s.fired {
+		s.fired = true
+		return nil, s.err
+	}
+	return s.batchReasonState.GetExecution(ctx, id)
+}
+
+// TestCompleteLoopSplitReturnsTheGuardStoreError: when the guard cannot read the
+// execution's deadline it cannot tell the execution's timeout from the batch's
+// own, and guessing either way is wrong (expiring an execution that has time, or
+// routing a spent one through on_error). The store error goes back to the
+// caller, who retries the final batch's commit, and nothing is committed on the
+// way.
+func TestCompleteLoopSplitReturnsTheGuardStoreError(t *testing.T) {
+	boom := errors.New("store unavailable")
+	rig := newBatchGuardRig(t, "continue", true, time.Now().Add(-time.Minute))
+	ctx := context.Background()
+	lease, payload, err := rig.eng.BuildSubgraphLease(ctx, rig.batches[0])
+	if err != nil {
+		t.Fatalf("BuildSubgraphLease() error = %v", err)
+	}
+	g, err := rig.eng.loadGraph(ctx, rig.id)
+	if err != nil || g == nil {
+		t.Fatalf("loadGraph() = (%v, %v)", g, err)
+	}
+	parentLease := &TaskLease{
+		LeaseID:    lease.LeaseID,
+		LeaseToken: lease.LeaseToken,
+		Attempt:    lease.Attempt,
+		Task: Task{
+			ExecutionID:  lease.Task.ExecutionID,
+			NodeName:     payload.ParentNode,
+			NodeIdx:      payload.ParentNodeIdx,
+			Type:         TaskTypeNodeBatch,
+			ActivationID: lease.Task.ActivationID,
+			AutoDepth:    lease.Task.AutoDepth,
+		},
+	}
+	// The deadline is memoized on first read; drop it so the guard has to read.
+	rig.eng.EvictExecution(rig.id)
+	fault := &firstReadFaultState{batchReasonState: rig.eng.state.(*batchReasonState), err: boom}
+	rig.eng.state = fault
+
+	results := []map[string]any{timedOutBatch().Output.Data, {"items": []any{"ok"}, "count": 1}}
+	err = rig.eng.completeLoopSplit(ctx, parentLease, g, results)
+
+	if !fault.fired {
+		t.Fatal("GetExecution was never called: the guard did not read the deadline")
+	}
+	if !errors.Is(err, boom) {
+		t.Fatalf("completeLoopSplit() = %v, want it to wrap %v", err, boom)
+	}
+	if queued := taskNames(rig.queue.Drain()); len(queued) != 0 {
+		t.Fatalf("downstream enqueued %v after a failed guard read, want nothing", queued)
+	}
+	node, err := rig.state.GetNode(ctx, rig.id, "loop")
+	if err != nil || node == nil {
+		t.Fatalf("GetNode(loop) = (%v, %v)", node, err)
+	}
+	if node.Status == types.NodeStatusFailed || node.Status == types.NodeStatusContinued || node.Status == types.NodeStatusSuccess {
+		t.Fatalf("map node status = %q: it was committed past a failed guard read", node.Status)
+	}
+	snap, err := rig.state.GetExecution(ctx, rig.id)
+	if err != nil || snap == nil {
+		t.Fatalf("GetExecution() = (%v, %v)", snap, err)
+	}
+	if snap.Status != types.ExecutionStatusRunning {
+		t.Fatalf("execution status = %q, want %q: a failed read must not conclude it", snap.Status, types.ExecutionStatusRunning)
 	}
 }
