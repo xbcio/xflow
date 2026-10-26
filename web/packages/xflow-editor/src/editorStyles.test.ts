@@ -857,6 +857,7 @@ describe("xflow.editor small-text tones, hit targets and forced colours", () => 
         new RegExp(`color:\\s*var\\(--xflow-${tone}-fg\\)\\s*;`)
       );
     }
+    expect(block(".xflow-editor-error")).toMatch(/color:\s*var\(--xflow-danger-fg\)\s*;/);
   });
 
   it("grows the sub-24px hit targets with a transparent ::after, leaving the visual size alone", () => {

@@ -2258,7 +2258,7 @@ button.xflow-editor-overview__run:hover {
 }
 
 .xflow-editor-error {
-  color: var(--xflow-danger);
+  color: var(--xflow-danger-fg);
 }
 
 .xflow-editor-connection-list {
