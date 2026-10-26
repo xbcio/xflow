@@ -129,6 +129,17 @@ func TestExpireRacingASignalNeverResumesATimedOutExecution(t *testing.T) {
 		}
 		rig.requireAnnouncedOnly(round, id, snap.Status)
 		rig.requireDrained(round)
+		// What the race itself left in the queue is settled first, so that the
+		// late signal below is judged on what it queued and nothing else. A resume
+		// the signal side leased just before the expiry wrote timeout is released
+		// when its input can no longer be built, and the release requeues it. Such
+		// a task was queued while the execution was still alive; what matters is
+		// that a worker is refused.
+		for _, task := range rig.queue.take(id) {
+			if _, err := rig.eng.BuildTaskLease(ctx, task); !errors.Is(err, engine.ErrExecutionInactive) {
+				t.Fatalf("round %d: execution ended %q but a task the race left queued was leased: error = %v", round, snap.Status, err)
+			}
+		}
 		// A signal that arrives after the end changes nothing and queues nothing.
 		if err := rig.eng.DeliverSignal(ctx, id, "go", map[string]any{"late": true}); err != nil {
 			t.Fatalf("round %d: late DeliverSignal error = %v, want a silent no-op", round, err)
