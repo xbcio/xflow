@@ -405,3 +405,57 @@ func TestSignalInTheWindowAfterTheTimeoutWriteQueuesNothingOnRedis(t *testing.T)
 	rig.requireNodesCanceled(ctx, 0, id, []string{"park"})
 	rig.requireDrained(0, g.Name(), id)
 }
+
+// TestResumeQueuedBeforeTheTimeoutIsRefusedAfterItOnRedis fixes the one
+// interleaving of the replay above that it reaches only in a few rounds in a
+// thousand: the signal wins the waiter and its resume is already in the queue
+// when the expiry writes timeout. That resume was queued while the execution was
+// alive, so queueing it was right; what must hold is that a worker presented
+// with it afterwards is refused, and that nothing further is queued or left in
+// the outbox when the same signal arrives again.
+func TestResumeQueuedBeforeTheTimeoutIsRefusedAfterItOnRedis(t *testing.T) {
+	ctx := context.Background()
+	rig := newDeadlineRaceRig(t)
+	g := raceGraph(t, "deadline-race-park", 0, types.NodeDef{Name: "park", Type: "test.race_park"})
+	id := rig.submit(ctx, g)
+	rig.parkOnSignal(ctx, id)
+
+	if err := rig.eng.DeliverSignal(ctx, id, "go", map[string]any{"by": "first"}); err != nil {
+		t.Fatalf("DeliverSignal() error = %v", err)
+	}
+	queued := rig.queue.take(id)
+	if len(queued) != 1 || queued[0].Type != engine.TaskTypeNodeResume {
+		t.Fatalf("the signal queued %+v, want exactly one resume task", queued)
+	}
+
+	outcome, err := rig.eng.ExpireExecution(ctx, id)
+	if err != nil || outcome != engine.ExpireOutcomeExpired {
+		t.Fatalf("ExpireExecution() = (%q, %v), want expired", outcome, err)
+	}
+	if _, err := rig.eng.BuildTaskLease(ctx, queued[0]); !errors.Is(err, engine.ErrExecutionInactive) {
+		t.Fatalf("a resume queued before the timeout was leased after it: error = %v, want ErrExecutionInactive", err)
+	}
+	// A lease that is minted and then released because its input cannot be built
+	// answers ErrExecutionInactive too, but the release puts the task back in the
+	// queue. Refusing the resume has to leave nothing behind.
+	if requeued := rig.queue.take(id); len(requeued) != 0 {
+		t.Fatalf("refusing a resume after the timeout requeued %d tasks: %+v", len(requeued), requeued)
+	}
+
+	outboxBefore := rig.outboxSize(ctx, id)
+	if err := rig.eng.DeliverSignal(ctx, id, "go", map[string]any{"by": "again"}); err != nil {
+		t.Fatalf("second DeliverSignal() error = %v, want a silent no-op", err)
+	}
+	if left := rig.queue.take(id); len(left) != 0 {
+		t.Fatalf("a signal after the timeout queued %d tasks: %+v", len(left), left)
+	}
+	if added := rig.outboxSize(ctx, id) - outboxBefore; added != 0 {
+		t.Fatalf("a signal after the timeout added %d outbox entries", added)
+	}
+	snap := rig.snapshot(ctx, id)
+	if snap.Status != types.ExecutionStatusTimeout || snap.Error != engine.ExecutionDeadlineExceededError {
+		t.Fatalf("execution = %q %q, want timeout for its deadline", snap.Status, snap.Error)
+	}
+	rig.requireAnnouncedOnly(0, id, types.ExecutionStatusTimeout)
+	rig.requireDrained(0, g.Name(), id)
+}
