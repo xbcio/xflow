@@ -543,6 +543,37 @@ func TestDeadlineSweepFetchesPastWhatIsBackingOff(t *testing.T) {
 	}
 }
 
+// TestDeadlineSweepAttemptsAtMostOneBatch pins the batch boundary. The scan reads
+// the batch plus one slot per execution backing off, so a stale backoff record
+// lets the page carry Batch+1 healthy candidates; the sweep must still attempt
+// exactly Batch of them and leave the last one for the next round.
+func TestDeadlineSweepAttemptsAtMostOneBatch(t *testing.T) {
+	const batch = 4
+	h := newSweepHarness(batch, nil)
+	// A record for an execution that is no longer listed widens the read by one.
+	h.backoff.Failure(DeadlineSweepKey(DeadlineExpiredExecution{ExecutionID: "stale"}), h.now)
+	ids := h.index.add("exec", batch+1, sweepEpoch.Add(-time.Hour))
+
+	got := h.sweep(t)
+
+	if h.index.lastLimit != batch+1 {
+		t.Fatalf("scan limit = %d, want %d: the test needs the page to carry one candidate too many", h.index.lastLimit, batch+1)
+	}
+	want := DeadlineSweepResult{Listed: batch + 1, Attempted: batch, Released: batch, Expired: batch}
+	if got != want {
+		t.Fatalf("Sweep() = %+v, want %+v", got, want)
+	}
+	if calls := h.expirer.callsFor(ids[batch]); calls != 0 {
+		t.Fatalf("the candidate past the batch was attempted %d times, want 0", calls)
+	}
+	if calls := h.expirer.callsFor(ids[batch-1]); calls != 1 {
+		t.Fatalf("the last candidate inside the batch was attempted %d times, want 1", calls)
+	}
+	if left := h.index.listed(); left != 1 {
+		t.Fatalf("entries still listed = %d, want only the one past the batch", left)
+	}
+}
+
 func TestDeadlineSweepBacksOffAFailingExecution(t *testing.T) {
 	h := newSweepHarness(5, nil)
 	broken := h.index.add("broken", 1, sweepEpoch.Add(-time.Hour))[0]
