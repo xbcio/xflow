@@ -129,6 +129,13 @@ func TestExpireRacingASignalNeverResumesATimedOutExecution(t *testing.T) {
 		}
 		rig.requireAnnouncedOnly(round, id, snap.Status)
 		rig.requireDrained(round)
+		// A signal that arrives after the end changes nothing and queues nothing.
+		if err := rig.eng.DeliverSignal(ctx, id, "go", map[string]any{"late": true}); err != nil {
+			t.Fatalf("round %d: late DeliverSignal error = %v, want a silent no-op", round, err)
+		}
+		if queued := rig.queue.take(id); len(queued) != 0 {
+			t.Fatalf("round %d: execution ended %q but a late signal queued %d tasks: %+v", round, snap.Status, len(queued), queued)
+		}
 	}
 	t.Logf("%d rounds: %d ended success, %d ended timeout", raceRounds(), succeeded, timedOut)
 }
@@ -205,5 +212,53 @@ func TestSignalThatFinishesFirstKeepsSuccessAgainstALateExpiry(t *testing.T) {
 	if left := rig.queue.take(id); len(left) != 0 {
 		t.Fatalf("the late expiry left %d tasks queued: %+v", len(left), left)
 	}
+	rig.requireDrained(0)
+}
+
+// TestSignalInTheWindowAfterTheTimeoutWriteQueuesNothing pins the guard the
+// replay above cannot reach. ExpireExecution writes the timeout status first and
+// cancels the suspended nodes after, so for a moment the execution is timed out
+// while its node is still parked on a waiter that a signal can consume. Once the
+// cascade has run there is no waiter left, and a late signal is harmless for
+// that reason alone; in this window it is harmless only because the engine
+// refuses to resume a timed-out execution. The window is made deterministic by
+// writing the timeout status without the cascade.
+func TestSignalInTheWindowAfterTheTimeoutWriteQueuesNothing(t *testing.T) {
+	ctx := context.Background()
+	rig := newDeadlineRaceRig(t)
+	g := raceGraph(t, "deadline-race-park", 0, types.NodeDef{Name: "park", Type: "test.race_park"})
+	id := rig.submit(ctx, g)
+	rig.parkOnSignal(ctx, id)
+
+	if err := rig.state.UpdateExecutionStatus(ctx, id, types.ExecutionStatusTimeout, engine.ExecutionDeadlineExceededError); err != nil {
+		t.Fatalf("UpdateExecutionStatus(timeout) error = %v", err)
+	}
+	rig.state.mu.Lock()
+	waiters := len(rig.state.suspended)
+	rig.state.mu.Unlock()
+	if waiters != 1 {
+		t.Fatalf("waiters after the timeout write = %d, want the parked node still waiting", waiters)
+	}
+
+	if err := rig.eng.DeliverSignal(ctx, id, "go", map[string]any{"by": "window"}); err != nil {
+		t.Fatalf("DeliverSignal() error = %v, want a silent no-op", err)
+	}
+	if queued := rig.queue.take(id); len(queued) != 0 {
+		t.Fatalf("a signal in the window queued %d tasks on a timed-out execution: %+v", len(queued), queued)
+	}
+	if got := rig.snapshot(ctx, id).Status; got != types.ExecutionStatusTimeout {
+		t.Fatalf("execution = %q after the signal, want it to stay timeout", got)
+	}
+	node, err := rig.state.GetNode(ctx, id, "park")
+	if err != nil || node == nil || node.Status == types.NodeStatusSuccess || node.Status == types.NodeStatusRunning {
+		t.Fatalf("parked node = (%+v, %v) after the signal, want it neither resumed nor completed", node, err)
+	}
+
+	// The cascade the writer never ran is still repaired afterwards.
+	outcome, err := rig.eng.ExpireExecution(ctx, id)
+	if err != nil || outcome != engine.ExpireOutcomeResumed {
+		t.Fatalf("ExpireExecution() = (%q, %v), want resumed", outcome, err)
+	}
+	rig.requireNodesCanceled(ctx, 0, id, []string{"park"})
 	rig.requireDrained(0)
 }
