@@ -34,7 +34,7 @@ func TestLeaseSweeperExecutionDeadlineShutdownIsNotAFailure(t *testing.T) {
 		h.expirer.errs[id] = errStoreDown
 	}
 	var cancel context.CancelFunc
-	h.LeaseSweeper.engine = cancelOnExpire{fakeExpirer: h.expirer, cancel: func() { cancel() }}
+	h.engine = cancelOnExpire{fakeExpirer: h.expirer, cancel: func() { cancel() }}
 
 	const passes = 120
 	for i := 0; i < passes; i++ {
