@@ -95,7 +95,7 @@ describe("degraded node types banner", () => {
   it("sends parameters to the JSON editor in the inspector, with the schema-not-loaded notice", () => {
     render(<XFlowEditor value={workflow} nodeTypesError={{}} />);
 
-    fireEvent.click(document.querySelector(".xflow-preview-node__select[aria-label^='worker node ']") as HTMLElement);
+    fireEvent.click(document.querySelector(".xflow-preview-node__select[aria-label^='worker 节点 ']") as HTMLElement);
     const inspector = screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
     expect(within(inspector).getByText(/节点类型 schema 未加载：参数请以 JSON 编辑/)).toBeTruthy();
     fireEvent.click(within(inspector).getByRole("button", { name: "以 JSON 编辑参数" }));
@@ -536,7 +536,7 @@ describe("shortcuts behind an expanded diagnostics drawer", () => {
     const leftCollapsed = () => document.querySelector(".xflow-editor-main")?.getAttribute("data-left-collapsed");
 
     // Control: with the dock docked the same keys act.
-    fireEvent.click(document.querySelector(".xflow-preview-node__select[aria-label^='worker node ']") as HTMLElement);
+    fireEvent.click(document.querySelector(".xflow-preview-node__select[aria-label^='worker 节点 ']") as HTMLElement);
     fireEvent.keyDown(window, { key: "b", code: "KeyB", metaKey: true });
     expect(leftCollapsed()).toBe("true");
     fireEvent.keyDown(window, { key: "b", code: "KeyB", metaKey: true });

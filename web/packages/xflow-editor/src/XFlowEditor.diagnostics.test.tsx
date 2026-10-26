@@ -674,7 +674,7 @@ describe("输出 tab (WB-04)", () => {
 const openDiagnosticsTab = (name: string | RegExp) =>
   fireEvent.click(within(drawer()).getByRole("tab", { name }));
 const selectNode = (name: string) =>
-  fireEvent.click(document.querySelector(`.xflow-preview-node__select[aria-label^="${name} node "]`) as HTMLElement);
+  fireEvent.click(document.querySelector(`.xflow-preview-node__select[aria-label^="${name} 节点 "]`) as HTMLElement);
 const inputPanel = () => drawer().querySelector<HTMLElement>(".xflow-editor-input") as HTMLElement;
 const logsPanel = () => drawer().querySelector<HTMLElement>(".xflow-editor-timeline") as HTMLElement;
 
@@ -1469,7 +1469,7 @@ describe("acting on a finding from an expanded drawer (E4b)", () => {
     ]
   };
   const workerCard = () =>
-    document.querySelector('.xflow-preview-node__select[aria-label^="worker node "]') as HTMLElement;
+    document.querySelector('.xflow-preview-node__select[aria-label^="worker 节点 "]') as HTMLElement;
 
   it("hands the drawer back to docked for 修正 ... 的参数 JSON", () => {
     render(<XFlowEditor value={withParams} onSave={vi.fn()} />);
@@ -1517,7 +1517,7 @@ describe("the other auto-open points keep the selection (E4b)", () => {
       ]
     };
     render(<XFlowEditor value={withParams} onSave={onSave} />);
-    fireEvent.click(document.querySelector('.xflow-preview-node__select[aria-label^="worker node "]') as HTMLElement);
+    fireEvent.click(document.querySelector('.xflow-preview-node__select[aria-label^="worker 节点 "]') as HTMLElement);
     const root = screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
     fireEvent.click(within(root).getByRole("button", { name: "以 JSON 编辑参数" }));
     fireEvent.change(within(root).getByLabelText("参数 JSON"), { target: { value: "{ broken" } });
@@ -1554,7 +1554,7 @@ describe("the other auto-open points keep the selection (E4b)", () => {
     render(<XFlowEditor value={workflow} onRunNode={onRunNode} />);
     const before = inspected();
     const node = (name: string) =>
-      document.querySelector(`.xflow-preview-node__select[aria-label^="${name} node "]`) as HTMLElement;
+      document.querySelector(`.xflow-preview-node__select[aria-label^="${name} 节点 "]`) as HTMLElement;
 
     fireEvent.contextMenu(node("tail"), { clientX: 420, clientY: 260 });
     fireEvent.click(screen.getByRole("menuitem", { name: /从此节点运行/ }));

@@ -160,7 +160,7 @@ describe("required-field errors in the node form (CP-01)", () => {
     connections: {}
   };
   const selectApi = (): void => {
-    const card = document.querySelector<HTMLElement>('.xflow-preview-node__select[aria-label^="api node "]');
+    const card = document.querySelector<HTMLElement>('.xflow-preview-node__select[aria-label^="api 节点 "]');
     if (!card) throw new Error("api card not found");
     fireEvent.click(card);
   };

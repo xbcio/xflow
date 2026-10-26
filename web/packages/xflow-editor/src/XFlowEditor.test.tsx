@@ -6,7 +6,7 @@ import { XFlowEditor } from "./index";
 
 /** The canvas node's own select button: the canvas cards stay a selectable list beside the outline tree. */
 const canvasNode = (name: string): HTMLElement => {
-  const node = document.querySelector<HTMLElement>(`.xflow-preview-node__select[aria-label^="${name} node "]`);
+  const node = document.querySelector<HTMLElement>(`.xflow-preview-node__select[aria-label^="${name} 节点 "]`);
   if (!node) throw new Error(`canvas node ${name} not found`);
   return node;
 };
@@ -274,7 +274,7 @@ describe("XFlowEditor", () => {
     // drawer (tabs, summary) mounts on open and is named by its own heading.
     expect(screen.getByRole("region", { name: "诊断台" })).toBeTruthy();
     expect(screen.queryByRole("tab", { name: "运行日志" })).toBeNull();
-    expect(screen.getByRole("region", { name: "Purchase approval preview" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Purchase approval 预览" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "收起左栏" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "收起属性面板" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "展开诊断台" }));
@@ -813,7 +813,7 @@ describe("XFlowEditor", () => {
     act(() => container.setWidth(1279));
 
     const editor = screen.getByRole("region", { name: "Purchase approval editor" });
-    const preview = screen.getByRole("region", { name: "Purchase approval preview" });
+    const preview = screen.getByRole("region", { name: "Purchase approval 预览" });
     expect(editor.getAttribute("data-layout")).toBe("c");
 
     // 沉浸布局 / 恢复自动布局 live in the ⋯ menu.
@@ -825,7 +825,7 @@ describe("XFlowEditor", () => {
     await chooseFromMoreMenu("进入沉浸布局");
     expect(editor.getAttribute("data-layout-policy")).toBe("compact");
     expect(editor.getAttribute("data-layout")).toBe("c");
-    expect(screen.getByRole("region", { name: "Purchase approval preview" })).toBe(preview);
+    expect(screen.getByRole("region", { name: "Purchase approval 预览" })).toBe(preview);
 
     fireEvent.click(screen.getByRole("button", { name: "节点与大纲" }));
     await waitFor(() => {
@@ -844,7 +844,7 @@ describe("XFlowEditor", () => {
       expect(editor.getAttribute("data-layout")).toBe("a");
       expect(screen.queryByRole("region", { name: "节点" })).toBeTruthy();
     });
-    expect(screen.getByRole("region", { name: "Purchase approval preview" })).toBe(preview);
+    expect(screen.getByRole("region", { name: "Purchase approval 预览" })).toBe(preview);
   });
 
   it("switches the layout from the container width, not the window", () => {
@@ -1437,7 +1437,7 @@ describe("XFlowEditor", () => {
       expect(within(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).getByDisplayValue("Parent replacement")).toBeTruthy();
       expect(canvasNode("external_start")).toBeTruthy();
     });
-    expect(document.querySelector('[aria-label^="route_by_amount node "]')).toBeNull();
+    expect(document.querySelector('[aria-label^="route_by_amount 节点 "]')).toBeNull();
     expect(handleChange).toHaveBeenCalledTimes(1);
   });
 
@@ -1955,7 +1955,7 @@ describe("XFlowEditor", () => {
         }
       }
     });
-    expect(document.querySelector('[aria-label^="l1_manager node "]')).toBeNull();
+    expect(document.querySelector('[aria-label^="l1_manager 节点 "]')).toBeNull();
   });
 
   it("cleans pin data, groups, dependency edges, and both connection directions when deleting a node", () => {

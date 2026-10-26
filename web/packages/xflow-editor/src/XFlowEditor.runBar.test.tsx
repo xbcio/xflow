@@ -634,7 +634,7 @@ describe("run-record top bar lineage (RN-01)", () => {
 
 describe("inspector 运行 tab", () => {
   const selectNode = (name: string): HTMLElement => {
-    const node = document.querySelector<HTMLElement>(`.xflow-preview-node__select[aria-label^="${name} node "]`);
+    const node = document.querySelector<HTMLElement>(`.xflow-preview-node__select[aria-label^="${name} 节点 "]`);
     if (!node) throw new Error(`canvas node ${name} not found`);
     fireEvent.click(node);
     return screen.getByRole("region", { name: /^(属性|工作流设置)$/ });

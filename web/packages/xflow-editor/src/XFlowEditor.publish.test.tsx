@@ -648,7 +648,7 @@ describe("XFlowEditor publish wiring (§6.10)", () => {
         onPublish={async (next) => next}
       />
     );
-    fireEvent.click(document.querySelector('.xflow-preview-node__select[aria-label^="api node "]') as HTMLElement);
+    fireEvent.click(document.querySelector('.xflow-preview-node__select[aria-label^="api 节点 "]') as HTMLElement);
     const inspector = screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
     const toggle = within(inspector).getByRole("button", { name: "以 JSON 编辑参数" });
     if (toggle.getAttribute("aria-pressed") !== "true") fireEvent.click(toggle);

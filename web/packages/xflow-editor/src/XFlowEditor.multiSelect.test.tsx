@@ -9,7 +9,7 @@ import { XFlowEditor } from "./index";
  * Flow's store (Meta on every platform here: both Meta and Control are bound).
  */
 const canvasNode = (name: string): HTMLElement => {
-  const node = document.querySelector<HTMLElement>(`.xflow-preview-node__select[aria-label^="${name} node "]`);
+  const node = document.querySelector<HTMLElement>(`.xflow-preview-node__select[aria-label^="${name} 节点 "]`);
   if (!node) throw new Error(`canvas node ${name} not found`);
   return node;
 };

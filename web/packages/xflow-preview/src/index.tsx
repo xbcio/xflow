@@ -1318,7 +1318,7 @@ function toFlowNodes(
       selected: selectedNodeIds.has(node.id),
       connectable: nodeCanConnect,
       deletable: false,
-      ariaLabel: `${node.name} node ${displayStatus(node, snapshot) ?? "pending"}`,
+      ariaLabel: `${node.name} 节点 ${nodeStatusMeta[displayStatus(node, snapshot) ?? "pending"].label}`,
       data: {
         graphNode: node,
         runtime: snapshot,
@@ -1615,7 +1615,7 @@ function EdgeList({ edges }: { edges: GraphEdge[] }): React.ReactElement {
   }
 
   return (
-    <ul className="xflow-preview-edges" aria-label="Workflow connections">
+    <ul className="xflow-preview-edges" aria-label="工作流连接">
       {edges.map((edge) => (
         <li
           key={edge.id}
@@ -1859,7 +1859,7 @@ const PreviewNode = React.memo(function PreviewNode({
         className="xflow-preview-node__select"
         role="button"
         tabIndex={0}
-        aria-label={`${node.name} node ${status ?? "pending"}`}
+        aria-label={`${node.name} 节点 ${nodeStatusMeta[status ?? "pending"].label}`}
         aria-keyshortcuts={onContextMenuKey ? "Shift+F10 ContextMenu" : undefined}
         onKeyDown={(event) => {
           if (event.key === "Enter" || event.key === " ") {
@@ -1877,7 +1877,7 @@ const PreviewNode = React.memo(function PreviewNode({
         }}
       >
         <div className="xflow-preview-node__header">
-          <span className="xflow-preview-node__icon" aria-label={`${node.type} icon`} data-cat={category}>
+          <span className="xflow-preview-node__icon" aria-label={`${node.type} 图标`} data-cat={category}>
             {nodeIcon ? nodeIcon(node) : categoryGlyph[categoryMeta.icon]}
           </span>
           <div className="xflow-preview-node__title">
@@ -2171,7 +2171,7 @@ const summaryStatuses = Object.keys(summaryStatusOrder) as NodeStatusKey[];
 
 function RunSummary({ summary }: { summary: RuntimeSummary }): React.ReactElement {
   return (
-    <div className="xflow-preview-summary" aria-label="Run summary">
+    <div className="xflow-preview-summary" aria-label="运行摘要">
       <span>Run summary</span>
       <div>
         <SummaryPill label={`${summary.total} nodes`} />
@@ -2194,7 +2194,7 @@ function SelectedNodeDetails({
   if (!node || !runtime) return null;
 
   return (
-    <section className="xflow-preview-details" aria-label="Selected node details">
+    <section className="xflow-preview-details" aria-label="选中节点详情">
       <span>Selected node</span>
       <strong>{node.name}</strong>
       <code>{node.type}</code>
@@ -2859,7 +2859,7 @@ export function XFlowPreview({
     <section
       ref={sectionRef}
       className={["xflow-preview", className].filter(Boolean).join(" ")}
-      aria-label={`${title} preview`}
+      aria-label={`${title} 预览`}
     >
       <header className="xflow-preview-toolbar">
         <div>
@@ -2876,7 +2876,7 @@ export function XFlowPreview({
       </header>
 
       <div className="xflow-preview-shell">
-        <aside className="xflow-preview-sidebar" aria-label="Workflow nodes">
+        <aside className="xflow-preview-sidebar" aria-label="工作流节点">
           <span>Nodes</span>
           <strong>{graph.nodes.length}</strong>
         </aside>
@@ -2949,7 +2949,7 @@ export function XFlowPreview({
             onEdgesDelete={canDeleteConnections ? handleEdgesDelete : undefined}
             onBeforeDelete={canDeleteConnections ? handleBeforeDelete : undefined}
             isValidConnection={canConnect ? isValidConnection : undefined}
-            aria-label={`${title} canvas`}
+            aria-label={`${title} 画布`}
             onNodeDragStop={canDragNodes ? (_, node, moved) => {
               // xyflow reports the grabbed node plus every other node the drag
               // moved (the whole selection); the owner commits them in one go.
@@ -3045,7 +3045,7 @@ export function XFlowPreview({
           </ReactFlow>
         </div>
 
-        <aside className="xflow-preview-panel" aria-label="Workflow status">
+        <aside className="xflow-preview-panel" aria-label="工作流状态">
           <RunSummary summary={summary} />
           <SelectedNodeDetails node={selectedNode} runtime={selectedRuntime} />
           <span>Connections</span>

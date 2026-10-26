@@ -182,7 +182,7 @@ function makeTwoGateExecution(): XFlowExecution {
 /** Clicks a suspended approval card's 处理 (React Flow hides it from the a11y tree in jsdom). */
 function openCard(cardName: string): HTMLElement {
   const select = document.querySelector<HTMLElement>(
-    `.xflow-preview-node__select[aria-label^="${cardName} node "]`
+    `.xflow-preview-node__select[aria-label^="${cardName} 节点 "]`
   );
   if (!select) throw new Error(`${cardName} card not found`);
   const card = select.closest<HTMLElement>(".react-flow__node") ?? select.parentElement;
@@ -864,7 +864,7 @@ describe("approval dialog (§6.12)", () => {
   it("opens the same dialog from the inspector 运行 tab", async () => {
     render(editorElement({ runtime: suspendedRuntime }));
     const node = document.querySelector<HTMLElement>(
-      '.xflow-preview-node__select[aria-label^="manager_approval node "]'
+      '.xflow-preview-node__select[aria-label^="manager_approval 节点 "]'
     );
     if (!node) throw new Error("approval node not found");
     fireEvent.click(node);

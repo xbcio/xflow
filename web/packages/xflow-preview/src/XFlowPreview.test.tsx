@@ -545,7 +545,7 @@ describe("XFlowPreview", () => {
       />
     );
 
-    expect(screen.getByRole("region", { name: "Payment flow preview" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Payment flow 预览" })).toBeTruthy();
     expect(container.querySelector(".react-flow")).toBeTruthy();
     expect(screen.getByText("Payment flow")).toBeTruthy();
     // Chip text and summary pills both come from core's status table. The bare
@@ -560,7 +560,7 @@ describe("XFlowPreview", () => {
     expect(screen.getAllByText("start")).toHaveLength(2);
     expect(screen.getByText(nodeStatusMeta.success.label)).toBeTruthy();
     expect(screen.getAllByText("charge")).toHaveLength(3);
-    expect(screen.getByLabelText("xflow.http icon")).toBeTruthy();
+    expect(screen.getByLabelText("xflow.http 图标")).toBeTruthy();
     expect(container.querySelector('[data-node-id="charge"] .xflow-preview-node__type')?.textContent).toBe("HTTP");
     expect(container.querySelector('[data-node-id="approval"]')?.getAttribute("data-disabled")).toBe("true");
     // A disabled node speaks through its status chip and its own badge.
@@ -574,11 +574,11 @@ describe("XFlowPreview", () => {
     // exact-name check is scoped to the edge role.
     expect(screen.getByRole("img", { name: "start main 连接到 charge main" })).toBeTruthy();
 
-    const chargeNode = container.querySelector('[aria-label="charge node running"]');
+    const chargeNode = container.querySelector('[aria-label="charge 节点 运行中"]');
     expect(chargeNode).toBeTruthy();
     fireEvent.click(chargeNode!);
 
-    expect(screen.getByRole("region", { name: "Selected node details" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "选中节点详情" })).toBeTruthy();
     expect(screen.getByText("Calls payment gateway")).toBeTruthy();
     expect(screen.getByText("Inputs 1")).toBeTruthy();
     expect(screen.getByText("Attempts 2")).toBeTruthy();
@@ -608,7 +608,7 @@ describe("XFlowPreview", () => {
     expect(disabled?.getAttribute("data-status")).toBe("disabled");
     expect(disabled?.querySelector(".xflow-preview-node__status")?.textContent)
       .toBe(nodeStatusMeta.disabled.label);
-    expect(container.querySelector('[aria-label="approval node disabled"]')).toBeTruthy();
+    expect(container.querySelector('[aria-label="approval 节点 已禁用"]')).toBeTruthy();
     // An enabled node the run has not reached is still queued.
     expect(container.querySelector('[data-node-id="notify"]')?.getAttribute("data-status")).toBe("pending");
     // The minimap swatch speaks the disabled tone, not the pending one's.
@@ -638,7 +638,7 @@ describe("XFlowPreview", () => {
     const card = container.querySelector('[data-node-id="approval"]');
     expect(card?.getAttribute("data-status")).toBe("skipped");
     expect(card?.querySelector(".xflow-preview-node__status")?.textContent).toBe(nodeStatusMeta.skipped.label);
-    expect(container.querySelector('[aria-label="approval node skipped"]')).toBeTruthy();
+    expect(container.querySelector('[aria-label="approval 节点 已跳过"]')).toBeTruthy();
   });
 
   it("draws the pin badge on a pinned node only", () => {
@@ -687,8 +687,8 @@ describe("XFlowPreview", () => {
       />
     );
 
-    expect(container.querySelector('[aria-label="ingest node committing"]')).toBeTruthy();
-    expect(container.querySelector('[aria-label="archive node expired"]')).toBeTruthy();
+    expect(container.querySelector('[aria-label="ingest 节点 提交中"]')).toBeTruthy();
+    expect(container.querySelector('[aria-label="archive 节点 记录已过期"]')).toBeTruthy();
     expect(screen.getByText(nodeStatusMeta.committing.label)).toBeTruthy();
     expect(screen.getByText(nodeStatusMeta.expired.label)).toBeTruthy();
     // Both statuses are shown by the run summary too; a status missing from its
@@ -1144,7 +1144,7 @@ describe("XFlowPreview", () => {
       />
     );
 
-    const httpNode = container.querySelector('[aria-label="http_1 node pending"]');
+    const httpNode = container.querySelector('[aria-label="http_1 节点 排队"]');
     expect(httpNode).toBeTruthy();
 
     fireEvent.click(httpNode!);
@@ -1604,7 +1604,7 @@ describe("XFlowPreview", () => {
     expect(flow.onNodeContextMenu).toBeUndefined();
     expect(flow.onPaneContextMenu).toBeUndefined();
 
-    const httpNode = container.querySelector('[aria-label="http_1 node pending"]')!;
+    const httpNode = container.querySelector('[aria-label="http_1 节点 排队"]')!;
     expect(httpNode.getAttribute("aria-keyshortcuts")).toBeNull();
     // fireEvent returns false only when a handler called preventDefault.
     expect(fireEvent.keyDown(httpNode, { key: "ContextMenu" })).toBe(true);
@@ -1626,7 +1626,7 @@ describe("XFlowPreview", () => {
     vi.spyOn(card, "getBoundingClientRect").mockReturnValue(
       { left: 100, top: 50, width: 232, height: 60, right: 332, bottom: 110, x: 100, y: 50, toJSON: () => ({}) }
     );
-    const httpNode = container.querySelector('[aria-label="http_1 node pending"]')!;
+    const httpNode = container.querySelector('[aria-label="http_1 节点 排队"]')!;
     expect(httpNode.getAttribute("aria-keyshortcuts")).toBe("Shift+F10 ContextMenu");
 
     expect(fireEvent.keyDown(httpNode, { key: "F10", shiftKey: true })).toBe(false);
@@ -3159,7 +3159,7 @@ describe("XFlowPreview canvas sections (§6.2)", () => {
         />
       );
       const box = boxes()[0] as HTMLElement;
-      const card = screen.getByRole("button", { name: /^approve node / });
+      const card = screen.getByRole("button", { name: /^approve 节点 / });
       // The box is drawn behind the cards, not around them: its handler can
       // never see a press that starts on a card.
       expect(box.contains(card)).toBe(false);
@@ -3233,7 +3233,7 @@ describe("XFlowPreview multi-selection (§6.2)", () => {
   } satisfies WorkflowDef;
 
   const card = (name: string): HTMLElement =>
-    screen.getByRole("button", { name: new RegExp(`^${name} node `) });
+    screen.getByRole("button", { name: new RegExp(`^${name} 节点 `) });
 
   it("configures a marquee on the left button while leaving pan and the context menu reachable", () => {
     render(
@@ -3492,7 +3492,7 @@ describe("XFlowPreview empty-canvas click under the marquee gesture", () => {
     const onPaneClick = vi.fn();
     const { container } = renderEditable(onPaneClick);
 
-    fireEvent.click(screen.getByRole("button", { name: /^http_1 node / }));
+    fireEvent.click(screen.getByRole("button", { name: /^http_1 节点 / }));
     fireEvent.click(container.querySelector<HTMLElement>("[data-edge-id]")!);
 
     expect(onPaneClick).not.toHaveBeenCalled();
