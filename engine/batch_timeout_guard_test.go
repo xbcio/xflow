@@ -197,6 +197,22 @@ func TestBatchTimeoutPastTheExecutionDeadlineExpiresTheExecution(t *testing.T) {
 	}
 }
 
+// TestSettledBatchWithATimedOutItemPastTheExecutionDeadlineExpiresTheExecution:
+// under continue_on_error a batch can settle successfully while one of its items
+// ran out of time. The batch reports no error, but the marker is still there and
+// the execution's budget is gone, so the barrier must still expire the execution.
+func TestSettledBatchWithATimedOutItemPastTheExecutionDeadlineExpiresTheExecution(t *testing.T) {
+	rig := newBatchGuardRig(t, "continue", true, time.Now().Add(-time.Minute))
+	settled := TaskResult{Output: &types.Output{Data: map[string]any{
+		"items":         []any{"ok", map[string]any{batchErrorKey: "timeout: deadline exceeded", "_index": 1}},
+		"count":         2,
+		"failed":        1,
+		batchTimeoutKey: true,
+	}}}
+	queued := rig.reportAll(t, 0, settled)
+	rig.requireExpired(t, queued)
+}
+
 // TestBatchTimeoutBeforeTheExecutionDeadlineStillAppliesOnError is the control:
 // the batch's own budget ran out while the execution still has time, so the map
 // node's on_error decides, exactly as before.
