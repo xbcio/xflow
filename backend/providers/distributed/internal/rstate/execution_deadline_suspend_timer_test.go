@@ -126,17 +126,15 @@ func (r *deadlineRaceRig) listSuspended(ctx context.Context, id types.ExecutionI
 // node resumes and finishes, and the execution ends success with its deadline
 // withdrawn and nothing left behind.
 //
-// The run is recorded once and read by both subtests, so the invariants and the
-// known-residue observation always describe the same execution.
+// Each subtest drives its own run of the scenario, so the known-residue
+// observation can be selected alone with -run without the invariants subtest
+// having run first.
 func TestTimerThatFiresBeforeTheDeadlineResumesTheNodeOnRedis(t *testing.T) {
 	ctx := context.Background()
-	var (
-		ran       bool
-		nodeAfter types.NodeStatus
-		residue   []string
-	)
 
-	t.Run("invariants", func(t *testing.T) {
+	// run drives the scenario once on a rig of its own, asserts everything that
+	// must hold, and returns what the residue observation reads.
+	run := func(t *testing.T) (nodeAfter types.NodeStatus, residue []string) {
 		rig := newDeadlineRaceRig(t)
 		g := raceGraphWithTimeout(t, "deadline-suspend-timer", time.Hour, 0, types.NodeDef{Name: "park", Type: "test.race_park"})
 		id := rig.submit(ctx, g)
@@ -183,7 +181,11 @@ func TestTimerThatFiresBeforeTheDeadlineResumesTheNodeOnRedis(t *testing.T) {
 		}
 		rig.requireDrained(0, g.Name(), id)
 
-		nodeAfter, residue, ran = node.Status, rig.listSuspended(ctx, id), true
+		return node.Status, rig.listSuspended(ctx, id)
+	}
+
+	t.Run("invariants", func(t *testing.T) {
+		run(t)
 	})
 
 	// suspended_residue_as_it_stands pins a KNOWN, UNDECIDED defect so that
@@ -197,9 +199,7 @@ func TestTimerThatFiresBeforeTheDeadlineResumesTheNodeOnRedis(t *testing.T) {
 	// When the defect is fixed, this subtest turns red on purpose: change it to
 	// require that the set is empty and move that assertion into invariants.
 	t.Run("suspended_residue_as_it_stands", func(t *testing.T) {
-		if !ran {
-			t.Fatalf("the invariants subtest did not finish, so there is no run to read")
-		}
+		nodeAfter, residue := run(t)
 		if nodeAfter != types.NodeStatusSuccess {
 			t.Fatalf("node after the timer resume = %q, want success", nodeAfter)
 		}
