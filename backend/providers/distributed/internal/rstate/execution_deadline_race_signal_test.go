@@ -278,3 +278,75 @@ func TestExpireRacingASignalNeverResumesATimedOutExecutionOnRedis(t *testing.T) 
 		}
 	})
 }
+
+// TestSignalThatFinishesFirstKeepsSuccessAgainstALateExpiryOnRedis is the signal
+// race with the interleaving fixed to the one the replay above almost never
+// lands on: the signal side runs to the end before the expiry starts. The signal
+// is delivered, the resume it queued is leased, and the woken node's commit
+// concludes the execution as success, all while the deadline is already behind
+// the clock. The expiry that arrives afterwards must find a finished execution
+// and leave it alone.
+//
+// The expiry has two ways to arrive late. ExpireExecution reads the status and
+// backs off. An expiry that read the status before the signal side finished is
+// past that read by the time it writes, so the same timeout write it would issue
+// is sent straight to the store here; the status script's terminal fence is the
+// only thing between that write and a success turned into a timeout.
+func TestSignalThatFinishesFirstKeepsSuccessAgainstALateExpiryOnRedis(t *testing.T) {
+	ctx := context.Background()
+	rig := newDeadlineRaceRig(t)
+	g := raceGraph(t, "deadline-race-park", 0, types.NodeDef{Name: "park", Type: "test.race_park"})
+	id := rig.submit(ctx, g)
+	rig.parkOnSignal(ctx, id)
+
+	if err := rig.eng.DeliverSignal(ctx, id, "go", map[string]any{"by": "signal"}); err != nil {
+		t.Fatalf("DeliverSignal() error = %v", err)
+	}
+	tasks := rig.queue.take(id)
+	if len(tasks) != 1 || tasks[0].Type != engine.TaskTypeNodeResume {
+		t.Fatalf("the signal queued %+v, want exactly one resume task", tasks)
+	}
+	lease, err := rig.eng.BuildTaskLease(ctx, tasks[0])
+	if err != nil {
+		t.Fatalf("BuildTaskLease(resume) error = %v", err)
+	}
+	commit, err := rig.eng.CommitTaskResultWithOutcome(ctx, lease, engine.TaskResult{
+		Output: &types.Output{Data: map[string]any{"woken": true}},
+	})
+	if err != nil || commit != engine.CommitOutcomeAccepted {
+		t.Fatalf("CommitTaskResultWithOutcome(resume) = (%q, %v), want accepted", commit, err)
+	}
+	if got := rig.snapshot(ctx, id).Status; got != types.ExecutionStatusSuccess {
+		t.Fatalf("execution after the signal side finished = %q, want success", got)
+	}
+	if n := rig.zcard(executionDeadlineIndexKey(namespace.Default)); n != 0 {
+		t.Fatalf("deadline index holds %d members after the success, want it withdrawn", n)
+	}
+
+	// The expiry arrives after the end.
+	outcome, err := rig.eng.ExpireExecution(ctx, id)
+	if err != nil || outcome != engine.ExpireOutcomeAlreadyTerminal {
+		t.Fatalf("ExpireExecution() = (%q, %v), want already_terminal", outcome, err)
+	}
+	// An expiry that decided before the end writes after it: the script refuses.
+	if err := rig.state.UpdateExecutionStatus(ctx, id, types.ExecutionStatusTimeout, engine.ExecutionDeadlineExceededError); err != nil {
+		t.Fatalf("UpdateExecutionStatus(timeout) error = %v", err)
+	}
+
+	snap := rig.snapshot(ctx, id)
+	if snap.Status != types.ExecutionStatusSuccess || snap.Error != "" {
+		t.Fatalf("execution = %q %q after the late expiry, want success with no reason", snap.Status, snap.Error)
+	}
+	node, err := rig.state.GetNode(ctx, id, "park")
+	if err != nil || node == nil || node.Status != types.NodeStatusSuccess {
+		t.Fatalf("woken node = (%+v, %v), want success", node, err)
+	}
+	rig.requireAnnouncedOnly(0, id, types.ExecutionStatusSuccess)
+	if got := rig.hooks.completionsOf(id); len(got) != 1 {
+		t.Fatalf("completion announcements = %v, want exactly [success]", got)
+	}
+	if left := rig.queue.take(id); len(left) != 0 {
+		t.Fatalf("the late expiry left %d tasks queued: %+v", len(left), left)
+	}
+	rig.requireDrained(0, g.Name(), id)
+}
