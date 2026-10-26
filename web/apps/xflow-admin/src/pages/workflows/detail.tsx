@@ -161,6 +161,10 @@ export default function WorkflowDetailPage() {
   // first row and loop on getExecution for as long as the page stays open.
   // A row the user clicks again is retried (selectExecution forgets it).
   const failedExecutionIdsRef = useRef<Set<string>>(new Set());
+  // The execution the newest selection picked on the user's behalf (the 运行记录
+  // auto-select). Only a selection the user made may announce that its detail is
+  // gone: walking past a history full of cleaned-up rows must stay silent.
+  const autoSelectedExecutionIdRef = useRef<string | undefined>(undefined);
   const workflowRef = useRef(workflow);
   workflowRef.current = workflow;
 
@@ -578,7 +582,10 @@ export default function WorkflowDetailPage() {
     const search = executionId ? `?exec=${encodeURIComponent(executionId)}` : '';
     history.replace(`${history.location.pathname}${search}`);
   }, []);
-  const selectExecution = useCallback((executionId: string) => {
+  // `auto` marks a selection the page made itself; the editor calls this with the
+  // id alone, so anything else is the user's own pick.
+  const selectExecution = useCallback((executionId: string, options?: { auto?: boolean }) => {
+    autoSelectedExecutionIdRef.current = options?.auto === true ? executionId : undefined;
     // An explicit pick is a retry: let the poll ask once more even if this id
     // was already reported as gone.
     failedExecutionIdsRef.current.delete(executionId);
@@ -684,7 +691,7 @@ export default function WorkflowDetailPage() {
     const first = executionList?.list.find(
       (row) => !failedExecutionIdsRef.current.has(row.executionId),
     );
-    if (first) selectExecution(first.executionId);
+    if (first) selectExecution(first.executionId, { auto: true });
   }, [executionList, mode, selectExecution, selectedExecutionId]);
 
   // §6.8 2s polling of the selected execution: hidden pages are skipped, and a
@@ -718,6 +725,14 @@ export default function WorkflowDetailPage() {
         reportForbidden(error);
         const status = (error as { status?: unknown } | null)?.status;
         if (status === 403 || status === 404) {
+          // 403 already told the user above; the fixed 404 copy never echoes the
+          // server's text, and its key keeps one notice per execution.
+          if (status === 404 && autoSelectedExecutionIdRef.current !== selectedExecutionId) {
+            void message.error({
+              key: `execution-gone:${selectedExecutionId}`,
+              content: '该执行记录已不存在，可能已被清理。',
+            });
+          }
           failedExecutionIdsRef.current.add(selectedExecutionId);
           setSelectedExecutionId((current) => (current === selectedExecutionId ? undefined : current));
           setSelectedExecution(undefined);
@@ -736,7 +751,7 @@ export default function WorkflowDetailPage() {
       cancelled = true;
       if (timer !== undefined) window.clearInterval(timer);
     };
-  }, [api, mode, replaceExec, reportForbidden, selectedExecutionId]);
+  }, [api, message, mode, replaceExec, reportForbidden, selectedExecutionId]);
 
   // §6.8 snapshot definition: replay the run's captured workflow_version. An
   // execution recorded before versions were stamped (or one whose version the

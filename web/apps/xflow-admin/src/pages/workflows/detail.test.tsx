@@ -1636,6 +1636,111 @@ describe('run records mode (§6.8)', () => {
     }
   });
 
+  describe('a selected execution whose detail is refused', () => {
+    const gone = () => Object.assign(new Error('not found'), { status: 404 });
+    const goneNotice = (executionId: string) => expect.objectContaining({
+      key: `execution-gone:${executionId}`,
+      content: '该执行记录已不存在，可能已被清理。',
+    });
+
+    it('tells the user once when a row they clicked is gone, and retries on a second click', async () => {
+      await mounted();
+      vi.useFakeTimers();
+      try {
+        // No list rows: nothing is auto-selected, every read is a direct pick.
+        host.api.getExecution.mockRejectedValue(gone());
+        await act(async () => editor().onModeChange?.('runs'));
+        await act(async () => {
+          editor().onSelectExecution?.('exec-1');
+        });
+        await act(async () => {});
+
+        expect(host.api.getExecution).toHaveBeenCalledTimes(1);
+        expect(editor().selectedExecution).toBeUndefined();
+        expect(host.error).toHaveBeenCalledTimes(1);
+        expect(host.error).toHaveBeenLastCalledWith(goneNotice('exec-1'));
+        expect(host.refresh).not.toHaveBeenCalled();
+
+        // The refusal is remembered: the poll does not ask or announce again.
+        await act(async () => {
+          vi.advanceTimersByTime(6000);
+        });
+        expect(host.api.getExecution).toHaveBeenCalledTimes(1);
+        expect(host.error).toHaveBeenCalledTimes(1);
+
+        // The same row clicked again is a retry and reports its failure again.
+        await act(async () => {
+          editor().onSelectExecution?.('exec-1');
+        });
+        await act(async () => {});
+        expect(host.api.getExecution).toHaveBeenCalledTimes(2);
+        expect(host.error).toHaveBeenCalledTimes(2);
+        expect(host.error).toHaveBeenLastCalledWith(goneNotice('exec-1'));
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('stays silent while the auto-selection walks past gone rows', async () => {
+      await mounted();
+      vi.useFakeTimers();
+      try {
+        host.api.listExecutions.mockResolvedValue({
+          list: [listRow('exec-gone-1'), listRow('exec-gone-2'), listRow('exec-3')],
+          total: 3,
+        });
+        host.api.getExecution.mockImplementation(async (id: string) => {
+          if (id === 'exec-3') return { executionId: id, status: 'success' as const };
+          throw gone();
+        });
+
+        await act(async () => editor().onModeChange?.('runs'));
+        await act(async () => {
+          await editor().onLoadExecutions?.({ page: 1, pageSize: 20 });
+        });
+        await act(async () => {});
+        await act(async () => {});
+        await act(async () => {});
+
+        expect(host.api.getExecution).toHaveBeenCalledWith('exec-gone-1');
+        expect(host.api.getExecution).toHaveBeenCalledWith('exec-gone-2');
+        expect(editor().selectedExecution?.executionId).toBe('exec-3');
+        expect(host.error).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps the permission notice as the only one for a 403', async () => {
+      await mounted();
+      vi.useFakeTimers();
+      try {
+        host.api.getExecution.mockRejectedValue(Object.assign(new Error('forbidden'), { status: 403 }));
+        await act(async () => editor().onModeChange?.('runs'));
+        await act(async () => {
+          editor().onSelectExecution?.('exec-1');
+        });
+        await act(async () => {});
+
+        expect(host.error).toHaveBeenCalledTimes(1);
+        expect(host.error).toHaveBeenLastCalledWith('没有权限执行此操作，正在刷新当前用户权限。');
+        expect(host.refresh).toHaveBeenCalledTimes(1);
+        expect(editor().selectedExecution).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('tells the user when the ?exec= link they opened is gone', async () => {
+      host.search = '?exec=exec-linked';
+      host.api.getExecution.mockRejectedValue(gone());
+
+      await mounted();
+      await waitFor(() => expect(host.error).toHaveBeenCalledTimes(1));
+      expect(host.error).toHaveBeenLastCalledWith(goneNotice('exec-linked'));
+    });
+  });
+
   it('clears the replayed definition when the selected execution disappears', async () => {
     await mounted();
     vi.useFakeTimers();
