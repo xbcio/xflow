@@ -27,6 +27,7 @@ type guardState struct {
 	mu          sync.Mutex
 	reads       int
 	nodeCommits int
+	afterRead   func()
 }
 
 var _ ExecutionStatusReader = (*guardState)(nil)
@@ -46,7 +47,17 @@ func (s *guardState) GetExecution(ctx context.Context, id types.ExecutionID) (*E
 	s.mu.Lock()
 	s.reads++
 	s.mu.Unlock()
-	return s.expireState.GetExecution(ctx, id)
+	snap, err := s.expireState.GetExecution(ctx, id)
+	// One-shot, and run after the snapshot is taken: the read that triggers it
+	// still sees the stored state as it was, the next one sees what the hook did.
+	s.mu.Lock()
+	hook := s.afterRead
+	s.afterRead = nil
+	s.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return snap, err
 }
 
 func (s *guardState) readCount() int {
