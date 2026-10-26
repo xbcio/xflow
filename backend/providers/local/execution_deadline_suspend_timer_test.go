@@ -93,6 +93,24 @@ func (r *deadlineRaceRig) awaitQueued(ctx context.Context, id types.ExecutionID)
 	}
 }
 
+// onlyQueuedWakeup waits for the one wakeup a short timer delivers and checks
+// what it wakes the node with. The commit that parks the node already flushes
+// the outbox, and a wakeup of timerWait can be due by then, so it may have left
+// the outbox before the test looks: the queue, not the outbox, is where this
+// wakeup is read.
+func (r *deadlineRaceRig) onlyQueuedWakeup(ctx context.Context, id types.ExecutionID, want types.SignalTrigger) *engine.Task {
+	r.t.Helper()
+	tasks := r.awaitQueued(ctx, id)
+	if len(tasks) != 1 {
+		r.t.Fatalf("the wakeup queued %d tasks, want exactly 1: %+v", len(tasks), tasks)
+	}
+	task := tasks[0]
+	if task.Type != engine.TaskTypeNodeResume || task.Payload == nil || task.Payload.Triggered != want {
+		r.t.Fatalf("queued wakeup is %+v (type %v), want a node resume triggered by %v", task.Payload, task.Type, want)
+	}
+	return task
+}
+
 // listSuspended reads the suspended index the way the cancel cascade does.
 func (r *deadlineRaceRig) listSuspended(ctx context.Context, id types.ExecutionID) []string {
 	r.t.Helper()
@@ -128,16 +146,13 @@ func TestTimerThatFiresBeforeTheDeadlineResumesTheNode(t *testing.T) {
 		}
 
 		rig.parkWith(ctx, id, &types.SuspendSpec{Mode: types.ModeTimer, Timer: timerWait})
-		entry := rig.onlyEntry(ctx, id, types.TimerFired)
-		if !entry.AvailableAt.Before(deadline) {
-			t.Fatalf("timer entry is available at %v, want it before the deadline %v", entry.AvailableAt, deadline)
+		wakeup := rig.onlyQueuedWakeup(ctx, id, types.TimerFired)
+		// Delivery only ever takes an entry that is due, so the wakeup being
+		// queued while the deadline is still ahead means the timer fired first.
+		if !time.Now().Before(deadline) {
+			t.Fatalf("the timer was delivered at %v, want it before the deadline %v", time.Now(), deadline)
 		}
-
-		tasks := rig.awaitQueued(ctx, id)
-		if len(tasks) != 1 || tasks[0].Type != engine.TaskTypeNodeResume {
-			t.Fatalf("the timer queued %+v, want exactly one resume task", tasks)
-		}
-		lease, err := rig.eng.BuildTaskLease(ctx, tasks[0])
+		lease, err := rig.eng.BuildTaskLease(ctx, wakeup)
 		if err != nil {
 			t.Fatalf("BuildTaskLease(timer resume) error = %v", err)
 		}
@@ -224,25 +239,26 @@ func TestTimerThatFiresAfterTheDeadlineIsRefusedOnceTheExecutionExpired(t *testi
 
 			parkedAt := time.Now()
 			rig.parkWith(ctx, id, &types.SuspendSpec{Mode: types.ModeTimer, Timer: tc.timer})
-			entry := rig.onlyEntry(ctx, id, types.TimerFired)
-			// The wakeup is where the spec put it, the park time plus the timer,
-			// and so behind the deadline: it was not pulled forward to it.
-			if entry.AvailableAt.Before(parkedAt.Add(tc.timer)) {
-				t.Fatalf("timer entry is available at %v, want no earlier than %v after the park at %v (clamped to the deadline %v?)",
-					entry.AvailableAt, tc.timer, parkedAt, deadline)
-			}
-			if !entry.AvailableAt.After(deadline) {
-				t.Fatalf("timer entry is available at %v, want it after the deadline %v", entry.AvailableAt, deadline)
-			}
 
-			wakeup := entry.Task
+			var wakeup engine.Task
 			if tc.timer == timerWait {
-				queued := rig.awaitQueued(ctx, id)
-				if len(queued) != 1 {
-					t.Fatalf("the timer queued %d tasks, want 1: %+v", len(queued), queued)
-				}
-				wakeup = *queued[0]
+				// Delivery never looks at the deadline, so a due timer is queued
+				// although the execution is already past it. The commit that parked
+				// the node may have flushed it already, so read it from the queue.
+				wakeup = *rig.onlyQueuedWakeup(ctx, id, types.TimerFired)
 			} else {
+				entry := rig.onlyEntry(ctx, id, types.TimerFired)
+				// The wakeup is where the spec put it, the park time plus the
+				// timer, and so behind the deadline: it was not pulled forward to
+				// it.
+				if entry.AvailableAt.Before(parkedAt.Add(tc.timer)) {
+					t.Fatalf("timer entry is available at %v, want no earlier than %v after the park at %v (clamped to the deadline %v?)",
+						entry.AvailableAt, tc.timer, parkedAt, deadline)
+				}
+				if !entry.AvailableAt.After(deadline) {
+					t.Fatalf("timer entry is available at %v, want it after the deadline %v", entry.AvailableAt, deadline)
+				}
+				wakeup = entry.Task
 				if err := rig.eng.FlushOutbox(ctx, id); err != nil {
 					t.Fatalf("FlushOutbox() error = %v", err)
 				}
