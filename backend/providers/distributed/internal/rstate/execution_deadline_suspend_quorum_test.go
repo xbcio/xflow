@@ -42,6 +42,15 @@ func quorumSpec() *types.SuspendSpec {
 // waiter spec names them), so the signal finds no waiter; and should it find
 // one, the engine refuses to resume an execution that is over. Either layer
 // alone is enough, so the window case only turns red when both are lifted.
+//
+// That is defense in depth, and it is why this test is not the one that guards
+// either layer. Lifting only the engine layer (executionActive treating a
+// timed-out execution as active) is caught by
+// TestSignalInTheWindowAfterTheTimeoutWriteQueuesNothingOnRedis and by the
+// replay in TestExpireRacingASignalNeverResumesATimedOutExecutionOnRedis.
+// Lifting only the store layer (the waiter-key DEL on a terminal status write)
+// is caught by TestTimeoutWriteKeepsSuspendedNodesButDropsWaiters. Do not read
+// a green run of this test as evidence that either layer alone is covered here.
 func TestSecondSignalOfAQuorumAfterTheExecutionExpiredQueuesNothingOnRedis(t *testing.T) {
 	cases := []struct {
 		name string
