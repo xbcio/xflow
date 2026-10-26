@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
@@ -97,6 +98,18 @@ func (e *Engine) commitTaskResultWithStrategy(ctx context.Context, lease *TaskLe
 		var businessErr *types.Error
 		if result.Output != nil {
 			businessErr = result.Output.Error
+		}
+		// A runner-reported node timeout that lands once the execution's own
+		// deadline is reached is the execution's timeout, not a failure on_error
+		// may route around. Only the timeout code is judged: any other error
+		// keeps its on_error semantics. Handled is answered as inactive, the
+		// outcome of every commit that finds the execution already over.
+		if isNodeTimeoutError(result.Error) {
+			if handled, err := e.expireIfExecutionDeadlineReached(ctx, task.ExecutionID, g, time.Now()); err != nil {
+				return CommitOutcomeTransientError, err
+			} else if handled {
+				return CommitOutcomeExecutionInactive, nil
+			}
 		}
 		return strategy.commitError(ctx, lease, meta, privateOutput, result.Error, result.Output, businessErr)
 	}

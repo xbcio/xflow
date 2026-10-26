@@ -673,6 +673,27 @@ func expansionBatchLease(t *Task) (*TaskLease, types.ExecutionID, []any, error) 
 // commit's own TaskResult.
 const batchErrorKey = "_error"
 
+// batchTimeoutKey marks a batch result in which an item ran out of time. It
+// travels the same way batchErrorKey does, for the same reason: completeLoopSplit
+// sees only the per-batch result maps, so a verdict that must outlive the commit
+// that produced it has to ride inside the map. It is written by
+// BatchResultForCommit at the top level of the result, never inside items, so
+// the guest body cannot forge it.
+//
+// A runner that predates it never sends it, and its batches fail through
+// failLoopSplit as they always did.
+const batchTimeoutKey = "_timeout"
+
+// anyBatchTimedOut reports whether any batch result carries batchTimeoutKey.
+func anyBatchTimedOut(results []map[string]any) bool {
+	for _, result := range results {
+		if timedOut, _ := result[batchTimeoutKey].(bool); timedOut {
+			return true
+		}
+	}
+	return false
+}
+
 // failedBatchErrors collects the error messages stamped on failed batches, in
 // batch order. Empty means every batch succeeded.
 func failedBatchErrors(results []map[string]any) []string {
@@ -760,6 +781,18 @@ func mergeBatchArtifacts(results []map[string]any) []types.ArtifactUse {
 // downstream on silently incomplete data. The map node's own OnError decides
 // what a failure means, exactly as it does for a node that failed directly.
 func (e *Engine) completeLoopSplit(ctx context.Context, lease *TaskLease, g *graph.Graph, results []map[string]any) error {
+	// A batch whose body ran out of time at the execution's own deadline is the
+	// execution's timeout, not a map failure on_error may route around: stop would
+	// fail the execution, continue and error_output would keep it running past its
+	// budget. Judged on the batches' marker, not their text. NotDue (the batch's
+	// own budget ran out first) falls through to the failure handling below.
+	if anyBatchTimedOut(results) {
+		if handled, err := e.expireIfExecutionDeadlineReached(ctx, lease.Task.ExecutionID, g, time.Now()); err != nil {
+			return err
+		} else if handled {
+			return nil
+		}
+	}
 	flat := flattenBatchResults(results)
 	output := map[string]any{
 		"results": flat,
