@@ -3,6 +3,7 @@ package xflow
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -301,5 +302,114 @@ func TestSettingsTimeoutZeroMeansNoLimit(t *testing.T) {
 	}
 	if len(detail.Nodes) != 1 || detail.Nodes[0].Status != types.NodeStatusSuccess {
 		t.Fatalf("nap node = %+v, want it run to success", detail.Nodes)
+	}
+}
+
+// TestSettingsTimeoutRerunStartsANewClock is scenario 3: a rerun of an
+// execution that timed out is a new execution with a new budget. The parent's
+// deadline is already in the past when the rerun is submitted, so a rerun that
+// kept it would be expired on arrival; one that gets its own clock runs to
+// success inside its own settings.timeout, well past the parent's deadline.
+func TestSettingsTimeoutRerunStartsANewClock(t *testing.T) {
+	const budget = 2500 * time.Millisecond
+	const rerunWork = time.Second
+
+	// The node hangs until its context ends while the first run is on, which is
+	// what makes the parent time out, and does a second of work once the test has
+	// flipped rerunPhase, which is what lets the rerun finish.
+	var rerunPhase atomic.Bool
+	work := node.Define("test.settings_timeout.rerun_work",
+		func(ctx context.Context, _ *types.Input) (*types.Output, error) {
+			wait := time.Duration(-1)
+			if rerunPhase.Load() {
+				wait = rerunWork
+			}
+			if wait < 0 {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(wait):
+				return &types.Output{Data: map[string]any{"reran": true}}, nil
+			}
+		})
+
+	eng := newSettingsTimeoutEngine(t, work)
+	ctx, cancel := context.WithTimeout(context.Background(), settingsTimeoutWaitLimit)
+	defer cancel()
+
+	wf := Workflow("settings-timeout-rerun")
+	start := wf.Node("start", node.Start())
+	step := wf.Node("work", work.New(nil))
+	wf.Connect(start, step)
+	workflowID := addWorkflowWithTimeout(t, eng, wf, budget)
+
+	parentID, err := eng.Invoke(ctx, workflowID, Start(), nil)
+	if err != nil {
+		t.Fatalf("Invoke() error = %v", err)
+	}
+	parent, err := eng.Wait(ctx, parentID)
+	if err != nil {
+		t.Fatalf("Wait(parent) error = %v", err)
+	}
+	if parent.Status != types.ExecutionStatusTimeout || parent.Error != engine.ExecutionDeadlineExceededError {
+		t.Fatalf("parent = %q error %q, want timeout %q\n%s",
+			parent.Status, parent.Error, engine.ExecutionDeadlineExceededError, describeExecution(ctx, eng, parentID))
+	}
+	parentSnap, err := eng.eng.State().GetExecution(ctx, parentID)
+	if err != nil || parentSnap == nil {
+		t.Fatalf("GetExecution(parent) = %+v, %v", parentSnap, err)
+	}
+	if !time.Now().After(parentSnap.Deadline) {
+		t.Fatalf("parent deadline %v is not in the past once the parent timed out", parentSnap.Deadline)
+	}
+
+	rerunPhase.Store(true)
+	rerun, err := eng.Rerun(ctx, parentID, "work")
+	if err != nil {
+		t.Fatalf("Rerun() error = %v", err)
+	}
+	if rerun.ExecutionID == "" || rerun.ExecutionID == parentID || rerun.Duplicate {
+		t.Fatalf("Rerun() = %+v, want a new execution", rerun)
+	}
+	result, err := eng.Wait(ctx, rerun.ExecutionID)
+	if err != nil {
+		t.Fatalf("Wait(rerun) error = %v", err)
+	}
+	if result.Status != types.ExecutionStatusSuccess || result.Error != "" {
+		t.Fatalf("rerun = %q error %q, want success inside its own budget\n%s",
+			result.Status, result.Error, describeExecution(ctx, eng, rerun.ExecutionID))
+	}
+
+	detail, err := eng.Inspect(ctx, rerun.ExecutionID)
+	if err != nil {
+		t.Fatalf("Inspect(rerun) error = %v", err)
+	}
+	if detail.ParentID != parentID || detail.RerunFrom != "work" {
+		t.Fatalf("rerun link = (%q, %q), want (%q, %q)", detail.ParentID, detail.RerunFrom, parentID, "work")
+	}
+	snap, err := eng.eng.State().GetExecution(ctx, rerun.ExecutionID)
+	if err != nil || snap == nil {
+		t.Fatalf("GetExecution(rerun) = %+v, %v", snap, err)
+	}
+	if want := snap.CreatedAt.Add(budget); !snap.Deadline.Equal(want) {
+		t.Fatalf("rerun deadline = %v, want its own CreatedAt + settings.timeout = %v", snap.Deadline, want)
+	}
+	if !snap.Deadline.After(parentSnap.Deadline) {
+		t.Fatalf("rerun deadline %v is not after the parent's %v: the clock was not restarted", snap.Deadline, parentSnap.Deadline)
+	}
+	if detail.UpdatedAt == nil || !detail.UpdatedAt.After(parentSnap.Deadline) {
+		t.Fatalf("rerun concluded at %v, want it to have run past the parent's deadline %v", detail.UpdatedAt, parentSnap.Deadline)
+	}
+
+	// The execution it came from is left exactly as it was.
+	again, err := eng.Inspect(ctx, parentID)
+	if err != nil {
+		t.Fatalf("Inspect(parent) error = %v", err)
+	}
+	if again.Status != types.ExecutionStatusTimeout || again.Error != engine.ExecutionDeadlineExceededError {
+		t.Fatalf("parent after the rerun = %q %q, want it still timeout", again.Status, again.Error)
 	}
 }
