@@ -21,6 +21,7 @@ const (
 	metricLeaseMaintenancePass       = "xflow_lease_maintenance_pass_total"
 	metricLeaseMaintenanceReleased   = "xflow_lease_maintenance_released_total"
 	metricLeaseMaintenanceCandidates = "xflow_lease_maintenance_candidates_total"
+	metricExecutionDeadlineExpired   = "xflow_execution_deadline_expired_total"
 	metricRunnerAuthDecisions        = "xflow_runner_auth_decisions_total"
 	metricRunnerClaimReclaimed       = "xflow_runner_claim_reclaimed_total"
 	metricRunnerLeaseReplayed        = "xflow_runner_lease_replayed_total"
@@ -73,6 +74,12 @@ type sweepQueueDepthObserver interface {
 
 type sweepQueueAgeObserver interface {
 	OnAssignmentQueueOldestAge(ctx context.Context, lane string, age time.Duration)
+}
+
+// executionDeadlineObserver mirrors service/control's optional
+// ExecutionDeadlineObserver extension.
+type executionDeadlineObserver interface {
+	OnExecutionDeadlineExpired(ctx context.Context, source string)
 }
 
 type runnerClaimObserver interface {
@@ -253,6 +260,18 @@ func (s SweepMetrics) OnSweepPassCandidates(ctx context.Context, pass, outcome s
 	s.Metrics.Add(metricLeaseMaintenanceCandidates, withNamespace(ctx, map[string]string{"pass": pass}), float64(inspected))
 }
 
+// OnExecutionDeadlineExpired counts one execution driven into the timeout
+// terminal state by its settings.timeout deadline.
+//
+// source names the observer that made the transition (service/control sends
+// "sweeper" for its deadline pass); it is forwarded as a literal for the same
+// reason the pass labels are. Unlike the pass counters, the namespace label is
+// the execution's own tenant: the sweeper runs each expiry under the namespace
+// its index entry names, so the context passed here is already scoped.
+func (s SweepMetrics) OnExecutionDeadlineExpired(ctx context.Context, source string) {
+	s.Metrics.Inc(metricExecutionDeadlineExpired, withNamespace(ctx, map[string]string{"source": source}))
+}
+
 // OnAssignmentQueueDepth records one assignment queue's depth.
 //
 // lane is forwarded as-is; service/control resolves the shared legacy queue to
@@ -296,6 +315,7 @@ var (
 	_ sweepPassCandidateObserver = SweepMetrics{}
 	_ sweepQueueDepthObserver    = SweepMetrics{}
 	_ sweepQueueAgeObserver      = SweepMetrics{}
+	_ executionDeadlineObserver  = SweepMetrics{}
 )
 
 // RunnerClaimMetrics observes durable runner-directory claim recovery and
