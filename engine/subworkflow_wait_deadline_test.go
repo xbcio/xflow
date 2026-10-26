@@ -302,3 +302,50 @@ func TestSubWorkflowWaitSettledByTheExecutionReturnsNilUnderRetry(t *testing.T) 
 		t.Fatalf("completion hooks = %v, want exactly [timeout]", got)
 	}
 }
+
+// TestSubWorkflowWaitWithoutNodeTimeoutLeavesTheExecutionToTheSweep pins a design
+// boundary rather than a goal: a sub-workflow node whose timeout is opted out
+// (timeout < 0) does not enter the dispatch's guard block, which is gated on a
+// positive node timeout. A resumed dispatch therefore leaves the over-deadline
+// execution alone, and the deadline sweep is what ends it. The wait lease TTL is
+// not clamped to the execution deadline either (R7/R8), so nothing in the wait
+// itself brings the execution forward. If a later change makes an unbounded wait
+// settle the execution at redelivery, this is the test to flip.
+func TestSubWorkflowWaitWithoutNodeTimeoutLeavesTheExecutionToTheSweep(t *testing.T) {
+	ctx := context.Background()
+	g := subWorkflowDeadlineGraph(t, "", -1)
+	rig := newExpireSubWorkflowRigOf(t, g)
+	childID := rig.link.ChildExecutionID
+
+	redeliverSubWorkflowNode(t, rig, g)
+
+	parent, err := rig.state.GetExecution(ctx, rig.parentID)
+	if err != nil || parent == nil || parent.Status != types.ExecutionStatusRunning {
+		t.Fatalf("parent = %+v (err %v), want running: the guard does not run without a node timeout", parent, err)
+	}
+	if got := rig.nodeStatus(t); got != types.NodeStatusWaiting {
+		t.Fatalf("sub node = %q, want waiting: re-parked for the sweep to settle", got)
+	}
+	child, err := rig.state.GetExecution(ctx, childID)
+	if err != nil || child == nil || child.Status != types.ExecutionStatusRunning {
+		t.Fatalf("child = %+v (err %v), want running", child, err)
+	}
+	if got := rig.hooks.completions(); len(got) != 0 {
+		t.Fatalf("completion hooks = %v, want none before the sweep", got)
+	}
+
+	// The sweep: the deadline scan hands the execution to ExpireExecution.
+	rig.expire(t, rig.parentID, ExpireOutcomeExpired)
+
+	parent, err = rig.state.GetExecution(ctx, rig.parentID)
+	if err != nil || parent == nil || parent.Status != types.ExecutionStatusTimeout || parent.Error != ExecutionDeadlineExceededError {
+		t.Fatalf("parent after the sweep = %+v (err %v), want timeout %q", parent, err, ExecutionDeadlineExceededError)
+	}
+	child, err = rig.state.GetExecution(ctx, childID)
+	if err != nil || child == nil || child.Status != types.ExecutionStatusCanceled {
+		t.Fatalf("child after the sweep = %+v (err %v), want canceled by the execution's cascade", child, err)
+	}
+	if got := rig.hooks.completions(); len(got) != 1 || got[0] != types.ExecutionStatusTimeout {
+		t.Fatalf("completion hooks = %v, want exactly [timeout]", got)
+	}
+}
