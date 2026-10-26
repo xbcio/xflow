@@ -147,3 +147,42 @@ func TestSubWorkflowWaitTimeoutBeforeTheExecutionDeadlineStillFollowsOnError(t *
 		t.Fatalf("child = %+v (err %v), want canceled by the node-timeout path", child, err)
 	}
 }
+
+// TestSubWorkflowFinishedChildBeatsTheExecutionDeadline pins the order of the two
+// checks in the dispatch: a child that already finished is a result, and the
+// result is committed before the execution deadline is even looked at. The
+// guard sits after concludeTerminalChild, so a redelivery that finds the child
+// success while the execution deadline is already reached still commits the
+// parent node as a success. Moving the guard in front of the conclusion would
+// time the execution out and cancel a child that had already done its work.
+func TestSubWorkflowFinishedChildBeatsTheExecutionDeadline(t *testing.T) {
+	ctx := context.Background()
+	g := subWorkflowDeadlineGraph(t, "", time.Minute)
+	// Parked under the already-reached execution deadline, so the resumed wait
+	// is over and the guard would fire were it reached.
+	rig := newExpireSubWorkflowRigOf(t, g)
+	childID := rig.link.ChildExecutionID
+	if err := rig.state.UpdateExecutionStatus(ctx, childID, types.ExecutionStatusSuccess, ""); err != nil {
+		t.Fatalf("finish the child: %v", err)
+	}
+
+	redeliverSubWorkflowNode(t, rig, g)
+
+	parent, err := rig.state.GetExecution(ctx, rig.parentID)
+	if err != nil || parent == nil {
+		t.Fatalf("read the parent: parent=%v err=%v", parent, err)
+	}
+	if parent.Status != types.ExecutionStatusRunning {
+		t.Fatalf("parent = %s %q, want running: a finished child is a result, not the execution's timeout", parent.Status, parent.Error)
+	}
+	if got := rig.nodeStatus(t); got != types.NodeStatusSuccess {
+		t.Fatalf("sub node = %q, want success: the child's result is the node's", got)
+	}
+	child, err := rig.state.GetExecution(ctx, childID)
+	if err != nil || child == nil || child.Status != types.ExecutionStatusSuccess {
+		t.Fatalf("child = %+v (err %v), want it left success, not canceled", child, err)
+	}
+	if got := rig.hooks.completions(); len(got) != 0 {
+		t.Fatalf("completion hooks = %v, want none: the execution is not concluded", got)
+	}
+}
