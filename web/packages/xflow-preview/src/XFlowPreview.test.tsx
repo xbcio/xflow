@@ -570,7 +570,9 @@ describe("XFlowPreview", () => {
     // The attempt count rides in the card's badge strip.
     expect(container.querySelector('[data-node-id="charge"] [data-badge="attempts"]')?.textContent)
       .toBe("第 2 次");
-    expect(screen.getByLabelText("start main to charge main")).toBeTruthy();
+    // The canvas edge and the sidebar list row carry the same label now, so the
+    // exact-name check is scoped to the edge role.
+    expect(screen.getByRole("img", { name: "start main 连接到 charge main" })).toBeTruthy();
 
     const chargeNode = container.querySelector('[aria-label="charge node running"]');
     expect(chargeNode).toBeTruthy();
@@ -1163,13 +1165,13 @@ describe("XFlowPreview", () => {
     expect(flow.onConnect).toEqual(expect.any(Function));
     expect(flow.nodes.map((node) => node.id)).toEqual(["source-id", "target-id"]);
     expect(flow.edges.map((edge) => edge.id)).toEqual(["source:success->target:payload"]);
-    expect(screen.queryByLabelText("source dependency to target main")).toBeNull();
+    expect(screen.queryByLabelText("source dependency 连接到 target main")).toBeNull();
 
     const sourceHandle = screen.getByRole("button", {
-      name: "source output success; press Enter or Space to start a connection"
+      name: "source 输出端口 success；按 Enter 或空格开始连线"
     });
     const targetHandle = screen.getByRole("button", {
-      name: "target input payload; press Enter or Space to complete a connection"
+      name: "target 输入端口 payload；按 Enter 或空格完成连线"
     });
     expect(sourceHandle.getAttribute("aria-disabled")).toBe("false");
     expect(sourceHandle.getAttribute("tabindex")).toBe("0");
@@ -1223,7 +1225,7 @@ describe("XFlowPreview", () => {
     // the edge object must carry no inline style, or it would outrank hover
     // and the selected rule.
     expect(edge.style).toBeUndefined();
-    expect(edge.ariaLabel).toContain("(port no longer exists)");
+    expect(edge.ariaLabel).toContain("（端口已不存在）");
     expect(onDeleteConnection).not.toHaveBeenCalled();
 
     // Without the prop the same edge is ordinary: the resting stroke, which core's
@@ -1250,13 +1252,13 @@ describe("XFlowPreview", () => {
     expect(flow.edges[0]).toMatchObject({ focusable: false, selectable: true, deletable: true });
 
     const edge = screen.getByRole("img", {
-      name: "Connection from source success to target payload"
+      name: "source success 连接到 target payload"
     });
     expect(edge.hasAttribute("tabindex")).toBe(false);
     fireEvent.click(edge);
     expect(latestFlowProps().edges[0].selected).toBe(true);
     // Re-query: the mock edge carries last render's `selected`, like xyflow's.
-    fireEvent.keyDown(screen.getByRole("img", { name: "Connection from source success to target payload" }), { key: "Delete" });
+    fireEvent.keyDown(screen.getByRole("img", { name: "source success 连接到 target payload" }), { key: "Delete" });
 
     expect(onDeleteConnection).toHaveBeenCalledTimes(1);
     expect(onDeleteConnection).toHaveBeenCalledWith({
@@ -1307,7 +1309,7 @@ describe("XFlowPreview", () => {
       />
     );
 
-    const edge = () => screen.getByRole("img", { name: /Connection from source success/ });
+    const edge = () => screen.getByRole("img", { name: /source success 连接到/ });
     fireEvent.click(edge());
     fireEvent.keyDown(edge(), { key: "Delete" });
     // One press removes the connection the user selected, not the node behind it.
@@ -1413,7 +1415,7 @@ describe("XFlowPreview", () => {
     expect(flow.edges[0]).toMatchObject({ selectable: false, focusable: false, deletable: false });
 
     const sourceHandle = screen.getByRole("button", {
-      name: "source output success; press Enter or Space to start a connection"
+      name: "source 输出端口 success；按 Enter 或空格开始连线"
     });
     expect(sourceHandle.getAttribute("aria-disabled")).toBe("true");
     expect(sourceHandle.getAttribute("tabindex")).toBe("-1");
@@ -2309,6 +2311,46 @@ describe("XFlowPreview canvas chrome", () => {
     pressShift("R");
     expect(container.querySelector(".xflow-preview-ruler")).toBeNull();
     expect(reactFlowMock.fitBounds).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps the toggle-triggered re-fit readable, while the zoom bar's fit still shows everything", () => {
+    vi.stubGlobal("requestAnimationFrame", vi.fn(() => 1));
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    // jsdom measures every box as 0×0, which makes the fit fall back to xyflow's own
+    // fitBounds (no minZoom to observe). Give only the canvas pane a real box so the
+    // fit takes the viewport path and the zoom clamp becomes visible.
+    const pane = { x: 0, y: 0, left: 0, top: 0, right: 1000, bottom: 800, width: 1000, height: 800 } as DOMRect;
+    const none = { x: 0, y: 0, left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 } as DOMRect;
+    const rectSpy = vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+      return this.classList.contains("react-flow") ? pane : none;
+    });
+    try {
+      const setViewport = vi.fn(() => Promise.resolve(true));
+      // A graph so wide that the "everything fits" zoom is far below the readable floor.
+      render(<XFlowPreview workflow={chromeWorkflow} />);
+      act(() => {
+        latestFlowProps().onInit?.({
+          fitBounds: reactFlowMock.fitBounds,
+          getNodes: () => [{ id: "start-id" }],
+          getNodesBounds: () => ({ x: 0, y: 0, width: 40000, height: 8000 }),
+          setViewport
+        });
+      });
+      setViewport.mockClear();
+
+      // Switching the minimap re-fits automatically: held at the readable floor.
+      pressShift("M");
+      expect(setViewport).toHaveBeenCalledTimes(1);
+      expect((setViewport.mock.calls[0] as unknown as [{ zoom: number }])[0].zoom).toBe(READABLE_FIT_ZOOM);
+
+      // The zoom bar's fit is the user's explicit "fit all": down to the 10% floor.
+      setViewport.mockClear();
+      fireEvent.click(screen.getByRole("button", { name: "适应画布" }));
+      expect(setViewport).toHaveBeenCalledTimes(1);
+      expect((setViewport.mock.calls[0] as unknown as [{ zoom: number }])[0].zoom).toBe(0.1);
+    } finally {
+      rectSpy.mockRestore();
+    }
   });
 
   it("lets a new prop value override the local toggle", () => {

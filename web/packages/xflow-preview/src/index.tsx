@@ -1571,8 +1571,8 @@ function toFlowEdges(
     if (!isDangling && !isError && variant === "none") continue;
 
     const showLabel = isDangling || edge.sourcePort !== "main";
-    const connectionLabel = `Connection from ${edge.sourceName} ${edge.sourcePort} to ${edge.targetName} ${edge.targetPort}${
-      isDangling ? " (port no longer exists)" : ""
+    const connectionLabel = `${edge.sourceName} ${edge.sourcePort} 连接到 ${edge.targetName} ${edge.targetPort}${
+      isDangling ? "（端口已不存在）" : ""
     }`;
 
     const flowEdge: BuiltInEdge = {
@@ -1627,7 +1627,7 @@ function EdgeList({ edges }: { edges: GraphEdge[] }): React.ReactElement {
       {edges.map((edge) => (
         <li
           key={edge.id}
-          aria-label={`${edge.sourceName} ${edge.sourcePort} to ${edge.targetName} ${edge.targetPort}`}
+          aria-label={`${edge.sourceName} ${edge.sourcePort} 连接到 ${edge.targetName} ${edge.targetPort}`}
         >
           <span>{edge.sourceName}</span>
           <span>{edge.sourcePort}</span>
@@ -1843,7 +1843,7 @@ const PreviewNode = React.memo(function PreviewNode({
           role="button"
           tabIndex={canConnect ? 0 : -1}
           aria-disabled={!canConnect}
-          aria-label={`${node.name} input ${port}; press Enter or Space to complete a connection`}
+          aria-label={`${node.name} 输入端口 ${port}；按 Enter 或空格完成连线`}
           onKeyDown={(event) => activateHandle(event, canConnect)}
         />
       ))}
@@ -1859,7 +1859,7 @@ const PreviewNode = React.memo(function PreviewNode({
           role="button"
           tabIndex={canConnect ? 0 : -1}
           aria-disabled={!canConnect}
-          aria-label={`${node.name} output main; press Enter or Space to start a connection`}
+          aria-label={`${node.name} 输出端口 main；按 Enter 或空格开始连线`}
           onKeyDown={(event) => activateHandle(event, canConnect)}
         />
       ) : null}
@@ -2100,7 +2100,7 @@ const PreviewNode = React.memo(function PreviewNode({
                       role="button"
                       tabIndex={canConnect ? 0 : -1}
                       aria-disabled={!canConnect}
-                      aria-label={`${node.name} output ${port}; press Enter or Space to start a connection`}
+                      aria-label={`${node.name} 输出端口 ${port}；按 Enter 或空格开始连线`}
                       onKeyDown={(event) => activateHandle(event, canConnect)}
                     />
                   ) : null}
@@ -2118,7 +2118,7 @@ const PreviewNode = React.memo(function PreviewNode({
                   role="button"
                   tabIndex={canConnect ? 0 : -1}
                   aria-disabled={!canConnect}
-                  aria-label={`${node.name} output error; press Enter or Space to start a connection`}
+                  aria-label={`${node.name} 输出端口 error；按 Enter 或空格开始连线`}
                   onKeyDown={(event) => activateHandle(event, canConnect)}
                 />
               ) : null}
@@ -2594,14 +2594,16 @@ export function XFlowPreview({
   }, [flowInstance, onReady, previewHandle]);
   const handleFit = React.useCallback(() => previewHandle.fitView(), [previewHandle]);
   // §6.2: switching the minimap or the rulers changes what the content has to stay
-  // clear of, so the graph is re-fitted. The first render is not a switch.
+  // clear of, so the graph is re-fitted. The first render is not a switch. This is
+  // an automatic fit, not the user's "fit all": it keeps READABLE_FIT_ZOOM, so a
+  // huge graph is never shrunk into the low-detail band by a mere toggle.
   const fittedFloats = React.useRef({ minimap: minimapShown, ruler: rulerShown });
   React.useEffect(() => {
     const fitted = fittedFloats.current;
     if (fitted.minimap === minimapShown && fitted.ruler === rulerShown) return;
     fittedFloats.current = { minimap: minimapShown, ruler: rulerShown };
-    handleFit();
-  }, [handleFit, minimapShown, rulerShown]);
+    previewHandle.fitView({ minZoom: READABLE_FIT_ZOOM });
+  }, [previewHandle, minimapShown, rulerShown]);
   // §6.2: a click on the minimap centres the canvas there, at the current zoom.
   const handleMiniMapClick = React.useCallback((_event: React.MouseEvent, position: { x: number; y: number }) => {
     flowInstance?.setCenter(position.x, position.y, { zoom: flowInstance.getZoom() });

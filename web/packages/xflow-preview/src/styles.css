@@ -896,7 +896,7 @@
 
   /* A required value the form would also flag: the card states it in danger. */
   .xflow-preview-node__summary dd[data-kind="missing"] {
-    color: var(--xflow-danger);
+    color: var(--xflow-danger-fg);
   }
 
   /* An a+b row keeps each half's own formatting (mono URL beside a plain method). */
@@ -1138,7 +1138,7 @@
 
   /* A pinned node keeps its success-toned pin, now in the badge strip. */
   .xflow-preview-node__pin {
-    color: var(--xflow-success);
+    color: var(--xflow-success-fg);
   }
 
   /* Branch labels sit at the strip's right end, each with its own handle on the
@@ -1307,11 +1307,11 @@
   }
 
   .xflow-preview-node__issues[data-tone="danger"] {
-    color: var(--xflow-danger);
+    color: var(--xflow-danger-fg);
   }
 
   .xflow-preview-node__issues[data-tone="warning"] {
-    color: var(--xflow-warning);
+    color: var(--xflow-warning-fg);
   }
 
   /* Scoped to the card: the details panel reuses the class on a plain paragraph. */

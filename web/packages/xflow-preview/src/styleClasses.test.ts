@@ -199,6 +199,17 @@ describe("xflow-preview shapes against the baseline", () => {
     }
   });
 
+  it("sets the card's small tone text in the -fg tone, keeping the raw colour for glyphs", () => {
+    // 11-12px text on the raised surface: the raw danger/warning/success colours
+    // miss 4.5:1 in the light appearance, the derived -fg tones clear it.
+    expect(declarationsOf('.xflow-preview-node__summary dd[data-kind="missing"]').color).toBe("var(--xflow-danger-fg)");
+    expect(declarationsOf(".xflow-preview-node__pin").color).toBe("var(--xflow-success-fg)");
+    expect(declarationsOf('.xflow-preview-node__issues[data-tone="danger"]').color).toBe("var(--xflow-danger-fg)");
+    expect(declarationsOf('.xflow-preview-node__issues[data-tone="warning"]').color).toBe("var(--xflow-warning-fg)");
+    // The active zoom-bar key is a 16px glyph, which the 3:1 non-text floor covers.
+    expect(declarationsOf('.xflow-preview-zoombar__button[data-active="true"]').color).toBe("var(--xflow-primary)");
+  });
+
   it("shapes the toolbar status pill like the baseline chip", () => {
     expect(declarationsOf(".xflow-preview-status")).toMatchObject({
       "border-radius": "var(--xflow-radius-full)",
