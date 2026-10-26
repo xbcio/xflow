@@ -986,7 +986,22 @@ export function ExecutionsCenter() {
 
   return (
     <div className="flex flex-col gap-4">
-      <PageHeader title="运行记录" />
+      <PageHeader
+        title="运行记录"
+        actions={
+          // Same contract as the overview's 刷新: the loaded rows stay up (the
+          // table's progress bar is the cue) and the button waits out the read
+          // in flight, so repeated clicks never stack requests.
+          <Button
+            size="small"
+            onClick={() => setListAttempt((attempt) => attempt + 1)}
+            disabled={loading}
+            data-action="refresh"
+          >
+            刷新
+          </Button>
+        }
+      />
 
       <div
         className="xflow-admin-card xflow-admin-tablecard"

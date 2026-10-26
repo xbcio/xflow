@@ -940,6 +940,81 @@ describe('AL-28 loading guards', () => {
   });
 });
 
+describe('manual refresh', () => {
+  const refreshButton = () =>
+    within(document.querySelector('[data-page-header]') as HTMLElement).getByRole('button', {
+      name: /刷\s*新/,
+    }) as HTMLButtonElement;
+  const card = () => document.querySelector('[data-table="executions"]') as HTMLElement;
+
+  it('refetches the current page and filters from 刷新 in the page header', async () => {
+    renderPage();
+    await waitFor(() => expect(rows()).toHaveLength(3));
+    fireEvent.click(document.querySelectorAll('.xflow-admin-page button')[1]);
+    await waitFor(() =>
+      expect(host.listExecutions).toHaveBeenLastCalledWith({ page: 2, pageSize: 20 }),
+    );
+    expect(host.listExecutions).toHaveBeenCalledTimes(2);
+
+    host.listExecutions.mockResolvedValueOnce(page([row('exec-30', 'success')], 41));
+    expect(refreshButton().getAttribute('data-action')).toBe('refresh');
+    fireEvent.click(refreshButton());
+
+    await waitFor(() => expect(execRow('exec-30')).not.toBeNull());
+    expect(host.listExecutions).toHaveBeenCalledTimes(3);
+    expect(host.listExecutions).toHaveBeenLastCalledWith({ page: 2, pageSize: 20 });
+    expect(rows()).toHaveLength(1);
+  });
+
+  it('disables 刷新 and keeps the old rows while the refresh is in flight', async () => {
+    renderPage();
+    await waitFor(() => expect(rows()).toHaveLength(3));
+    expect(refreshButton().disabled).toBe(false);
+    expect(card().getAttribute('aria-busy')).toBe('false');
+
+    let resolve!: (value: ReturnType<typeof page>) => void;
+    host.listExecutions.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    fireEvent.click(refreshButton());
+
+    await waitFor(() => expect(refreshButton().disabled).toBe(true));
+    // A click on the disabled button must not stack a second request.
+    fireEvent.click(refreshButton());
+    expect(host.listExecutions).toHaveBeenCalledTimes(2);
+    // The rows stay up under the 2px bar: no skeleton, no Spin overlay.
+    expect(rows()).toHaveLength(3);
+    expect(document.querySelector('.xflow-admin-table-skeleton')).toBeNull();
+    expect(document.querySelector('.ant-spin-spinning')).toBeNull();
+    expect(card().getAttribute('aria-busy')).toBe('true');
+    expect(document.querySelector('.xflow-admin-table-progress')).not.toBeNull();
+
+    resolve(page([row('exec-30', 'success')], 1));
+    await waitFor(() => expect(execRow('exec-30')).not.toBeNull());
+    expect(refreshButton().disabled).toBe(false);
+    expect(card().getAttribute('aria-busy')).toBe('false');
+  });
+
+  it('keeps the loaded rows under the list banner when 刷新 fails, then recovers', async () => {
+    renderPage();
+    await waitFor(() => expect(rows()).toHaveLength(3));
+
+    host.listExecutions.mockRejectedValueOnce(new Error('503 service unavailable'));
+    fireEvent.click(refreshButton());
+
+    expect(await screen.findByText('运行记录加载失败')).toBeTruthy();
+    expect(screen.queryByText('503 service unavailable')).toBeNull();
+    expect(document.querySelector('[data-error-detail]')?.getAttribute('data-error-detail')).toContain(
+      '503 service unavailable',
+    );
+    expect(rows()).toHaveLength(3);
+    expect(refreshButton().disabled).toBe(false);
+
+    host.listExecutions.mockResolvedValueOnce(page([row('exec-30', 'success')], 1));
+    fireEvent.click(refreshButton());
+    await waitFor(() => expect(execRow('exec-30')).not.toBeNull());
+    expect(screen.queryByText('运行记录加载失败')).toBeNull();
+  });
+});
+
 describe('AL-29 result toasts', () => {
   const popup = () => document.querySelector('.ant-notification') as HTMLElement | null;
 
