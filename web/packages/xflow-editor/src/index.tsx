@@ -3907,6 +3907,30 @@ export function XFlowEditor({
     }
   }, [compactDrawer, editMode, focusNodeLibrarySearchControl, layout, leftDrawerTab]);
 
+  // The element that opened a compact drawer (a rail key, or whatever held focus
+  // when a shortcut opened it). Read in a layout effect so it runs before the
+  // drawer moves focus inside itself.
+  const compactDrawerOpenerRef = React.useRef<HTMLElement | null>(null);
+  const previousCompactDrawerRef = React.useRef(compactDrawer);
+  React.useLayoutEffect(() => {
+    // Switching between the two drawers keeps the original opener.
+    if (!compactDrawer || previousCompactDrawerRef.current) return;
+    const active = document.activeElement;
+    compactDrawerOpenerRef.current =
+      active instanceof HTMLElement && active !== document.body ? active : null;
+  }, [compactDrawer]);
+  React.useEffect(() => {
+    const previous = previousCompactDrawerRef.current;
+    previousCompactDrawerRef.current = compactDrawer;
+    if (!previous || compactDrawer) return;
+    // Closing hands focus back to the opener, unless the user already moved it
+    // somewhere outside the drawer (a click on the canvas, say).
+    const active = document.activeElement;
+    const lost = !active || active === document.body || active.closest(".xflow-editor-compact-drawer") !== null;
+    const opener = compactDrawerOpenerRef.current;
+    if (lost && opener?.isConnected && !opener.matches(":disabled")) opener.focus({ preventScroll: true });
+  }, [compactDrawer]);
+
   const selectNodeByName = React.useCallback((name: string) => {
     const index = nodes.findIndex((node, nodeIndex) => nodeName(node, nodeIndex) === name);
     if (index >= 0) setSelectedKey(nodeKey(nodes[index], index));
@@ -3963,6 +3987,16 @@ export function XFlowEditor({
   const openCompactDrawer = React.useCallback((drawer: "left" | "right") => {
     setCompactDrawer(drawer);
   }, []);
+
+  // The compact drawer covers the canvas's zoom controls, so picking a run in it
+  // is also the signal to get out of the way of the replay it just started.
+  const selectExecutionFromDrawer = React.useCallback(
+    (executionId: string) => {
+      onSelectExecution?.(executionId);
+      setCompactDrawer((current) => (current === "left" ? undefined : current));
+    },
+    [onSelectExecution]
+  );
 
   /**
    * §6.8: the execution list is the replay's only left-column content, so every
@@ -5764,7 +5798,7 @@ export function XFlowEditor({
                 selectedId={selectedExecution?.executionId}
                 state={executionList}
                 onLoad={onLoadExecutions}
-                onSelect={onSelectExecution}
+                onSelect={onSelectExecution ? selectExecutionFromDrawer : undefined}
               />
             ) : leftDrawerSection === "library" ? (
               renderNodeZones(undefined)
@@ -5779,35 +5813,36 @@ export function XFlowEditor({
             )}
           </Drawer>
         ) : null}
-      </div>
 
-      {layout === "c" ? (
-        <Drawer
-          destroyOnHidden
-          focusable={{ trap: true, focusTriggerAfterClose: true }}
-          getContainer={false}
-          keyboard
-          mask={false}
-          aria-label="属性"
-          open={compactDrawer === "right"}
-          placement="right"
-          classNames={editorCompactDrawerClassNamesEnd}
-          rootClassName="xflow-editor-compact-drawer"
-          rootStyle={{ position: "absolute" }}
-          size={360}
-          onClose={() => setCompactDrawer(undefined)}
-        >
-          {editMode || runsMode ? (
-            inspectorElement
-          ) : (
-            <section className="xflow-editor-preview-inspector" aria-label="预览模式说明">
-              <EyeIcon />
-              <strong>{readOnly ? "只读" : "预览模式"}</strong>
-              <p>{readOnly ? "画布、节点属性和工作流定义均保持只读。" : "画布、节点属性和工作流定义均保持只读。切换到编辑模式后可继续修改。"}</p>
-            </section>
-          )}
-        </Drawer>
-      ) : null}
+        {/* Inside the workbench body like the left drawer, so it also starts under the top bar. */}
+        {layout === "c" ? (
+          <Drawer
+            destroyOnHidden
+            focusable={{ trap: true, focusTriggerAfterClose: true }}
+            getContainer={false}
+            keyboard
+            mask={false}
+            aria-label="属性"
+            open={compactDrawer === "right"}
+            placement="right"
+            classNames={editorCompactDrawerClassNamesEnd}
+            rootClassName="xflow-editor-compact-drawer"
+            rootStyle={{ position: "absolute" }}
+            size={360}
+            onClose={() => setCompactDrawer(undefined)}
+          >
+            {editMode || runsMode ? (
+              inspectorElement
+            ) : (
+              <section className="xflow-editor-preview-inspector" aria-label="预览模式说明">
+                <EyeIcon />
+                <strong>{readOnly ? "只读" : "预览模式"}</strong>
+                <p>{readOnly ? "画布、节点属性和工作流定义均保持只读。" : "画布、节点属性和工作流定义均保持只读。切换到编辑模式后可继续修改。"}</p>
+              </section>
+            )}
+          </Drawer>
+        ) : null}
+      </div>
 
       <CanvasContextMenu
         items={contextMenu?.kind === "pane" ? paneContextMenuItems : nodeContextMenuItems}

@@ -234,6 +234,76 @@ describe("运行记录 mode (§6.8)", () => {
     }
   });
 
+  it("closes the compact execution drawer once a row is picked, so the canvas controls are free", async () => {
+    class CompactResizeObserver {
+      private readonly callback: ResizeObserverCallback;
+      constructor(callback: ResizeObserverCallback) {
+        this.callback = callback;
+      }
+      observe(target: Element): void {
+        this.callback(
+          [{ target, contentRect: { width: 1200, height: 900 } } as ResizeObserverEntry],
+          this as unknown as ResizeObserver
+        );
+      }
+      unobserve(): void {}
+      disconnect(): void {}
+    }
+    const previous = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = CompactResizeObserver as unknown as typeof ResizeObserver;
+    try {
+      const onSelectExecution = vi.fn();
+      render(
+        <XFlowEditor
+          {...runsProps}
+          executionList={{
+            list: [
+              { executionId: "exec-a", status: "success", createdAt: "2026-01-02T03:04:05Z", updatedAt: "2026-01-02T03:04:15Z" },
+              { executionId: "exec-b", status: "failed", createdAt: "2026-01-02T04:04:05Z", updatedAt: "2026-01-02T04:04:15Z" }
+            ],
+            total: 2
+          }}
+          onLoadExecutions={vi.fn()}
+          onSelectExecution={onSelectExecution}
+        />
+      );
+      const rail = screen.getByRole("complementary", { name: "紧凑导航" });
+      const key = within(rail).getByRole("button", { name: "执行记录" });
+      key.focus();
+      fireEvent.click(key);
+      const dialog = await screen.findByRole("dialog", { name: "执行列表" });
+
+      fireEvent.click(within(dialog).getByRole("button", { name: /exec-b/ }));
+
+      expect(onSelectExecution).toHaveBeenCalledWith("exec-b");
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: "执行列表" })).toBeNull());
+      // The row unmounted with the drawer; focus goes back to the key that opened it.
+      expect(document.activeElement).toBe(key);
+    } finally {
+      globalThis.ResizeObserver = previous;
+    }
+  });
+
+  it("leaves the docked execution list open after a row is picked on the desktop layout", () => {
+    const onSelectExecution = vi.fn();
+    render(
+      <XFlowEditor
+        {...runsProps}
+        executionList={{
+          list: [{ executionId: "exec-a", status: "success", createdAt: "2026-01-02T03:04:05Z", updatedAt: "2026-01-02T03:04:15Z" }],
+          total: 1
+        }}
+        onLoadExecutions={vi.fn()}
+        onSelectExecution={onSelectExecution}
+      />
+    );
+
+    fireEvent.click(within(screen.getByRole("region", { name: "执行" })).getByRole("button", { name: /exec-a/ }));
+
+    expect(onSelectExecution).toHaveBeenCalledWith("exec-a");
+    expect(screen.getByRole("region", { name: "执行" })).toBeTruthy();
+  });
+
   it("expands the left column when 节点 returns from the replay", () => {
     render(
       <XFlowEditor

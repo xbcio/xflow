@@ -544,6 +544,51 @@ describe("dual-zone left column (§6.0.1)", () => {
     expect(wrapper?.classList.contains("xflow-editor-compact-drawer__wrapper--end")).toBe(false);
   });
 
+  it("hands focus back to the 节点与大纲 key when Escape closes the compact left drawer", async () => {
+    const container = mockEditorWidth();
+    render(<XFlowEditor value={workflow} />);
+    act(() => container.setWidth(1279));
+
+    const key = within(screen.getByRole("complementary", { name: "紧凑导航" })).getByRole("button", { name: "节点与大纲" });
+    key.focus();
+    fireEvent.click(key);
+    const dialog = await screen.findByRole("dialog", { name: "节点与大纲" });
+    await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
+
+    fireEvent.keyDown(document.activeElement ?? dialog, { key: "Escape" });
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "节点与大纲" })).toBeNull());
+    expect(document.activeElement).toBe(key);
+  });
+
+  it("hands focus back to the 属性面板 key when Escape closes the compact right drawer", async () => {
+    const container = mockEditorWidth();
+    render(<XFlowEditor value={workflow} />);
+    act(() => container.setWidth(1279));
+
+    const key = within(screen.getByRole("complementary", { name: "紧凑导航" })).getByRole("button", { name: "属性面板" });
+    key.focus();
+    fireEvent.click(key);
+    const dialog = await screen.findByRole("dialog", { name: "属性" });
+
+    fireEvent.keyDown(document.activeElement ?? dialog, { key: "Escape" });
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "属性" })).toBeNull());
+    expect(document.activeElement).toBe(key);
+  });
+
+  it("draws the compact right drawer inside the workbench body too, so both start under the top bar", async () => {
+    const container = mockEditorWidth();
+    render(<XFlowEditor value={workflow} />);
+    act(() => container.setWidth(1279));
+
+    fireEvent.click(within(screen.getByRole("complementary", { name: "紧凑导航" })).getByRole("button", { name: "属性面板" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "属性" });
+    expect(dialog.closest(".xflow-editor-main")).not.toBeNull();
+    expect(dialog.closest("header")).toBeNull();
+  });
+
   it("draws the library group head label, then the chevron, then the count last", () => {
     render(<XFlowEditor value={workflow} />);
     const head = document.querySelector<HTMLElement>(".xflow-editor-node-group__title")!;

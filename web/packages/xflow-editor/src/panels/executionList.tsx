@@ -271,6 +271,7 @@ export function ExecutionListPanel({
           return (
             <div
               className="xflow-editor-exec-item"
+              data-selected={row.executionId === selectedId ? "true" : undefined}
               data-status={row.status}
               key={row.executionId}
               role="listitem"

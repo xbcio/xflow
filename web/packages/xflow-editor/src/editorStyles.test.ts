@@ -879,6 +879,28 @@ describe("xflow.editor small-text tones, hit targets and forced colours", () => 
     expect(block(".xflow-editor .xflow-editor-hint__help")).toMatch(/height:\s*14px\s*;[\s\S]*width:\s*14px\s*;/);
   });
 
+  it("grows the library group heading to the control step through a token-sized ::after", () => {
+    const heading = ".xflow-editor .xflow-editor-node-group__title";
+    expect(block(`${heading},\n.xflow-editor .xflow-composer-section-toggle`)).toMatch(/position:\s*relative\s*;/);
+    const after = block(`${heading}::after,\n.xflow-editor .xflow-composer-section-toggle::after`);
+    expect(after).toMatch(/content:\s*""\s*;/);
+    expect(after).toMatch(/position:\s*absolute\s*;/);
+    // Vertical only: a side-wise inset would shrink the full-width row to 24px across, and
+    // min() keeps a taller row from losing target. The step comes from the token.
+    expect(after).toMatch(/inset:\s*min\(0px, calc\(\(100% - var\(--xflow-control-height-sm\)\) \/ 2\)\) 0\s*;/);
+    expect(after).not.toMatch(/\b24px\b/);
+    // The visible row keeps its 20px line; only the target grows.
+    expect(block(".xflow-editor-node-group__title")).toMatch(/line-height:\s*var\(--xflow-line-height-md\)\s*;/);
+  });
+
+  it("marks the replayed execution row with the primary tint, ahead of the hover wash", () => {
+    const button = ".xflow-editor-exec-item__button";
+    expect(block(`${button}:hover`)).toMatch(/background:\s*var\(--xflow-hover\)\s*;/);
+    expect(block(`${button}[aria-current="true"]`)).toMatch(/background:\s*var\(--xflow-primary-bg-subtle\)\s*;/);
+    // Same specificity as :hover, so the later rule wins: the selected row keeps its tint under the pointer.
+    expect(css.indexOf(`${button}[aria-current="true"]`)).toBeGreaterThan(css.indexOf(`${button}:hover`));
+  });
+
   it("keeps an outline on every input focus state, which forced colours map to a system colour", () => {
     const focusRules = [
       ".xflow-editor .xflow-editor-field:focus,\n.xflow-editor .xflow-editor-textarea:focus,\n.xflow-editor .xflow-editor-select__root.ant-select-focused",

@@ -5583,7 +5583,7 @@ button.xflow-editor-overview__run:hover {
 .xflow-editor .xflow-editor-node-group__title::after,
 .xflow-editor .xflow-composer-section-toggle::after {
   content: "";
-  inset: min(0px, calc((100% - 24px) / 2)) 0;
+  inset: min(0px, calc((100% - var(--xflow-control-height-sm)) / 2)) 0;
   position: absolute;
 }
 

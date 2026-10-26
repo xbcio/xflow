@@ -116,6 +116,32 @@ describe("ExecutionListPanel (§6.8)", () => {
     expect(region.querySelector(".xflow-editor-exec-item__button")?.getAttribute("aria-current")).toBe("true");
   });
 
+  it("marks only the replayed row as current, and follows the selection", () => {
+    const rows = [row({ executionId: "exec-1" }), row({ executionId: "exec-2" }), row({ executionId: "exec-3" })];
+    const { rerender } = render(<ExecutionListPanel selectedId="exec-2" state={state(rows)} onLoad={vi.fn()} />);
+
+    const marks = () =>
+      screen.getAllByRole("listitem").map((item) => ({
+        current: item.querySelector("button")?.getAttribute("aria-current") ?? null,
+        selected: item.getAttribute("data-selected")
+      }));
+    expect(marks()).toEqual([
+      { current: null, selected: null },
+      { current: "true", selected: "true" },
+      { current: null, selected: null }
+    ]);
+
+    rerender(<ExecutionListPanel selectedId="exec-3" state={state(rows)} onLoad={vi.fn()} />);
+    expect(marks()).toEqual([
+      { current: null, selected: null },
+      { current: null, selected: null },
+      { current: "true", selected: "true" }
+    ]);
+
+    rerender(<ExecutionListPanel state={state(rows)} onLoad={vi.fn()} />);
+    expect(marks().every((mark) => mark.current === null && mark.selected === null)).toBe(true);
+  });
+
   it("puts the queue position on the status chip, as §4's 排队 label does", () => {
     render(<ExecutionListPanel state={state([row({ status: "queued", queuePosition: 3 })])} onLoad={vi.fn()} />);
 
