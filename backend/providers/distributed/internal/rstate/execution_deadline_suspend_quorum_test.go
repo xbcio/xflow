@@ -42,6 +42,15 @@ func quorumSpec() *types.SuspendSpec {
 // waiter spec names them), so the signal finds no waiter; and should it find
 // one, the engine refuses to resume an execution that is over. Either layer
 // alone is enough, so the window case only turns red when both are lifted.
+//
+// That is defense in depth, and it is why this test is not the one that guards
+// either layer. Lifting only the engine layer (executionActive treating a
+// timed-out execution as active) is caught by
+// TestSignalInTheWindowAfterTheTimeoutWriteQueuesNothingOnRedis and by the
+// replay in TestExpireRacingASignalNeverResumesATimedOutExecutionOnRedis.
+// Lifting only the store layer (the waiter-key DEL on a terminal status write)
+// is caught by TestTimeoutWriteKeepsSuspendedNodesButDropsWaiters. Do not read
+// a green run of this test as evidence that either layer alone is covered here.
 func TestSecondSignalOfAQuorumAfterTheExecutionExpiredQueuesNothingOnRedis(t *testing.T) {
 	cases := []struct {
 		name string
@@ -121,10 +130,14 @@ func TestSecondSignalOfAQuorumAfterTheExecutionExpiredQueuesNothingOnRedis(t *te
 				t.Fatalf("parked node = (%+v, %v) after the late signal, want it neither resumed nor completed", node, err)
 			}
 
-			// Whatever the end had not yet done is repaired afterwards.
-			if outcome, err := rig.eng.ExpireExecution(ctx, id); err != nil ||
-				(outcome != engine.ExpireOutcomeExpired && outcome != engine.ExpireOutcomeResumed && outcome != engine.ExpireOutcomeAlreadyTerminal) {
-				t.Fatalf("ExpireExecution() after the late signal = (%q, %v), want it to finish the end", outcome, err)
+			// Whatever the end had not yet done is repaired afterwards. Both subtests
+			// reach this call with the execution already in timeout for its deadline
+			// (asserted above), so ExpireExecution takes its resumed branch and
+			// repeats the cascade: nothing else can come back. Expired would mean
+			// it wrote the status again, AlreadyTerminal that the execution
+			// concluded some other way.
+			if outcome, err := rig.eng.ExpireExecution(ctx, id); err != nil || outcome != engine.ExpireOutcomeResumed {
+				t.Fatalf("ExpireExecution() after the late signal = (%q, %v), want resumed", outcome, err)
 			}
 			rig.requireNodesCanceled(ctx, 0, id, []string{"park"})
 			rig.requireDrained(0, g.Name(), id)

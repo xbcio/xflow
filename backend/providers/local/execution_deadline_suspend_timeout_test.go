@@ -25,13 +25,11 @@ func signalWithTimeout(wait time.Duration) *types.SuspendSpec {
 // node's business, not the execution's, so the execution is not timeout.
 func TestNodeTimeoutThatFiresBeforeTheDeadlineResumesTheNode(t *testing.T) {
 	ctx := context.Background()
-	var (
-		ran       bool
-		nodeAfter types.NodeStatus
-		residue   []string
-	)
 
-	t.Run("invariants", func(t *testing.T) {
+	// run drives the scenario once on a rig of its own, asserts everything that
+	// must hold, and returns what the residue observation reads. Each subtest
+	// calls it, so either can be selected alone with -run.
+	run := func(t *testing.T) (nodeAfter types.NodeStatus, residue []string) {
 		rig := newDeadlineRaceRig(t)
 		g := raceGraphWithTimeout(t, "deadline-suspend-node-timeout", time.Hour, 0, types.NodeDef{Name: "park", Type: "test.race_park"})
 		id := rig.submit(ctx, g)
@@ -76,7 +74,11 @@ func TestNodeTimeoutThatFiresBeforeTheDeadlineResumesTheNode(t *testing.T) {
 		}
 		rig.requireDrained(0)
 
-		nodeAfter, residue, ran = node.Status, rig.listSuspended(ctx, id), true
+		return node.Status, rig.listSuspended(ctx, id)
+	}
+
+	t.Run("invariants", func(t *testing.T) {
+		run(t)
 	})
 
 	// suspended_residue_as_it_stands pins the same KNOWN, UNDECIDED defect as the
@@ -90,9 +92,7 @@ func TestNodeTimeoutThatFiresBeforeTheDeadlineResumesTheNode(t *testing.T) {
 	// When the defect is fixed, this subtest turns red on purpose: change it to
 	// require that the index is empty and move that assertion into invariants.
 	t.Run("suspended_residue_as_it_stands", func(t *testing.T) {
-		if !ran {
-			t.Fatalf("the invariants subtest did not finish, so there is no run to read")
-		}
+		nodeAfter, residue := run(t)
 		if nodeAfter != types.NodeStatusSuccess {
 			t.Fatalf("node after the node timeout = %q, want success", nodeAfter)
 		}
