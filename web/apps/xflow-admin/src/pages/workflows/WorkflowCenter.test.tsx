@@ -743,6 +743,10 @@ describe('workflow table', () => {
 
     expect(await screen.findByText('工作流列表加载失败')).toBeTruthy();
     expect(screen.getByText('503 service unavailable')).toBeTruthy();
+    // AD-04: the error banner owns the screen; the first-run empty state must
+    // not appear beside it.
+    expect(screen.queryByText('还没有工作流')).toBeNull();
+    expect(document.querySelector('.ant-table-tbody .ant-empty')).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: /重\s*试/ }));
     await waitFor(() => expect(rows()).toContain('wf-1'));

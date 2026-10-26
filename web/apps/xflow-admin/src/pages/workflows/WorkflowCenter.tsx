@@ -828,8 +828,9 @@ export function WorkflowCenter() {
             scroll={{ x: 640 }}
             pagination={false}
             // AL-28: a refresh keeps the rows; TableProgressBar above is the cue.
+            // AD-04: an error is not an empty result; the banner owns the state.
             locale={{
-              emptyText: firstLoad ? (
+              emptyText: listError ? null : firstLoad ? (
                 <TableSkeleton rows={5} density="two-line" label="正在加载工作流" />
               ) : (
                 emptyState
