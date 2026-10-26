@@ -5,7 +5,7 @@ import type {
   WorkflowSummary,
 } from '@xflow/api';
 import { workflowStatusMeta } from '@xflow/core';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 
 /**
  * A/B proposal: the workflow row is one readable health snapshot. These are the
@@ -270,6 +270,9 @@ export function RunStrip({
   executions?: WorkflowRecentExecution[];
   onOpen: (executionId: string) => void;
 }) {
+  // Roving tabindex: the strip is one tab stop, the arrow keys move inside it.
+  const [stopId, setStopId] = useState<string>();
+  const groupRef = useRef<HTMLSpanElement>(null);
   if (!executions || executions.length === 0) {
     return (
       <span className="xflow-admin-faint" data-recent="missing">
@@ -279,8 +282,38 @@ export function RunStrip({
   }
   // Wire order is newest first; the strip reads chronologically.
   const ordered = [...executions].reverse().slice(-10);
+  // A refetch may drop the parked run; the first cell then takes the stop.
+  const parked = ordered.some((run) => run.executionId === stopId) ? stopId : ordered[0].executionId;
+
+  const moveFocus = (event: KeyboardEvent<HTMLSpanElement>) => {
+    const last = ordered.length - 1;
+    const from = ordered.findIndex((run) => run.executionId === parked);
+    // No wrap-around: the strip never hands focus to a neighbour outside it.
+    const to =
+      event.key === 'ArrowRight'
+        ? Math.min(from + 1, last)
+        : event.key === 'ArrowLeft'
+          ? Math.max(from - 1, 0)
+          : event.key === 'Home'
+            ? 0
+            : event.key === 'End'
+              ? last
+              : -1;
+    if (to < 0) return;
+    event.preventDefault();
+    setStopId(ordered[to].executionId);
+    groupRef.current?.querySelectorAll<HTMLButtonElement>('.xflow-row-run')[to]?.focus();
+  };
+
   return (
-    <span className="xflow-row-runs" data-recent={ordered.length} role="group" aria-label="最近 10 次运行">
+    <span
+      ref={groupRef}
+      className="xflow-row-runs"
+      data-recent={ordered.length}
+      role="group"
+      aria-label="最近运行"
+      onKeyDown={moveFocus}
+    >
       {ordered.map((run) => {
         const meta = workflowStatusMeta[run.status];
         const time = fullTimestamp(run.createdAt);
@@ -294,13 +327,16 @@ export function RunStrip({
             type="button"
             className="xflow-row-run"
             key={run.executionId}
+            tabIndex={run.executionId === parked ? 0 : -1}
             data-tone={meta?.tone ?? 'neutral'}
             data-status={run.status}
             data-exec={run.executionId}
             title={title}
             aria-label={`${title}，打开运行记录 ${run.executionId}`}
+            onFocus={() => setStopId(run.executionId)}
             onClick={(event) => {
               event.stopPropagation();
+              setStopId(run.executionId);
               onOpen(run.executionId);
             }}
           />

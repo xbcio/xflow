@@ -115,8 +115,8 @@ interface CardFailure {
 }
 
 function recentFailure(reason: unknown): CardFailure {
-  const status = (reason as { response?: { status?: unknown } } | null)?.response?.status;
-  const code = typeof status === 'number' ? `HTTP ${status}` : undefined;
+  const status = statusOf(reason);
+  const code = status === undefined ? undefined : `HTTP ${status}`;
   const transport = reason instanceof Error && reason.message ? reason.message : undefined;
   return {
     message: '加载失败',
@@ -216,7 +216,7 @@ export function WorkflowCenter() {
     setPage(1);
   }
   const [loading, setLoading] = useState(true);
-  const [listError, setListError] = useState<string>();
+  const [listError, setListError] = useState<CardFailure>();
   const [listAttempt, setListAttempt] = useState(0);
 
   const [recentFailures, setRecentFailures] = useState<ExecutionListItem[]>();
@@ -282,7 +282,7 @@ export function WorkflowCenter() {
         },
         (reason: unknown) => {
           if (cancelled) return;
-          setListError(errorMessage(reason, '工作流列表加载失败，请稍后重试。'));
+          setListError(recentFailure(reason));
           setLoading(false);
         },
       );
@@ -520,7 +520,19 @@ export function WorkflowCenter() {
         return (
           <span className="xflow-admin-name xflow-row-name">
             <strong className="xflow-row-name__title" title={row.name}>
-              {row.name}
+              {/* A real link: ⌘/middle click, copy-link and the screen reader's
+                  link role work. A plain click still routes in-app. */}
+              <a
+                className="xflow-row-name__link"
+                href={`/workflows/${row.id}`}
+                onClick={(event) => {
+                  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                  event.preventDefault();
+                  history.push(`/workflows/${row.id}`);
+                }}
+              >
+                {row.name}
+              </a>
             </strong>
             <small className="xflow-row-name__meta">
               {description ? (
@@ -806,7 +818,11 @@ export function WorkflowCenter() {
                 type="error"
                 showIcon
                 title="工作流列表加载失败"
-                description={listError}
+                // Fixed Chinese copy; the server's text and status stay in the
+                // detail attribute. The leading space keeps the headline and
+                // the hint apart for innerText and screen readers.
+                description={<> 请稍后重试。</>}
+                data-error-detail={listError.detail}
                 action={
                   <Button size="small" onClick={() => setListAttempt((attempt) => attempt + 1)}>
                     重试

@@ -22,6 +22,20 @@
   white-space: nowrap;
 }
 
+.xflow-row-name__link {
+  color: inherit;
+  text-decoration: none;
+}
+
+.xflow-row-name__link:hover {
+  text-decoration: underline;
+}
+
+.xflow-row-name__link:focus-visible {
+  outline: 2px solid var(--xflow-focus-ring);
+  outline-offset: 1px;
+}
+
 .xflow-row-name__meta {
   display: flex;
   align-items: center;
@@ -87,6 +101,7 @@
 }
 
 .xflow-row-run {
+  position: relative;
   width: 8px;
   height: 16px;
   padding: 0;
@@ -99,6 +114,16 @@
   transition:
     transform var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard),
     filter var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard);
+}
+
+/* The chip stays 8×16 to the eye; the hit area grows to 24px tall. The width
+   cannot reach 24px inside the 2px gap without overlapping its neighbours, so
+   it stays at 8px on purpose. */
+.xflow-row-run::after {
+  content: '';
+  position: absolute;
+  inset-block: calc(var(--xflow-space-1) * -1);
+  inset-inline: 0;
 }
 
 .xflow-row-run[data-tone='success'] {

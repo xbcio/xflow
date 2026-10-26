@@ -325,6 +325,50 @@ describe('workflow table', () => {
     expect(empty?.querySelector('.xflow-row-run')).toBeNull();
   });
 
+  it('keeps the run strip to one tab stop and moves it with the arrow keys', async () => {
+    host.listWorkflows.mockResolvedValue(
+      page([
+        wf('wf-1', '客户同步', 'v3', [], undefined, {
+          recentExecutions: [
+            { executionId: 'exec-3', status: 'failed', createdAt: '2026-10-19T14:03:23' },
+            { executionId: 'exec-2', status: 'success', createdAt: '2026-10-19T14:02:23' },
+            { executionId: 'exec-1', status: 'success', createdAt: '2026-10-19T14:01:23' },
+          ],
+        }),
+      ]),
+    );
+    render(<WorkflowCenter />);
+    await waitFor(() => expect(rows()).toContain('wf-1'));
+
+    const group = screen.getByRole('group', { name: '最近运行' });
+    const chips = () => [...group.querySelectorAll('.xflow-row-run')] as HTMLButtonElement[];
+    const stops = () => chips().filter((chip) => chip.tabIndex === 0).map((chip) => chip.getAttribute('data-exec'));
+    expect(chips()).toHaveLength(3);
+    expect(stops()).toEqual(['exec-1']);
+
+    fireEvent.keyDown(chips()[0], { key: 'ArrowRight' });
+    expect(document.activeElement).toBe(chips()[1]);
+    expect(stops()).toEqual(['exec-2']);
+
+    fireEvent.keyDown(chips()[1], { key: 'End' });
+    expect(document.activeElement).toBe(chips()[2]);
+    // The strip does not wrap past either end, and never leaves the group.
+    fireEvent.keyDown(chips()[2], { key: 'ArrowRight' });
+    expect(document.activeElement).toBe(chips()[2]);
+    expect(stops()).toEqual(['exec-3']);
+
+    fireEvent.keyDown(chips()[2], { key: 'Home' });
+    expect(document.activeElement).toBe(chips()[0]);
+    fireEvent.keyDown(chips()[0], { key: 'ArrowLeft' });
+    expect(document.activeElement).toBe(chips()[0]);
+    expect(stops()).toEqual(['exec-1']);
+
+    // Clicking still opens that run, and a click also parks the tab stop there.
+    fireEvent.click(chips()[1]);
+    expect(host.push).toHaveBeenCalledWith('/workflows/wf-1?exec=exec-2');
+    expect(stops()).toEqual(['exec-2']);
+  });
+
   it('renders the window success rate and P50, and degrades omitted fields to —', async () => {
     const restoreViewport = setWideViewport(true);
     try {
@@ -634,6 +678,50 @@ describe('workflow table', () => {
     ).toBe('true');
   });
 
+  it('draws the name as a real link to the workflow that a plain click routes in-app', async () => {
+    render(<WorkflowCenter />);
+    await waitFor(() => expect(rows()).toContain('wf-1'));
+
+    const link = document.querySelector(
+      'tr[data-workflow="wf-1"] .xflow-admin-col-name a[href]',
+    ) as HTMLAnchorElement;
+    expect(link.getAttribute('href')).toBe('/workflows/wf-1');
+    expect(link.textContent).toBe('客户同步');
+    expect(screen.getByRole('link', { name: '客户同步' })).toBe(link);
+
+    // The row handler also listens, so a click must navigate exactly once and
+    // must not fall through to the browser's own navigation.
+    const click = createEvent.click(link);
+    fireEvent(link, click);
+    expect(click.defaultPrevented).toBe(true);
+    expect(host.push).toHaveBeenCalledTimes(1);
+    expect(host.push).toHaveBeenCalledWith('/workflows/wf-1');
+  });
+
+  it('leaves modified and non-primary link clicks to the browser', async () => {
+    render(<WorkflowCenter />);
+    await waitFor(() => expect(rows()).toContain('wf-1'));
+
+    const link = document.querySelector('tr[data-workflow="wf-1"] .xflow-admin-col-name a[href]') as HTMLElement;
+    // Read the flag after React has had its turn, then stop jsdom from really
+    // navigating (it has no navigation and logs an error for every anchor).
+    const seen: boolean[] = [];
+    const record = (event: Event) => {
+      seen.push(event.defaultPrevented);
+      event.preventDefault();
+    };
+    document.addEventListener('click', record);
+    try {
+      for (const init of [{ metaKey: true }, { ctrlKey: true }, { shiftKey: true }, { altKey: true }, { button: 1 }]) {
+        fireEvent(link, createEvent.click(link, init));
+      }
+    } finally {
+      document.removeEventListener('click', record);
+    }
+    expect(seen).toEqual([false, false, false, false, false]);
+    expect(host.push).not.toHaveBeenCalled();
+  });
+
   it('draws a fixed skeleton on the first load instead of a spinner over an empty header', async () => {
     let resolve!: (value: ReturnType<typeof page>) => void;
     host.listWorkflows.mockReturnValue(new Promise((done) => { resolve = done; }));
@@ -737,12 +825,20 @@ describe('workflow table', () => {
   });
 
   it('reports a failed fetch and refetches the same page on 重试', async () => {
-    host.listWorkflows.mockRejectedValueOnce(new Error('503 service unavailable'));
+    host.listWorkflows.mockRejectedValueOnce(new XFlowApiError(500, 'internal error'));
     host.listWorkflows.mockResolvedValueOnce(page([wf('wf-1', '客户同步', 'v3')]));
     render(<WorkflowCenter />);
 
     expect(await screen.findByText('工作流列表加载失败')).toBeTruthy();
-    expect(screen.getByText('503 service unavailable')).toBeTruthy();
+    // The server's text and status stay out of the Chinese copy; they live in
+    // the detail attribute, and the headline and hint read as separate words.
+    const banner = document.querySelector('.xflow-admin-banner') as HTMLElement;
+    expect(banner.textContent).not.toContain('internal error');
+    expect(banner.textContent).not.toContain('HTTP 500');
+    expect(banner.querySelector('[data-error-detail]')?.getAttribute('data-error-detail')).toBe(
+      'HTTP 500 · internal error',
+    );
+    expect(banner.textContent).toMatch(/工作流列表加载失败\s+请稍后重试。/);
     // AD-04: the error banner owns the screen; the first-run empty state must
     // not appear beside it.
     expect(screen.queryByText('还没有工作流')).toBeNull();
