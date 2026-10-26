@@ -121,10 +121,14 @@ func TestSecondSignalOfAQuorumAfterTheExecutionExpiredQueuesNothingOnRedis(t *te
 				t.Fatalf("parked node = (%+v, %v) after the late signal, want it neither resumed nor completed", node, err)
 			}
 
-			// Whatever the end had not yet done is repaired afterwards.
-			if outcome, err := rig.eng.ExpireExecution(ctx, id); err != nil ||
-				(outcome != engine.ExpireOutcomeExpired && outcome != engine.ExpireOutcomeResumed && outcome != engine.ExpireOutcomeAlreadyTerminal) {
-				t.Fatalf("ExpireExecution() after the late signal = (%q, %v), want it to finish the end", outcome, err)
+			// Whatever the end had not yet done is repaired afterwards. Both subtests
+			// reach this call with the execution already in timeout for its deadline
+			// (asserted above), so ExpireExecution takes its resumed branch and
+			// repeats the cascade: nothing else can come back. Expired would mean
+			// it wrote the status again, AlreadyTerminal that the execution
+			// concluded some other way.
+			if outcome, err := rig.eng.ExpireExecution(ctx, id); err != nil || outcome != engine.ExpireOutcomeResumed {
+				t.Fatalf("ExpireExecution() after the late signal = (%q, %v), want resumed", outcome, err)
 			}
 			rig.requireNodesCanceled(ctx, 0, id, []string{"park"})
 			rig.requireDrained(0, g.Name(), id)
