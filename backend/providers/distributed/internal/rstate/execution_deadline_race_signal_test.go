@@ -350,3 +350,58 @@ func TestSignalThatFinishesFirstKeepsSuccessAgainstALateExpiryOnRedis(t *testing
 	}
 	rig.requireDrained(0, g.Name(), id)
 }
+
+// TestSignalInTheWindowAfterTheTimeoutWriteQueuesNothingOnRedis pins the guard
+// the replay above cannot reach. ExpireExecution writes the timeout status first
+// and cancels the suspended nodes after, so for a moment the execution is timed
+// out while its node is still listed as suspended and a waiter key is still
+// there for a signal to consume. Once the cascade has run the node is no longer
+// a resume target, and a late signal is harmless for that reason alone; in this
+// window it is harmless only because the engine refuses to resume a timed-out
+// execution. The window is made deterministic by writing the timeout status
+// without the cascade.
+func TestSignalInTheWindowAfterTheTimeoutWriteQueuesNothingOnRedis(t *testing.T) {
+	ctx := context.Background()
+	rig := newDeadlineRaceRig(t)
+	g := raceGraph(t, "deadline-race-park", 0, types.NodeDef{Name: "park", Type: "test.race_park"})
+	id := rig.submit(ctx, g)
+	rig.parkOnSignal(ctx, id)
+
+	if err := rig.state.UpdateExecutionStatus(ctx, id, types.ExecutionStatusTimeout, engine.ExecutionDeadlineExceededError); err != nil {
+		t.Fatalf("UpdateExecutionStatus(timeout) error = %v", err)
+	}
+	nodes, err := rig.state.ListSuspendedNodes(ctx, id)
+	if err != nil || len(nodes) != 1 {
+		t.Fatalf("ListSuspendedNodes after the timeout write = (%v, %v), want the parked node still listed", nodes, err)
+	}
+	if n := rig.existsWaiter(ctx, id); n != 1 {
+		t.Fatalf("waiter:go exists = %d after the timeout write, want the parked node still waiting", n)
+	}
+	outboxBefore := rig.outboxSize(ctx, id)
+
+	if err := rig.eng.DeliverSignal(ctx, id, "go", map[string]any{"by": "window"}); err != nil {
+		t.Fatalf("DeliverSignal() error = %v, want a silent no-op", err)
+	}
+	if queued := rig.queue.take(id); len(queued) != 0 {
+		t.Fatalf("a signal in the window queued %d tasks on a timed-out execution: %+v", len(queued), queued)
+	}
+	if added := rig.outboxSize(ctx, id) - outboxBefore; added != 0 {
+		t.Fatalf("a signal in the window added %d outbox entries on a timed-out execution", added)
+	}
+	snap := rig.snapshot(ctx, id)
+	if snap.Status != types.ExecutionStatusTimeout || snap.Error != engine.ExecutionDeadlineExceededError {
+		t.Fatalf("execution = %q %q after the signal, want it to stay timeout for its deadline", snap.Status, snap.Error)
+	}
+	node, err := rig.state.GetNode(ctx, id, "park")
+	if err != nil || node == nil || node.Status == types.NodeStatusSuccess || node.Status == types.NodeStatusRunning {
+		t.Fatalf("parked node = (%+v, %v) after the signal, want it neither resumed nor completed", node, err)
+	}
+
+	// The cascade the writer never ran is still repaired afterwards.
+	outcome, err := rig.eng.ExpireExecution(ctx, id)
+	if err != nil || outcome != engine.ExpireOutcomeResumed {
+		t.Fatalf("ExpireExecution() = (%q, %v), want resumed", outcome, err)
+	}
+	rig.requireNodesCanceled(ctx, 0, id, []string{"park"})
+	rig.requireDrained(0, g.Name(), id)
+}
