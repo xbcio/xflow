@@ -256,6 +256,9 @@ export default function OverviewPage() {
     : undefined;
 
   const refresh = () => setAttempt((current) => current + 1);
+  // model.ts words 501/403/401 itself in Chinese; every other failure carries
+  // the server's own text, which must not be drawn as copy.
+  const knownCopy = failure?.unsupported || failure?.status === 403 || failure?.status === 401;
 
   return (
     <div className="xflow-ov">
@@ -286,12 +289,16 @@ export default function OverviewPage() {
           type="error"
           showIcon
           title={failure.message}
-          description={
-            <span data-error-detail={failure.detail}>
-              {failure.detail}
-              {failure.status ? `（HTTP ${failure.status}）` : ''}
-            </span>
-          }
+          // The 501/403/401 details are fixed Chinese copy; any other detail is
+          // the server's own text and stays in the attribute with the status.
+          // The leading space keeps headline and hint apart for innerText.
+          description={<> {knownCopy ? failure.detail : '请稍后重试。'}</>}
+          data-error-detail={[
+            failure.status ? `HTTP ${failure.status}` : undefined,
+            knownCopy ? undefined : failure.detail,
+          ]
+            .filter(Boolean)
+            .join(' · ')}
           action={
             <Button size="small" onClick={refresh}>
               重试

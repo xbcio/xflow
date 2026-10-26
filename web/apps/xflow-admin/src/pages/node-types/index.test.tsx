@@ -211,6 +211,18 @@ describe('node library page', () => {
     expect(host.listNodeTypes).toHaveBeenCalledTimes(2);
   });
 
+  it('keeps the server text and status out of the failure copy', async () => {
+    host.listNodeTypes.mockRejectedValueOnce(Object.assign(new Error('internal error'), { status: 500 }));
+
+    render(<NodeTypesPage />);
+    expect(await screen.findByText('节点库加载失败')).toBeTruthy();
+    const banner = document.querySelector('[data-error-detail]') as HTMLElement;
+    expect(banner.textContent).not.toContain('internal error');
+    expect(banner.textContent).not.toContain('HTTP 500');
+    expect(banner.getAttribute('data-error-detail')).toBe('HTTP 500 · internal error');
+    expect(banner.textContent).toMatch(/节点库加载失败\s+请稍后重试。/);
+  });
+
   it('shows the server-empty state instead of an error', async () => {
     host.listNodeTypes.mockResolvedValue({ param_validation_mode: 'off', node_types: [] });
 

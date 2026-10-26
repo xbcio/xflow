@@ -227,11 +227,28 @@ describe('overview dashboard (A-A)', () => {
     renderPage();
 
     expect(await screen.findByText('当前部署未启用执行统计')).toBeTruthy();
-    expect(screen.getByText(/HTTP 501/)).toBeTruthy();
+    // The status code is diagnostic detail, not Chinese copy.
+    expect(screen.queryByText(/HTTP 501/)).toBeNull();
+    expect(document.querySelector('[data-error-detail]')?.getAttribute('data-error-detail')).toContain(
+      'HTTP 501',
+    );
 
     fireEvent.click(screen.getByRole('button', { name: /重\s*试/ }));
     await screen.findByText('运行数');
     expect(host.getOverview).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the server text and status out of the failure copy', async () => {
+    host.getOverview.mockRejectedValueOnce(new XFlowApiError(500, 'internal error'));
+    renderPage();
+
+    expect(await screen.findByText('概览加载失败')).toBeTruthy();
+    const banner = document.querySelector('[data-error-detail]') as HTMLElement;
+    expect(banner.textContent).not.toContain('internal error');
+    expect(banner.textContent).not.toContain('HTTP 500');
+    expect(banner.getAttribute('data-error-detail')).toBe('HTTP 500 · internal error');
+    // Headline and hint are separated, so a reader does not hear them fused.
+    expect(banner.textContent).toMatch(/概览加载失败\s+请稍后重试。/);
   });
 
   it('switches the window and requests that window from the server', async () => {

@@ -63,16 +63,27 @@ function statusOf(reason: unknown): number | undefined {
   return typeof response === 'number' ? response : undefined;
 }
 
-function describeNodeTypesError(reason: unknown): string {
+interface NodeTypesFailure {
+  /** Fixed Chinese hint drawn under the headline. */
+  hint: string;
+  /** Status/transport text for troubleshooting; never rendered as copy. */
+  detail?: string;
+}
+
+function describeNodeTypesError(reason: unknown): NodeTypesFailure {
   const status = statusOf(reason);
+  const transport = reason instanceof Error && reason.message ? reason.message : undefined;
+  const detail = [status === undefined ? undefined : `HTTP ${status}`, transport].filter(Boolean).join(' · ') || undefined;
   if (status === 403) {
-    return '服务端返回 403：当前凭据缺少读取节点库所需的 workflow.read scope（workflow scope 同样有效）。服务端仍独立鉴权，前端不会绕过这一限制。';
+    return {
+      hint: '服务端返回 403：当前凭据缺少读取节点库所需的 workflow.read scope（workflow scope 同样有效）。服务端仍独立鉴权，前端不会绕过这一限制。',
+      detail,
+    };
   }
   if (status === 404) {
-    return '服务端未提供 /v1/node-types（404）。请确认服务端版本包含节点类型接口。';
+    return { hint: '服务端未提供 /v1/node-types（404）。请确认服务端版本包含节点类型接口。', detail };
   }
-  if (reason instanceof Error && reason.message) return reason.message;
-  return '节点类型加载失败，请稍后重试。';
+  return { hint: '请稍后重试。', detail };
 }
 
 /** First line of the long-form docs, without a markdown heading marker. */
@@ -193,7 +204,7 @@ export default function NodeTypesPage() {
   const [schemas, setSchemas] = useState<NodeFormSchema[]>([]);
   const [validationMode, setValidationMode] = useState<ParamValidationMode>();
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useState<NodeTypesFailure>();
   const [attempt, setAttempt] = useState(0);
   const [category, setCategory] = useState<CategoryFilter>('all');
   const [query, setQuery] = useState('');
@@ -330,7 +341,10 @@ export default function NodeTypesPage() {
           type="error"
           showIcon
           title="节点库加载失败"
-          description={error}
+          // The leading space keeps headline and hint apart for innerText; the
+          // server's text and status stay in the detail attribute.
+          description={<> {error.hint}</>}
+          data-error-detail={error.detail}
           action={
             <Button size="small" onClick={reload}>
               重试
