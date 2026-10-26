@@ -2,6 +2,7 @@ package rstate
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -222,30 +223,37 @@ func (r *deadlineRaceRig) zcard(key string) int64 {
 	return n
 }
 
-// requireDrained fails the test when the store still holds any bookkeeping the
-// given executions' end must have released: a deadline index entry, a concurrency
-// slot or queue place of their workflow, or a parked waiter or suspended node.
-func (r *deadlineRaceRig) requireDrained(round int, workflow string, ids ...types.ExecutionID) {
-	r.t.Helper()
+// drainProblem describes the first piece of bookkeeping the given executions'
+// end left behind, or "" when there is none: a deadline index entry, a
+// concurrency slot or queue place of their workflow, or a suspended node. The
+// signal-named waiter key is not looked at: what the store leaves of it is the
+// subject of the signal test's own subtest.
+func (r *deadlineRaceRig) drainProblem(workflow string, ids ...types.ExecutionID) string {
 	ns := namespace.Default
 	if n := r.zcard(executionDeadlineIndexKey(ns)); n != 0 {
 		members, _ := r.rdb.ZRange(context.Background(), executionDeadlineIndexKey(ns), 0, -1).Result()
-		r.t.Fatalf("round %d: deadline index still holds %d entries: %v", round, n, members)
+		return fmt.Sprintf("deadline index still holds %d entries: %v", n, members)
 	}
 	tag := workflowDigestTag(ns, workflow)
 	if n := r.zcard(concurrencySlotKeyForTag(ns, tag)); n != 0 {
-		r.t.Fatalf("round %d: %d concurrency slots of %q leaked", round, n, workflow)
+		return fmt.Sprintf("%d concurrency slots of %q leaked", n, workflow)
 	}
 	if n := r.zcard(concurrencyQueueKeyForTag(ns, tag)); n != 0 {
-		r.t.Fatalf("round %d: %d queue places of %q leaked", round, n, workflow)
+		return fmt.Sprintf("%d queue places of %q leaked", n, workflow)
 	}
 	for _, id := range ids {
 		if n, err := r.rdb.SCard(context.Background(), suspendedNodesKey(ns, id)).Result(); err != nil || n != 0 {
-			r.t.Fatalf("round %d: %s has %d suspended nodes left (err %v)", round, id, n, err)
+			return fmt.Sprintf("%s has %d suspended nodes left (err %v)", id, n, err)
 		}
-		if n, err := r.rdb.Exists(context.Background(), waiterKey(ns, id, "go")).Result(); err != nil || n != 0 {
-			r.t.Fatalf("round %d: %s still has a waiter on the signal go (err %v)", round, id, err)
-		}
+	}
+	return ""
+}
+
+// requireDrained fails the test when drainProblem finds anything.
+func (r *deadlineRaceRig) requireDrained(round int, workflow string, ids ...types.ExecutionID) {
+	r.t.Helper()
+	if problem := r.drainProblem(workflow, ids...); problem != "" {
+		r.t.Fatalf("round %d: %s", round, problem)
 	}
 }
 
