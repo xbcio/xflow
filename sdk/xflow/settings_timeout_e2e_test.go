@@ -276,3 +276,30 @@ func TestSettingsTimeoutWithinBudgetSucceeds(t *testing.T) {
 		t.Fatalf("stored deadline = %v, want CreatedAt + settings.timeout = %v", snap.Deadline, want)
 	}
 }
+
+// TestSettingsTimeoutZeroMeansNoLimit is scenario 4, the control for scenario 2:
+// the same workflow with settings.timeout = 0 has no budget at all, so the nap
+// is not cut short and the stored execution carries no deadline.
+func TestSettingsTimeoutZeroMeansNoLimit(t *testing.T) {
+	eng, id, result := runNapWorkflow(t, "settings-timeout-zero", 0)
+	ctx := context.Background()
+
+	if result.Status != types.ExecutionStatusSuccess || result.Error != "" {
+		t.Fatalf("Wait() = %q error %q, want success with no error\n%s",
+			result.Status, result.Error, describeExecution(ctx, eng, id))
+	}
+	snap, err := eng.eng.State().GetExecution(ctx, id)
+	if err != nil || snap == nil {
+		t.Fatalf("GetExecution() = %+v, %v", snap, err)
+	}
+	if !snap.Deadline.IsZero() {
+		t.Fatalf("stored deadline = %v, want none for settings.timeout = 0", snap.Deadline)
+	}
+	detail, err := eng.Inspect(ctx, id, "nap")
+	if err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+	if len(detail.Nodes) != 1 || detail.Nodes[0].Status != types.NodeStatusSuccess {
+		t.Fatalf("nap node = %+v, want it run to success", detail.Nodes)
+	}
+}
