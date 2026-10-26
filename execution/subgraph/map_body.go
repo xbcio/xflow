@@ -183,6 +183,8 @@ func (x *MapBodyExecutor) runItem(ctx context.Context, req engine.BatchBodyReque
 		itemResult.Data = exitsAsItemResult(res.Exits)
 	default:
 		itemResult.Err = itemFailure(res)
+		// itemFailure flattens the outcome into text, so the cause is kept here.
+		itemResult.Timeout = res.Outcome == OutcomeTimeout
 	}
 	return itemResult, nil
 }
