@@ -262,6 +262,10 @@ func TestRedisExecutionReaderAgainstMiniredis(t *testing.T) {
 // `xflow execution diff` with missing flags fails fast and deterministically
 // in this test (no live Redis/MySQL needed).
 func TestExecutionDiffCommandRequiresFlags(t *testing.T) {
+	// The flags default from these variables, so an exported value would
+	// satisfy a "missing" case and send it on to a real connection.
+	t.Setenv("XFLOW_MYSQL_DSN", "")
+	t.Setenv("XFLOW_REDIS_ADDR", "")
 	cases := []struct {
 		name    string
 		args    []string
