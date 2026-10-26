@@ -183,7 +183,7 @@ describe('execution table', () => {
     const success = execRow('exec-8');
     expect(success?.querySelector('.xflow-admin-col-status')?.textContent).toBe('成功');
     expect(success?.querySelector('.xflow-admin-col-exec .xflow-admin-mono')?.textContent).toBe(
-      'exec-8',
+      '8',
     );
     // Real ids are 41 chars; the cell has to stay one line (ellipsis) and the
     // whole id is the copy button's accessible name.
@@ -365,7 +365,7 @@ describe('execution table', () => {
 
   it('paginates on the server and derives the footer from total', async () => {
     renderPage();
-    await screen.findByText('exec-9');
+    await waitFor(() => expect(rows()).toHaveLength(3));
 
     expect(document.querySelector('.xflow-admin-page')?.textContent).toContain('第 1 / 3 页');
     // AD-18: more than one page also states the server total.
@@ -612,7 +612,7 @@ describe('execution table', () => {
     expect(await screen.findByText('运行记录加载失败')).toBeTruthy();
     // AD-04: the English transport text is diagnostic detail, not copy.
     expect(screen.queryByText('503 service unavailable')).toBeNull();
-    expect(screen.getByText('加载失败，请重试')).toBeTruthy();
+    expect(screen.getByText('请稍后重试。')).toBeTruthy();
     expect(document.querySelector('[data-error-detail]')?.getAttribute('data-error-detail')).toContain(
       '503 service unavailable',
     );
@@ -658,7 +658,7 @@ describe('execution table', () => {
     expect(await screen.findByText('运行记录加载失败')).toBeTruthy();
     expect(screen.queryByText('没有匹配的记录')).toBeNull();
     expect(document.querySelector('.xflow-admin-page')).toBeNull();
-    expect(screen.getByText('加载失败，请重试')).toBeTruthy();
+    expect(screen.getByText('请稍后重试。')).toBeTruthy();
   });
 
   it('wires the client through the authenticated fetcher', async () => {
@@ -1064,5 +1064,170 @@ describe('AL-29 result toasts', () => {
     // Same operation on the same target: one toast, not a stack.
     expect(document.querySelectorAll('.ant-notification-notice')).toHaveLength(1);
     expect(document.querySelector('.ant-notification-notice')?.getAttribute('role')).toBe('status');
+  });
+});
+
+describe('execution id cell', () => {
+  const longId = 'exec-7c3f9a2e-1b4d-4e8a-9f6c-2d5b8a1e0c47';
+  const shortOf = (id: string) =>
+    execRow(id)?.querySelector('[data-copy-exec] .xflow-admin-mono')?.textContent;
+
+  it('drops the exec- prefix and draws the first eight characters after it', async () => {
+    host.listExecutions.mockResolvedValue(page([row(longId, 'success')], 1));
+    renderPage();
+    await waitFor(() => expect(rows()).toHaveLength(1));
+
+    const copy = execRow(longId)?.querySelector('[data-copy-exec]') as HTMLElement;
+    expect(copy.getAttribute('data-copy-exec')).toBe(longId);
+    expect(copy.getAttribute('title')).toBe(longId);
+    expect(copy.getAttribute('aria-label')).toBe(`复制执行 ID ${longId}`);
+    expect(shortOf(longId)).toBe('7c3f9a2e');
+    expect(copy.textContent).not.toContain('exec-');
+  });
+
+  it('shows 65d1abcd for exec-65d1abcd-xxxx and keeps the whole id as the name', async () => {
+    const id = 'exec-65d1abcd-xxxx';
+    host.listExecutions.mockResolvedValue(page([row(id, 'success')], 1));
+    renderPage();
+    await waitFor(() => expect(rows()).toHaveLength(1));
+
+    expect(shortOf(id)).toBe('65d1abcd');
+    const copy = execRow(id)?.querySelector('[data-copy-exec]') as HTMLElement;
+    expect(copy.getAttribute('title')).toBe(id);
+    expect(copy.getAttribute('aria-label')).toContain(id);
+  });
+
+  it('takes the first eight characters of an id without the exec- prefix', async () => {
+    const id = 'abcdefghijkl';
+    host.listExecutions.mockResolvedValue(page([row(id, 'success')], 1));
+    renderPage();
+    await waitFor(() => expect(rows()).toHaveLength(1));
+
+    expect(shortOf(id)).toBe('abcdefgh');
+    expect(execRow(id)?.querySelector('[data-copy-exec]')?.getAttribute('title')).toBe(id);
+  });
+
+  it('copies the whole id, not the short form', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    host.listExecutions.mockResolvedValue(page([row(longId, 'success')], 1));
+    renderPage();
+    await waitFor(() => expect(rows()).toHaveLength(1));
+
+    fireEvent.click(execRow(longId)?.querySelector('[data-copy-exec]') as HTMLElement);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(longId));
+  });
+
+  // Fixed layout: the colgroup width is the column. Eight mono glyphs are
+  // ~58px (0.6em of the 12px cell font); the cell adds 28px of padding and, from
+  // 1280, a 16px copy icon with its gap. Fewer than that ellipsizes the id.
+  const columnWidths = () =>
+    [...document.querySelectorAll('[data-table="executions"] colgroup col')].map((col) =>
+      parseFloat((col as HTMLElement).style.width),
+    );
+  const idColWidth = () => columnWidths()[0] ?? 0;
+
+  it('gives the id column room for eight glyphs plus the copy icon from 1280', async () => {
+    renderPage();
+    await waitFor(() => expect(rows()).toHaveLength(3));
+
+    expect(idColWidth()).toBeGreaterThanOrEqual(8 * 7.22 + 28 + 16);
+  });
+
+  it('gives the compact id column room for eight glyphs', async () => {
+    window.matchMedia = ((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia;
+    renderPage();
+    await waitFor(() => expect(rows()).toHaveLength(3));
+
+    expect(idColWidth()).toBeGreaterThanOrEqual(8 * 7.22 + 28);
+    // The extra width comes out of other columns, not out of the card.
+    expect(columnWidths().reduce((sum, width) => sum + width, 0)).toBe(750);
+  });
+
+  it('keeps the wide table width: the columns still add up to the scroll width', async () => {
+    renderPage();
+    await waitFor(() => expect(rows()).toHaveLength(3));
+
+    expect(columnWidths().reduce((sum, width) => sum + width, 0)).toBe(1008);
+  });
+});
+
+describe('row navigation link', () => {
+  const linkRow = () =>
+    page([row('exec a/1', 'success', { workflowId: 'wf-1', workflowName: '客户同步' })], 1);
+  const rowLink = () =>
+    execRow('exec a/1')?.querySelector('.xflow-admin-col-workflow a[href]') as HTMLAnchorElement;
+
+  it('puts a real link in the workflow name cell that targets the run record', async () => {
+    host.listExecutions.mockResolvedValue(linkRow());
+    renderPage();
+    await waitFor(() => expect(rows()).toHaveLength(1));
+
+    expect(rowLink().getAttribute('href')).toBe('/workflows/wf-1?exec=exec%20a%2F1');
+    expect(rowLink().textContent).toBe('客户同步');
+  });
+
+  it('navigates once on a plain click and leaves modified clicks to the browser', async () => {
+    host.listExecutions.mockResolvedValue(linkRow());
+    renderPage();
+    await waitFor(() => expect(rows()).toHaveLength(1));
+
+    fireEvent.click(rowLink());
+    expect(host.push).toHaveBeenCalledTimes(1);
+    expect(host.push).toHaveBeenCalledWith('/workflows/wf-1?exec=exec%20a%2F1');
+
+    host.push.mockClear();
+    for (const init of [{ metaKey: true }, { ctrlKey: true }, { shiftKey: true }, { altKey: true }, { button: 1 }]) {
+      const notPrevented = fireEvent.click(rowLink(), init);
+      expect(notPrevented).toBe(true);
+    }
+    expect(host.push).not.toHaveBeenCalled();
+  });
+
+  it('keeps the whole row clickable and Enter working', async () => {
+    host.listExecutions.mockResolvedValue(linkRow());
+    renderPage();
+    await waitFor(() => expect(rows()).toHaveLength(1));
+
+    fireEvent.click(execRow('exec a/1') as HTMLElement);
+    expect(host.push).toHaveBeenCalledTimes(1);
+    fireEvent.keyDown(execRow('exec a/1') as HTMLElement, { key: 'Enter' });
+    expect(host.push).toHaveBeenCalledTimes(2);
+  });
+
+  it('draws a plain name when the row names no workflow to open', async () => {
+    host.listExecutions.mockResolvedValue(page([row('exec-9', 'running')], 1));
+    renderPage();
+    await waitFor(() => expect(rows()).toHaveLength(1));
+
+    expect(execRow('exec-9')?.querySelector('.xflow-admin-col-workflow a')).toBeNull();
+  });
+});
+
+describe('list failure banner', () => {
+  it('separates title and description and never shows the server text', async () => {
+    host.listExecutions.mockRejectedValue(new Error('internal error'));
+    renderPage();
+
+    const title = await screen.findByText('运行记录加载失败');
+    const description = document.querySelector('[data-error-detail]') as HTMLElement;
+    expect(description.textContent).toBe('请稍后重试。');
+    expect(description.getAttribute('data-error-detail')).toContain('internal error');
+    expect(screen.queryByText('internal error')).toBeNull();
+    expect(document.querySelector('.xflow-admin-banner')?.textContent).not.toMatch(/加载失败.*加载失败/);
+    // innerText is not implemented by jsdom: assert the DOM carries a real
+    // separator or a block boundary between the two pieces.
+    const container = title.parentElement as HTMLElement;
+    const joined = container.textContent ?? '';
+    expect(joined).toMatch(/运行记录加载失败\s+请稍后重试。/);
   });
 });

@@ -170,9 +170,32 @@ function EmDash() {
 }
 
 /**
- * The execution id is opaque and long; the cell keeps the row one line and the
- * whole id is both the tooltip and the copy target (never a workspace leak).
+ * The execution id is opaque and long. The cell shows eight characters of it,
+ * after the fixed `exec-` prefix (which says nothing about which run it is);
+ * the whole id is the tooltip, the accessible name and the copy target (never a
+ * workspace leak). Kept local to this directory; it can be merged with the
+ * workflow list's short-id button later.
  */
+const SHORT_ID_LENGTH = 8;
+const EXEC_ID_PREFIX = 'exec-';
+
+function shortExecutionId(id: string): string {
+  const bare = id.startsWith(EXEC_ID_PREFIX) ? id.slice(EXEC_ID_PREFIX.length) : id;
+  return bare.slice(0, SHORT_ID_LENGTH);
+}
+
+/**
+ * The table lays out fixed, so a column's width is its cell width and the id
+ * column has to hold eight mono glyphs (about 7.22px each at the 12px cell
+ * font, 58px) plus the first-cell padding (16px lead + 12px = 28px), and from
+ * 1280 the copy icon (12px box + 4px gap = 16px). 58 + 28 = 86 and 86 + 16 = 102;
+ * 2px more keeps a wider fallback mono font from tipping the last glyph into
+ * the ellipsis. The extra width is taken from columns whose content has room
+ * (see the column list), so the table width does not change.
+ */
+const ID_COLUMN_WIDTH = 88;
+const ID_COLUMN_WIDTH_WITH_COPY = 104;
+
 function ExecutionIdCell({ id, onCopy }: { id: string; onCopy: (id: string) => void }) {
   if (!id) return <EmDash />;
   return (
@@ -187,7 +210,8 @@ function ExecutionIdCell({ id, onCopy }: { id: string; onCopy: (id: string) => v
         onCopy(id);
       }}
     >
-      <span className="xflow-admin-mono xflow-admin-ellipsis">{id}</span>
+      <span className="xflow-admin-mono xflow-admin-ellipsis">{shortExecutionId(id)}</span>
+
       <span className="xflow-exec-id__copy" aria-hidden="true">
         <CopyIcon />
       </span>
@@ -272,9 +296,49 @@ function TimeCell({ value }: { value?: string }) {
 }
 
 /** §6.6b: a row opens the run-record mode of its workflow, on that execution. */
+function runRecordHref(row: Pick<ExecutionListItem, 'workflowId' | 'executionId'>): string {
+  return `/workflows/${row.workflowId}?exec=${encodeURIComponent(row.executionId)}`;
+}
+
 function openInRunRecord(row: Pick<ExecutionListItem, 'workflowId' | 'executionId'>): void {
   if (!row.workflowId) return;
-  history.push(`/workflows/${row.workflowId}?exec=${encodeURIComponent(row.executionId)}`);
+  history.push(runRecordHref(row));
+}
+
+/**
+ * The workflow name is a real link so the run record can be opened in a new
+ * tab or copied. A plain left click stays an in-app navigation; a modified or
+ * non-primary click is left to the browser.
+ */
+function WorkflowNameLink({
+  row,
+}: {
+  row: Pick<ExecutionListItem, 'workflowId' | 'executionId' | 'workflowName'>;
+}) {
+  if (!row.workflowName) return <EmDash />;
+  if (!row.workflowId) {
+    return (
+      <span className="xflow-admin-ellipsis" title={row.workflowName}>
+        {row.workflowName}
+      </span>
+    );
+  }
+  return (
+    <a
+      className="xflow-admin-ellipsis xflow-exec-name-link"
+      href={runRecordHref(row)}
+      title={row.workflowName}
+      onClick={(event) => {
+        if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+          return;
+        }
+        event.preventDefault();
+        openInRunRecord(row);
+      }}
+    >
+      {row.workflowName}
+    </a>
+  );
 }
 
 /** AL-29: a result toast's 打开执行 follows the execution into its run record. */
@@ -305,7 +369,7 @@ function listFailure(reason: unknown): ListFailure {
   const code = typeof status === 'number' ? `HTTP ${status}` : undefined;
   const transport = reason instanceof Error && reason.message ? reason.message : undefined;
   return {
-    message: '加载失败，请重试',
+    message: '请稍后重试。',
     code,
     detail: [code, transport].filter(Boolean).join(' · ') || undefined,
   };
@@ -728,7 +792,7 @@ export function ExecutionsCenter() {
       title: '执行 ID',
       dataIndex: 'executionId',
       className: 'xflow-admin-col-exec',
-      width: showSecondaryColumns ? 100 : 84,
+      width: showSecondaryColumns ? ID_COLUMN_WIDTH_WITH_COPY : ID_COLUMN_WIDTH,
       render: (id: string) => <ExecutionIdCell id={id} onCopy={copyId} />,
     },
     {
@@ -736,14 +800,7 @@ export function ExecutionsCenter() {
       dataIndex: 'workflowName',
       className: 'xflow-admin-col-workflow',
       width: showSecondaryColumns ? 104 : 84,
-      render: (name: string) =>
-        name ? (
-          <span className="xflow-admin-ellipsis" title={name}>
-            {name}
-          </span>
-        ) : (
-          <EmDash />
-        ),
+      render: (_name: string, row) => <WorkflowNameLink row={row} />,
     },
     {
       title: '状态',
@@ -770,7 +827,9 @@ export function ExecutionsCenter() {
       title: '耗时',
       dataIndex: 'durationMs',
       className: 'xflow-admin-col-duration',
-      width: showSecondaryColumns ? 76 : 68,
+      // The longest value (`59m 59s`, about 43px) leaves room in 72px; the 4px
+      // saved in the wide set goes to the id column.
+      width: showSecondaryColumns ? 72 : 68,
       render: (value?: number) => <DurationCell ms={value} />,
     },
     ...(showSecondaryColumns
@@ -806,7 +865,9 @@ export function ExecutionsCenter() {
       title: '错误',
       dataIndex: 'error',
       className: 'xflow-admin-col-error',
-      width: showSecondaryColumns ? 112 : 78,
+      // The compact error is already an ellipsis line (full text in the tooltip);
+      // 4px of it pays for the id column's eight glyphs.
+      width: showSecondaryColumns ? 112 : 74,
       render: (value: string) => {
         const line = firstLine(value);
         return line ? (
@@ -946,10 +1007,14 @@ export function ExecutionsCenter() {
               showIcon
               title="运行记录加载失败"
               description={
-                <span data-error-detail={listError.detail} title={listError.detail}>
-                  {listError.message}
-                  {listError.code ? `（${listError.code}）` : ''}
-                </span>
+                <>
+                  {/* A real space: the title and description are inline, so
+                      innerText and screen readers would otherwise join them. */}{' '}
+                  <span data-error-detail={listError.detail} title={listError.detail}>
+                    {listError.message}
+                    {listError.code ? `（${listError.code}）` : ''}
+                  </span>
+                </>
               }
               action={
                 <Button size="small" onClick={() => setListAttempt((attempt) => attempt + 1)}>

@@ -65,8 +65,8 @@
   outline-offset: 1px;
 }
 
-/* Below 1280 the id column is 84px: the row is still click-to-copy, the icon
-   would only crowd the prefix. */
+/* Below 1280 the id column has no room for the icon next to eight glyphs: the
+   row is still click-to-copy. */
 @media (max-width: 1279px) {
   .xflow-exec-id__copy {
     display: none;
@@ -155,4 +155,24 @@
    padding keeps both labels readable without widening the table. */
 .xflow-exec-table .xflow-admin-op {
   padding: 0 var(--xflow-space-1);
+}
+
+/* ---------- Workflow name link ---------- */
+
+/* A real anchor so the run record opens in a new tab; it keeps the plain name
+   look and only reveals itself on hover and keyboard focus. */
+.xflow-exec-name-link {
+  color: inherit;
+  text-decoration: none;
+}
+
+.xflow-exec-name-link:hover {
+  color: var(--xflow-primary);
+  text-decoration: underline;
+}
+
+.xflow-exec-name-link:focus-visible {
+  border-radius: var(--xflow-radius-xs);
+  outline: 2px solid var(--xflow-focus-ring);
+  outline-offset: 1px;
 }
