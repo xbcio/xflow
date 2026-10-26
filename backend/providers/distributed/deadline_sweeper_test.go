@@ -24,15 +24,34 @@ type completeRecorder struct {
 	engine.BaseHooks
 	mu       sync.Mutex
 	statuses map[types.ExecutionID][]types.ExecutionStatus
+	// afterRecord, when set, runs after each announcement is recorded and outside
+	// the lock. It runs on the caller's goroutine (the sweeper's), so a test can
+	// hold that sweeper at the announcement.
+	afterRecord func()
 }
 
 func (r *completeRecorder) OnExecutionComplete(_ context.Context, id types.ExecutionID, status types.ExecutionStatus) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.statuses == nil {
 		r.statuses = make(map[types.ExecutionID][]types.ExecutionStatus)
 	}
 	r.statuses[id] = append(r.statuses[id], status)
+	after := r.afterRecord
+	r.mu.Unlock()
+	if after != nil {
+		after()
+	}
+}
+
+// total counts the announcements recorded across every execution.
+func (r *completeRecorder) total() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, statuses := range r.statuses {
+		n += len(statuses)
+	}
+	return n
 }
 
 func (r *completeRecorder) announced(id types.ExecutionID) int {
@@ -372,6 +391,12 @@ func TestEmbeddedBackendDeadlineSweepIsNotStarvedByGoneEntries(t *testing.T) {
 // check: every embedded process runs a sweeper against the same Redis, and each
 // overdue execution must still end in timeout exactly once, with its index entry
 // acknowledged and nothing left half-done.
+//
+// It also requires both sweepers to take part. Without that, a sweeper that sat
+// idle would leave the other to do all the work and the test would still pass.
+// Whichever sweeper announces first is held at its announcement (mid-expiry, so
+// the other has to resume that execution) until the other has announced one of
+// its own, which makes the overlap certain instead of a matter of timing.
 func TestTwoEmbeddedBackendsSweepingOneRedisAreHarmless(t *testing.T) {
 	rdb := newRedisStateTestClient(t)
 	addr := rdb.Options().Addr
@@ -384,11 +409,30 @@ func TestTwoEmbeddedBackendsSweepingOneRedisAreHarmless(t *testing.T) {
 	for i := 0; i < n; i++ {
 		seedExecution(t, a, g, types.ExecutionID(fmt.Sprintf("exec-%02d", i)), types.ExecutionStatusRunning, past.Add(time.Duration(i)*time.Millisecond))
 	}
+	// The wait is bounded and gives up for good, so an idle sweeper fails the
+	// participation check below instead of hanging, or delaying every later
+	// announcement by the same wait.
+	var open sync.Once
+	both := make(chan struct{})
+	rendezvous := func() {
+		if hooksA.total() >= 1 && hooksB.total() >= 1 {
+			open.Do(func() { close(both) })
+		}
+		select {
+		case <-both:
+		case <-time.After(3 * time.Second):
+			open.Do(func() { close(both) })
+		}
+	}
+	hooksA.afterRecord, hooksB.afterRecord = rendezvous, rendezvous
 	bindSweep(t, a, engA)
 	bindSweep(t, b, engB)
 
 	for i := 0; i < n; i++ {
 		waitForTimeout(t, a, types.ExecutionID(fmt.Sprintf("exec-%02d", i)), 10*time.Second)
+	}
+	if hooksA.total() < 1 || hooksB.total() < 1 {
+		t.Fatalf("announcements: backend A %d, backend B %d, want both sweepers to have expired at least one execution", hooksA.total(), hooksB.total())
 	}
 	for i := 0; i < n; i++ {
 		id := types.ExecutionID(fmt.Sprintf("exec-%02d", i))
