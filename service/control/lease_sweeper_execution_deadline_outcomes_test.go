@@ -9,24 +9,26 @@ import (
 )
 
 // unreleasedOutcomes are the outcomes ExpireExecution reports without an error
-// that the pass must not count as released. Gone, AlreadyTerminal and NotDue are
-// benign: someone else owns or finished the execution, so the pass retries it at
-// its next opportunity. Canceling is also not a failure, but its entry stays
-// listed until the cancel concludes, so the pass sets it aside for a window.
+// that the pass must not count as released. AlreadyTerminal and NotDue are
+// benign: someone else finished the execution, or it is not due, so the pass
+// retries it at its next opportunity. Canceling and Gone are not failures
+// either, but neither withdraws the entry (a cancel withdraws its own; a Gone
+// entry has missing execution keys that may only be a replica lag away), so the
+// pass sets them aside for a window instead of retrying them on every round.
 var unreleasedOutcomes = []struct {
 	outcome  engine.ExpireOutcome
 	setAside bool
 }{
 	{engine.ExpireOutcomeCanceling, true},
-	{engine.ExpireOutcomeGone, false},
+	{engine.ExpireOutcomeGone, true},
 	{engine.ExpireOutcomeAlreadyTerminal, false},
 	{engine.ExpireOutcomeNotDue, false},
 }
 
 // TestLeaseSweeperExecutionDeadlineOutcomesThatAreNotReleases pins, per outcome,
 // what the pass records: nothing released, nothing expired, no failure and no
-// failure alert; the benign ones are not backed off at all, and Canceling is set
-// aside for a window without counting as a failure.
+// failure alert; the benign ones are not backed off at all, and Canceling and
+// Gone are set aside for a window without counting as a failure.
 func TestLeaseSweeperExecutionDeadlineOutcomesThatAreNotReleases(t *testing.T) {
 	for _, tc := range unreleasedOutcomes {
 		t.Run(string(tc.outcome), func(t *testing.T) {
