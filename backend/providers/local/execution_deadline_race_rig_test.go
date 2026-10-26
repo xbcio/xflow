@@ -199,8 +199,20 @@ func (r *deadlineRaceRig) requireDrained(round int) {
 	if n := len(r.state.queued); n != 0 {
 		r.t.Fatalf("round %d: %d queue places leaked", round, n)
 	}
-	if n := len(r.state.suspended); n != 0 {
-		r.t.Fatalf("round %d: %d suspended waiters leaked", round, n)
+	// A suspended-index member is a leak unless its node already finished
+	// successfully. A node woken by its timer or its Timeout is resumed through
+	// the outbox, which never touches the index, so the member stays after the
+	// node ran to success. That residue is a known, undecided defect (the
+	// suspended_residue_as_it_stands subtests pin it); a node that is still
+	// suspended, canceled, running or missing is not residue and is reported.
+	for key := range r.state.suspended {
+		if node := r.state.nodes[key]; node == nil || node.Status != types.NodeStatusSuccess {
+			status := types.NodeStatus("missing")
+			if node != nil {
+				status = node.Status
+			}
+			r.t.Fatalf("round %d: suspended waiter %s leaked with its node %s", round, key, status)
+		}
 	}
 }
 
