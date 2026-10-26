@@ -199,7 +199,7 @@ beforeEach(() => {
 const rows = () => [...document.querySelectorAll('tr[data-workflow]')].map((row) => row.getAttribute('data-workflow'));
 const card = (id: string) => document.querySelector(`[data-env="${id}"]`);
 const pageHeader = () => document.querySelector('[data-page-header]') as HTMLElement;
-const headerButton = (name: string) => within(pageHeader()).getByRole('button', { name });
+const headerButton = (name: string | RegExp) => within(pageHeader()).getByRole('button', { name });
 
 describe('workflow table', () => {
   it('renders a server page with only the columns the backend has (ruling 20)', async () => {
@@ -847,6 +847,80 @@ describe('workflow table', () => {
     fireEvent.click(screen.getByRole('button', { name: /重\s*试/ }));
     await waitFor(() => expect(rows()).toContain('wf-1'));
     expect(host.listWorkflows).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText('工作流列表加载失败')).toBeNull();
+  });
+
+  it('refetches the current page and window from 刷新 in the page header', async () => {
+    host.listWorkflows.mockResolvedValue(page([wf('wf-1', '第一页', 'v1')], 41));
+    render(<WorkflowCenter />);
+    await screen.findByText('第一页');
+    fireEvent.click(document.querySelectorAll('.xflow-admin-page button')[1]);
+    await waitFor(() =>
+      expect(host.listWorkflows).toHaveBeenLastCalledWith(listArgs({ page: 2 })),
+    );
+    expect(host.listWorkflows).toHaveBeenCalledTimes(2);
+
+    host.listWorkflows.mockResolvedValueOnce(page([wf('wf-31', '刷新后', 'v2')], 41));
+    const refresh = headerButton(/刷\s*新/);
+    expect(refresh.getAttribute('data-action')).toBe('refresh');
+    fireEvent.click(refresh);
+
+    await screen.findByText('刷新后');
+    expect(host.listWorkflows).toHaveBeenCalledTimes(3);
+    expect(host.listWorkflows).toHaveBeenLastCalledWith(listArgs({ page: 2 }));
+    expect(rows()).toEqual(['wf-31']);
+  });
+
+  it('disables 刷新 and keeps the old rows while the refresh is in flight', async () => {
+    render(<WorkflowCenter />);
+    await waitFor(() => expect(rows()).toEqual(['wf-1', 'wf-2']));
+    const refresh = headerButton(/刷\s*新/) as HTMLButtonElement;
+    expect(refresh.disabled).toBe(false);
+
+    let resolve!: (value: ReturnType<typeof page>) => void;
+    host.listWorkflows.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+    fireEvent.click(refresh);
+
+    await waitFor(() => expect(refresh.disabled).toBe(true));
+    // A click on the disabled button must not stack a second request.
+    fireEvent.click(refresh);
+    expect(host.listWorkflows).toHaveBeenCalledTimes(2);
+    // The rows stay up under the 2px bar: no skeleton, no Spin overlay.
+    expect(rows()).toEqual(['wf-1', 'wf-2']);
+    expect(document.querySelector('.xflow-admin-table-skeleton')).toBeNull();
+    expect(document.querySelector('.ant-spin-spinning')).toBeNull();
+    expect(
+      (document.querySelector('[data-table="workflows"]') as HTMLElement).getAttribute('aria-busy'),
+    ).toBe('true');
+    expect(screen.getByRole('progressbar', { name: '正在刷新工作流' })).toBeTruthy();
+
+    resolve(page([wf('wf-3', '夜间归档', 'v1')]));
+    await waitFor(() => expect(rows()).toEqual(['wf-3']));
+    expect(refresh.disabled).toBe(false);
+    expect(
+      (document.querySelector('[data-table="workflows"]') as HTMLElement).getAttribute('aria-busy'),
+    ).toBe('false');
+  });
+
+  it('keeps the loaded rows under the list banner when 刷新 fails, then recovers', async () => {
+    render(<WorkflowCenter />);
+    await waitFor(() => expect(rows()).toEqual(['wf-1', 'wf-2']));
+
+    host.listWorkflows.mockRejectedValueOnce(new XFlowApiError(503, 'upstream down'));
+    fireEvent.click(headerButton(/刷\s*新/));
+
+    expect(await screen.findByText('工作流列表加载失败')).toBeTruthy();
+    const banner = document.querySelector('.xflow-admin-banner') as HTMLElement;
+    expect(banner.textContent).not.toContain('upstream down');
+    expect(banner.querySelector('[data-error-detail]')?.getAttribute('data-error-detail')).toBe(
+      'HTTP 503 · upstream down',
+    );
+    expect(rows()).toEqual(['wf-1', 'wf-2']);
+    expect((headerButton(/刷\s*新/) as HTMLButtonElement).disabled).toBe(false);
+
+    host.listWorkflows.mockResolvedValueOnce(page([wf('wf-3', '夜间归档', 'v1')]));
+    fireEvent.click(headerButton(/刷\s*新/));
+    await waitFor(() => expect(rows()).toEqual(['wf-3']));
     expect(screen.queryByText('工作流列表加载失败')).toBeNull();
   });
 

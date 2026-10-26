@@ -734,6 +734,17 @@ export function WorkflowCenter() {
             <Button type="primary" icon={<PlusIcon />} onClick={() => history.push('/workflows/new')}>
               新建工作流
             </Button>
+            {/* Same contract as the overview's 刷新: the loaded rows stay up
+                (the table's progress bar is the cue) and the button waits out
+                the read in flight, so repeated clicks never stack requests. */}
+            <Button
+              size="small"
+              onClick={() => setListAttempt((attempt) => attempt + 1)}
+              disabled={loading}
+              data-action="refresh"
+            >
+              刷新
+            </Button>
           </>
         }
       />
