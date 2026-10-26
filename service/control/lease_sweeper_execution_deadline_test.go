@@ -393,6 +393,34 @@ func TestLeaseSweeperExecutionDeadlineFailuresDoNotStarveNewEntries(t *testing.T
 	}
 }
 
+// TestLeaseSweeperExecutionDeadlineInspectedCountsOnlyWhatWasAttempted pins the
+// candidate count the pass reports. The scan lists executions that are backing off
+// along with the ones it attempts, but the metric's help promises that backed-off
+// ones are not counted, so inspected must follow attempts and not the page size.
+func TestLeaseSweeperExecutionDeadlineInspectedCountsOnlyWhatWasAttempted(t *testing.T) {
+	h := newDeadlineHarness(everyPass(5))
+	base := h.now.Add(-time.Hour)
+	for _, id := range h.list("broken", 3, base) {
+		h.expirer.errs[id] = errStoreDown
+	}
+	h.pass()
+	h.list("healthy", 2, base.Add(time.Minute))
+	*h.now = h.now.Add(10 * time.Millisecond)
+
+	h.pass()
+
+	if h.state.lastLimit != 5+3 {
+		t.Fatalf("scan limit = %d, want the batch plus the 3 backing off (%d)", h.state.lastLimit, 5+3)
+	}
+	want := []candidateEvent{
+		{pass: SweepPassExecutionDeadline, outcome: SweepPassOutcomeRan, inspected: 3},
+		{pass: SweepPassExecutionDeadline, outcome: SweepPassOutcomeRan, inspected: 2},
+	}
+	if got := h.observer.candidateSnapshot(); !equalCandidateEvents(got, want) {
+		t.Fatalf("candidate events = %+v, want %+v: the 3 backed-off executions are listed but not inspected", got, want)
+	}
+}
+
 // TestLeaseSweeperExecutionDeadlineBacksOffAFailingExecution pins that a failing
 // execution is not called again inside its backoff window, and is again once the
 // window has passed, with the window doubling.
