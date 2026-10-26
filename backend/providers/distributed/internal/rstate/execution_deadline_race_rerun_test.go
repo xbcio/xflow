@@ -7,8 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/redis/go-redis/v9"
-
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
@@ -152,5 +150,3 @@ func TestExpireRacingARerunGivesTheRerunItsOwnClockOnRedis(t *testing.T) {
 	}
 	t.Logf("%d rounds: %d reruns were accepted inside the race, %d after it", raceRounds(), rerunInRace, raceRounds()-rerunInRace)
 }
-
-var _ = redis.Z{}
