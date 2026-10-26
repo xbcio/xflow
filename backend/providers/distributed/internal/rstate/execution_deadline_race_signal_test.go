@@ -459,3 +459,66 @@ func TestResumeQueuedBeforeTheTimeoutIsRefusedAfterItOnRedis(t *testing.T) {
 	rig.requireAnnouncedOnly(0, id, types.ExecutionStatusTimeout)
 	rig.requireDrained(0, g.Name(), id)
 }
+
+// TestResumeHeldByAWorkerIsRefusedAgainAfterTheTimeoutOnRedis fixes the
+// interleaving the replay above reaches only by chance, and in which the engine's
+// own execution-status fence in BuildTaskLease is the only thing that names the
+// refusal. The signal wakes the node, a worker leases the resume (the node is
+// running on a live lease), and then the deadline expires the execution. The same
+// resume task reaching BuildTaskLease again afterwards, as a redelivery would,
+// has to be refused as an inactive execution.
+//
+// The store refuses that second acquire on its own, because the execution is
+// terminal and the node still holds its lease; with the engine's fence out, the
+// refusal is classified from the node's live lease as ErrLeaseAlreadyActive, a
+// worker-side retry signal rather than a final answer. The earlier tests cancel
+// the node before the resume arrives, so the node-terminal fence answers there
+// and the classification never reaches this path.
+func TestResumeHeldByAWorkerIsRefusedAgainAfterTheTimeoutOnRedis(t *testing.T) {
+	ctx := context.Background()
+	rig := newDeadlineRaceRig(t)
+	g := raceGraph(t, "deadline-race-park", 0, types.NodeDef{Name: "park", Type: "test.race_park"})
+	id := rig.submit(ctx, g)
+	rig.parkOnSignal(ctx, id)
+
+	if err := rig.eng.DeliverSignal(ctx, id, "go", map[string]any{"by": "signal"}); err != nil {
+		t.Fatalf("DeliverSignal() error = %v", err)
+	}
+	tasks := rig.queue.take(id)
+	if len(tasks) != 1 || tasks[0].Type != engine.TaskTypeNodeResume {
+		t.Fatalf("the signal queued %+v, want exactly one resume task", tasks)
+	}
+	resume := tasks[0]
+	if _, err := rig.eng.BuildTaskLease(ctx, resume); err != nil {
+		t.Fatalf("BuildTaskLease(resume) error = %v, want the worker to hold the lease", err)
+	}
+	node, err := rig.state.GetNode(ctx, id, "park")
+	if err != nil || node == nil || node.Status != types.NodeStatusRunning || node.LeaseToken == "" {
+		t.Fatalf("woken node = (%+v, %v), want running on a live lease", node, err)
+	}
+
+	outcome, err := rig.eng.ExpireExecution(ctx, id)
+	if err != nil || outcome != engine.ExpireOutcomeExpired {
+		t.Fatalf("ExpireExecution() = (%q, %v), want expired", outcome, err)
+	}
+	node, err = rig.state.GetNode(ctx, id, "park")
+	if err != nil || node == nil || node.Status != types.NodeStatusRunning || node.LeaseToken == "" {
+		t.Fatalf("woken node = (%+v, %v) after the expiry, want it still running on its lease "+
+			"so that only the execution fence can answer", node, err)
+	}
+
+	_, err = rig.eng.BuildTaskLease(ctx, resume)
+	if !errors.Is(err, engine.ErrExecutionInactive) {
+		t.Fatalf("the held resume leased again after the timeout: error = %v, want ErrExecutionInactive", err)
+	}
+	if errors.Is(err, engine.ErrLeaseAlreadyActive) {
+		t.Fatalf("the held resume was refused as a live lease, not as an inactive execution: error = %v", err)
+	}
+	if left := rig.queue.take(id); len(left) != 0 {
+		t.Fatalf("refusing the held resume queued %d tasks: %+v", len(left), left)
+	}
+	snap := rig.snapshot(ctx, id)
+	if snap.Status != types.ExecutionStatusTimeout || snap.Error != engine.ExecutionDeadlineExceededError {
+		t.Fatalf("execution = %q %q, want timeout for its deadline", snap.Status, snap.Error)
+	}
+}
