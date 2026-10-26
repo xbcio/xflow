@@ -45,3 +45,33 @@ func TestOnlyTheMiddleBatchCarryingTheMarkerExpiresTheExecution(t *testing.T) {
 		}
 	}
 }
+
+// failedBatchWithMarker is failedBatch with batchTimeoutKey set to value, for a
+// marker that is present but is not the boolean true the host writes.
+func failedBatchWithMarker(value any) TaskResult {
+	result := failedBatch()
+	result.Output.Data[batchTimeoutKey] = value
+	return result
+}
+
+// TestMarkerThatIsNotBooleanTrueDoesNotExpireTheExecution: the guard reads the
+// marker's value, not its presence. A key holding false, or the string "true",
+// is not the host's timeout verdict, so even with the execution budget gone the
+// batch keeps its on_error semantics. A guard that tests only for the key would
+// expire the execution here.
+func TestMarkerThatIsNotBooleanTrueDoesNotExpireTheExecution(t *testing.T) {
+	values := []struct {
+		name  string
+		value any
+	}{
+		{"bool_false", false},
+		{"string_true", "true"},
+	}
+	for _, v := range values {
+		t.Run(v.name, func(t *testing.T) {
+			rig := newBatchGuardRig(t, "continue", true, time.Now().Add(-time.Minute))
+			queued := rig.reportAll(t, 0, failedBatchWithMarker(v.value))
+			requireBatchOnError(t, rig, queued, types.ExecutionStatusRunning, types.NodeStatusContinued, "next")
+		})
+	}
+}
