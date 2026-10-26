@@ -17,10 +17,18 @@ import (
 // error target for error_output.
 func subWorkflowDeadlineGraph(t *testing.T, onError string, nodeTimeout time.Duration) *graph.Graph {
 	t.Helper()
+	return subWorkflowDeadlineGraphWithRetry(t, onError, nodeTimeout, nil)
+}
+
+// subWorkflowDeadlineGraphWithRetry is subWorkflowDeadlineGraph with retry
+// settings on the sub-workflow node.
+func subWorkflowDeadlineGraphWithRetry(t *testing.T, onError string, nodeTimeout time.Duration, retry *types.RetrySettings) *graph.Graph {
+	t.Helper()
 	def := subWorkflowParentDef()
 	def.Settings = &types.WorkflowSettings{Timezone: "UTC", Timeout: time.Hour}
 	def.Nodes[0].Timeout = nodeTimeout
 	def.Nodes[0].OnError = onError
+	def.Nodes[0].Retry = retry
 	def.Nodes = append(def.Nodes,
 		types.NodeDef{Name: "next", Type: "test.echo"},
 		types.NodeDef{Name: "onerr", Type: "test.echo"},
@@ -255,5 +263,42 @@ func TestSubWorkflowWaitGuardErrorIsReturned(t *testing.T) {
 	parent, err = rig.state.GetExecution(ctx, rig.parentID)
 	if err != nil || parent == nil || parent.Status != types.ExecutionStatusTimeout {
 		t.Fatalf("parent after the retry = %+v (err %v), want timeout", parent, err)
+	}
+}
+
+// TestSubWorkflowWaitSettledByTheExecutionReturnsNilUnderRetry pins the return
+// value of a handled guard on a node that retries. The execution's expiry has
+// already finalized the parked node, so falling through to the node-timeout
+// pipeline would ask the retry scheduler to reset a node that is no longer
+// active and surface "retry state ... no longer active" as the dispatch's
+// error. A handled guard must end the dispatch with nil, leave the execution
+// timed out and schedule no retry.
+func TestSubWorkflowWaitSettledByTheExecutionReturnsNilUnderRetry(t *testing.T) {
+	ctx := context.Background()
+	retry := &types.RetrySettings{MaxAttempts: 3, InitialInterval: 1}
+	g := subWorkflowDeadlineGraphWithRetry(t, "", time.Minute, retry)
+	rig := newExpireSubWorkflowRigOf(t, g)
+
+	handled, err := redeliverSubWorkflowNodeResult(t, rig, g)
+	if err != nil || !handled {
+		t.Fatalf("dispatch = (handled %v, %v), want (true, nil): the execution settled the wait, there is no retry to refuse", handled, err)
+	}
+
+	parent, err := rig.state.GetExecution(ctx, rig.parentID)
+	if err != nil || parent == nil || parent.Status != types.ExecutionStatusTimeout || parent.Error != ExecutionDeadlineExceededError {
+		t.Fatalf("parent = %+v (err %v), want timeout %q", parent, err, ExecutionDeadlineExceededError)
+	}
+	if got := rig.nodeStatus(t); got == types.NodeStatusPending {
+		t.Fatalf("sub node = %q, want it not reset for a retry", got)
+	}
+	entries, err := rig.state.ListOutbox(ctx, rig.parentID, time.Now().UTC().Add(time.Hour), 16)
+	if err != nil {
+		t.Fatalf("ListOutbox: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("recorded %d retry intents, want none: the execution's timeout is not retried", len(entries))
+	}
+	if got := rig.hooks.completions(); len(got) != 1 || got[0] != types.ExecutionStatusTimeout {
+		t.Fatalf("completion hooks = %v, want exactly [timeout]", got)
 	}
 }
