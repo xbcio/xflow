@@ -24,8 +24,9 @@ import (
 type guardState struct {
 	*expireState
 
-	mu    sync.Mutex
-	reads int
+	mu          sync.Mutex
+	reads       int
+	nodeCommits int
 }
 
 var _ ExecutionStatusReader = (*guardState)(nil)
@@ -58,6 +59,31 @@ func (s *guardState) resetReads() {
 	s.mu.Lock()
 	s.reads = 0
 	s.mu.Unlock()
+}
+
+// CommitNode counts the acyclic node commits that reach the store. The store
+// fences a terminal execution on its own, so a guard that handled a timeout but
+// let the commit run on anyway would be invisible in the final state; the count
+// is what shows the commit never started.
+func (s *guardState) CommitNode(ctx context.Context, req CommitNodeRequest) (CommitNodeResult, error) {
+	s.mu.Lock()
+	s.nodeCommits++
+	s.mu.Unlock()
+	return s.expireState.CommitNode(ctx, req)
+}
+
+// CommitLeasedNode is the cyclic path's committer; the same count applies.
+func (s *guardState) CommitLeasedNode(ctx context.Context, req CommitNodeRequest) (CommitNodeResult, error) {
+	s.mu.Lock()
+	s.nodeCommits++
+	s.mu.Unlock()
+	return s.expireState.CommitLeasedNode(ctx, req)
+}
+
+func (s *guardState) nodeCommitCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.nodeCommits
 }
 
 // guardSpec is the workflow a guardRig runs. bounded declares settings.timeout
@@ -175,6 +201,9 @@ func (r *guardRig) requireExpired(t *testing.T) {
 	}
 	if got := taskNames(r.queue.Drain()); len(got) != 0 {
 		t.Fatalf("downstream enqueued %v, want nothing past the execution deadline", got)
+	}
+	if got := r.state.nodeCommitCount(); got != 0 {
+		t.Fatalf("node commits reaching the store = %d, want 0: the node must not be committed at all", got)
 	}
 	want := []types.ExecutionStatus{types.ExecutionStatusTimeout}
 	if got := r.hooks.completions(); !slices.Equal(got, want) {
@@ -434,6 +463,9 @@ func TestNodeTimeoutPastTheExecutionDeadlineYieldsToACancel(t *testing.T) {
 			}
 			if got := taskNames(rig.queue.Drain()); len(got) != 0 {
 				t.Fatalf("downstream enqueued %v, want nothing", got)
+			}
+			if got := rig.state.nodeCommitCount(); got != 0 {
+				t.Fatalf("node commits reaching the store = %d, want 0: the cancel owns the execution", got)
 			}
 			if got := rig.hooks.completions(); len(got) != 0 {
 				t.Fatalf("OnExecutionComplete statuses = %v, want none", got)
