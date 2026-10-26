@@ -214,8 +214,9 @@ describe("xflow.editor responsive rules (§7.1 breakpoints)", () => {
     const preludes = [...css.matchAll(/@media\s+([^{]+)\{/g)].map((match) => match[1].trim());
     for (const prelude of preludes) {
       expect(prelude, `@media ${prelude}`).not.toMatch(/\(\s*(?:max|min)-(?:width|height)\b/);
-      // Whatever remains is a preference query (the theme), never a size one.
-      expect(prelude, `@media ${prelude}`).toMatch(/prefers-/);
+      // Whatever remains is a user-preference query (the theme, motion, forced
+      // colours), never a size one.
+      expect(prelude, `@media ${prelude}`).toMatch(/prefers-|forced-colors/);
     }
   });
 
@@ -835,6 +836,93 @@ describe("round-2 visual audit fixes", () => {
   it("draws the section-card stack at the baseline 12px gap on the raised surface", () => {
     expect(rule(".xflow-editor .xflow-editor-config")).toMatch(/gap:\s*var\(--xflow-space-3\)\s*;/);
     expect(css).toMatch(/--xflow-editor-section-card-bg:\s*var\(--xflow-surface-raised\)\s*;/);
+  });
+});
+
+// Contrast, hit-target and forced-colours rules the browser applies but jsdom
+// cannot see, so the sheet is read from disk.
+describe("xflow.editor small-text tones, hit targets and forced colours", () => {
+  /** The declaration block of the rule whose selector list is exactly `selector`. */
+  const block = (selector: string): string => {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = css.match(new RegExp(`(?:^|\\})\\s*${escaped}\\s*\\{([^}]*)\\}`));
+    expect(match, `${selector} has a rule`).not.toBeNull();
+    return match?.[1] ?? "";
+  };
+
+  it("reads the 12px status and note text from the -fg tones, not the raw colours", () => {
+    expect(block('.xflow-editor-output__note[data-tone="warning"]')).toMatch(/color:\s*var\(--xflow-warning-fg\)\s*;/);
+    for (const tone of ["success", "warning", "danger", "info"]) {
+      expect(block(`.xflow-editor-kvlist__status[data-tone="${tone}"]`), tone).toMatch(
+        new RegExp(`color:\\s*var\\(--xflow-${tone}-fg\\)\\s*;`)
+      );
+    }
+  });
+
+  it("grows the sub-24px hit targets with a transparent ::after, leaving the visual size alone", () => {
+    for (const selector of [
+      ".xflow-editor-section-action",
+      ".xflow-editor-connection-delete",
+      ".xflow-editor .xflow-editor-hint__help"
+    ]) {
+      expect(block(selector), `${selector} anchors its target`).toMatch(/position:\s*relative\s*;/);
+      const after = block(`${selector}::after`);
+      expect(after, `${selector}::after`).toMatch(/content:\s*""\s*;/);
+      expect(after, `${selector}::after`).toMatch(/position:\s*absolute\s*;/);
+      expect(after, `${selector}::after`).toMatch(
+        /inset:\s*calc\(\(100% - var\(--xflow-control-height-sm\)\) \/ 2\)\s*;/
+      );
+    }
+    // The visible box stays 20px / 14px.
+    expect(block(".xflow-editor-section-action")).toMatch(/height:\s*20px\s*;[\s\S]*width:\s*20px\s*;/);
+    expect(block(".xflow-editor-connection-delete")).toMatch(/height:\s*20px\s*;[\s\S]*width:\s*20px\s*;/);
+    expect(block(".xflow-editor .xflow-editor-hint__help")).toMatch(/height:\s*14px\s*;[\s\S]*width:\s*14px\s*;/);
+  });
+
+  it("keeps an outline on every input focus state, which forced colours map to a system colour", () => {
+    const focusRules = [
+      ".xflow-editor .xflow-editor-field:focus,\n.xflow-editor .xflow-editor-textarea:focus,\n.xflow-editor .xflow-editor-select__root.ant-select-focused",
+      ".xflow-editor .xflow-editor-library-search:focus-within",
+      ".xflow-editor .xflow-editor-select__root.ant-select-focused"
+    ];
+    for (const selector of focusRules) {
+      const rules = [...css.matchAll(new RegExp(`(?:^|\\})\\s*${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\{([^}]*)\\}`, "g"))];
+      expect(rules.length, selector).toBeGreaterThan(0);
+      for (const [, body] of rules) {
+        if (/box-shadow:\s*0 0 0 3px/.test(body)) {
+          expect(body, `${selector} draws its ring with box-shadow only`).toMatch(/outline:\s*2px solid transparent\s*;/);
+        }
+      }
+    }
+  });
+
+  it("pins the base outline colour of those inputs to transparent, so focus cannot fade a dark ring in", () => {
+    // AntD controls carry `transition: all`; with the initial outline colour
+    // (currentcolor) in the base state, focusing transitions a dark outline to
+    // transparent. Matching the base to the focus value removes the flash.
+    for (const selector of [
+      ".xflow-editor .xflow-editor-field,\n.xflow-editor .xflow-editor-textarea,\n.xflow-editor .xflow-editor-select__root",
+      ".xflow-editor .xflow-editor-library-search"
+    ]) {
+      expect(block(selector), selector).toMatch(/outline-color:\s*transparent\s*;/);
+    }
+  });
+
+  it("draws a 2px Highlight outline on those focus states under forced-colors", () => {
+    const media = css.match(/@media\s*\(forced-colors:\s*active\)\s*\{([\s\S]*?\n\})\s*\n/);
+    expect(media, "a forced-colors block").not.toBeNull();
+    const body = media?.[1] ?? "";
+    for (const selector of [
+      ".xflow-editor .xflow-editor-field:focus",
+      ".xflow-editor .xflow-editor-textarea:focus",
+      ".xflow-editor .xflow-editor-select__root:focus-within",
+      ".xflow-editor .xflow-editor-library-search:focus-within"
+    ]) {
+      expect(body, selector).toContain(selector);
+    }
+    expect(body).toMatch(/outline:\s*2px solid Highlight\s*;/);
+    // The branch states a system keyword, not a colour literal.
+    expect(body).not.toMatch(/#[0-9a-f]{3,8}\b|rgba?\(|hsla?\(/i);
   });
 });
 
