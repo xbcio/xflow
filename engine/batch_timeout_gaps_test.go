@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -73,5 +74,52 @@ func TestMarkerThatIsNotBooleanTrueDoesNotExpireTheExecution(t *testing.T) {
 			queued := rig.reportAll(t, 0, failedBatchWithMarker(v.value))
 			requireBatchOnError(t, rig, queued, types.ExecutionStatusRunning, types.NodeStatusContinued, "next")
 		})
+	}
+}
+
+// TestMarkerStaysOutOfEveryBatchItemShape: the marker is one top-level key and
+// the items array is left exactly as the body produced it, whatever shape the
+// timed-out entries have. The three shapes are an item with no data, an item
+// whose data is a map the guest wrote, and an item that failed. A guest's map
+// must come back untouched (the marker would otherwise be forgeable and its own
+// output rewritten), a nil must stay nil, and a failure placeholder is only
+// {_error, _index}.
+func TestMarkerStaysOutOfEveryBatchItemShape(t *testing.T) {
+	guestMap := map[string]any{"id": 1}
+	results := []BatchItemResult{
+		{Index: 0, Data: nil, Timeout: true},
+		{Index: 1, Data: guestMap, Timeout: true},
+		{Index: 2, Err: errors.New("timeout: deadline exceeded"), Timeout: true},
+		{Index: 3, Data: map[string]any{"id": 3}},
+	}
+	data, verdict := BatchResultForCommit(results, true, nil)
+	if verdict != nil {
+		t.Fatalf("verdict = %v, want a settled batch under continue_on_error", verdict)
+	}
+	if marker, _ := data[batchTimeoutKey].(bool); !marker {
+		t.Fatalf("batch data %q = %v, want true at the top level", batchTimeoutKey, data[batchTimeoutKey])
+	}
+	items, ok := data["items"].([]any)
+	if !ok || len(items) != len(results) {
+		t.Fatalf("items = %v, want %d entries", data["items"], len(results))
+	}
+	for i, item := range items {
+		if row, isMap := item.(map[string]any); isMap {
+			if _, inItem := row[batchTimeoutKey]; inItem {
+				t.Fatalf("item %d = %v holds %q: the marker belongs beside items, not in them", i, row, batchTimeoutKey)
+			}
+		}
+	}
+	// A nil Data is a typed nil map once it sits in an []any, so it is checked as
+	// a map: a marker written into a freshly made map would make it non-nil.
+	if first, isMap := items[0].(map[string]any); !isMap || first != nil {
+		t.Fatalf("item 0 = %#v, want a nil map kept as nil", items[0])
+	}
+	if len(guestMap) != 1 || guestMap["id"] != 1 {
+		t.Fatalf("the guest's map = %v, want it left untouched", guestMap)
+	}
+	placeholder, isMap := items[2].(map[string]any)
+	if !isMap || len(placeholder) != 2 {
+		t.Fatalf("item 2 = %v, want exactly {%s, _index}", items[2], batchErrorKey)
 	}
 }
