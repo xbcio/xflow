@@ -862,7 +862,6 @@ describe("xflow.editor small-text tones, hit targets and forced colours", () => 
 
   it("grows the sub-24px hit targets with a transparent ::after, leaving the visual size alone", () => {
     for (const selector of [
-      ".xflow-editor-section-action",
       ".xflow-editor-connection-delete",
       ".xflow-editor .xflow-editor-hint__help"
     ]) {
@@ -875,7 +874,6 @@ describe("xflow.editor small-text tones, hit targets and forced colours", () => 
       );
     }
     // The visible box stays 20px / 14px.
-    expect(block(".xflow-editor-section-action")).toMatch(/height:\s*20px\s*;[\s\S]*width:\s*20px\s*;/);
     expect(block(".xflow-editor-connection-delete")).toMatch(/height:\s*20px\s*;[\s\S]*width:\s*20px\s*;/);
     expect(block(".xflow-editor .xflow-editor-hint__help")).toMatch(/height:\s*14px\s*;[\s\S]*width:\s*14px\s*;/);
   });

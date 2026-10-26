@@ -2121,42 +2121,6 @@ button.xflow-editor-overview__run:hover {
   width: 12px;
 }
 
-.xflow-editor-section-action {
-  align-items: center;
-  background: transparent;
-  border: 0;
-  border-radius: var(--xflow-radius-xs);
-  color: var(--xflow-text-tertiary);
-  cursor: pointer;
-  display: inline-flex;
-  height: 20px;
-  justify-content: center;
-  padding: 0;
-  position: relative;
-  width: 20px;
-}
-
-/* WCAG 2.5.8: the 20px glyph button keeps its visual size; a transparent
- * pseudo-element, which belongs to the button, grows the target to the 24px
- * control step. The inset resolves against the padding box, so it is -2px. */
-.xflow-editor-section-action::after {
-  content: "";
-  inset: calc((100% - var(--xflow-control-height-sm)) / 2);
-  position: absolute;
-}
-
-.xflow-editor-section-action:hover {
-  background: var(--xflow-hover);
-  color: var(--xflow-text);
-}
-
-.xflow-editor-section-action:focus-visible {
-  background: var(--xflow-primary-bg-subtle);
-  color: var(--xflow-primary-fg);
-  outline: 2px solid var(--xflow-focus-ring);
-  outline-offset: 2px;
-}
-
 .xflow-editor-form label {
   align-items: center;
   display: grid;
