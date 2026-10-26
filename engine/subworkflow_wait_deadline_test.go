@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -347,5 +348,83 @@ func TestSubWorkflowWaitWithoutNodeTimeoutLeavesTheExecutionToTheSweep(t *testin
 	}
 	if got := rig.hooks.completions(); len(got) != 1 || got[0] != types.ExecutionStatusTimeout {
 		t.Fatalf("completion hooks = %v, want exactly [timeout]", got)
+	}
+}
+
+// TestSubWorkflowChildTimingOutBeforeItsParentFollowsOnError pins R3 from the
+// child's side: a child that ran out of its OWN settings.timeout while the
+// parent's deadline is still an hour away is the parent node's failure, and the
+// parent routes it through the node's on_error. The parent's execution is not
+// expired: stop fails the node and with it the execution, continue moves on past
+// the node, and error_output takes the node's error port as a success.
+func TestSubWorkflowChildTimingOutBeforeItsParentFollowsOnError(t *testing.T) {
+	cases := []struct {
+		name       string
+		onError    string
+		wantParent types.ExecutionStatus
+		wantNode   types.NodeStatus
+		wantRoute  string
+	}{
+		{"stop", "", types.ExecutionStatusFailed, types.NodeStatusFailed, ""},
+		{"continue", string(types.OnErrorContinue), types.ExecutionStatusRunning, types.NodeStatusContinued, "next"},
+		{"error_output", string(types.OnErrorOutput), types.ExecutionStatusRunning, types.NodeStatusSuccess, "onerr"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			g := subWorkflowDeadlineGraph(t, tc.onError, time.Minute)
+			rig := newExpireSubWorkflowRigOf(t, g)
+			childID := rig.link.ChildExecutionID
+
+			// The rig seeds an already-reached parent deadline; push it out so only
+			// the child's budget has run out, and drop the engine's memo of it.
+			rig.state.fakeState.mu.Lock()
+			rig.state.fakeState.executions[rig.parentID].Deadline = time.Now().Add(time.Hour)
+			rig.state.fakeState.executions[childID].Deadline = pastDeadline
+			rig.state.fakeState.mu.Unlock()
+			rig.eng.EvictExecution(rig.parentID)
+			rig.log.track = childID
+			rig.log.clear()
+			// The child's own start task is still queued from the rig's dispatch;
+			// only what the conclusion schedules is of interest below.
+			rig.eng.queue.(*fakeQueue).Drain()
+
+			rig.expire(t, childID, ExpireOutcomeExpired)
+
+			child, err := rig.state.GetExecution(ctx, childID)
+			if err != nil || child == nil || child.Status != types.ExecutionStatusTimeout {
+				t.Fatalf("child = %+v (err %v), want timeout", child, err)
+			}
+			parent, err := rig.state.GetExecution(ctx, rig.parentID)
+			if err != nil || parent == nil {
+				t.Fatalf("read the parent: parent=%v err=%v", parent, err)
+			}
+			if parent.Status != tc.wantParent {
+				t.Fatalf("parent = %s %q, want %s: the child's timeout is the node's failure, routed by on_error", parent.Status, parent.Error, tc.wantParent)
+			}
+			node, err := rig.state.GetNode(ctx, rig.parentID, "sub")
+			if err != nil || node == nil || node.Status != tc.wantNode {
+				t.Fatalf("sub node = %+v (err %v), want %s", node, err, tc.wantNode)
+			}
+			if !strings.Contains(node.Error, "timed out") || !strings.Contains(node.Error, string(childID)) {
+				t.Fatalf("sub node error = %q, want the child's timeout and identity", node.Error)
+			}
+			if got := rig.hooks.completions(); len(got) != 1 || got[0] != types.ExecutionStatusTimeout {
+				t.Fatalf("completion hooks of the child = %v, want exactly [timeout]", got)
+			}
+			// The route's follow-up reaches the queue through the commit's outbox
+			// flush; a stopped parent schedules nothing.
+			var routed []string
+			for _, queued := range rig.eng.queue.(*fakeQueue).Drain() {
+				routed = append(routed, queued.NodeName)
+			}
+			if tc.wantRoute == "" {
+				if len(routed) != 0 {
+					t.Fatalf("scheduled %v after a stopped parent, want nothing", routed)
+				}
+			} else if len(routed) != 1 || routed[0] != tc.wantRoute {
+				t.Fatalf("scheduled %v, want exactly [%s]: the failure's route", routed, tc.wantRoute)
+			}
+		})
 	}
 }
