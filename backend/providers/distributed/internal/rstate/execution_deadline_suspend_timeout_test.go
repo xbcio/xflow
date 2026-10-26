@@ -2,6 +2,7 @@ package rstate
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 	"time"
@@ -106,4 +107,97 @@ func TestNodeTimeoutThatFiresBeforeTheDeadlineResumesTheNodeOnRedis(t *testing.T
 				"so assert the waiter is cleaned up instead", waiterAfter)
 		}
 	})
+}
+
+// TestNodeTimeoutThatFiresAfterTheDeadlineIsRefusedOnceTheExecutionExpiredOnRedis parks
+// a node on a signal with a Timeout in an execution whose deadline is already
+// behind the clock, expires the execution, and only then lets the node's
+// timeout wakeup reach a worker. The execution is over and its node is
+// canceled, so the wakeup must be refused and must not run the node: a node
+// timeout never outlives the execution that holds it.
+//
+// The two subtests differ in where the wakeup is when the expiry arrives, as in
+// the timer test: still in the outbox with an availability that was not pulled
+// forward to the deadline, or already delivered and sitting in the queue. The
+// Redis store drops the outbox of a timed-out execution, so no late wakeup can
+// be delivered from it afterwards.
+func TestNodeTimeoutThatFiresAfterTheDeadlineIsRefusedOnceTheExecutionExpiredOnRedis(t *testing.T) {
+	cases := []struct {
+		name string
+		wait time.Duration
+	}{
+		{name: "timeout_still_in_the_outbox", wait: farAway},
+		{name: "timeout_already_queued", wait: timerWait},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			rig := newDeadlineRaceRig(t)
+			g := raceGraph(t, "deadline-suspend-node-timeout", 0, types.NodeDef{Name: "park", Type: "test.race_park"})
+			id := rig.submit(ctx, g)
+			deadline := rig.snapshot(ctx, id).Deadline
+
+			parkedAt := time.Now()
+			rig.parkWith(ctx, id, signalWithTimeout(tc.wait))
+
+			var wakeup engine.Task
+			if tc.wait == timerWait {
+				// Delivery never looks at the deadline, so a due timeout is queued
+				// although the execution is already past it. The commit that parked
+				// the node may have flushed it already, so read it from the queue.
+				wakeup = *rig.onlyQueuedWakeup(ctx, id, types.TimeoutFired)
+			} else {
+				entry := rig.onlyEntry(ctx, id, types.TimeoutFired)
+				// The wakeup is where the spec put it, the park time plus the
+				// Timeout, and so behind the deadline: it was not pulled forward to
+				// it. The store truncates to the millisecond, hence the allowance.
+				if entry.AvailableAt.Before(parkedAt.Add(tc.wait - time.Millisecond)) {
+					t.Fatalf("timeout entry is available at %v, want no earlier than %v after the park at %v (clamped to the deadline %v?)",
+						entry.AvailableAt, tc.wait, parkedAt, deadline)
+				}
+				if !entry.AvailableAt.After(deadline) {
+					t.Fatalf("timeout entry is available at %v, want it after the deadline %v", entry.AvailableAt, deadline)
+				}
+				wakeup = entry.Task
+				if err := rig.eng.FlushOutbox(ctx, id); err != nil {
+					t.Fatalf("FlushOutbox() error = %v", err)
+				}
+				// The queue ignores the delay it is handed, so a flush of an entry
+				// that is not due would show up here as a queued task.
+				if early := rig.queue.take(id); len(early) != 0 {
+					t.Fatalf("a node timeout an hour away was delivered at once: %+v", early)
+				}
+			}
+
+			outcome, err := rig.eng.ExpireExecution(ctx, id)
+			if err != nil || outcome != engine.ExpireOutcomeExpired {
+				t.Fatalf("ExpireExecution() = (%q, %v), want expired", outcome, err)
+			}
+			if snap := rig.snapshot(ctx, id); snap.Status != types.ExecutionStatusTimeout || snap.Error != engine.ExecutionDeadlineExceededError {
+				t.Fatalf("execution = %q %q, want timeout for its deadline", snap.Status, snap.Error)
+			}
+			rig.requireNodesCanceled(ctx, 0, id, []string{"park"})
+			if left := rig.outboxSize(ctx, id); left != 0 {
+				t.Fatalf("a timed-out execution still holds %d outbox records", left)
+			}
+
+			// The node's timeout elapses and a worker is handed its wakeup.
+			if _, err := rig.eng.BuildTaskLease(ctx, &wakeup); !errors.Is(err, engine.ErrExecutionInactive) {
+				t.Fatalf("a node timeout wakeup after the execution timeout was leased: error = %v, want ErrExecutionInactive", err)
+			}
+
+			if snap := rig.snapshot(ctx, id); snap.Status != types.ExecutionStatusTimeout || snap.Error != engine.ExecutionDeadlineExceededError {
+				t.Fatalf("execution = %q %q after the late wakeup, want it to stay timeout for its deadline", snap.Status, snap.Error)
+			}
+			rig.requireNodesCanceled(ctx, 0, id, []string{"park"})
+			rig.requireAnnouncedOnly(0, id, types.ExecutionStatusTimeout)
+			if left := rig.queue.take(id); len(left) != 0 {
+				t.Fatalf("refusing the late wakeup left %d tasks queued: %+v", len(left), left)
+			}
+			if left := rig.outboxSize(ctx, id); left != 0 {
+				t.Fatalf("refusing the late wakeup left %d outbox records", left)
+			}
+			rig.requireDrained(0, g.Name(), id)
+		})
+	}
 }
