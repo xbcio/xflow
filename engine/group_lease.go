@@ -281,6 +281,18 @@ func (e *Engine) CommitGroupResult(ctx context.Context, lease *TaskLease, res Gr
 	if !active {
 		return CommitOutcomeExecutionInactive, nil
 	}
+	// A group that reports timeout once the execution's own deadline is
+	// reached is the execution's timeout, not a group failure to commit as
+	// fatal. Only the timeout outcome is judged. Handled is answered as
+	// inactive, the outcome of every commit that finds the execution already
+	// over; the group is deliberately not committed.
+	if res.Outcome == GroupOutcomeTimeout {
+		if handled, err := e.expireIfExecutionDeadlineReached(ctx, lease.Task.ExecutionID, g, time.Now()); err != nil {
+			return "", err
+		} else if handled {
+			return CommitOutcomeExecutionInactive, nil
+		}
+	}
 
 	unitIdx := lease.Task.UnitIdx
 	if unitIdx < 0 || unitIdx >= g.UnitCount() || g.UnitKindAt(unitIdx) != graph.UnitGroup {
