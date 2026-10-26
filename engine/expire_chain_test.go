@@ -148,37 +148,92 @@ func TestExpireExecutionCascadesThroughAThreeLevelChain(t *testing.T) {
 //
 // F1: the grandchild cancel is not retried by ExpireExecution; the gap was ruled
 // out of scope for this round, so this test only pins the current state. If a
-// later change closes it, this test is the one to flip.
+// later change closes it, only the "F1 as it stands" group below flips; the
+// invariants group must keep holding under any reasonable fix.
 func TestExpireExecutionDoesNotRetryAFailedGrandchildCancel(t *testing.T) {
+	// Both groups read the same run, so a red group does not hide the other.
+	run := runFailedGrandchildCancel(t)
+
+	// Invariants: what any reasonable fix of F1 is expected to keep. The parent's
+	// expiry is written and announced once, the child is stopped, and the
+	// deadline entry is acknowledged exactly once.
+	t.Run("invariants", func(t *testing.T) {
+		if parent := run.parent; parent.Status != types.ExecutionStatusTimeout || parent.Error != ExecutionDeadlineExceededError {
+			t.Fatalf("parent = %s %q, want timeout %q", parent.Status, parent.Error, ExecutionDeadlineExceededError)
+		}
+		if child := run.child; child.Status != types.ExecutionStatusCanceled {
+			t.Fatalf("child = %s, want canceled", child.Status)
+		}
+		// The deadline entry is withdrawn if and only if the call succeeded. The
+		// original pin said "acked exactly once"; that is this line plus the F1
+		// group's firstErr == nil. Split this way, a fix that makes the first call
+		// report the grandchild (an error, hence no ack until the replay) flips
+		// only the F1 group, and nothing may ever ack a call that failed.
+		wantAcks := 0
+		if run.firstErr == nil {
+			wantAcks = 1
+		}
+		if n := run.acksAfterFirst; n != wantAcks {
+			t.Fatalf("acked %d times after a call that returned %v, want %d: the entry is withdrawn only once the call succeeded", n, run.firstErr, wantAcks)
+		}
+		if got := run.completions; len(got) != 1 || got[0] != types.ExecutionStatusTimeout {
+			t.Fatalf("parent completion hooks = %v, want exactly [timeout]", got)
+		}
+	})
+
+	// F1 as it stands: the grandchild's failed cancel is invisible to the
+	// parent's call (the child's Cancel keeps only the log line), so the call
+	// returns expired with no error and the grandchild stays canceling, even
+	// across the resumed call. Flip this group when F1 is fixed.
+	t.Run("f1_as_it_stands", func(t *testing.T) {
+		if run.firstErr != nil || run.firstOutcome != ExpireOutcomeExpired {
+			t.Fatalf("ExpireExecution() = (%q, %v), want (expired, nil): the grandchild failure does not reach the parent", run.firstOutcome, run.firstErr)
+		}
+		if grand := run.grand; grand.Status != types.ExecutionStatusCanceling {
+			t.Fatalf("grandchild = %s, want canceling: its cancel failed half way", grand.Status)
+		}
+		if run.secondErr != nil || run.secondOutcome != ExpireOutcomeResumed {
+			t.Fatalf("second ExpireExecution() = (%q, %v), want (resumed, nil)", run.secondOutcome, run.secondErr)
+		}
+		if grand := run.grandAfterSecond; grand.Status != types.ExecutionStatusCanceling {
+			t.Fatalf("grandchild after the resumed expiry = %s, want still canceling (F1: not retried)", grand.Status)
+		}
+	})
+}
+
+// failedGrandchildCancelRun is what the F1 scenario observed, recorded rather
+// than asserted, so the two assertion groups of the test read one run and a red
+// group cannot hide the other.
+type failedGrandchildCancelRun struct {
+	firstOutcome, secondOutcome ExpireOutcome
+	firstErr, secondErr         error
+
+	// Read after the first call.
+	parent, child, grand *ExecutionSnapshot
+	acksAfterFirst       int
+
+	// Read after the second call.
+	grandAfterSecond *ExecutionSnapshot
+	completions      []types.ExecutionStatus
+}
+
+// runFailedGrandchildCancel makes the grandchild's own cancel fail half way,
+// expires the parent twice and records what each call and the stores showed.
+func runFailedGrandchildCancel(t *testing.T) failedGrandchildCancelRun {
+	t.Helper()
 	ctx := context.Background()
 	rig := newExpireChainRig(t)
 	rig.state.failListSuspendedFor(rig.grandchild, errors.New("injected: grandchild list suspended nodes failed"))
 
-	got, err := rig.eng.ExpireExecution(ctx, rig.parentID)
-	if err != nil || got != ExpireOutcomeExpired {
-		t.Fatalf("ExpireExecution() = (%q, %v), want (expired, nil): the grandchild failure does not reach the parent", got, err)
-	}
-	if parent := rig.status(t, rig.parentID); parent.Status != types.ExecutionStatusTimeout || parent.Error != ExecutionDeadlineExceededError {
-		t.Fatalf("parent = %s %q, want timeout %q", parent.Status, parent.Error, ExecutionDeadlineExceededError)
-	}
-	if child := rig.status(t, rig.childID); child.Status != types.ExecutionStatusCanceled {
-		t.Fatalf("child = %s, want canceled", child.Status)
-	}
-	if grand := rig.status(t, rig.grandchild); grand.Status != types.ExecutionStatusCanceling {
-		t.Fatalf("grandchild = %s, want canceling: its cancel failed half way", grand.Status)
-	}
-	if n := rig.log.count("ack"); n != 1 {
-		t.Fatalf("acked %d times, want 1: the parent's expiry is settled", n)
-	}
+	var run failedGrandchildCancelRun
+	run.firstOutcome, run.firstErr = rig.eng.ExpireExecution(ctx, rig.parentID)
+	run.parent = rig.status(t, rig.parentID)
+	run.child = rig.status(t, rig.childID)
+	run.grand = rig.status(t, rig.grandchild)
+	run.acksAfterFirst = rig.log.count("ack")
 
-	got, err = rig.eng.ExpireExecution(ctx, rig.parentID)
-	if err != nil || got != ExpireOutcomeResumed {
-		t.Fatalf("second ExpireExecution() = (%q, %v), want (resumed, nil)", got, err)
-	}
-	if grand := rig.status(t, rig.grandchild); grand.Status != types.ExecutionStatusCanceling {
-		t.Fatalf("grandchild after the resumed expiry = %s, want still canceling (F1: not retried)", grand.Status)
-	}
-	if got := rig.hooks.completions(); len(got) != 1 || got[0] != types.ExecutionStatusTimeout {
-		t.Fatalf("parent completion hooks = %v, want exactly [timeout]", got)
-	}
+	run.secondOutcome, run.secondErr = rig.eng.ExpireExecution(ctx, rig.parentID)
+	run.grandAfterSecond = rig.status(t, rig.grandchild)
+	run.completions = rig.hooks.completions()
+	return run
 }
