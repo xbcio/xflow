@@ -413,3 +413,99 @@ func TestSettingsTimeoutRerunStartsANewClock(t *testing.T) {
 		t.Fatalf("parent after the rerun = %q %q, want it still timeout", again.Status, again.Error)
 	}
 }
+
+// TestSettingsTimeoutCancelsTheSubWorkflowChild is scenario 5: a parent whose
+// settings.timeout runs out while its sub-workflow node waits on a child that
+// never finishes ends as timeout, and the child it started is canceled by the
+// parent's expiry. The child has no budget of its own and parks on a signal
+// nobody sends, so nothing but the parent's cascade can end it. The engine-level
+// cases (execution_deadline_subworkflow_test.go and the engine's own) pin the
+// cascade's details; this one proves it holds through Invoke on the SDK engine.
+func TestSettingsTimeoutCancelsTheSubWorkflowChild(t *testing.T) {
+	const budget = 2500 * time.Millisecond
+	eng := newSettingsTimeoutEngine(t)
+	ctx, cancel := context.WithTimeout(context.Background(), settingsTimeoutWaitLimit)
+	defer cancel()
+
+	child := Workflow("settings-timeout-sw-child")
+	childStart := child.Node("start", node.Start())
+	childPark := child.Node("park", node.Wait("never-signalled"))
+	child.Connect(childStart, childPark)
+	if _, err := eng.AddWorkflow(ctx, child); err != nil {
+		t.Fatalf("AddWorkflow(child) error = %v", err)
+	}
+
+	parent := Workflow("settings-timeout-sw-parent")
+	parentStart := parent.Node("start", node.Start())
+	sub := parent.Node("sub", node.SubWorkflow("settings-timeout-sw-child"))
+	parent.Connect(parentStart, sub)
+	parentWorkflowID := addWorkflowWithTimeout(t, eng, parent, budget)
+
+	parentID, err := eng.Invoke(ctx, parentWorkflowID, Start(), nil)
+	if err != nil {
+		t.Fatalf("Invoke() error = %v", err)
+	}
+
+	// The cascade is only worth testing against a child that is really running:
+	// wait for the parent's node to name its child and for the child to park.
+	var childID types.ExecutionID
+	waitForTransientCondition(t, 10*time.Second, func() bool {
+		detail, err := eng.Inspect(ctx, parentID, "sub")
+		if err != nil || len(detail.Nodes) != 1 {
+			return false
+		}
+		childID = detail.Nodes[0].ChildExecutionID
+		return childID != ""
+	})
+	waitForNodeStatus(t, ctx, eng, childID, "park", types.NodeStatusSuspended)
+
+	result, err := eng.Wait(ctx, parentID)
+	if err != nil {
+		t.Fatalf("Wait(parent) error = %v", err)
+	}
+	if result.Status != types.ExecutionStatusTimeout || result.Error != engine.ExecutionDeadlineExceededError {
+		t.Fatalf("parent = %q error %q, want timeout %q\n%s",
+			result.Status, result.Error, engine.ExecutionDeadlineExceededError, describeExecution(ctx, eng, parentID))
+	}
+
+	// Wait returns at the parent's status write; the cascade runs right after
+	// it, so the child is polled for, with a bound.
+	cascadeCtx, cancelCascade := context.WithTimeout(ctx, 8*time.Second)
+	defer cancelCascade()
+	waitForExecStatus(t, cascadeCtx, eng, childID, types.ExecutionStatusCanceled)
+
+	parentDetail, err := eng.Inspect(ctx, parentID)
+	if err != nil {
+		t.Fatalf("Inspect(parent) error = %v", err)
+	}
+	if parentDetail.CreatedAt == nil {
+		t.Fatal("Inspect(parent) CreatedAt = nil, want stamped")
+	}
+	childDetail, err := eng.Inspect(ctx, childID)
+	if err != nil {
+		t.Fatalf("Inspect(child) error = %v", err)
+	}
+	if childDetail.ParentID != parentID || childDetail.ParentNode != "sub" {
+		t.Fatalf("child linkage = (%q, %q), want (%q, %q)", childDetail.ParentID, childDetail.ParentNode, parentID, "sub")
+	}
+	// The child was stopped by the parent's expiry, not by anything earlier: it
+	// was still parked when the parent's budget began to run out.
+	if childDetail.UpdatedAt == nil || childDetail.UpdatedAt.Before(parentDetail.CreatedAt.Add(budget-50*time.Millisecond)) {
+		t.Fatalf("child was canceled at %v, want it to outlive the parent's %v budget from %v",
+			childDetail.UpdatedAt, budget, parentDetail.CreatedAt)
+	}
+
+	// The parent's node keeps the child it waited on and is closed as canceled;
+	// the child's cancellation must not turn the parent into anything but its
+	// timeout.
+	parentSub, err := eng.Inspect(ctx, parentID, "sub")
+	if err != nil || len(parentSub.Nodes) != 1 {
+		t.Fatalf("Inspect(parent, sub) = %+v, %v", parentSub.Nodes, err)
+	}
+	if got := parentSub.Nodes[0]; got.Status != types.NodeStatusCanceled || got.ChildExecutionID != childID {
+		t.Fatalf("parent sub node = %q child %q, want canceled and still naming %q", got.Status, got.ChildExecutionID, childID)
+	}
+	if parentSub.Status != types.ExecutionStatusTimeout || parentSub.Error != engine.ExecutionDeadlineExceededError {
+		t.Fatalf("parent after the cascade = %q %q, want it still timeout", parentSub.Status, parentSub.Error)
+	}
+}
