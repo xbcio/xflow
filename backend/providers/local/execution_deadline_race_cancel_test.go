@@ -3,6 +3,7 @@ package local
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/xbcio/xflow/engine"
@@ -113,6 +114,113 @@ func TestExpireRacingCancelLeavesOneTerminalStateAndNoLiveChild(t *testing.T) {
 		node, err := rig.state.GetNode(ctx, parentID, "sub")
 		if err != nil || node == nil || node.Status != types.NodeStatusCanceled {
 			t.Fatalf("round %d: parked sub-workflow node = (%+v, %v), want canceled", round, node, err)
+		}
+		rig.requireDrained(round)
+	}
+	t.Logf("%d rounds: %d ended canceled, %d ended timeout", raceRounds(), canceled, timedOut)
+}
+
+// raceParkedNodes is how many independent nodes the cancel race parks at once.
+// One is the case every other race covers; the cascade over a set of suspended
+// nodes only shows its shape from the second node on, so the number is above
+// two.
+const raceParkedNodes = 3
+
+// raceParallelParkGraph compiles a workflow holding settings.timeout whose n
+// nodes have no connections, so every one of them is an entry node and Submit
+// queues a task for each.
+func raceParallelParkGraph(t *testing.T, n int) *graph.Graph {
+	t.Helper()
+	nodes := make([]types.NodeDef, n)
+	for i := range nodes {
+		nodes[i] = types.NodeDef{Name: fmt.Sprintf("park%d", i), Type: "test.race_park"}
+	}
+	return raceGraph(t, "deadline-race-parallel-park", 0, nodes...)
+}
+
+// parkEveryNode drives each of the execution's n queued entry tasks to a
+// suspension on a signal of its own ("go-<node>"), the way parkOnSignal does for
+// a single node, and returns the node names in the order they were parked.
+func (r *deadlineRaceRig) parkEveryNode(ctx context.Context, id types.ExecutionID, n int) []string {
+	r.t.Helper()
+	tasks := r.queue.take(id)
+	if len(tasks) != n {
+		r.t.Fatalf("execution %s has %d queued tasks, want %d", id, len(tasks), n)
+	}
+	names := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		lease, err := r.eng.BuildTaskLease(ctx, task)
+		if err != nil {
+			r.t.Fatalf("BuildTaskLease(%s) error = %v", task.NodeName, err)
+		}
+		err = r.eng.CommitTaskResult(ctx, lease, engine.TaskResult{
+			Suspend: &types.SuspendSpec{Mode: types.ModeSignal, Signals: []string{"go-" + task.NodeName}},
+		})
+		if err != nil {
+			r.t.Fatalf("CommitTaskResult(suspend %s) error = %v", task.NodeName, err)
+		}
+		names = append(names, task.NodeName)
+	}
+	if got := r.snapshot(ctx, id).Status; got != types.ExecutionStatusRunning {
+		r.t.Fatalf("execution after the parks = %q, want running", got)
+	}
+	r.state.mu.Lock()
+	waiters := len(r.state.suspended)
+	r.state.mu.Unlock()
+	if waiters != n {
+		r.t.Fatalf("waiters after the parks = %d, want %d", waiters, n)
+	}
+	return names
+}
+
+// requireNodesCanceled fails unless every one of the named nodes ended canceled.
+func (r *deadlineRaceRig) requireNodesCanceled(ctx context.Context, round int, id types.ExecutionID, names []string) {
+	r.t.Helper()
+	for _, name := range names {
+		node, err := r.state.GetNode(ctx, id, name)
+		if err != nil || node == nil || node.Status != types.NodeStatusCanceled {
+			r.t.Fatalf("round %d: parked node %s = (%+v, %v), want canceled", round, name, node, err)
+		}
+	}
+}
+
+// TestExpireRacingCancelStopsEveryParkedNode replays the race between the
+// deadline sweep and a user cancel on an execution with raceParkedNodes nodes
+// parked on signals. Whichever side owns the execution, its cascade has to reach
+// all of them: a cascade that stopped after the first node would leave the others
+// suspended with their waiters registered, on an execution that is already over.
+func TestExpireRacingCancelStopsEveryParkedNode(t *testing.T) {
+	ctx := context.Background()
+	var canceled, timedOut int
+	for round := 0; round < raceRounds(); round++ {
+		rig := newDeadlineRaceRig(t)
+		id := rig.submit(ctx, raceParallelParkGraph(t, raceParkedNodes))
+		names := rig.parkEveryNode(ctx, id, raceParkedNodes)
+
+		var cancelErr, expireErr error
+		raceTogether(
+			func() { cancelErr = rig.eng.Cancel(ctx, id) },
+			func() { _, expireErr = rig.eng.ExpireExecution(ctx, id) },
+		)
+		if cancelErr != nil && !errors.Is(cancelErr, engine.ErrExecutionInactive) {
+			t.Fatalf("round %d: Cancel() error = %v", round, cancelErr)
+		}
+		if expireErr != nil {
+			t.Fatalf("round %d: ExpireExecution() error = %v", round, expireErr)
+		}
+
+		switch snap := rig.snapshot(ctx, id); snap.Status {
+		case types.ExecutionStatusCanceled:
+			canceled++
+		case types.ExecutionStatusTimeout:
+			timedOut++
+		default:
+			t.Fatalf("round %d: execution ended %q, want canceled or timeout", round, snap.Status)
+		}
+		rig.requireNodesCanceled(ctx, round, id, names)
+		listed, err := rig.state.ListSuspendedNodes(ctx, id)
+		if err != nil || len(listed) != 0 {
+			t.Fatalf("round %d: ListSuspendedNodes = (%v, %v), want none left", round, listed, err)
 		}
 		rig.requireDrained(round)
 	}
