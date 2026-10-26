@@ -195,3 +195,84 @@ func describeExecution(ctx context.Context, eng *Engine, id types.ExecutionID) s
 	}
 	return out
 }
+
+// settingsTimeoutNapFor is how long settingsTimeoutNap occupies its lease. It is
+// long enough that an execution budget cut in half (or applied as zero) ends the
+// node mid-flight, and short enough that a case stays a few seconds.
+const settingsTimeoutNapFor = 3 * time.Second
+
+// settingsTimeoutNap is a node that works for settingsTimeoutNapFor and then
+// succeeds, giving up early only if its context ends first.
+var settingsTimeoutNap = node.Define("test.settings_timeout.nap",
+	func(ctx context.Context, _ *types.Input) (*types.Output, error) {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(settingsTimeoutNapFor):
+			return &types.Output{Data: map[string]any{"napped": true}}, nil
+		}
+	})
+
+// runNapWorkflow registers start -> nap with settings.timeout = timeout, runs
+// it and returns the engine, the execution id and the result Wait reported.
+func runNapWorkflow(t *testing.T, name string, timeout time.Duration) (*Engine, types.ExecutionID, types.Result) {
+	t.Helper()
+	eng := newSettingsTimeoutEngine(t, settingsTimeoutNap)
+	ctx, cancel := context.WithTimeout(context.Background(), settingsTimeoutWaitLimit)
+	defer cancel()
+
+	wf := Workflow(name)
+	start := wf.Node("start", node.Start())
+	nap := wf.Node("nap", settingsTimeoutNap.New(nil))
+	wf.Connect(start, nap)
+	workflowID := addWorkflowWithTimeout(t, eng, wf, timeout)
+
+	id, err := eng.Invoke(ctx, workflowID, Start(), nil)
+	if err != nil {
+		t.Fatalf("Invoke() error = %v", err)
+	}
+	result, err := eng.Wait(ctx, id)
+	if err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+	return eng, id, result
+}
+
+// TestSettingsTimeoutWithinBudgetSucceeds is scenario 2: an execution that
+// finishes inside settings.timeout is a success, not a timeout, and it carries
+// no error. The budget is also read back from the stored execution, so a
+// success cannot be mistaken for an execution that never had one.
+func TestSettingsTimeoutWithinBudgetSucceeds(t *testing.T) {
+	// Longer than the nap by a wide margin, and shorter than twice the nap:
+	// a budget applied at half its value ends the nap mid-flight.
+	const budget = 5 * time.Second
+	eng, id, result := runNapWorkflow(t, "settings-timeout-within-budget", budget)
+	ctx := context.Background()
+
+	if result.Status != types.ExecutionStatusSuccess || result.Error != "" {
+		t.Fatalf("Wait() = %q error %q, want success with no error\n%s",
+			result.Status, result.Error, describeExecution(ctx, eng, id))
+	}
+	detail, err := eng.Inspect(ctx, id)
+	if err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+	if detail.Status != result.Status || detail.Error != result.Error {
+		t.Fatalf("Inspect() = %q %q, want what Wait() reported (%q %q)",
+			detail.Status, detail.Error, result.Status, result.Error)
+	}
+	if detail.CreatedAt == nil || detail.UpdatedAt == nil {
+		t.Fatalf("Inspect() CreatedAt/UpdatedAt = %v/%v, want both stamped", detail.CreatedAt, detail.UpdatedAt)
+	}
+	if lived := detail.UpdatedAt.Sub(*detail.CreatedAt); lived < settingsTimeoutNapFor || lived >= budget {
+		t.Fatalf("execution lived %v, want the nap (%v) completed inside the %v budget", lived, settingsTimeoutNapFor, budget)
+	}
+
+	snap, err := eng.eng.State().GetExecution(ctx, id)
+	if err != nil || snap == nil {
+		t.Fatalf("GetExecution() = %+v, %v", snap, err)
+	}
+	if want := snap.CreatedAt.Add(budget); !snap.Deadline.Equal(want) {
+		t.Fatalf("stored deadline = %v, want CreatedAt + settings.timeout = %v", snap.Deadline, want)
+	}
+}
