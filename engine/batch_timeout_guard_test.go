@@ -11,6 +11,32 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
+// batchReasonState is fakeState with the status write both real backends have:
+// the execution-level reason is recorded for any status (fakeState keeps it for
+// failed only) and a terminal status is never overwritten. ExpireExecution reads
+// the reason back to tell its own timeout from another one, so without this it
+// would never see its write.
+type batchReasonState struct {
+	*fakeState
+}
+
+func (s *batchReasonState) UpdateExecutionStatus(_ context.Context, id types.ExecutionID, status types.ExecutionStatus, errMsg string) error {
+	f := s.fakeState
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	exec, ok := f.executions[id]
+	if !ok || types.IsTerminalExecutionStatus(exec.Status) {
+		return nil
+	}
+	exec.Status = status
+	if errMsg != "" {
+		exec.Error = errMsg
+	}
+	f.releaseConcurrencySlotLocked(id, status)
+	f.publishLocked(ExecutionEvent{ExecutionID: id, Status: status, Error: errMsg})
+	return nil
+}
+
 // batchGuardRig is a map node with three batches and a settings.timeout, driven
 // through the path a remote runner takes: BuildSubgraphLease for each batch,
 // then CommitSubgraphResult with whatever the runner reported. The stored
@@ -53,7 +79,7 @@ func newBatchGuardRig(t *testing.T, onError string, bounded bool, execDeadline t
 		"xflow.map": &loopHandler{},
 		"test.echo": &echoHandler{},
 	}}
-	eng := newTestEngine(t, state, queue, reg)
+	eng := newTestEngine(t, &batchReasonState{fakeState: state}, queue, reg)
 	id, err := eng.Submit(context.Background(), g, nil)
 	if err != nil {
 		t.Fatalf("submit: %v", err)
