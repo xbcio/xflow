@@ -8,7 +8,7 @@ import {
 import { createXFlowApiClient, type WorkflowSummary } from '@xflow/api';
 import { history } from '@umijs/max';
 import { Input, Modal, type InputRef } from 'antd';
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 
 import { authorizedFetch } from '../services/http';
 
@@ -59,6 +59,9 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
   const [loadError, setLoadError] = useState(false);
   const [active, setActive] = useState(0);
   const inputRef = useRef<InputRef>(null);
+  const paletteId = useId();
+  const listId = `${paletteId}-list`;
+  const optionId = (index: number) => `${paletteId}-option-${index}`;
 
   // One read per palette session; reopening reuses the rows already fetched.
   useEffect(() => {
@@ -140,6 +143,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
     <Modal
       open={open}
       onCancel={onClose}
+      title={<span className="xflow-admin-visually-hidden">全局搜索</span>}
       footer={null}
       closable={false}
       width={560}
@@ -150,7 +154,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
       getContainer={() => document.querySelector<HTMLElement>('.xflow-admin') ?? document.body}
       rootClassName="xflow-admin-modal-root"
       className="xflow-admin-palette"
-      styles={{ body: { padding: 0 } }}
+      styles={{ header: { marginBottom: 0 }, body: { padding: 0 } }}
     >
       <div className="flex flex-col" onKeyDown={onKeyDown}>
         <Input
@@ -158,16 +162,22 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
           variant="borderless"
           className="xflow-admin-palette-input"
           prefix={<SearchIcon />}
+          role="combobox"
           aria-label="全局搜索"
+          aria-expanded={items.length > 0}
+          aria-controls={listId}
+          aria-autocomplete="list"
+          aria-activedescendant={items[active] ? optionId(active) : undefined}
           placeholder="搜索工作流，或跳转页面"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
         />
-        <div className="xflow-admin-palette-list" role="listbox" aria-label="命令面板结果">
+        <div id={listId} className="xflow-admin-palette-list" role="listbox" aria-label="命令面板结果">
           {items.map((item, index) => (
             <button
               type="button"
               key={item.key}
+              id={optionId(index)}
               role="option"
               aria-selected={index === active}
               data-active={index === active || undefined}
