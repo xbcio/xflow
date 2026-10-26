@@ -38,6 +38,7 @@ import {
   categoryOf,
   edgeVariant,
   foundationTokens,
+  formatNodeTimeout,
   hasNodePosition,
   isSupplyNode,
   isTextEntryTarget,
@@ -454,15 +455,6 @@ export function readableNodeType(type: string): string {
     .map((word) => TYPE_ACRONYMS.has(word.toLowerCase()) ? word.toUpperCase() : word.charAt(0).toUpperCase() + word.slice(1))
     .join(" ");
   return label || type;
-}
-
-/** Node timeouts are nanoseconds; the badge shows whole h/m/s when it can. */
-function formatNodeTimeout(ns: number): string {
-  const seconds = ns / 1_000_000_000;
-  if (seconds >= 3600 && Number.isInteger(seconds / 3600)) return `${seconds / 3600}h`;
-  if (seconds >= 60 && Number.isInteger(seconds / 60)) return `${seconds / 60}m`;
-  if (Number.isInteger(seconds)) return `${seconds}s`;
-  return `${ns}ns`;
 }
 
 /**

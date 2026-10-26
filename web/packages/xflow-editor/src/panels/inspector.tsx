@@ -14,7 +14,7 @@ import {
 } from "@xflow/icons";
 import { Button, Dropdown, Input, Select, Tabs, Tooltip } from "antd";
 import type { MenuProps, TabsProps } from "antd";
-import { APPROVAL_NODE_TYPE, isSupplyNode, nodeStatusMeta, runtimeForNode } from "@xflow/core";
+import { APPROVAL_NODE_TYPE, formatNodeTimeout, isSupplyNode, nodeStatusMeta, runtimeForNode } from "@xflow/core";
 import type { NodeTypesResponse, RuntimeSnapshot, WorkflowDef, WorkflowNode } from "@xflow/core";
 import type { ComposerSpec, Issue, Patch } from "@xflow/composer/core";
 import { Section } from "@xflow/composer/form";
@@ -177,15 +177,6 @@ function nodeIdentity(node: WorkflowNode, index: number): { name: string; displa
   const label = typeof node.ui?.label === "string" ? node.ui.label.trim() : "";
   const distinct = label !== "" && label !== name;
   return { name, display: distinct ? label : name, distinct };
-}
-
-/** Node timeouts are nanoseconds; the summary shows whole h/m/s when it can. */
-function formatNodeTimeout(ns: number): string {
-  const seconds = ns / 1_000_000_000;
-  if (seconds >= 3600 && Number.isInteger(seconds / 3600)) return `${seconds / 3600}h`;
-  if (seconds >= 60 && Number.isInteger(seconds / 60)) return `${seconds / 60}m`;
-  if (Number.isInteger(seconds)) return `${seconds}s`;
-  return `${ns}ns`;
 }
 
 /** Right-aligned status for the merged execution section (design: 继承工作流 · 重试 2 次). */

@@ -612,3 +612,4 @@ export * from "./breakpoints";
 export * from "./appearance";
 export * from "./capabilities";
 export * from "./approval";
+export * from "./duration";
