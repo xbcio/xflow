@@ -118,7 +118,14 @@ func newDeadlineRaceRig(t *testing.T, opts ...engine.Option) *deadlineRaceRig {
 // positive limit adds a workflow-scoped concurrency limit in queue mode.
 func raceGraph(t *testing.T, name string, limit int, nodes ...types.NodeDef) *graph.Graph {
 	t.Helper()
-	settings := &types.WorkflowSettings{Timezone: "UTC", Timeout: raceTimeout}
+	return raceGraphWithTimeout(t, name, raceTimeout, limit, nodes...)
+}
+
+// raceGraphWithTimeout is raceGraph with the settings.timeout spelled out, for
+// the tests whose second execution must not be due the moment it exists.
+func raceGraphWithTimeout(t *testing.T, name string, timeout time.Duration, limit int, nodes ...types.NodeDef) *graph.Graph {
+	t.Helper()
+	settings := &types.WorkflowSettings{Timezone: "UTC", Timeout: timeout}
 	if limit > 0 {
 		settings.Concurrency = &types.ConcurrencySettings{Limit: limit}
 	}
