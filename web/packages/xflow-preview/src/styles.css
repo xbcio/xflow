@@ -296,15 +296,18 @@
 
   /* WCAG 2.5.8: the title chip's text stays its visual size, while a transparent
      pseudo-element grows the target to 24 screen px. --xflow-preview-inverse-zoom
-     is 1/zoom (capped at 3), written from JS; min() keeps a wider title's own
-     width and only pads the axis that falls short. */
+     is 1/zoom (capped at 3), written from JS; max() keeps a wider title's own
+     size and only pads the axis that falls short. The target is pinned to the
+     side that faces the delete button and ends at the middle of the chip's gap,
+     where the delete button's target begins: a short title grows away from its
+     neighbour, so the two 24px boxes abut instead of overlapping. */
   .xflow-preview-section__title-action::after {
     content: "";
     height: max(100%, calc(24px * var(--xflow-preview-inverse-zoom, 1)));
-    left: min(0px, calc((100% - 24px * var(--xflow-preview-inverse-zoom, 1)) / 2));
     position: absolute;
+    right: calc(var(--xflow-space-1-5) / -2);
     top: min(0px, calc((100% - 24px * var(--xflow-preview-inverse-zoom, 1)) / 2));
-    width: max(100%, calc(24px * var(--xflow-preview-inverse-zoom, 1)));
+    width: max(calc(100% + var(--xflow-space-1-5) / 2), calc(24px * var(--xflow-preview-inverse-zoom, 1)));
   }
 
   .xflow-preview-section__title-action:focus-visible {
@@ -341,13 +344,17 @@
   }
 
   /* The 16px × keeps its visual size; the transparent pseudo-element carries the
-     24 screen-px target. Symmetric expansion is the only way both axes reach 24
-     at the 62% default zoom, and the section delete asks for confirmation. */
+     24 screen-px target. It starts at the middle of the chip's gap, where the
+     rename button's target ends, and grows away from it; an inset centred on the
+     button would reach back over the rename target. */
   .xflow-preview-section__delete::after {
     border-radius: var(--xflow-radius-xs);
     content: "";
-    inset: min(0px, calc((100% - 24px * var(--xflow-preview-inverse-zoom, 1)) / 2));
+    height: max(100%, calc(24px * var(--xflow-preview-inverse-zoom, 1)));
+    left: calc(var(--xflow-space-1-5) / -2);
     position: absolute;
+    top: min(0px, calc((100% - 24px * var(--xflow-preview-inverse-zoom, 1)) / 2));
+    width: max(calc(100% + var(--xflow-space-1-5) / 2), calc(24px * var(--xflow-preview-inverse-zoom, 1)));
   }
 
   .xflow-preview-section__delete:hover {
@@ -493,11 +500,15 @@
     color: var(--xflow-primary);
   }
 
-  /* The baseline's native range: a 96px track at the primary accent colour. */
+  /* The baseline's native range: a 96px track at the primary accent colour. A
+     range cannot carry a pseudo-element, so the 24px target (WCAG 2.5.8) is the
+     element's own box: exactly the zoom bar's content height (34px - 2px border
+     - 2 x 4px padding), so the bar does not grow. The painted track and the
+     16px thumb are the UA's own and stay centred in the taller box. */
   .xflow-preview-zoombar__slider {
     accent-color: var(--xflow-primary);
     background: transparent;
-    height: 16px;
+    height: 24px;
     margin: 0 var(--xflow-space-1);
     padding: 0;
     width: 96px;

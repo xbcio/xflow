@@ -620,3 +620,65 @@ describe("xflow-preview canvas sections against styles.css", () => {
     expect(rules).not.toMatch(/#[0-9a-f]{3,8}\b|rgba?\(|hsla?\(/i);
   });
 });
+
+// WCAG 2.5.8: a canvas control keeps its visual size and carries a transparent
+// 24 screen-px target. jsdom has no layout, so the rules are pinned as text;
+// the pixel extents were measured in a real browser.
+describe("xflow-preview section and zoom bar hit targets (WCAG 2.5.8)", () => {
+  const target = "calc(24px * var(--xflow-preview-inverse-zoom, 1))";
+  const halfGap = "var(--xflow-space-1-5) / 2";
+
+  it("grows the rename button to 24 screen px, ending where the delete button's target begins", () => {
+    expect(declarationsOf(".xflow-preview-section__title-action")).toMatchObject({ position: "relative" });
+    const after = declarationsOf(".xflow-preview-section__title-action::after");
+    expect(after).toMatchObject({
+      content: '""',
+      position: "absolute",
+      height: `max(100%, ${target})`,
+      width: `max(calc(100% + ${halfGap}), ${target})`,
+      // Anchored on the side facing the delete button; a short title grows away from it.
+      right: "calc(var(--xflow-space-1-5) / -2)"
+    });
+    expect(after).not.toHaveProperty("left");
+  });
+
+  it("grows the delete button to 24 screen px, starting where the rename button's target ends", () => {
+    expect(declarationsOf(".xflow-preview-section__delete")).toMatchObject({ position: "relative" });
+    const after = declarationsOf(".xflow-preview-section__delete::after");
+    expect(after).toMatchObject({
+      content: '""',
+      position: "absolute",
+      height: `max(100%, ${target})`,
+      width: `max(calc(100% + ${halfGap}), ${target})`,
+      left: "calc(var(--xflow-space-1-5) / -2)"
+    });
+    // A symmetric inset would reach into the rename button's target.
+    expect(after).not.toHaveProperty("inset");
+    expect(after).not.toHaveProperty("right");
+  });
+
+  it("splits the chip's own gap between the two targets, so they never overlap", () => {
+    expect(declarationsOf(".xflow-preview-section__title").gap).toBe("var(--xflow-space-1-5)");
+    // Each side takes half the gap: rename ends at +gap/2, delete starts at -gap/2.
+    expect(declarationsOf(".xflow-preview-section__title-action::after").right).toBe("calc(var(--xflow-space-1-5) / -2)");
+    expect(declarationsOf(".xflow-preview-section__delete::after").left).toBe("calc(var(--xflow-space-1-5) / -2)");
+  });
+
+  it("makes the zoom slider 24px tall without a pseudo-element, which a range cannot have", () => {
+    const slider = declarationsOf(".xflow-preview-zoombar__slider");
+    expect(slider.height).toBe("24px");
+    // The UA paints the track and thumb centred in the taller box, so no vertical margin is needed.
+    expect(slider.margin).toBe("0 var(--xflow-space-1)");
+    expect(css).not.toMatch(/\.xflow-preview-zoombar__slider(?::[\w-]+)*::(?:after|before)/);
+  });
+
+  it("fits the 24px slider inside the zoom bar's content box, so the bar does not grow", () => {
+    const tokens = readFileSync(`${import.meta.dirname}/../../xflow-core/src/tokens.css`, "utf8");
+    const token = (name: string) => Number(new RegExp(`--xflow-${name}:\\s*(\\d+)px`).exec(tokens)?.[1]);
+    const bar = declarationsOf(".xflow-preview-zoombar");
+    expect(bar.height).toBe("var(--xflow-float-height)");
+    expect(bar.border).toBe("1px solid var(--xflow-border)");
+    expect(bar.padding).toBe("var(--xflow-space-1)");
+    expect(token("float-height") - 2 * 1 - 2 * token("space-1")).toBeGreaterThanOrEqual(24);
+  });
+});
