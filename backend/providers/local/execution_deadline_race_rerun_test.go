@@ -26,12 +26,16 @@ const raceRerunTimeout = time.Hour
 // retries until the parent's timeout write has landed. The rerun can therefore
 // be accepted after the parent's terminal write but before the expiry's last
 // step, the acknowledgement of the parent's deadline entry; whether a given
-// round hits that window is the scheduler's choice, and the log line reports
-// how many rounds were accepted inside the race. Either way the assertions are
-// the same: the rerun's clock and index entry must survive that acknowledgement.
+// round hits that window is the scheduler's choice. A parent in timeout keeps
+// its deadline entry until that acknowledgement, so the rerun side looks for the
+// entry the moment its rerun is accepted: finding it proves the rerun beat the
+// acknowledgement. That is a lower bound, since a rerun accepted a hair before
+// the acknowledgement may look a hair after it, and the log line reports it.
+// Either way the assertions are the same: the rerun's clock and index entry must
+// survive that acknowledgement.
 func TestExpireRacingARerunGivesTheRerunItsOwnClock(t *testing.T) {
 	ctx := context.Background()
-	var rerunInRace int
+	var acceptedFirst, beforeAck int
 	for round := 0; round < raceRounds(); round++ {
 		rig := newDeadlineRaceRig(t)
 		g := raceGraphWithTimeout(t, "deadline-race-rerun", raceRerunTimeout, 0,
@@ -48,12 +52,18 @@ func TestExpireRacingARerunGivesTheRerunItsOwnClock(t *testing.T) {
 
 		var rerun engine.RerunResult
 		var rerunErr, expireErr error
+		var parentEntryAtAccept bool
 		var outcome engine.ExpireOutcome
 		raceTogether(
 			func() {
 				for i := 0; i < 5000; i++ {
 					rerun, rerunErr = rig.eng.Rerun(ctx, engine.RerunRequest{ExecutionID: parentID, FromNode: "work"})
 					if !errors.Is(rerunErr, engine.ErrExecutionNotRerunnable) {
+						if rerunErr == nil {
+							rig.state.mu.Lock()
+							_, parentEntryAtAccept = rig.state.deadlines[parentID]
+							rig.state.mu.Unlock()
+						}
 						return
 					}
 					runtime.Gosched()
@@ -69,7 +79,10 @@ func TestExpireRacingARerunGivesTheRerunItsOwnClock(t *testing.T) {
 		}
 		switch {
 		case rerunErr == nil:
-			rerunInRace++
+			acceptedFirst++
+			if parentEntryAtAccept {
+				beforeAck++
+			}
 		case errors.Is(rerunErr, engine.ErrExecutionNotRerunnable):
 			// The expiry never became visible to the retry loop in time. The
 			// parent is terminal now, so the rerun the race missed is made here and
@@ -130,5 +143,6 @@ func TestExpireRacingARerunGivesTheRerunItsOwnClock(t *testing.T) {
 		}
 		rig.requireDrained(round)
 	}
-	t.Logf("%d rounds: %d reruns were accepted inside the race, %d after it", raceRounds(), rerunInRace, raceRounds()-rerunInRace)
+	t.Logf("%d rounds: %d reruns accepted by the retry loop (%d of them provably before the parent's acknowledgement), %d made after the loop",
+		raceRounds(), acceptedFirst, beforeAck, raceRounds()-acceptedFirst)
 }

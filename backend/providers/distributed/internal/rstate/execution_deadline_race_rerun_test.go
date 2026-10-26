@@ -7,8 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/redis/go-redis/v9"
-
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
@@ -18,6 +16,13 @@ import (
 // enough that an execution created by the rerun is nowhere near due, so a rerun
 // that inherited its parent's overdue deadline cannot hide behind a tiny one.
 const raceRerunTimeout = time.Hour
+
+// raceRerunSkew is how far short of raceRerunTimeout the gap between a rerun's
+// created_at and its deadline may fall. It is the engine-to-store stamping delay
+// plus millisecond truncation, which measured at most 2ms; two seconds leaves a
+// thousand times that for a loaded machine and is still far below any error a
+// mis-set deadline would make.
+const raceRerunSkew = 2 * time.Second
 
 // TestExpireRacingARerunGivesTheRerunItsOwnClockOnRedis replays the race between
 // the deadline sweep expiring an execution and a rerun of that same execution.
@@ -104,12 +109,17 @@ func TestExpireRacingARerunGivesTheRerunItsOwnClockOnRedis(t *testing.T) {
 			t.Fatalf("round %d: rerun parent = %q, want %q", round, fresh.ParentID, parentID)
 		}
 		// The engine stamps the deadline when it builds the rerun; the store stamps
-		// created_at when the seed script runs, a few milliseconds later. The
-		// deadline is therefore the budget after created_at up to that skew.
+		// created_at when the create call runs, a moment later, and both are kept in
+		// whole milliseconds. The deadline is therefore the budget after created_at
+		// less the time between the two stamps. Measured over 600 rounds (400 plain,
+		// 200 under the race detector) that difference was never negative and never
+		// above 2ms, so the budget may fall short of raceRerunTimeout by
+		// raceRerunSkew and may not exceed it. A rerun whose deadline is set earlier
+		// than the budget by more than the skew is a clock that did not restart.
 		budget := fresh.Deadline.Sub(fresh.CreatedAt)
-		if fresh.Deadline.IsZero() || budget > raceRerunTimeout || budget < raceRerunTimeout-time.Minute {
-			t.Fatalf("round %d: rerun deadline = %v from created %v, want created + %v (less the stamping skew)",
-				round, fresh.Deadline, fresh.CreatedAt, raceRerunTimeout)
+		if fresh.Deadline.IsZero() || budget > raceRerunTimeout || budget < raceRerunTimeout-raceRerunSkew {
+			t.Fatalf("round %d: rerun deadline = %v from created %v, want created + %v (less at most %v of stamping skew)",
+				round, fresh.Deadline, fresh.CreatedAt, raceRerunTimeout, raceRerunSkew)
 		}
 		if !fresh.CreatedAt.After(parent.CreatedAt) || !fresh.Deadline.After(parent.Deadline.Add(time.Hour)) {
 			t.Fatalf("round %d: rerun clock (%v .. %v) was not restarted from the parent's (%v .. %v)",
@@ -140,5 +150,3 @@ func TestExpireRacingARerunGivesTheRerunItsOwnClockOnRedis(t *testing.T) {
 	}
 	t.Logf("%d rounds: %d reruns were accepted inside the race, %d after it", raceRounds(), rerunInRace, raceRounds()-rerunInRace)
 }
-
-var _ = redis.Z{}

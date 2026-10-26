@@ -72,3 +72,44 @@ func TestConcurrentExpirersSettleOneTimeoutWithoutErrorOnRedis(t *testing.T) {
 		rig.close()
 	}
 }
+
+// TestConcurrentExpirersStopEveryParkedNodeOnRedis starts raceExpirers
+// ExpireExecution calls on one overdue execution that has more parked nodes than
+// there are callers, against the Redis store. The single-node test above cannot
+// tell a cascade that reaches every suspended node from one that stops after the
+// first, because the first is all there is. The extra node is what keeps this
+// one honest: every call re-runs the idempotent cascade, so a cascade that
+// handled one node per call would still finish a three-node execution under
+// eight callers, and only a node count above the caller count shows it. Every
+// node must end canceled and none may stay suspended.
+func TestConcurrentExpirersStopEveryParkedNodeOnRedis(t *testing.T) {
+	ctx := context.Background()
+	for round := 0; round < raceRounds(); round++ {
+		rig := newDeadlineRaceRig(t)
+		parked := raceExpirers + 1
+		g := raceParallelParkGraph(t, parked)
+		id := rig.submit(ctx, g)
+		names := rig.parkEveryNode(ctx, id, parked)
+
+		errs := make([]error, raceExpirers)
+		fns := make([]func(), raceExpirers)
+		for i := range fns {
+			fns[i] = func() { _, errs[i] = rig.eng.ExpireExecution(ctx, id) }
+		}
+		raceTogether(fns...)
+
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("round %d: expirer %d error = %v", round, i, err)
+			}
+		}
+		snap := rig.snapshot(ctx, id)
+		if snap.Status != types.ExecutionStatusTimeout || snap.Error != engine.ExecutionDeadlineExceededError {
+			t.Fatalf("round %d: execution = %q %q, want timeout %q", round, snap.Status, snap.Error, engine.ExecutionDeadlineExceededError)
+		}
+		rig.requireAnnouncedOnly(round, id, types.ExecutionStatusTimeout)
+		rig.requireNodesCanceled(ctx, round, id, names)
+		rig.requireDrained(round, g.Name(), id)
+		rig.close()
+	}
+}
