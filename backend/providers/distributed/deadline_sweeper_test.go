@@ -12,6 +12,7 @@ import (
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -294,6 +295,76 @@ func TestEmbeddedBackendDeadlineSweepIsNotStarvedByFailingEntries(t *testing.T) 
 	snap, err := b.State().GetExecution(context.Background(), "broken-000")
 	if err != nil || snap == nil || snap.Status != types.ExecutionStatusRunning {
 		t.Fatalf("broken-000 = %+v, %v, want it left running", snap, err)
+	}
+}
+
+// countingExpirer hands every execution to the real engine and counts how often
+// each was attempted.
+type countingExpirer struct {
+	eng   *engine.Engine
+	mu    sync.Mutex
+	calls map[types.ExecutionID]int
+}
+
+func (e *countingExpirer) ExpireExecution(ctx context.Context, id types.ExecutionID) (engine.ExpireOutcome, error) {
+	e.mu.Lock()
+	if e.calls == nil {
+		e.calls = make(map[types.ExecutionID]int)
+	}
+	e.calls[id]++
+	e.mu.Unlock()
+	return e.eng.ExpireExecution(ctx, id)
+}
+
+func (e *countingExpirer) callsFor(id types.ExecutionID) int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.calls[id]
+}
+
+// TestEmbeddedBackendDeadlineSweepIsNotStarvedByGoneEntries is the starvation
+// regression for executions whose state is listed but whose graph key is gone:
+// ExpireExecution reports them Gone without acknowledging the entry, so more of
+// them than one batch would otherwise sit at the head of the index and be retried
+// every tick, ahead of a fresh execution that is never reached.
+func TestEmbeddedBackendDeadlineSweepIsNotStarvedByGoneEntries(t *testing.T) {
+	rdb := newRedisStateTestClient(t)
+	addr := rdb.Options().Addr
+	// The seeding backend and the sweeping one are separate processes sharing one
+	// Redis, so the sweeper's graph cache is cold and cannot mask a missing key.
+	seeder, _ := newSweepBackend(t, addr, nil)
+	b, eng := newSweepBackend(t, addr, nil)
+	g := sweepTestGraph(t)
+	ns := namespace.FromContext(context.Background())
+	old := time.Now().UTC().Add(-time.Hour)
+	for i := 0; i < deadlineSweepBatch+5; i++ {
+		id := types.ExecutionID(fmt.Sprintf("gone-%03d", i))
+		seedExecution(t, seeder, g, id, types.ExecutionStatusRunning, old.Add(time.Duration(i)*time.Millisecond))
+		graphKey := fmt.Sprintf("xflow:ns:%s:exec:{%s}:graph", ns, id)
+		if n, err := rdb.Del(context.Background(), graphKey).Result(); err != nil || n != 1 {
+			t.Fatalf("Del(%s) = %d, %v, want the graph key removed", graphKey, n, err)
+		}
+	}
+	seedExecution(t, seeder, g, "fresh", types.ExecutionStatusRunning, time.Now().UTC().Add(-time.Minute))
+
+	expirer := &countingExpirer{eng: eng}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		b.runDeadlineSweeper(ctx, expirer, testSweepInterval)
+	}()
+	t.Cleanup(func() { cancel(); <-done })
+
+	waitForTimeout(t, b, "fresh", 10*time.Second)
+	// A gone entry waits out a window of at least a second after each attempt, so
+	// by the time fresh is done the oldest one has been tried once (twice if the
+	// machine stalled for a whole window), not once per tick.
+	if got := expirer.callsFor("gone-000"); got < 1 || got > 2 {
+		t.Fatalf("gone-000 was attempted %d times, want 1 (at most 2): a gone entry must back off", got)
+	}
+	if deadlineAcked(t, b, "gone-000") {
+		t.Fatal("gone-000 was acknowledged, want its entry kept: the graph may only be a replica lag away")
 	}
 }
 
