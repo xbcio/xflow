@@ -40,6 +40,17 @@ func (c *batchRunCounter) Execute(context.Context, *types.Input) (*types.Output,
 
 // A map batch whose body is stopped by the execution deadline is the
 // execution's timeout, whatever the map node's on_error says.
+//
+// Measured at the commit before the fix, with the maintenance sweep stretched
+// out of the way (see the bind below): on_error=stop and every terminal map node
+// end as failed or success, so those cases are what pin the fix. The
+// continue/error_output cases with a downstream node were already green: the
+// map node commits through on_error, the downstream node is leased after the
+// execution deadline, its lease arrives expired, the runner reports a node
+// timeout without running the handler, and the existing atomic-commit guard
+// expires the execution. That is the next lease noticing the spent budget, not
+// the batch commit, so the end state is the same and the cases stay as the
+// outcome contract.
 func TestMapBatchPastTheExecutionDeadlineExpiresTheExecution(t *testing.T) {
 	cases := []struct {
 		onError    types.OnError
@@ -71,7 +82,11 @@ func TestMapBatchPastTheExecutionDeadlineExpiresTheExecution(t *testing.T) {
 					func() subgraph.Backend { return New(WithRegistry(reg), WithConcurrency(1)) }),
 				true, time.Time{})
 			eng := engine.New(b.State(), b.Queue(), engine.WithBatchBodyExecutor(bodies))
-			stop := b.Bind(eng)
+			// Bind, with the maintenance interval stretched to an hour. Bind's 1s
+			// deadline sweep would otherwise end any overdue execution on its own and
+			// hide whether the commit path did: this run has to be ended by the
+			// commit alone.
+			stop := b.bindHandlerWithOutbox(eng, execution.NewEmbeddedDispatcher(eng, reg).HandleTask, time.Hour)
 			defer stop()
 
 			def := &types.WorkflowDef{
