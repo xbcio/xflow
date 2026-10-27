@@ -30,7 +30,7 @@ const maxExactEntryAttempts = 100
 func publicEntryInsideSlack(t *testing.T, margin time.Duration) (*guardRig, ExpireOutcome) {
 	t.Helper()
 	if margin <= 0 || margin >= executionDeadlineClockSlack {
-		t.Fatalf("margin = %v, want a margin inside (0, %v): the case is about the slack window", margin, executionDeadlineClockSlack)
+		t.Fatalf("margin = %v, want a margin inside (0, %v): the case is about the slack window; update publicEntryMargins if executionDeadlineClockSlack changed", margin, executionDeadlineClockSlack)
 	}
 	for attempt := 0; attempt < maxExactEntryAttempts; attempt++ {
 		rig := newGuardRig(t, guardSpec{onError: "continue", bounded: true}, time.Now().Add(time.Hour))
@@ -49,13 +49,26 @@ func publicEntryInsideSlack(t *testing.T, margin time.Duration) (*guardRig, Expi
 	return nil, ""
 }
 
+// publicEntryMargins are the distances before the deadline the public entry is
+// probed at, derived from the slack so they stay inside (0, slack) when the
+// constant is retuned. The smallest is deliberately well below the others: a
+// public entry that forgave a slack of a few milliseconds, a tenth of the real
+// one, would still pass at 40ms and 20ms and is only caught here. It needs the
+// slack to exceed it, and the margin check in publicEntryInsideSlack fails
+// loudly, telling this list to be updated, if the slack ever drops that low.
+var publicEntryMargins = []time.Duration{
+	executionDeadlineClockSlack * 4 / 5,
+	executionDeadlineClockSlack * 2 / 5,
+	5 * time.Millisecond,
+}
+
 // TestPublicExpireExecutionKeepsTheExactDeadline: an execution whose deadline is
 // still ahead, but by less than the clock slack, is not due for the sweeper. It
 // stays running and nothing is announced. Next to it, a node timeout from a
 // clamped lease at the same margin is the execution's timeout, which makes the
 // slack visibly a property of that one path and not of the execution.
 func TestPublicExpireExecutionKeepsTheExactDeadline(t *testing.T) {
-	for _, margin := range []time.Duration{40 * time.Millisecond, 20 * time.Millisecond} {
+	for _, margin := range publicEntryMargins {
 		t.Run(margin.String()+" before the deadline", func(t *testing.T) {
 			t.Run("the public entry answers not due and writes nothing", func(t *testing.T) {
 				rig, got := publicEntryInsideSlack(t, margin)
