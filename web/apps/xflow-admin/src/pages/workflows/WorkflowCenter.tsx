@@ -222,6 +222,14 @@ export function WorkflowCenter() {
   const [recentFailures, setRecentFailures] = useState<ExecutionListItem[]>();
   const [failuresError, setFailuresError] = useState<CardFailure>();
   const [failuresAttempt, setFailuresAttempt] = useState(0);
+  const [envAttempt, setEnvAttempt] = useState(0);
+  // 刷新 rereads all three independent reads, like the overview's 刷新. The
+  // list retry below stays list-only.
+  const refreshAll = () => {
+    setListAttempt((attempt) => attempt + 1);
+    setFailuresAttempt((attempt) => attempt + 1);
+    setEnvAttempt((attempt) => attempt + 1);
+  };
 
   // The three overview cards settle independently. AD-07: the grid always
   // keeps three columns; a failed read draws "—" plus a short reason instead of
@@ -257,7 +265,7 @@ export function WorkflowCenter() {
     return () => {
       cancelled = true;
     };
-  }, [api, canReadRunners, canReadPools]);
+  }, [api, canReadRunners, canReadPools, envAttempt]);
 
   // A failed page keeps the rows already on screen (the loading state does the
   // same), and the banner names the failure; 重试 refetches the same page.
@@ -739,7 +747,7 @@ export function WorkflowCenter() {
                 the read in flight, so repeated clicks never stack requests. */}
             <Button
               size="small"
-              onClick={() => setListAttempt((attempt) => attempt + 1)}
+              onClick={refreshAll}
               disabled={loading}
               data-action="refresh"
             >

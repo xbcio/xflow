@@ -924,6 +924,67 @@ describe('workflow table', () => {
     expect(screen.queryByText('工作流列表加载失败')).toBeNull();
   });
 
+  it('rereads the KPI strip and the recent failures along with the list from 刷新', async () => {
+    render(<WorkflowCenter />);
+    await waitFor(() => expect(card('types')?.textContent).toContain('28'));
+    await screen.findByText('告警归因');
+    for (const read of [
+      host.listWorkflows,
+      host.listNodeTypes,
+      host.fetchRunners,
+      host.fetchRunnerPools,
+      host.listExecutions,
+    ]) {
+      expect(read).toHaveBeenCalledTimes(1);
+    }
+
+    // Hold the side reads open: the old KPI values and failure rows stay up
+    // until the new ones arrive instead of flashing back to a placeholder.
+    host.listNodeTypes.mockImplementationOnce(() => new Promise(() => {}));
+    host.listExecutions.mockImplementationOnce(() => new Promise(() => {}));
+    fireEvent.click(headerButton(/刷\s*新/));
+
+    await waitFor(() => expect(host.listWorkflows).toHaveBeenCalledTimes(2));
+    for (const read of [
+      host.listNodeTypes,
+      host.fetchRunners,
+      host.fetchRunnerPools,
+      host.listExecutions,
+    ]) {
+      expect(read).toHaveBeenCalledTimes(2);
+    }
+    expect(card('types')?.textContent).toContain('28');
+    expect(screen.getByText('告警归因')).toBeTruthy();
+  });
+
+  it('does not read the execution list from 刷新 without execution read', async () => {
+    host.currentUser = {
+      subject: 'tester',
+      namespace: 'team-a',
+      scopes: ['workflow', 'management.runner.list', 'management.runner_pool.read'],
+    };
+    render(<WorkflowCenter />);
+    await waitFor(() => expect(card('types')?.textContent).toContain('28'));
+
+    fireEvent.click(headerButton(/刷\s*新/));
+    await waitFor(() => expect(host.listWorkflows).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(host.listNodeTypes).toHaveBeenCalledTimes(2));
+    expect(host.listExecutions).not.toHaveBeenCalled();
+  });
+
+  it('does not read runners or pools from 刷新 without the management scopes', async () => {
+    host.currentUser = { subject: 'tester', namespace: 'team-a', scopes: ['workflow', 'execution'] };
+    render(<WorkflowCenter />);
+    await waitFor(() => expect(card('types')?.textContent).toContain('28'));
+
+    fireEvent.click(headerButton(/刷\s*新/));
+    await waitFor(() => expect(host.listWorkflows).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(host.listNodeTypes).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(host.listExecutions).toHaveBeenCalledTimes(2));
+    expect(host.fetchRunners).not.toHaveBeenCalled();
+    expect(host.fetchRunnerPools).not.toHaveBeenCalled();
+  });
+
   it('publishes the server total for the nav badge, and hides it while loading or after a failure', async () => {
     render(<WorkflowCenter />);
     // First render is loading: no badge yet.
