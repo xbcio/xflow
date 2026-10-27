@@ -104,8 +104,13 @@ func (e *Engine) commitTaskResultWithStrategy(ctx context.Context, lease *TaskLe
 		// may route around. Only the timeout code is judged: any other error
 		// keeps its on_error semantics. Handled is answered as inactive, the
 		// outcome of every commit that finds the execution already over.
+		//
+		// The lease says which budget the node was cut off at. It is the server's
+		// own record of the lease it issued (the control plane commits against the
+		// directory's copy, not the runner's echo), so a runner cannot claim the
+		// execution deadline for itself.
 		if isNodeTimeoutError(result.Error) {
-			if handled, err := e.expireIfExecutionDeadlineReached(ctx, task.ExecutionID, g, time.Now()); err != nil {
+			if handled, err := e.expireIfLeaseTimeoutReached(ctx, task.ExecutionID, g, time.Now(), lease.ExecutionDeadline); err != nil {
 				return CommitOutcomeTransientError, err
 			} else if handled {
 				return CommitOutcomeExecutionInactive, nil
