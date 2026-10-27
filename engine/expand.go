@@ -71,7 +71,7 @@ func (e *Engine) expandLoopSplit(ctx context.Context, lease *TaskLease, g *graph
 		return fmt.Errorf("decode loop/split batches for %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
 	}
 	if len(batches) == 0 {
-		return e.completeLoopSplit(ctx, lease, g, []map[string]any{})
+		return e.completeLoopSplit(ctx, lease, g, []map[string]any{}, nil)
 	}
 
 	expander, ok := e.state.(DurableLeaseExpander)
@@ -319,7 +319,7 @@ func (e *Engine) ExecuteBatch(ctx context.Context, t *Task) (err error) {
 	if !accepted || !allDone {
 		return nil
 	}
-	return e.completeLoopSplit(ctx, lease, g, results)
+	return e.completeLoopSplit(ctx, lease, g, results, t)
 }
 
 // batchLeaseIsStale reports whether the parent generation this batch belongs to
@@ -424,7 +424,7 @@ func (e *Engine) runBatchBody(ctx context.Context, g *graph.Graph, lease *TaskLe
 		SpanID:          submission.SpanID,
 		// The same bound BuildSubgraphLease ships to a runner, so an in-process
 		// body cannot outlive the map node either.
-		Deadline: batchDeadline(batchParentIssuedAt(t), e.resolveNodeTimeout(meta.Timeout), e.outerDeadline, execDeadline),
+		Deadline: e.batchLeaseDeadline(t, meta, execDeadline),
 	})
 	if err != nil {
 		// The body could not be RUN — compile failure, missing handler, backend
@@ -592,6 +592,15 @@ func batchDeadline(parentIssuedAt time.Time, timeout time.Duration, outer, execD
 		deadline = outer
 	}
 	return clampToExecutionDeadline(execDeadline, deadline)
+}
+
+// batchLeaseDeadline is batchDeadline for one batch task of the map node meta,
+// given the stored execution deadline. It is the single statement of which bound
+// a batch is issued with, so that the runner's cut-off (BuildSubgraphLease), the
+// in-process body (runBatchBody) and the verdict on a timed-out batch
+// (completeLoopSplit) cannot disagree about it.
+func (e *Engine) batchLeaseDeadline(t *Task, meta graph.NodeMeta, execDeadline time.Time) time.Time {
+	return batchDeadline(batchParentIssuedAt(t), e.resolveNodeTimeout(meta.Timeout), e.outerDeadline, execDeadline)
 }
 
 func expansionBatchLease(t *Task) (*TaskLease, types.ExecutionID, []any, error) {
@@ -772,6 +781,27 @@ func mergeBatchArtifacts(results []map[string]any) []types.ArtifactUse {
 	return out
 }
 
+// timedOutBatchDeadline is the bound the timed-out batches were cut off at,
+// rebuilt on the server from the graph, the stored execution deadline and the
+// batch task the commit arrived on. batch is the task of any one batch: they all
+// carry the parent's issue time, so they all share one bound, whichever batch
+// happened to report last. The marker that says a batch timed out rides in the
+// batch's result and a runner can write it; the bound it is judged against does
+// not, which is why it is not read from the result. Without a batch task (an
+// expansion with no batches has nothing that could have timed out) the bound is
+// unknown and the guard stays exact.
+func (e *Engine) timedOutBatchDeadline(ctx context.Context, lease *TaskLease, g *graph.Graph, batch *Task) (time.Time, error) {
+	nodeIdx := lease.Task.NodeIdx
+	if batch == nil || nodeIdx < 0 || nodeIdx >= g.NodeCount() {
+		return time.Time{}, nil
+	}
+	execDeadline, err := e.executionDeadline(ctx, lease.Task.ExecutionID, g)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return e.batchLeaseDeadline(batch, g.NodeAt(nodeIdx), execDeadline), nil
+}
+
 // completeLoopSplit terminalizes a fully completed child generation through
 // the same token-fenced commit path as other node results. In an acyclic graph
 // that also writes the durable downstream advance intent.
@@ -780,14 +810,18 @@ func mergeBatchArtifacts(results []map[string]any) []types.ArtifactUse {
 // a hole where that batch's items should be, and committing success would fire
 // downstream on silently incomplete data. The map node's own OnError decides
 // what a failure means, exactly as it does for a node that failed directly.
-func (e *Engine) completeLoopSplit(ctx context.Context, lease *TaskLease, g *graph.Graph, results []map[string]any) error {
+func (e *Engine) completeLoopSplit(ctx context.Context, lease *TaskLease, g *graph.Graph, results []map[string]any, batch *Task) error {
 	// A batch whose body ran out of time at the execution's own deadline is the
 	// execution's timeout, not a map failure on_error may route around: stop would
 	// fail the execution, continue and error_output would keep it running past its
 	// budget. Judged on the batches' marker, not their text. NotDue (the batch's
 	// own budget ran out first) falls through to the failure handling below.
 	if anyBatchTimedOut(results) {
-		if handled, err := e.expireIfExecutionDeadlineReached(ctx, lease.Task.ExecutionID, g, time.Now()); err != nil {
+		cutoff, err := e.timedOutBatchDeadline(ctx, lease, g, batch)
+		if err != nil {
+			return err
+		}
+		if handled, err := e.expireIfLeaseTimeoutReached(ctx, lease.Task.ExecutionID, g, time.Now(), cutoff); err != nil {
 			return err
 		} else if handled {
 			return nil
