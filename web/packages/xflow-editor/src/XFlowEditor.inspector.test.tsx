@@ -617,6 +617,17 @@ describe("node template field (IN-02 / §6.4)", () => {
     expect(lastWorkflow(handleChange)).toBeUndefined();
   });
 
+  it("draws antd's own empty-state copy in Chinese without an admin locale around the editor", () => {
+    render(<XFlowEditor value={templated} onChange={vi.fn()} />);
+    const panel = selectNode("api");
+
+    fireEvent.change(templateField(panel), { target: { value: "no-such-template" } });
+
+    const popup = [...document.querySelectorAll(".xflow-editor-select__popup")].at(-1);
+    expect(popup?.textContent).toContain("暂无数据");
+    expect(popup?.textContent).not.toContain("No data");
+  });
+
   it("draws no 模板 row when node_templates is missing or empty", () => {
     const { unmount } = render(<XFlowEditor value={workflow} onChange={vi.fn()} />);
     let panel = selectNode("api");

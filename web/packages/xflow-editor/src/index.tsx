@@ -48,6 +48,7 @@ import {
   type InputRef,
   type MenuProps
 } from "antd";
+import zhCN from "antd/locale/zh_CN";
 import type {
   CardSummaryRow,
   ConnectionTargets,
@@ -5147,6 +5148,9 @@ export function XFlowEditor({
 
   return (
     <ConfigProvider
+      // Standalone (outside the admin shell) there is no locale pack above the
+      // editor, so antd's built-in copy (empty states, pagination) would be English.
+      locale={zhCN}
       // AntD splits a two-character label into "发 布"; the baseline draws it
       // tight, and the space is a rendering rule, so it is off for the whole
       // editor instead of patched per button.
