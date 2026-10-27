@@ -151,15 +151,11 @@ func (e *Engine) BuildGroupLease(ctx context.Context, t *Task) (*TaskLease, *Gro
 		Namespace: e.namespace,
 	}
 
-	var deadline time.Time
-	if gm.Timeout > 0 {
-		deadline = issuedAt.Add(gm.Timeout)
-	}
 	// And to the execution's own deadline (settings.timeout), which also bounds
 	// a group that declares no timeout of its own. The payload deadline is what
 	// the runner's inner engine receives as WithOuterDeadline, so this is how the
 	// execution budget reaches every member lease of the group.
-	deadline = clampToExecutionDeadline(execDeadline, deadline)
+	deadline := groupLeaseDeadline(gm.Timeout, issuedAt, execDeadline)
 
 	payload := &GroupLeasePayload{
 		ProtocolVersion: 1,
@@ -217,14 +213,10 @@ func (e *Engine) RecoverGroupLease(ctx context.Context, execID types.ExecutionID
 		return nil, nil, fmt.Errorf("project group package for recovery: %w", err)
 	}
 
-	var deadline time.Time
-	if gm.Timeout > 0 {
-		deadline = lease.IssuedAt.Add(gm.Timeout)
-	}
 	// And to the execution's own deadline, same as BuildGroupLease: recovery
 	// replays the original lease, so the clamp must hold on this path too or a
 	// recovered group would run past the execution budget.
-	deadline = clampToExecutionDeadline(execDeadline, deadline)
+	deadline := groupLeaseDeadline(gm.Timeout, lease.IssuedAt, execDeadline)
 
 	taskLease := &TaskLease{
 		LeaseID:    lease.LeaseID,
@@ -265,6 +257,38 @@ type GroupLeaseReader interface {
 	GetGroupLease(ctx context.Context, id types.ExecutionID, unitIdx int) (*GroupLease, error)
 }
 
+// groupLeaseDeadline is the absolute instant a group must stop by: the group's
+// own timeout from its lease's issue time, tightened to the execution's
+// deadline (settings.timeout; zero when it has none). Zero means unbounded.
+//
+// It is the one place this arithmetic lives, shared by the lease builders and by
+// the commit that has to tell which of the two budgets a reported timeout ran
+// out of; two copies would let the commit judge a deadline the lease was never
+// issued with.
+func groupLeaseDeadline(timeout time.Duration, issuedAt, execDeadline time.Time) time.Time {
+	var deadline time.Time
+	if timeout > 0 {
+		deadline = issuedAt.Add(timeout)
+	}
+	return clampToExecutionDeadline(execDeadline, deadline)
+}
+
+// committedGroupDeadline is groupLeaseDeadline for the lease being committed,
+// or the zero time when the lease does not name a group unit of g. The unit is
+// validated by the commit itself afterwards, so an unusable one is not an error
+// here: it has no deadline to judge by, which leaves the guard exact.
+func (e *Engine) committedGroupDeadline(ctx context.Context, lease *TaskLease, g *graph.Graph) (time.Time, error) {
+	unitIdx := lease.Task.UnitIdx
+	if unitIdx < 0 || unitIdx >= g.UnitCount() || g.UnitKindAt(unitIdx) != graph.UnitGroup {
+		return time.Time{}, nil
+	}
+	execDeadline, err := e.executionDeadline(ctx, lease.Task.ExecutionID, g)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return groupLeaseDeadline(g.GroupMetaAt(unitIdx).Timeout, lease.IssuedAt, execDeadline), nil
+}
+
 // CommitGroupResult validates and commits a group execution result through
 // the GroupStateStore. It maps the GroupResult to the internal commit request,
 // validates exit ports against the compiled boundary outputs, and propagates
@@ -287,7 +311,16 @@ func (e *Engine) CommitGroupResult(ctx context.Context, lease *TaskLease, res Gr
 	// inactive, the outcome of every commit that finds the execution already
 	// over; the group is deliberately not committed.
 	if res.Outcome == GroupOutcomeTimeout {
-		if handled, err := e.expireIfExecutionDeadlineReached(ctx, lease.Task.ExecutionID, g, time.Now()); err != nil {
+		// A group lease carries its bound in GroupLeasePayload.Deadline, never in
+		// TaskLease.ExecutionDeadline, and that payload is the runner's to echo.
+		// The bound the group was cut off at is therefore rebuilt from what the
+		// server holds: the graph, the lease's issue time and the stored
+		// execution deadline, by the arithmetic BuildGroupLease used.
+		leaseDeadline, err := e.committedGroupDeadline(ctx, lease, g)
+		if err != nil {
+			return "", err
+		}
+		if handled, err := e.expireIfLeaseTimeoutReached(ctx, lease.Task.ExecutionID, g, time.Now(), leaseDeadline); err != nil {
 			return "", err
 		} else if handled {
 			return CommitOutcomeExecutionInactive, nil

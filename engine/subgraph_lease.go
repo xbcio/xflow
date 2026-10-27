@@ -192,7 +192,7 @@ func (e *Engine) BuildSubgraphLease(ctx context.Context, t *Task) (*TaskLease, *
 		// on lease.IssuedAt above: that is now, and a recovery rebuild must not
 		// hand the batch a fresh budget. This is what stops a body outliving
 		// the map node's own timeout.
-		Deadline: batchDeadline(batchParentIssuedAt(t), e.resolveNodeTimeout(meta.Timeout), e.outerDeadline, execDeadline),
+		Deadline: e.batchLeaseDeadline(t, meta, execDeadline),
 	}
 	// The body and the batching context are what turn this lease from a
 	// pass-through into runnable work. They come from two different places: the
@@ -310,7 +310,7 @@ func (e *Engine) CommitSubgraphResult(ctx context.Context, lease *TaskLease, res
 	if !active {
 		return CommitOutcomeExecutionInactive, nil
 	}
-	if err := e.completeLoopSplit(ctx, parentLease, g, results); err != nil {
+	if err := e.completeLoopSplit(ctx, parentLease, g, results, &lease.Task); err != nil {
 		return CommitOutcomeTransientError, err
 	}
 	return CommitOutcomeAccepted, nil

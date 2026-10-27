@@ -181,7 +181,7 @@ func TestCompleteLoopSplitReturnsTheGuardStoreError(t *testing.T) {
 	rig.eng.state = fault
 
 	results := []map[string]any{timedOutBatch().Output.Data, {"items": []any{"ok"}, "count": 1}}
-	err = rig.eng.completeLoopSplit(ctx, parentLease, g, results)
+	err = rig.eng.completeLoopSplit(ctx, parentLease, g, results, rig.batches[0])
 
 	if !fault.fired {
 		t.Fatal("GetExecution was never called: the guard did not read the deadline")
