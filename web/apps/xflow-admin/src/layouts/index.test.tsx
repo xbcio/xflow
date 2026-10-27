@@ -1,6 +1,7 @@
 import { paletteTokens } from '@xflow/core';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { theme } from 'antd';
+import type React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { routes } from '../../config/routes';
@@ -17,6 +18,8 @@ const host = vi.hoisted(() => ({
   fetchRunners: vi.fn(),
   fetchLeader: vi.fn(),
   listWorkflows: vi.fn(),
+  // Lets a test mount real page content where the router's Outlet would sit.
+  outlet: undefined as (() => React.ReactElement) | undefined,
 }));
 
 vi.mock('@umijs/max', () => ({
@@ -28,7 +31,7 @@ vi.mock('@umijs/max', () => ({
       : undefined,
   }),
   history: { replace: host.replace, push: host.push },
-  Outlet: () => <div data-testid="outlet" />,
+  Outlet: () => host.outlet?.() ?? <div data-testid="outlet" />,
 }));
 
 vi.mock('@xflow/api', async (importOriginal) => {
@@ -48,6 +51,7 @@ import BasicLayout from './index';
 import { AdminShell, useAdminWorkflowCount } from './AdminShell';
 import { adminAlertClassNames, adminThemeConfig } from './theme';
 import NotFoundPage from '../pages/404';
+import { ImportWorkflowDialog } from '../pages/workflows/ImportWorkflowDialog';
 import IndexPage from '../pages/index';
 
 const originalMatchMedia = window.matchMedia;
@@ -117,6 +121,7 @@ beforeEach(() => {
   host.pathname = '/workflows';
   host.search = '';
   host.namespace = 'ns-a';
+  host.outlet = undefined;
   host.viewExecutions = true;
   // The cluster footer reads only with the matching management scopes; the
   // suite that exercises it opts in here, and the no-scope test overrides it.
@@ -569,6 +574,19 @@ describe('workflow detail route', () => {
     expect(screen.getByTestId('outlet')).toBeTruthy();
     expect(screen.queryByRole('navigation', { name: '主导航' })).toBeNull();
     expect(adminRoot()).toBeNull();
+  });
+});
+
+describe('built-in accessible names', () => {
+  it('names the modal close button 关闭 rather than rc-dialog\'s hardcoded "Close"', () => {
+    host.outlet = () => (
+      <ImportWorkflowDialog open api={{ createWorkflow: vi.fn() }} onClose={vi.fn()} onImported={vi.fn()} />
+    );
+    render(<BasicLayout />);
+
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByRole('button', { name: '关闭' })).toBeTruthy();
+    expect(within(dialog).queryByRole('button', { name: 'Close' })).toBeNull();
   });
 });
 

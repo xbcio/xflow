@@ -110,6 +110,9 @@ export default function BasicLayout() {
       // AL-30: every Alert below the shell is the compact banner (admin.css),
       // so no call site repeats the classes.
       alert={{ classNames: adminAlertClassNames }}
+      // rc-dialog hardcodes the close button's aria-label as "Close" and a
+      // locale pack does not reach it; the context `closable` does.
+      modal={{ closable: { 'aria-label': '关闭' } }}
     >
       {/* Toasts portal into the shell so `--xflow-*` (e.g. the mono execution
           id in the rerun toast) resolve; the editor route falls back to body.
