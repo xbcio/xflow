@@ -177,9 +177,12 @@ func TestSettingsTimeoutRunningNodeEndsTheExecutionAsTimeout(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Inspect(%s) error = %v", tc.follower, err)
 			}
-			// The route node is part of the execution, so it must be reported, and
-			// it must still be waiting: an empty list would pass a bare "never ran"
-			// check without proving anything about the route.
+			// Inspect is asked about this one name, so it always returns exactly
+			// one entry that echoes the name (a node with no record reads as
+			// Pending); the length and name checks below are sanity guards that
+			// cannot fail on a healthy engine. The check that discriminates is
+			// the Pending status: a route node that ran, or was routed to,
+			// would carry a different status.
 			if len(followerDetail.Nodes) != 1 {
 				t.Fatalf("Inspect(%s) nodes = %+v, want exactly the route node reported\n%s",
 					tc.follower, followerDetail.Nodes, describeExecution(ctx, eng, id))
