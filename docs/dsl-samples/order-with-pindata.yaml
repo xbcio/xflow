@@ -24,9 +24,8 @@ description: "订单处理工作流 — Pin Data 调试示例"
 # 全局配置
 # ──────────────────────────────────────
 settings:
-  # 注意：settings 层没有 timeout 字段（WorkflowSettings 只有 concurrency /
-  # timezone / on_error / pin_data_mode / retry），写了也不会被读取；单次执行
-  # 的时限是节点级 timeout。
+  # settings.timeout 是整个执行的预算（整数纳秒，从提交时刻起算，含排队与挂起，
+  # 0/缺省 = 不限）；本样例没有设置，单个节点的时限仍是节点级 timeout。
   timezone: "Asia/Shanghai"
   pin_data_mode: test_only        # 只在测试执行中生效，见文件头
 

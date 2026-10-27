@@ -6030,6 +6030,20 @@ components:
           type: integer
         timezone:
           type: string
+        timeout:
+          type: integer
+          format: int64
+          description: |
+            Go duration (nanoseconds) for the whole execution: an execution
+            budget counted from submission, including time spent queued behind
+            `concurrency` and time spent suspended. When it elapses the
+            execution ends with the `timeout` status; this does not go through
+            `on_error`. Omit or use 0 for no budget. A negative value, or a
+            non-zero value on a `faf` workflow, is rejected at compile time.
+            Independent of the per-node `timeout`. Run-time expiry is not
+            implemented yet: the field is currently validated and persisted
+            only, so a workflow that declares it does not time out because of
+            it.
         on_error:
           type: string
           enum: ["", stop, error_output, main_output, continue]
