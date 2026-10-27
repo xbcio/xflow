@@ -63,6 +63,16 @@ describe("buildAntdTheme", () => {
         expect(contrastRatio(components.Button.dangerColor, token.colorError)).toBeGreaterThanOrEqual(4.5);
       });
 
+      it("keeps the solid danger label at AA on the hover and pressed fills, and the fills distinct", () => {
+        // AntD reads the solid button's hover/pressed fills from colorErrorHover/Active.
+        const label = components.Button.dangerColor;
+        expect(contrastRatio(label, token.colorErrorHover)).toBeGreaterThanOrEqual(4.5);
+        expect(contrastRatio(label, token.colorErrorActive)).toBeGreaterThanOrEqual(4.5);
+        expect(token.colorErrorHover).not.toBe(token.colorError);
+        expect(token.colorErrorActive).not.toBe(token.colorError);
+        expect(token.colorErrorActive).not.toBe(token.colorErrorHover);
+      });
+
       it("parses focus, radius, type and elevation from the foundation scale", () => {
         const radius = (value: string) => Number.parseInt(value, 10);
         expect(token.controlOutline).toBe(palette.focusRing);

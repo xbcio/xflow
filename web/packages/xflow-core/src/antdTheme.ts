@@ -30,6 +30,8 @@ export interface SharedAntdToken {
   colorBorderBg: string;
   colorBorderSecondary: string;
   colorError: string;
+  colorErrorActive: string;
+  colorErrorHover: string;
   colorFillAlter: string;
   colorFillContent: string;
   colorFillContentHover: string;
@@ -218,6 +220,8 @@ export function buildAntdTheme(mode: Appearance, options: AntdThemeOptions = {})
       colorBorderBg: palette.border,
       colorBorderSecondary: palette.borderSubtle,
       colorError: palette.danger,
+      colorErrorActive: palette.dangerActive,
+      colorErrorHover: palette.dangerHover,
       colorFillAlter: palette.field,
       colorFillContent: palette.field,
       colorFillContentHover: palette.hover,

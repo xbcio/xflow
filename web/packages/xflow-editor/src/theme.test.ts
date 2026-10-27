@@ -59,7 +59,9 @@ describe("createEditorThemeConfig", () => {
           colorInfo: palette.info,
           colorSuccess: palette.success,
           colorWarning: palette.warning,
-          colorError: palette.danger
+          colorError: palette.danger,
+          colorErrorHover: palette.dangerHover,
+          colorErrorActive: palette.dangerActive
         });
       });
 

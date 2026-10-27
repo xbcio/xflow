@@ -73,6 +73,14 @@ export interface Palette {
   success: string;
   warning: string;
   danger: string;
+  /**
+   * Hover/pressed fills of a solid danger button. AntD derives them from the
+   * seed and the `onDanger` label drops under AA on two of the four: light hover
+   * lightens to #de595b (3.69:1) and dark pressed deepens to #ad4c47 (3.48:1).
+   * All four steps are pinned so the label holds 4.5:1 in every state.
+   */
+  dangerHover: string;
+  dangerActive: string;
   suspend: string;
   neutral: string;
   accent: string;
@@ -177,6 +185,8 @@ export const palettes: Record<Appearance, Palette> = {
     success: "#12855a",
     warning: "#b26b00",
     danger: "#d1333b",
+    dangerHover: "#bf2c35",
+    dangerActive: "#ab202c",
     suspend: "#7a52d6",
     neutral: "#6b7280",
     accent: "#0d8f8f",
@@ -220,6 +230,8 @@ export const palettes: Record<Appearance, Palette> = {
     success: "#35c98b",
     warning: "#f2b44c",
     danger: "#ff6a62",
+    dangerHover: "#e8867e",
+    dangerActive: "#d05751",
     suspend: "#a98bff",
     neutral: "#8f97a3",
     accent: "#2cc4c4",

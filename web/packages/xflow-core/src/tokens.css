@@ -87,6 +87,8 @@
     --xflow-success: #12855a;
     --xflow-warning: #b26b00;
     --xflow-danger: #d1333b;
+    --xflow-danger-hover: #bf2c35;
+    --xflow-danger-active: #ab202c;
     --xflow-suspend: #7a52d6;
     --xflow-neutral: #6b7280;
     --xflow-accent: #0d8f8f;
@@ -174,6 +176,8 @@
     --xflow-success: #35c98b;
     --xflow-warning: #f2b44c;
     --xflow-danger: #ff6a62;
+    --xflow-danger-hover: #e8867e;
+    --xflow-danger-active: #d05751;
     --xflow-suspend: #a98bff;
     --xflow-neutral: #8f97a3;
     --xflow-accent: #2cc4c4;

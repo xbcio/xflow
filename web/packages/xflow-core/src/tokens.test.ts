@@ -106,8 +106,9 @@ describe("token vocabulary", () => {
     // same reason, so they are palette keys rather than derived expressions.
     // Stage 1b adds the five surface steps plus elev0/elev4 (elev1-3 already existed);
     // stage 1c adds borderSubtle for separators; onDanger is the label colour
-    // for a solid danger fill.
-    expect(Object.keys(paletteTokens.light)).toHaveLength(23 + 4 + 3 + 4 + 7 + 1 + 1);
+    // for a solid danger fill; dangerHover/dangerActive are that fill's
+    // hover and pressed steps.
+    expect(Object.keys(paletteTokens.light)).toHaveLength(23 + 4 + 3 + 4 + 7 + 1 + 1 + 2);
     for (const key of ["highlight", "hoverSubtle", "insetShadow", "shadow", "borderSubtle"]) {
       expect(Object.keys(paletteTokens.light), key).toContain(key);
     }
