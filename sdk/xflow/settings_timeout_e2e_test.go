@@ -177,11 +177,16 @@ func TestSettingsTimeoutRunningNodeEndsTheExecutionAsTimeout(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Inspect(%s) error = %v", tc.follower, err)
 			}
-			for _, n := range followerDetail.Nodes {
-				if n.Status == types.NodeStatusSuccess || n.Status == types.NodeStatusRunning {
-					t.Fatalf("on_error=%s route node %q is %q after the budget ended the execution, want it never run",
-						tc.onError, n.Name, n.Status)
-				}
+			// The route node is part of the execution, so it must be reported, and
+			// it must still be waiting: an empty list would pass a bare "never ran"
+			// check without proving anything about the route.
+			if len(followerDetail.Nodes) != 1 {
+				t.Fatalf("Inspect(%s) nodes = %+v, want exactly the route node reported\n%s",
+					tc.follower, followerDetail.Nodes, describeExecution(ctx, eng, id))
+			}
+			if n := followerDetail.Nodes[0]; n.Name != tc.follower || n.Status != types.NodeStatusPending {
+				t.Fatalf("on_error=%s route node %q is %q after the budget ended the execution, want %q (never run)",
+					tc.onError, n.Name, n.Status, types.NodeStatusPending)
 			}
 		})
 	}
