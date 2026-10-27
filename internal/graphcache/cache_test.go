@@ -167,6 +167,7 @@ func TestCacheDeleteDoesNotNotify(t *testing.T) {
 
 	// Capacity eviction notifies.
 	c.Put("first", newGraph(), 0)
+	clk.advance(time.Second) // tied `used` would pick the victim by map order
 	c.Put("second", newGraph(), 0)
 	if len(notified) != 1 || notified[0] != "first" {
 		t.Fatalf("capacity eviction notified %v, want [first]", notified)
