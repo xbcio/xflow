@@ -265,7 +265,13 @@ func TestSettingsTimeoutWithinBudgetSucceeds(t *testing.T) {
 	if detail.CreatedAt == nil || detail.UpdatedAt == nil {
 		t.Fatalf("Inspect() CreatedAt/UpdatedAt = %v/%v, want both stamped", detail.CreatedAt, detail.UpdatedAt)
 	}
-	if lived := detail.UpdatedAt.Sub(*detail.CreatedAt); lived < settingsTimeoutNapFor || lived >= budget {
+	// CreatedAt and UpdatedAt are wall-clock stamps while the nap is timed on the
+	// monotonic clock, and the OS slews the wall clock (up to 500ppm) when it
+	// corrects it: measured here, a 3s nap spans 2.998s of wall clock. The lower
+	// bound therefore allows 100ms, the same slack the other cases give their
+	// lifetime checks; success above already proves the nap ran to completion.
+	const wallSlack = 100 * time.Millisecond
+	if lived := detail.UpdatedAt.Sub(*detail.CreatedAt); lived < settingsTimeoutNapFor-wallSlack || lived >= budget {
 		t.Fatalf("execution lived %v, want the nap (%v) completed inside the %v budget", lived, settingsTimeoutNapFor, budget)
 	}
 
