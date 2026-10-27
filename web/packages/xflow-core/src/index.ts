@@ -47,7 +47,7 @@ export interface WorkflowSettings {
   /**
    * Whole-execution budget in integer nanoseconds (Go time.Duration wire form,
    * like `concurrency.queue_timeout`); 0 or unset means no budget. A Go duration
-   * string such as "30s" is rejected by the server.
+   * string such as "30s" fails JSON decoding on the server (HTTP 400 bad_request).
    */
   timeout?: number;
   concurrency?: number;

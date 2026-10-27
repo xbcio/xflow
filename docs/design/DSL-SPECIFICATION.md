@@ -163,7 +163,8 @@ settings:
 #   <0：编译期报错（settings.timeout must be >= 0）。
 #   FAF 工作流（options.faf）声明非零值：编译期报错，FAF 不持久化执行，没有可到期的记录。
 # 线格式与 queue_timeout 相同：time.Duration 的 JSON 表示，即整数纳秒（30 分钟 =
-# 1800000000000）。JSON 解码不接受 "30m" 这样的时长字符串，写字符串会在注册时被拒绝。
+# 1800000000000）。JSON 解码不接受 "30m" 这样的时长字符串：写字符串时注册请求在解码阶段失败，
+# HTTP 返回 400 bad_request（invalid JSON）。
 # 它与节点级 timeout 互相独立：节点 timeout 约束单次 handler 调用，本字段约束整个执行。
 # 状态：已实现，运行时会按预算到期处理。
 #   起算：预算的截止时刻 = 提交（admission，即执行创建）时刻 + settings.timeout，排队与
