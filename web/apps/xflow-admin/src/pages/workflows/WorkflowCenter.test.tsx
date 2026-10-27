@@ -1505,6 +1505,25 @@ describe('import DSL', () => {
     expect(screen.getByText(/duration is required/)).toBeTruthy();
   });
 
+  it('names the import-warning toast close button 关闭, with no English Close left', async () => {
+    await openImportDialog();
+    host.createWorkflow.mockResolvedValue({
+      workflowId: 'wf-9',
+      warnings: ['node "pause" has no stable id'],
+    });
+    await pasteJson('{"name":"导入流","nodes":[]}');
+    submitImport();
+
+    await waitFor(() =>
+      expect(document.querySelector('.ant-notification-notice')?.textContent).toContain(
+        'has no stable id',
+      ),
+    );
+    const notice = document.querySelector('.ant-notification-notice') as HTMLElement;
+    expect(within(notice).getByRole('button', { name: '关闭' })).toBeTruthy();
+    expect(notice.querySelector('[aria-label="Close"]')).toBeNull();
+  });
+
   it('maps a server error code to Chinese help and keeps the message expandable', async () => {
     await openImportDialog();
     host.createWorkflow.mockRejectedValue(

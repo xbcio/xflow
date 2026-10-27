@@ -32,6 +32,12 @@ export interface ActionToast {
   error: (title: string, reason?: string) => void;
 }
 
+/**
+ * rc-notification hardcodes the close button's aria-label as "Close" and the
+ * Provider cannot reach it, so every notice passes this per call.
+ */
+export const TOAST_CLOSABLE = { 'aria-label': '关闭' } as const;
+
 let sequence = 0;
 
 /**
@@ -56,6 +62,7 @@ export function useActionToast(): ActionToast {
           placement: 'bottomRight',
           duration: SUCCESS_TOAST_SECONDS,
           pauseOnHover: true,
+          closable: TOAST_CLOSABLE,
           // A finished operation is a status, not an alert: it must not
           // interrupt a screen reader mid-sentence.
           role: 'status',
@@ -81,6 +88,7 @@ export function useActionToast(): ActionToast {
           placement: 'bottomRight',
           duration: ERROR_TOAST_SECONDS,
           pauseOnHover: true,
+          closable: TOAST_CLOSABLE,
         });
       },
     }),

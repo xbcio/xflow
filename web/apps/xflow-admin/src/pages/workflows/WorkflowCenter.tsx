@@ -37,6 +37,7 @@ import type { InitialState } from '../../app';
 import { PageHeader } from '../../components/PageHeader';
 import { TableProgressBar } from '../../components/TableProgressBar';
 import { TableToolbar } from '../../components/TableToolbar';
+import { TOAST_CLOSABLE } from '../../components/useActionToast';
 import { useSearchShortcut } from '../../components/useSearchShortcut';
 import { authorizedFetch } from '../../services/http';
 import { fetchRunnerPools, fetchRunners } from '../../services/management';
@@ -472,6 +473,7 @@ export function WorkflowCenter() {
               </div>
             ),
             duration: false,
+            closable: TOAST_CLOSABLE,
           });
         } else {
           message.success(`已导入工作流 ${result.workflowId}`);

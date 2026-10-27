@@ -1121,6 +1121,31 @@ describe('AL-29 result toasts', () => {
     expect(document.body.textContent).not.toContain('Bearer');
   });
 
+  it('names the close button 关闭 on a success toast, with no English Close left', async () => {
+    renderPage();
+    await waitFor(() => expect(rows()).toHaveLength(3));
+
+    fireEvent.click(execRow('exec-9')?.querySelector('[data-op="pause"]') as HTMLElement);
+    await waitFor(() => expect(popup()?.textContent).toContain('已暂停 exec-9'));
+
+    const notice = document.querySelector('.ant-notification-notice') as HTMLElement;
+    expect(within(notice).getByRole('button', { name: '关闭' })).toBeTruthy();
+    expect(notice.querySelector('[aria-label="Close"]')).toBeNull();
+  });
+
+  it('names the close button 关闭 on a failure toast, with no English Close left', async () => {
+    host.pauseExecution.mockRejectedValueOnce(new Error('boom'));
+    renderPage();
+    await waitFor(() => expect(rows()).toHaveLength(3));
+
+    fireEvent.click(execRow('exec-9')?.querySelector('[data-op="pause"]') as HTMLElement);
+    await waitFor(() => expect(popup()?.textContent).toContain('暂停失败'));
+
+    const notice = document.querySelector('.ant-notification-notice') as HTMLElement;
+    expect(within(notice).getByRole('button', { name: '关闭' })).toBeTruthy();
+    expect(notice.querySelector('[aria-label="Close"]')).toBeNull();
+  });
+
   it('announces a success as a status and reuses one toast for a repeated operation', async () => {
     host.listExecutions.mockResolvedValue(
       page([row('exec-9', 'running', { workflowId: 'wf-1' })], 1),
