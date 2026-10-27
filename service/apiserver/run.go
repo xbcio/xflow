@@ -288,10 +288,14 @@ func (s *APIServer) serveMetrics() (func(), error) {
 	// conflicting family, promhttp's default error handling would 500 the WHOLE
 	// endpoint, taking the server's own metrics down with it.
 	if inbox := metricsInboxFor(s.cp); inbox != nil {
-		mux.Handle(path, promhttp.HandlerFor(
-			prometheus.Gatherers{s.cfg.Metrics.Registry(), inbox},
-			promhttp.HandlerOpts{},
-		))
+		// A collector constructed over a host registration-only adapter has no
+		// gatherer; merging a nil one would make prometheus.Gatherers panic at
+		// scrape time, so only the inbox is served in that case.
+		gatherers := prometheus.Gatherers{inbox}
+		if self := s.cfg.Metrics.Gatherer(); self != nil {
+			gatherers = prometheus.Gatherers{self, inbox}
+		}
+		mux.Handle(path, promhttp.HandlerFor(gatherers, promhttp.HandlerOpts{}))
 	} else {
 		mux.Handle(path, s.cfg.Metrics.Handler())
 	}

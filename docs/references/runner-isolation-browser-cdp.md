@@ -139,59 +139,15 @@ Configuration surface (`sdk/runner/config.go`):
 
 - `browser_cdp.endpoints` / `max_contexts` / `queue_timeout` /
   `connect_timeout` (`config.go:74-79`);
-- `http_host_policy.allow` / `.deny` / `.block_private_ips` /
-  `.block_private_ips_allow` (`config.go:82-95`);
+- `http_host_policy.allow` / `.deny` (`config.go:82-95`);
 - env equivalents `XFLOW_BROWSER_CDP_ENDPOINTS` (`config.go:400`) and
-  `XFLOW_HTTP_HOST_POLICY_ALLOW` / `_DENY` /
-  `_BLOCK_PRIVATE_IPS` / `_BLOCK_PRIVATE_IPS_ALLOW` (`config.go:419-440`);
+  `XFLOW_HTTP_HOST_POLICY_ALLOW` / `_DENY` (`config.go:419-440`);
 - an invalid pattern list fails config load (`config.go:662-675`), so a
   malformed policy is a startup failure rather than a silently permissive one.
 
 Note the asymmetry in §2.3's first bullet: a *non*-browser runner keeps the
 permissive historical default for `xflow.http`. Only the browser capability
 turns "unconfigured" into "deny everything".
-
-### 2.5 Dial-time address guard (`block_private_ips`)
-
-A second, independent layer refuses connections by *address*, not by name. It
-is installed by the same function (`run.go:521-525`) and is **enabled by
-default** (`config.go`'s `defaultRunnerConfig` sets `httpBlockPrivateIPs: true`).
-
-- **Scope:** `xflow.http` and `xflow.grpc` only. The guard wraps those two
-  transports' dialers, checks every resolved A/AAAA record, and connects only to
-  the exact address it checked, so a rebinding answer cannot redirect the
-  connection. It does **not** cover Browser/CDP navigation: there the browser
-  process resolves and dials, and the runner never sees the socket — which is
-  why gap G3 below stays open for browser traffic.
-- **What it refuses:** loopback, RFC 1918 private, link-local (including
-  `169.254.169.254`), unspecified, multicast, shared address space
-  (`100.64.0.0/10`, which holds cloud metadata endpoints), benchmarking,
-  IETF/reserved ranges, `0.0.0.0/8`, and the IPv6 transition prefixes that
-  embed an IPv4 destination (NAT64 `64:ff9b::/96`, 6to4 `2002::/16`, Teredo
-  `2001::/32`). IPv4-mapped IPv6 is classified as the IPv4 it carries.
-- **Exemptions:** `http_host_policy.block_private_ips_allow` is the guard's own
-  list (same exact/`.suffix`/`*.wildcard` grammar). It is deliberately separate
-  from `http_host_policy.allow`: a non-empty `allow` also switches the name
-  policy into allowlist-only mode, so reusing it would break every public
-  destination the operator did not list. An unparsable exemption list fails
-  closed (the guard stays on with no exemptions).
-- **Failure classification:** a refused address is a permanent
-  `http.address_not_allowed` / `grpc.address_not_allowed` error, so it does not
-  consume a retry budget. A DNS failure during the gRPC preflight is not a
-  policy decision: a pooled connection may still be used, and a pool miss is
-  re-resolved by the dialer itself.
-
-**Migration.** Upgrading a runner enables the guard with an empty exemption list;
-a workflow that previously reached `localhost`, an RFC 1918 address, or a cloud
-metadata endpoint through `xflow.http`/`xflow.grpc` will now fail with
-`*.address_not_allowed`. To keep such a destination, add its host to
-`http_host_policy.block_private_ips_allow` (YAML), or set
-`XFLOW_HTTP_HOST_POLICY_BLOCK_PRIVATE_IPS_ALLOW` /
-`--http-block-private-ips-allow` — do *not* put it in `allow`, which changes the
-name policy. `block_private_ips: false` /
-`XFLOW_HTTP_HOST_POLICY_BLOCK_PRIVATE_IPS=false` /
-`--http-block-private-ips=false` restores the old unfiltered behavior for the
-whole process and is intended only as an escape hatch during migration.
 
 ### 2.4 Resource bounding
 

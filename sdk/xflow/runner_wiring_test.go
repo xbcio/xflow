@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/node/supply"
@@ -121,6 +123,44 @@ func TestNewRunnerSkipsTheMetricsReporterWhenItCannotReport(t *testing.T) {
 		t.Error("a reporter was built over gRPC, whose client does not implement " +
 			"MetricsReportClient")
 	}
+}
+
+// A collector bound to a host registry must report through Gatherer, not
+// through a concrete registry it does not own. A host that only accepts
+// registrations has nothing to snapshot, so reporting degrades to "not
+// reporting" instead of refusing to start.
+func TestNewRunnerMetricsReporterUsesTheCollectorGatherer(t *testing.T) {
+	cfg := RunnerConfig{ServerURL: "http://server:8080"}
+	client, cleanup, err := newRunnerProtocolClient(cfg, runnerOptionsFrom(nil), mustTestCredentialReloader(t, cfg))
+	if err != nil {
+		t.Fatalf("newRunnerProtocolClient: %v", err)
+	}
+	defer cleanup()
+
+	reportCfg := RunnerConfig{ServerURL: "http://server:8080", RunnerID: "r-1", ReportMetrics: true}
+	registry := prometheus.NewRegistry()
+	reporter, err := newRunnerMetricsReporter(client, metrics.NewWithRegisterer(registry, registry), reportCfg)
+	if err != nil {
+		t.Fatalf("newRunnerMetricsReporter(host registry): %v", err)
+	}
+	if reporter == nil {
+		t.Fatal("no reporter was built over a host registry that can gather")
+	}
+
+	reporter, err = newRunnerMetricsReporter(client, metrics.NewWithRegisterer(registerOnlyAdapter{registry}, nil), reportCfg)
+	if err != nil {
+		t.Fatalf("newRunnerMetricsReporter(register-only): %v; an ineffective "+
+			"metrics config must keep running, not refuse to start", err)
+	}
+	if reporter != nil {
+		t.Fatal("a reporter was built over a collector with no gatherer")
+	}
+}
+
+// registerOnlyAdapter exposes registration without gathering, like a host
+// adapter that forwards registrations into its own private registry.
+type registerOnlyAdapter struct {
+	prometheus.Registerer
 }
 
 // A bad interval must be rejected at assembly, not silently ignored: a runner

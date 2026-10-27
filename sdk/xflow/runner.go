@@ -521,7 +521,9 @@ func NewRunner(cfg RunnerConfig, opts ...RunnerOption) (*Runner, error) {
 // (only the HTTP one does — gRPC is not a target deployment and crosses clouds
 // via the Relay Gateway). A gRPC runner told to report keeps running without
 // reporting, because refusing to start would turn a config that is merely
-// ineffective into an outage.
+// ineffective into an outage. A collector whose host registerer cannot gather
+// takes the same path: there is nothing to snapshot, and that is a deployment
+// misconfiguration, not a reason to refuse to run work.
 func newRunnerMetricsReporter(client runnersvc.ProtocolClient, m *metrics.Metrics, cfg RunnerConfig) (*runnersvc.MetricsReporter, error) {
 	if !cfg.ReportMetrics {
 		return nil, nil
@@ -529,6 +531,12 @@ func newRunnerMetricsReporter(client runnersvc.ProtocolClient, m *metrics.Metric
 	if m == nil {
 		return nil, fmt.Errorf("xflow: RunnerConfig.ReportMetrics requires WithRunnerMetrics: " +
 			"there is no registry to report")
+	}
+	gatherer := m.Gatherer()
+	if gatherer == nil {
+		slog.Warn("metrics reporting was requested but the configured collector cannot gather; " +
+			"continuing without it")
+		return nil, nil
 	}
 	interval := runnersvc.DefaultMetricsReportInterval
 	if cfg.ReportMetricsInterval != 0 {
@@ -545,7 +553,7 @@ func newRunnerMetricsReporter(client runnersvc.ProtocolClient, m *metrics.Metric
 		return nil, nil
 	}
 	return runnersvc.NewMetricsReporter(runnersvc.MetricsReporterConfig{
-		Gatherer: m.Registry(),
+		Gatherer: gatherer,
 		Client:   reportClient,
 		RunnerID: cfg.RunnerID,
 		Interval: interval,
