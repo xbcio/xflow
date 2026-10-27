@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 
 	"github.com/xbcio/xflow/types"
@@ -240,36 +239,6 @@ func acquireGRPC(ctx context.Context, host string, secure bool, opts ...grpc.Dia
 	pool := types.ResourcePoolFromContext(ctx)
 	if pool == nil {
 		return nil, nil, types.NewPermanentError("grpc.no_pool", "xflow.grpc: no resource pool configured")
-	}
-	if guard := currentAddressGuard(); guard != nil {
-		// Only a TCP target has a host to judge and an address for the guarded
-		// dialer to check. A unix socket (or any other scheme without host:port)
-		// is left to the gRPC transport untouched: the address dialer splits its
-		// argument as host:port, so installing it there would reject the socket
-		// path and break a target that worked before the guard existed.
-		if targetHost, ok := targetTCPHost(host); ok {
-			// gRPC's dial is lazy and a refused dial surfaces as a generic
-			// Unavailable status, which Execute would classify as transient. Check
-			// the target first so a policy rejection stays permanent and carries
-			// the host that caused it. The dialer below re-checks whatever
-			// addresses the resolver actually hands it, so this preflight is about
-			// classification, not about the security decision.
-			if err := guard.validateTarget(ctx, host); err != nil {
-				var blocked *blockedAddressError
-				if errors.As(err, &blocked) {
-					return nil, func() {}, types.NewPermanentError("grpc.address_not_allowed", blocked.Error())
-				}
-				// Resolution failed (DNS outage, empty answer). Do not reject here:
-				// the pool may already hold an established connection for this
-				// target, and a DNS blip must not break calls that need no dial at
-				// all. On a pool miss the injected dialer below resolves again and
-				// fails the lazy dial, so the address decision still happens at
-				// dial time; only the premature failure is skipped.
-			}
-			// The allowlist decision and the error message use the operator's
-			// hostname; gRPC's resolver hands the dialer IP addresses.
-			opts = append(opts, grpc.WithContextDialer(guard.grpcDialer(targetHost)))
-		}
 	}
 	conn, err := pool.GRPC(ctx, host, secure, opts...)
 	if err != nil {

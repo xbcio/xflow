@@ -33,20 +33,10 @@ type traceCarrierCacheEntry struct {
 // the memo alongside the graph cache. A hit returns a copy, so a caller that
 // mutates the map cannot poison later dispatches.
 //
-// A backend without the capability still reads through GetExecution, unchanged.
+// A backend without the capability reads the full snapshot via GetExecution.
+// That answer is memoized the same way: the carrier is immutable, and tracing
+// must not re-read a snapshot on every background span of an execution.
 func (e *Engine) ExecutionTraceCarrier(ctx context.Context, id types.ExecutionID) (map[string]string, error) {
-	reader, ok := e.state.(ExecutionTraceCarrierReader)
-	if !ok {
-		snap, err := e.state.GetExecution(ctx, id)
-		if err != nil {
-			return nil, err
-		}
-		if snap == nil {
-			return nil, nil
-		}
-		return snap.TraceCarrier, nil
-	}
-
 	e.mu.RLock()
 	cached, hit := e.traceCarriers[id]
 	e.mu.RUnlock()
@@ -54,12 +44,25 @@ func (e *Engine) ExecutionTraceCarrier(ctx context.Context, id types.ExecutionID
 		return cloneTraceCarrier(cached.carrier), nil
 	}
 
-	carrier, found, err := reader.GetExecutionTraceCarrier(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	if !found {
-		carrier = nil
+	var carrier map[string]string
+	if reader, ok := e.state.(ExecutionTraceCarrierReader); ok {
+		found := false
+		var err error
+		carrier, found, err = reader.GetExecutionTraceCarrier(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			carrier = nil
+		}
+	} else {
+		snap, err := e.state.GetExecution(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if snap != nil {
+			carrier = snap.TraceCarrier
+		}
 	}
 	// Store the backend's answer even when it is empty: the entry itself is the
 	// sentinel that stops a carrier-less execution from re-reading on every
@@ -150,6 +153,30 @@ func (e *Engine) BuildTaskLease(ctx context.Context, t *Task) (*TaskLease, error
 		Task:       *t,
 		IssuedAt:   issuedAt,
 		TTL:        ttl,
+	}
+	// Carry the submission trace onto the lease. An embedded (local) backend
+	// executes the task on a queue worker whose ctx starts from
+	// context.Background(), so this carrier is the only path by which a local
+	// task span can join the workflow's trace. It is deliberately the execution
+	// snapshot's carrier, not one injected here: the control plane replaces it
+	// with its own dispatch span's carrier before the lease leaves the process
+	// (dispatchNodeLease / dispatchSubgraphLease / dispatchGroupLease in
+	// service/control), so cluster dispatch keeps its child-of-dispatch shape.
+	//
+	// Only backends that expose the NARROW carrier read do this. A backend
+	// without it would answer through GetExecution, adding a whole-snapshot
+	// round trip to every lease acquisition — the exact cost the arrival-folding
+	// commit budget exists to keep out of this path. The capability is the
+	// documented opt-in for exactly this shape of read (engine interfaces,
+	// ExecutionTraceCarrierReader), and both real backends (local memory state,
+	// distributed state) declare it.
+	//
+	// Failures are swallowed: tracing must never decide whether a lease can be
+	// issued, and a backend whose carrier read fails still has the lease.
+	if _, ok := e.state.(ExecutionTraceCarrierReader); ok {
+		if carrier, carrierErr := e.ExecutionTraceCarrier(ctx, t.ExecutionID); carrierErr == nil && len(carrier) > 0 {
+			lease.TraceCarrier = carrier
+		}
 	}
 	var prev *NodeSnapshot
 	if routeChecked {

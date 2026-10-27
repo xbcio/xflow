@@ -13,6 +13,7 @@ import (
 	"github.com/xbcio/xflow/backend/providers/distributed/internal/redisx"
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/internal/graphcache"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/types"
@@ -36,9 +37,13 @@ type Store struct {
 	// before the store starts serving; read-only afterwards, hence no lock.
 	ownedNamespaces []namespace.Namespace
 
-	// in-memory graph cache for CheckCompletion (avoids Redis round-trips per node)
-	mu     sync.RWMutex
-	graphs map[types.ExecutionID]*graph.Graph
+	// in-memory graph cache: LoadGraph decodes into it and CheckCompletion reads
+	// it. Bounded because every replica that executes one node of an execution
+	// populates it while only the terminalizing replica evicts it — see
+	// internal/graphcache.
+	graphs             *graphcache.Cache
+	graphCacheMaxBytes int64
+	graphCacheIdleTTL  time.Duration
 
 	// per-execution TTL overrides (set via SubmitOption)
 	ttlMu    sync.RWMutex
@@ -120,12 +125,30 @@ type Store struct {
 	cursorKey []byte
 }
 
-func New(rdb redis.UniversalClient, db store.Store, execTTL time.Duration) *Store {
+// Option configures a Store at construction time.
+type Option func(*Store)
+
+// WithGraphCache bounds the store's in-memory decoded-graph cache.
+//
+// The cache is populated by every replica that loads an execution's graph and
+// evicted only when that execution reaches a terminal state on the same
+// replica, so without a bound a non-finalizing replica pins every graph it ever
+// touched. maxBytes <= 0 and idleTTL <= 0 disable the respective bound;
+// omitting the option keeps graphcache.DefaultMaxBytes / DefaultIdleTTL.
+func WithGraphCache(maxBytes int64, idleTTL time.Duration) Option {
+	return func(s *Store) {
+		s.graphCacheMaxBytes = maxBytes
+		s.graphCacheIdleTTL = idleTTL
+	}
+}
+
+func New(rdb redis.UniversalClient, db store.Store, execTTL time.Duration, opts ...Option) *Store {
 	s := &Store{
 		rdb:                    rdb,
 		db:                     db,
 		execTTL:                execTTL,
-		graphs:                 make(map[types.ExecutionID]*graph.Graph),
+		graphCacheMaxBytes:     graphcache.DefaultMaxBytes,
+		graphCacheIdleTTL:      graphcache.DefaultIdleTTL,
 		execTTLs:               make(map[types.ExecutionID]time.Duration),
 		execTransient:          make(map[types.ExecutionID]transientMark),
 		leaseRepairCursors:     make(map[namespace.Namespace]redisx.Cursors),
@@ -134,6 +157,29 @@ func New(rdb redis.UniversalClient, db store.Store, execTTL time.Duration) *Stor
 		auditCounters:          &auditCounters{},
 		cursorKey:              newCursorSigningKey(),
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	s.graphs = graphcache.New(graphcache.Options{
+		// The entry cap is a fixed secondary guard; the byte budget is the
+		// configurable one.
+		MaxEntries: graphcache.DefaultMaxEntries,
+		MaxBytes:   s.graphCacheMaxBytes,
+		IdleTTL:    s.graphCacheIdleTTL,
+		// The backend installs the logger right after New, so it is read at call
+		// time rather than captured. Same line and keys as the engine's cache,
+		// distinguished by scope.
+		OnSweep: func(st graphcache.Stats) {
+			if s.logger == nil {
+				return
+			}
+			s.logger.Info("graph_cache_stats", "scope", "store",
+				"entries", st.Entries, "bytes", st.Bytes,
+				"evicted_idle", st.EvictedIdle,
+				"evicted_capacity", st.EvictedCapacity,
+				"evicted_explicit", st.EvictedExplicit)
+		},
+	})
 	// The readiness index is on by default because it is a pure accelerator:
 	// with it the drain discovers ready work in time proportional to the
 	// backlog, without it every discovery call sweeps the keyspace exactly as
@@ -773,9 +819,7 @@ func redisResultStrings(value any) []string {
 // once an execution reaches a terminal state, so completed executions do not
 // pin memory.
 func (s *Store) evictExecutionCaches(id types.ExecutionID) {
-	s.mu.Lock()
-	delete(s.graphs, id)
-	s.mu.Unlock()
+	s.graphs.Delete(id)
 	s.ttlMu.Lock()
 	delete(s.execTTLs, id)
 	s.ttlMu.Unlock()

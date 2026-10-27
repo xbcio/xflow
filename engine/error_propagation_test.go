@@ -304,7 +304,7 @@ func TestEngineTerminalHooksFollowPersistentState(t *testing.T) {
 		if hooks.executionCompletions != 0 {
 			t.Fatalf("execution completion hooks = %d, want 0", hooks.executionCompletions)
 		}
-		if _, ok := eng.graphs[lease.Task.ExecutionID]; !ok {
+		if _, ok := eng.graphs.Get(lease.Task.ExecutionID); !ok {
 			t.Fatal("execution graph was evicted despite failed fenced terminal commit")
 		}
 	})
@@ -320,7 +320,7 @@ func TestEngineTerminalHooksFollowPersistentState(t *testing.T) {
 		if err := state.CreateExecution(context.Background(), &ExecutionSnapshot{ID: id, Graph: g, Status: types.ExecutionStatusRunning}); err != nil {
 			t.Fatalf("CreateExecution() error = %v", err)
 		}
-		eng.graphs[id] = g
+		eng.graphs.Put(id, g, 0)
 		state.updateStatusErr = map[types.ExecutionStatus]error{
 			types.ExecutionStatusSuccess: statusErr,
 		}
@@ -332,7 +332,7 @@ func TestEngineTerminalHooksFollowPersistentState(t *testing.T) {
 		if hooks.executionCompletions != 0 {
 			t.Fatalf("execution completion hooks = %d, want 0", hooks.executionCompletions)
 		}
-		if _, ok := eng.graphs[id]; !ok {
+		if _, ok := eng.graphs.Get(id); !ok {
 			t.Fatal("execution graph was evicted despite failed terminal status write")
 		}
 	})
@@ -393,7 +393,7 @@ func TestEngineCancelPropagatesStateErrors(t *testing.T) {
 			if err := state.CreateExecution(context.Background(), &ExecutionSnapshot{ID: id, Graph: g, Status: types.ExecutionStatusRunning}); err != nil {
 				t.Fatalf("CreateExecution() error = %v", err)
 			}
-			eng.graphs[id] = g
+			eng.graphs.Put(id, g, 0)
 			tt.fault(state, id)
 
 			err = eng.Cancel(context.Background(), id)
@@ -403,7 +403,7 @@ func TestEngineCancelPropagatesStateErrors(t *testing.T) {
 			if hooks.executionCompletions != 0 {
 				t.Fatalf("execution completion hooks = %d, want 0", hooks.executionCompletions)
 			}
-			if _, ok := eng.graphs[id]; !ok {
+			if _, ok := eng.graphs.Get(id); !ok {
 				t.Fatal("execution graph was evicted despite failed cancellation state write")
 			}
 		})

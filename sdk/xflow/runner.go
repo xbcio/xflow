@@ -151,6 +151,19 @@ type RunnerConfig struct {
 	HeartbeatInterval time.Duration
 	PollWait          time.Duration
 
+	// ShutdownTimeout bounds how long a graceful stop — cancelling the context
+	// passed to Run — takes before Run returns. One budget covers both
+	// handler-owned phases: the wait for in-flight handlers to finish and
+	// report, and the activation-tracker cleanup that follows. Cancelling that
+	// context stops polling but does not cancel a running handler, so this is
+	// what ends the stop; work still running when it expires is abandoned by
+	// this process and replayed by the server (at-least-once). Zero keeps the
+	// runner service default (10s); negative values are treated the same as
+	// zero. Keep it below the orchestrator's terminationGracePeriodSeconds
+	// (commonly 30s): the goodbye deregister call and Runner.Close run after
+	// the budget and add their own small fixed caps.
+	ShutdownTimeout time.Duration
+
 	// SupplyPollInterval is how often this runner re-reads every supply it
 	// hosts, independently of the control plane's supply hints. Zero uses
 	// runnersvc.DefaultSupplyPollInterval (60s); a non-zero value below
@@ -262,6 +275,18 @@ type runnerOptions struct {
 	// (tests calling buildRunnerServiceConfig directly, RunnerTransportInProc)
 	// builds those clients statically from RunnerConfig.
 	credReloader *CredentialReloader
+	// supplyRegistry overrides the process-wide supply.Default for both the
+	// activation gate and the registry the heartbeat reports Observed() from.
+	// Nil (every production path) means supply.Default.
+	//
+	// Deliberately not a public option: $supplies expression evaluation reads
+	// supply.Default unconditionally (exprx.ExprEnv), so pointing a real
+	// runner's gate at any other registry would publish content nothing in the
+	// process can read. It exists for in-package tests that need a registry of
+	// their own, because the process-wide one keeps content for the life of the
+	// process: a second round of the same test otherwise hits the gate's
+	// IsReady fast path and never exercises the fetch it asserts on.
+	supplyRegistry *supply.Registry
 }
 
 // RunnerOption configures a Runner.
@@ -496,7 +521,9 @@ func NewRunner(cfg RunnerConfig, opts ...RunnerOption) (*Runner, error) {
 // (only the HTTP one does — gRPC is not a target deployment and crosses clouds
 // via the Relay Gateway). A gRPC runner told to report keeps running without
 // reporting, because refusing to start would turn a config that is merely
-// ineffective into an outage.
+// ineffective into an outage. A collector whose host registerer cannot gather
+// takes the same path: there is nothing to snapshot, and that is a deployment
+// misconfiguration, not a reason to refuse to run work.
 func newRunnerMetricsReporter(client runnersvc.ProtocolClient, m *metrics.Metrics, cfg RunnerConfig) (*runnersvc.MetricsReporter, error) {
 	if !cfg.ReportMetrics {
 		return nil, nil
@@ -504,6 +531,12 @@ func newRunnerMetricsReporter(client runnersvc.ProtocolClient, m *metrics.Metric
 	if m == nil {
 		return nil, fmt.Errorf("xflow: RunnerConfig.ReportMetrics requires WithRunnerMetrics: " +
 			"there is no registry to report")
+	}
+	gatherer := m.Gatherer()
+	if gatherer == nil {
+		slog.Warn("metrics reporting was requested but the configured collector cannot gather; " +
+			"continuing without it")
+		return nil, nil
 	}
 	interval := runnersvc.DefaultMetricsReportInterval
 	if cfg.ReportMetricsInterval != 0 {
@@ -520,7 +553,7 @@ func newRunnerMetricsReporter(client runnersvc.ProtocolClient, m *metrics.Metric
 		return nil, nil
 	}
 	return runnersvc.NewMetricsReporter(runnersvc.MetricsReporterConfig{
-		Gatherer: m.Registry(),
+		Gatherer: gatherer,
 		Client:   reportClient,
 		RunnerID: cfg.RunnerID,
 		Interval: interval,
@@ -861,6 +894,10 @@ func buildRunnerServiceConfig(cfg RunnerConfig, opts ...RunnerOption) (runnersvc
 		// which is what a restart already does.
 		DescriptorsJSON: runnerDescriptorsJSON(cfg.Capabilities, registeredNodeDescriptors(), o.logger),
 		PollWait:        cfg.PollWait,
+		// Passed through verbatim, zero included: the service resolves unset to
+		// its own default, so the default lives in one place rather than being
+		// frozen into every caller's config.
+		ShutdownTimeout: cfg.ShutdownTimeout,
 		Tracer:          o.tracer,
 		Namespaces:      cfg.Namespaces,
 		GroupRuntime:    groupRuntime,
@@ -947,14 +984,19 @@ func wireRunnerTriggerHosting(svcCfg *runnersvc.Config, cfg RunnerConfig, o *run
 		return err
 	}
 	// The supply fetch client shares the seed origin: both talk to the control
-	// plane's HTTP API. The gate publishes into supply.Default, the same
-	// registry node handlers read through $supplies.
+	// plane's HTTP API. The gate publishes into the process-wide supply.Default
+	// (the registry node handlers read through $supplies), unless an in-package
+	// test installed a registry of its own.
+	supplyReg := o.supplyRegistry
+	if supplyReg == nil {
+		supplyReg = supply.Default
+	}
 	gate := runnersvc.NewSupplyGate(&runnersvc.HTTPSupplyFetcher{
 		BaseURL:  seedBaseURL,
 		Token:    seedToken,
 		RunnerID: cfg.RunnerID,
 		Client:   seedClient,
-	}, supply.Default, o.logger)
+	}, supplyReg, o.logger)
 	// Pull mode: a requirement declared as xflow.supply.http is fetched by THIS
 	// runner from the declared source, using this process's network position and
 	// credentials; the content goes into the local registry and is never written
@@ -992,7 +1034,7 @@ func wireRunnerTriggerHosting(svcCfg *runnersvc.Config, cfg RunnerConfig, o *run
 	// The same gate/registry pair feeds the heartbeat's two supply channels:
 	// the registry is what Observed() reads out to report applied hashes, and
 	// the gate is what ApplyHints fetches into on a piggybacked hint.
-	svcCfg.SupplyRegistry = supply.Default
+	svcCfg.SupplyRegistry = supplyReg
 	svcCfg.SupplyGate = gate
 	return nil
 }

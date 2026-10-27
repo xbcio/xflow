@@ -33,6 +33,9 @@ type runnerConfigFile struct {
 		Labels              map[string]string `yaml:"labels"`
 		Namespaces          *[]string         `yaml:"namespaces"`
 		AutoLabels          *bool             `yaml:"auto_labels"`
+		// ShutdownTimeout bounds how long a SIGTERM waits for in-flight
+		// handlers to finish. Unset keeps the runner service default.
+		ShutdownTimeout *string `yaml:"shutdown_timeout"`
 	} `yaml:"runner"`
 	Server struct {
 		URL        *string `yaml:"url"`
@@ -80,15 +83,6 @@ type runnerConfigFile struct {
 	HTTPHostPolicy struct {
 		Allow *[]string `yaml:"allow"`
 		Deny  *[]string `yaml:"deny"`
-		// BlockPrivateIPs controls the dial-time address guard for xflow.http
-		// and xflow.grpc. Nil means "not set" and keeps the secure default
-		// (enabled); false restores the historical unfiltered dial behavior.
-		BlockPrivateIPs *bool `yaml:"block_private_ips"`
-		// BlockPrivateIPsAllow is the address guard's own exemption list. It is
-		// separate from allow on purpose: allow also switches the name-level
-		// policy into allowlist-only mode, so using it for a private-host
-		// exemption would reject every public destination not listed there.
-		BlockPrivateIPsAllow *[]string `yaml:"block_private_ips_allow"`
 	} `yaml:"http_host_policy"`
 	// SupplyPullAllowedHosts is the runner-level allowlist for supply pull
 	// sources (xflow.supply.http). Nil keeps the default policy: only public
@@ -149,7 +143,6 @@ func defaultRunnerConfig() runnerConfig {
 		reportMetricsInterval:    "15s",
 		identityStoreKind:        identityStoreEphemeral,
 		autoLabels:               true,
-		httpBlockPrivateIPs:      true,
 	}
 }
 
@@ -228,6 +221,9 @@ func loadRunnerConfigFromBytesForProfile(data []byte, profile Profile) (runnerCo
 	if file.Runner.AutoLabels != nil {
 		cfg.autoLabels = *file.Runner.AutoLabels
 	}
+	if file.Runner.ShutdownTimeout != nil {
+		cfg.shutdownTimeout = *file.Runner.ShutdownTimeout
+	}
 	if file.Poll.Wait != nil {
 		cfg.pollWait = *file.Poll.Wait
 	}
@@ -278,12 +274,6 @@ func loadRunnerConfigFromBytesForProfile(data []byte, profile Profile) (runnerCo
 	}
 	if file.HTTPHostPolicy.Deny != nil {
 		cfg.httpHostPolicyDeny = copyStringsPreservingEmpty(*file.HTTPHostPolicy.Deny)
-	}
-	if file.HTTPHostPolicy.BlockPrivateIPs != nil {
-		cfg.httpBlockPrivateIPs = *file.HTTPHostPolicy.BlockPrivateIPs
-	}
-	if file.HTTPHostPolicy.BlockPrivateIPsAllow != nil {
-		cfg.httpBlockPrivateIPsAllow = copyStringsPreservingEmpty(*file.HTTPHostPolicy.BlockPrivateIPsAllow)
 	}
 	if file.SupplyPullAllowedHosts != nil {
 		cfg.supplyPullAllowedHosts = copyTrimmedHosts(*file.SupplyPullAllowedHosts)
@@ -356,9 +346,9 @@ var runnerConfigIssueOrder = []string{
 	"namespace",
 	"heartbeat-interval",
 	"poll-wait",
+	"shutdown-timeout",
 	"seed-request-timeout",
 	"supply-poll-interval",
-	"block-private-ips",
 	"allow-plaintext",
 	"require-supply-encryption",
 	"auto-labels",
@@ -422,21 +412,6 @@ func applyLookupEnvOverrides(cfg runnerConfig, lookupEnv func(string) (string, b
 	if v, ok := lookupEnv("XFLOW_HTTP_HOST_POLICY_DENY"); ok {
 		cfg.httpHostPolicyDeny = splitCSVPreservingExplicitEmpty(v)
 	}
-	// Same explicit-empty convention as the other two host lists; the flag and
-	// YAML spellings use the same underlying field.
-	if v, ok := lookupEnv("XFLOW_HTTP_HOST_POLICY_BLOCK_PRIVATE_IPS_ALLOW"); ok {
-		cfg.httpBlockPrivateIPsAllow = splitCSVPreservingExplicitEmpty(v)
-	}
-	if v, ok := lookupEnv("XFLOW_HTTP_HOST_POLICY_BLOCK_PRIVATE_IPS"); ok {
-		b, err := strconv.ParseBool(v)
-		if err != nil {
-			setRunnerConfigIssue(&cfg, "block-private-ips",
-				fmt.Errorf("XFLOW_HTTP_HOST_POLICY_BLOCK_PRIVATE_IPS must be a valid boolean: %w", err))
-		} else {
-			clearRunnerConfigIssue(&cfg, "block-private-ips")
-			cfg.httpBlockPrivateIPs = b
-		}
-	}
 	if v, ok := lookupEnv("XFLOW_SUPPLY_PULL_ALLOWED_HOSTS"); ok {
 		cfg.supplyPullAllowedHosts = splitCSV(v)
 	}
@@ -454,6 +429,11 @@ func applyLookupEnvOverrides(cfg runnerConfig, lookupEnv func(string) (string, b
 	}
 	if v, ok := lookupEnv("XFLOW_RUNNER_POLL_WAIT"); ok {
 		cfg.pollWait = v
+	}
+	// Same unset-stays-unset rule as the seed timeout: the graceful-stop bound
+	// and its default belong to the runner service.
+	if v, ok := lookupEnv("XFLOW_RUNNER_SHUTDOWN_TIMEOUT"); ok {
+		cfg.shutdownTimeout = v
 	}
 	// No default, unlike heartbeat/poll: an unset value must stay unset so the
 	// SDK applies protocol.DefaultEntrySeedRequestTimeout. Materializing 15s
@@ -667,9 +647,6 @@ func validateRunnerConfig(cfg runnerConfig) error {
 	if err := validateHostOnlyList("HTTP host policy denylist", cfg.httpHostPolicyDeny); err != nil {
 		return err
 	}
-	if err := validateHostOnlyList("private-IP blocking allowlist", cfg.httpBlockPrivateIPsAllow); err != nil {
-		return err
-	}
 	if err := validateHostOnlyList("supply pull allowed hosts", cfg.supplyPullAllowedHosts); err != nil {
 		return err
 	}
@@ -703,6 +680,15 @@ func validateRunnerConfig(cfg runnerConfig) error {
 	}
 	if err := validatePositiveDuration("poll wait", cfg.pollWait); err != nil {
 		return err
+	}
+	// Optional, so it is validated only when set. A malformed value fails closed
+	// rather than being dropped: an operator who wrote "30" (no unit) and got a
+	// runner still on the 10s default would see SIGTERM kill work with no
+	// indication that the setting did nothing.
+	if cfg.shutdownTimeout != "" {
+		if err := validatePositiveDuration("shutdown timeout", cfg.shutdownTimeout); err != nil {
+			return err
+		}
 	}
 	// Optional, so it is validated only when set. A malformed value still fails
 	// closed here rather than being dropped: a batch-sized admission whose
@@ -1001,13 +987,6 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 	if base.changed["http-host-deny"] {
 		cfg.httpHostPolicyDeny = normalizeExplicitEmptyStringArray(base.httpHostPolicyDeny)
 	}
-	if base.changed["http-block-private-ips-allow"] {
-		cfg.httpBlockPrivateIPsAllow = normalizeExplicitEmptyStringArray(base.httpBlockPrivateIPsAllow)
-	}
-	if base.changed["http-block-private-ips"] {
-		clearRunnerConfigIssue(&cfg, "block-private-ips")
-		cfg.httpBlockPrivateIPs = base.httpBlockPrivateIPs
-	}
 	if base.changed["supply-pull-allowed-hosts"] {
 		cfg.supplyPullAllowedHosts = copyTrimmedHosts(base.supplyPullAllowedHosts)
 	}
@@ -1030,6 +1009,10 @@ func resolveRunnerConfig(base runnerConfig) (runnerConfig, error) {
 	if base.changed["poll-wait"] {
 		clearRunnerConfigIssue(&cfg, "poll-wait")
 		cfg.pollWait = base.pollWait
+	}
+	if base.changed["shutdown-timeout"] {
+		clearRunnerConfigIssue(&cfg, "shutdown-timeout")
+		cfg.shutdownTimeout = base.shutdownTimeout
 	}
 	if base.changed["seed-request-timeout"] {
 		clearRunnerConfigIssue(&cfg, "seed-request-timeout")
@@ -1162,6 +1145,13 @@ func genericSampleRunnerConfigYAML() string {
     # Browser CDP work requires the "xflow.browser.cdp" capability.
     - "xflow.function"
   # auto_labels: true   # adds xflow.io/os, /arch, /env, /hostname
+  # How long a SIGTERM waits for in-flight handlers to finish and report before
+  # the process exits. Cancelling the run context stops polling but does not
+  # cancel a handler already running, so this is what bounds a graceful stop.
+  # Omitted keeps the 10s default. Keep it below the orchestrator's
+  # terminationGracePeriodSeconds (commonly 30s): work still running at the
+  # deadline is abandoned here and replayed by the control plane.
+  # shutdown_timeout: "25s"
 
 server:
   # transport: "http" or "grpc" (default: grpc, see defaultRunnerConfig)
@@ -1205,18 +1195,9 @@ heartbeat:
 # Shared destination policy for xflow.http requests and Browser navigation.
 # Host patterns only: exact hosts, suffixes prefixed by ".", and wildcards
 # prefixed by "*." are accepted; schemes, ports, paths, and userinfo are rejected.
-# block_private_ips (default true) separately refuses xflow.http and xflow.grpc
-# dials whose destination resolves to a loopback, private, link-local,
-# unspecified, multicast, or otherwise non-public address. block_private_ips_allow
-# is the guard's own exemption list: a matching host is dialed wherever it
-# resolves, and — unlike the name-level allow list — it does not turn the policy
-# into allowlist-only mode for every other destination. Set block_private_ips to
-# false to keep the historical unfiltered dial behavior.
 # http_host_policy:
 #   allow: ["app.example.internal"]
 #   deny: ["metadata.google.internal"]
-#   block_private_ips: true
-#   block_private_ips_allow: ["internal-db.corp.example"]
 
 # Browser CDP uses an existing remote-debugging endpoint; it never starts a
 # browser. An empty endpoints list (the secure default) denies all endpoint

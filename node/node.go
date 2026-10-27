@@ -202,31 +202,6 @@ func SetHTTPHostPolicy(p HTTPHostPolicy) {
 	action.HTTPHostPolicy = p
 }
 
-// SetHTTPPrivateIPBlocking installs (enabled=true) or removes the dial-time
-// outbound address guard shared by xflow.http and xflow.grpc. With it enabled,
-// a connection is refused when the destination host resolves to a loopback,
-// private, link-local, unspecified, multicast, or otherwise non-public
-// address. The connection is made to the exact address that was checked, so a
-// DNS answer that changes between the check and the dial (rebinding) cannot
-// redirect it.
-//
-// allow is the dedicated exemption list for the address guard
-// (http_host_policy.block_private_ips_allow), using the same
-// exact/.suffix/*.wildcard grammar as NewHTTPHostPolicy. A host matching it is
-// exempt from the address refusal: naming a host there is the operator's
-// explicit decision to permit wherever it resolves. It is deliberately a
-// different list from the one given to NewHTTPHostPolicy: a name-level
-// allowlist also switches the policy into allowlist-only mode, so reusing it
-// here would make one private-host exemption reject every public destination
-// that is not listed.
-//
-// Disabled by default, so embedded hosts keep the historical unfiltered dial
-// behavior. The standalone runner enables it from
-// http_host_policy.block_private_ips, which defaults to true.
-func SetHTTPPrivateIPBlocking(enabled bool, allow []string) {
-	action.SetHTTPPrivateIPBlocking(enabled, allow)
-}
-
 // BrowserCDPConfig configures the restricted remote-CDP credential-harvesting
 // node. It is re-exported so runner hosts can configure it without importing
 // node/internal/action.

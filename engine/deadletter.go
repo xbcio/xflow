@@ -211,7 +211,11 @@ func (e *Engine) ListDeadLetters(ctx context.Context, id types.ExecutionID, page
 // OutboxObserver (via WithOutboxObserver) and audit the replay themselves.
 // CLI/HTTP callers must use DeadLetterManager.Replay.
 func (e *Engine) ReplayDeadLetter(ctx context.Context, req ReplayDeadLetterRequest) (ReplayDeadLetterResult, error) {
-	ctx, span := outboxTracer().Start(ctx, "xflow.outbox.replay", "entry_id", req.EntryID)
+	// Parented through startExecutionSpan like every other execution-owned
+	// engine span: a programmatic (CLI / background) replay has no request span,
+	// and without the submission carrier it would be a detached root. A caller
+	// that already has a span (the control plane's authorized request) keeps it.
+	ctx, span := e.startExecutionSpan(ctx, req.ExecutionID, "xflow.outbox.replay", "entry_id", req.EntryID)
 	defer span.End()
 	state, err := e.atomicState()
 	if err != nil {

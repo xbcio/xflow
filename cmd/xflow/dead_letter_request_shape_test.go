@@ -100,7 +100,8 @@ func TestDeadLetterReplaySendsEachFlagToItsOwnBodyField(t *testing.T) {
 // discarded — the failure mode is a page far larger than asked for, against
 // the one endpoint whose response the CLI caps at 4 MiB.
 //
-// The trailing slash. dead_letter.go:131 trims it off opts.server. No test has
+// The trailing slash. newDeadLetterClient trims it off the resolved server
+// URL. No test has
 // ever passed a --server value ending in "/", so deleting the TrimRight is a
 // no-op on every existing input. A trailing slash is the ordinary copy-paste
 // shape of a base URL, and without the trim the CLI requests

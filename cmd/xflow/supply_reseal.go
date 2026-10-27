@@ -73,10 +73,11 @@ reports failed=0 and verification.verified=true.
 Requires --mysql-dsn (or XFLOW_MYSQL_DSN).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			opts.mysqlDSN = resolveEnvFlag(cmd, "mysql-dsn", "XFLOW_MYSQL_DSN", "")
 			return runSupplyReseal(cmd.Context(), opts)
 		},
 	}
-	cmd.Flags().StringVar(&opts.mysqlDSN, "mysql-dsn", envOr("XFLOW_MYSQL_DSN", ""),
+	cmd.Flags().StringVar(&opts.mysqlDSN, "mysql-dsn", "",
 		"MySQL DSN to reseal (env: XFLOW_MYSQL_DSN)")
 	cmd.Flags().StringVar(&opts.masterKeyFile, "master-key-file", "",
 		"Path to a 0600 file holding the base64-encoded current master key; XFLOW_MASTER_KEY takes precedence")

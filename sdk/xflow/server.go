@@ -121,9 +121,17 @@ type serverConfig struct {
 	// ownedNamespaces is the namespace set this deployment owns on shared
 	// infrastructure; nil keeps the legacy unscoped behavior. Set only by
 	// WithServerNamespaces.
-	ownedNamespaces          []namespace.Namespace
-	outboxDiscoveryPage      int
-	outputCompression        bool
+	ownedNamespaces []namespace.Namespace
+	// executionDriftRepair is WithServerExecutionDriftRepair's configuration;
+	// nil keeps the repair worker off (the default: it writes to the durable
+	// projection, so it must be an explicit opt-in).
+	executionDriftRepair *executionDriftRepairConfig
+	outboxDiscoveryPage  int
+	outputCompression    bool
+	// queueMaxDepth / queueDepthInterval configure producer-side asynq queue
+	// backpressure; see WithServerQueueBackpressure.
+	queueMaxDepth            int
+	queueDepthInterval       time.Duration
 	enableRunnerMetricsProxy bool
 	runnerMetricsInterval    time.Duration
 	enableManagement         bool
@@ -503,6 +511,54 @@ func WithServerNamespaces(ns []namespace.Namespace) ServerOption {
 	}
 }
 
+// executionDriftRepairConfig is WithServerExecutionDriftRepair's parameters.
+// The worker's runtime dependencies (scanner, status reader, recorder, leader
+// gate, namespaces, observer) are resolved by NewServer from the store and the
+// control plane; only the policy knobs live here.
+type executionDriftRepairConfig struct {
+	period     time.Duration
+	staleAfter time.Duration
+	batch      int
+	dryRun     bool
+}
+
+// WithServerExecutionDriftRepair turns on the durable-projection repair
+// worker: it scans SQL execution rows that still read "running" after the
+// staleness window and rewrites the ones whose authoritative Redis status is
+// terminal.
+//
+// Redis is authoritative; the SQL row is a best-effort mirror. A projection
+// write that failed (or a process that exited before issuing it) leaves the
+// row stale forever, because the failed write is gone. This worker is the only
+// path that reconciles those rows.
+//
+// It is OFF unless this option is supplied, because it writes to the durable
+// store. The authority boundary is one-directional: only an explicitly
+// terminal Redis status is copied. A non-terminal status is skipped (the row
+// is behind, not wrong), and a missing status key is skipped too — the
+// execution's retention window elapsed, and absence is not an outcome. dryRun
+// classifies candidates and reports them without writing.
+//
+// Zero or negative period/staleAfter/batch keep the control defaults (1m, 5m,
+// 256); batch is one scan page and is capped at control.MaxExecutionDriftBatch,
+// because a sweep pages through candidates rather than reading one fixed
+// window (an unrepairable row at the head of the order must not starve the rows
+// behind it). The scan is scoped to WithServerNamespaces' owned set when one is
+// declared, and leader-gated like the other maintenance workers. A store that
+// does not implement store.ExecutionDriftScanner (an in-memory one) or a
+// backend that does not implement engine.ExecutionStatusReader leaves the
+// worker unbuilt; see Server.ExecutionDriftRepair to check.
+func WithServerExecutionDriftRepair(period, staleAfter time.Duration, batch int, dryRun bool) ServerOption {
+	return func(c *serverConfig) {
+		c.executionDriftRepair = &executionDriftRepairConfig{
+			period:     period,
+			staleAfter: staleAfter,
+			batch:      batch,
+			dryRun:     dryRun,
+		}
+	}
+}
+
 // LeaderLockKey returns the Redis key under which a server owning ns campaigns
 // for control-plane leadership. It exists so tests and tooling derive the key
 // from the same rule the server uses instead of hard-coding the literal. The
@@ -550,6 +606,31 @@ func WithServerOutboxDiscoveryPage(page int) ServerOption {
 // rstate/output_codec.go.
 func WithServerOutputCompression(enabled bool) ServerOption {
 	return func(c *serverConfig) { c.outputCompression = enabled }
+}
+
+// WithServerQueueBackpressure bounds how many tasks may sit in each asynq
+// queue before the server stops offering more work to it: once a task's own
+// queue holds maxDepth pending+active tasks, the outbox flush receives
+// engine.ErrQueueFull, keeps the remaining intent durable in the outbox, and
+// resumes on a later drain. maxDepth <= 0 (the default) disables the bound.
+//
+// The bound is sampled, not exact, and sampleInterval sets the cadence
+// (<= 0 means one second). Sampling fails open — an unreadable queue admits —
+// so a Redis problem degrades into no backpressure rather than a producer that
+// refuses to deliver. It applies to the outbox flush only; Submit's enqueue
+// still blocks by design, because it has no durable intent behind it.
+//
+// This is an availability guard, not a throughput knob: it exists so a fan-out
+// wider than the broker queue cannot park every queue worker inside a blocking
+// enqueue they alone could relieve. Set it above the queue depth the consumer
+// pool normally sustains, so ordinary bursts are not throttled; it only needs
+// to catch the unbounded fan-out case. Ignored by the in-memory backend, whose
+// lane buffer is already bounded.
+func WithServerQueueBackpressure(maxDepth int, sampleInterval time.Duration) ServerOption {
+	return func(c *serverConfig) {
+		c.queueMaxDepth = maxDepth
+		c.queueDepthInterval = sampleInterval
+	}
 }
 
 // WithServerRunnerMetricsProxy accepts metrics pushed by runners and merges
@@ -621,9 +702,13 @@ type Server struct {
 	supplies   store.Supplies
 	artifacts  *store.ArtifactStore
 	reconciler *control.AuditReconcileWorker
+	drift      *control.ExecutionDriftWorker
 	// reconcileOnce keeps the worker to a single goroutine when a caller uses
 	// both Start and Run, or calls either twice.
 	reconcileOnce sync.Once
+	// driftOnce is reconcileOnce's counterpart for the execution drift repair
+	// worker; the two workers start independently.
+	driftOnce sync.Once
 }
 
 // NewServer creates an embeddable control-plane server. RedisAddr empty means
@@ -717,6 +802,7 @@ func NewServer(cfg ServerConfig, opts ...ServerOption) (*Server, error) {
 		supplies:   apiCfg.Supplies,
 		artifacts:  sc.artifacts,
 		reconciler: newAuditReconciler(cfg.Store, api, sc),
+		drift:      newExecutionDriftRepairWorker(cfg.Store, api, sc),
 	}, nil
 }
 
@@ -766,6 +852,51 @@ func newAuditReconciler(st store.Store, api *apiserver.APIServer, sc *serverConf
 		cfg.Observer = metrics.NewReconcileMetrics(sc.metrics)
 	}
 	return control.NewAuditReconcileWorker(ar, control.NewExecutionAuthority(api.Backend().State()), cfg)
+}
+
+// newExecutionDriftRepairWorker builds the durable-projection repair worker,
+// or returns nil when it is not configured or a capability is missing.
+//
+// The capability question is answered once, here, by type assertion — the same
+// shape newAuditReconciler uses for its reconcile scans. A worker built without
+// a scanner would scan nothing; one built without an authoritative status
+// reader would write nothing. In both cases the option still "looks wired", so
+// nil is the honest answer and Server.ExecutionDriftRepair reports it.
+//
+// The worker's writes are the reason it is opt-in (WithServerExecutionDriftRepair
+// sets executionDriftRepair): unlike the audit reconciler, which settles a
+// backlog that would otherwise be stuck, this one rewrites rows in the durable
+// store, so enabling it is an operator decision.
+func newExecutionDriftRepairWorker(st store.Store, api *apiserver.APIServer, sc *serverConfig) *control.ExecutionDriftWorker {
+	if st == nil || sc.executionDriftRepair == nil || api == nil || api.Backend() == nil {
+		return nil
+	}
+	scanner, ok := st.(store.ExecutionDriftScanner)
+	if !ok {
+		return nil
+	}
+	statuses, ok := api.Backend().State().(engine.ExecutionStatusReader)
+	if !ok {
+		return nil
+	}
+	cfg := control.ExecutionDriftConfig{
+		Period:     sc.executionDriftRepair.period,
+		StaleAfter: sc.executionDriftRepair.staleAfter,
+		Batch:      sc.executionDriftRepair.batch,
+		DryRun:     sc.executionDriftRepair.dryRun,
+		// The durable table is shared like the rest of the infrastructure: a
+		// dedicated deployment must repair only the projections of the
+		// namespaces it owns.
+		Namespaces: sc.ownedNamespaces,
+		// Leader-gated so one replica scans and writes; the rewrite is
+		// idempotent, so a leader switch is safe.
+		Elector: leaderGate(api.IsLeader),
+		Logger:  sc.logger,
+	}
+	if sc.metrics != nil {
+		cfg.Observer = metrics.NewExecutionDriftMetrics(sc.metrics)
+	}
+	return control.NewExecutionDriftWorker(scanner, statuses, st, cfg)
 }
 
 // leaderGate adapts APIServer.IsLeader to control.LeaderGate without requiring
@@ -857,6 +988,9 @@ func buildServerAPIConfig(cfg ServerConfig, sc *serverConfig) apiserver.Config {
 
 		OutputCompression: sc.outputCompression,
 
+		QueueMaxDepth:            sc.queueMaxDepth,
+		QueueDepthSampleInterval: sc.queueDepthInterval,
+
 		EnableRunnerMetricsProxy: sc.enableRunnerMetricsProxy,
 		RunnerMetricsInterval:    sc.runnerMetricsInterval,
 		// Unconditional, and deliberately not an option. This encrypts supply
@@ -878,6 +1012,22 @@ func buildServerAPIConfig(cfg ServerConfig, sc *serverConfig) apiserver.Config {
 // assert its presence — production must not run with a durable audit sink and
 // no reconciler — or to drive a sweep explicitly via ReconcileOnce.
 func (s *Server) Reconciler() *control.AuditReconcileWorker { return s.reconciler }
+
+// ExecutionDriftRepair returns the durable execution-projection repair worker,
+// or nil when WithServerExecutionDriftRepair was not supplied or the store /
+// backend lacks the capabilities it needs (store.ExecutionDriftScanner and
+// engine.ExecutionStatusReader).
+//
+// Start already runs it in the background, so a caller needs this only to
+// assert its presence — an operator who passed the option and got nil has a
+// store that cannot be scanned and should know before drift accumulates — or
+// to drive a sweep explicitly via ReconcileOnce.
+//
+// Do not call ReconcileOnce by hand while Run is active: both advance the
+// worker's sweep cursor, which is documented as not concurrency-safe, so a
+// manual sweep alongside the background loop is a data race. Stop the Server
+// (or never Start it) before driving a sweep yourself.
+func (s *Server) ExecutionDriftRepair() *control.ExecutionDriftWorker { return s.drift }
 
 // Handler returns the HTTP Runner Protocol + workflow submission/query API.
 func (s *Server) Handler() http.Handler { return s.api.Handler() }
@@ -912,17 +1062,19 @@ func (s *Server) ControlServer() *control.Server { return s.api.ControlServer() 
 func (s *Server) TLSReloader() *apiserver.TLSReloader { return s.api.TLSReloader() }
 
 // Start begins dispatching queued tasks to runners and starts background
-// maintenance (lease sweeping, leader election, audit reconciliation). Does not
-// block.
+// maintenance (lease sweeping, leader election, audit reconciliation, and the
+// opt-in execution drift repair). Does not block.
 //
 // The audit reconcile worker runs here rather than being left to the caller: a
 // worker that is constructed and never driven settles nothing while reading as
-// wired from every angle a caller can check. It stops when ctx is cancelled.
+// wired from every angle a caller can check. The execution drift repair worker
+// is driven the same way, for the same reason. Both stop when ctx is cancelled.
 func (s *Server) Start(ctx context.Context) error {
 	if err := s.api.Start(ctx); err != nil {
 		return err
 	}
 	s.startReconciler(ctx)
+	s.startExecutionDriftRepair(ctx)
 	return nil
 }
 
@@ -968,10 +1120,12 @@ func (s *Server) RegisterGRPC(g *grpc.Server) { s.api.RegisterGRPC(g) }
 // Handler() into their own http.Server.
 func (s *Server) Run(ctx context.Context) error {
 	// apiserver.Run calls the apiserver's own Start, not this type's, so the
-	// reconciler is started here too. Both entry points must drive it: the
-	// self-hosting caller is the one that most resembles cmd/server, and it
-	// would otherwise accumulate the same silent audit backlog.
+	// background workers are started here too. Both entry points must drive
+	// them: the self-hosting caller is the one that most resembles cmd/server,
+	// and it would otherwise accumulate the same silent audit backlog — and,
+	// when opted in, the same unrepaired projection drift.
 	s.startReconciler(ctx)
+	s.startExecutionDriftRepair(ctx)
 	return s.api.Run(ctx)
 }
 
@@ -984,6 +1138,19 @@ func (s *Server) startReconciler(ctx context.Context) {
 	}
 	s.reconcileOnce.Do(func() {
 		go func() { _ = s.reconciler.Run(ctx) }()
+	})
+}
+
+// startExecutionDriftRepair runs the durable-projection repair worker in the
+// background, at most once per Server. It has its own sync.Once because it is
+// independently optional: a server may have an audit reconciler and no drift
+// repair, or the reverse.
+func (s *Server) startExecutionDriftRepair(ctx context.Context) {
+	if s.drift == nil {
+		return
+	}
+	s.driftOnce.Do(func() {
+		go func() { _ = s.drift.Run(ctx) }()
 	})
 }
 

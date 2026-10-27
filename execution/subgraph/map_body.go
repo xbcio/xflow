@@ -81,7 +81,30 @@ func NewMapBodyExecutor(executor *Executor, suspendDisabled bool, deadline time.
 // Kafka flush, so "concurrency comes from the batches" is false there and the
 // items are the only axis left. Measured on that path, the body loop accounted
 // for effectively all of a batch's wall clock.
-func (x *MapBodyExecutor) ExecuteBatchBody(ctx context.Context, req engine.BatchBodyRequest) ([]engine.BatchItemResult, error) {
+func (x *MapBodyExecutor) ExecuteBatchBody(ctx context.Context, req engine.BatchBodyRequest) (out []engine.BatchItemResult, err error) {
+	// One xflow.map.body span per BATCH. The item loop below runs one
+	// sub-graph execution per item; without the mark below each of those would
+	// open its own xflow.subgraph.execute span, turning one map into a span per
+	// item. The loop's contexts carry withoutSubgraphSpan so the batch span is
+	// the single span this fan-out reports under.
+	//
+	// As with every subgraph-owned span, this one exists only when the host has
+	// installed the process-wide TracerProvider (see subgraphTracer); otherwise
+	// it is a no-op and the call proceeds unchanged.
+	ctx, span := subgraphTracer().Start(ctx, "xflow.map.body",
+		"execution_id", req.ExecutionID,
+		"node_name", req.ParentNode,
+		"batch_index", req.BatchIndex,
+		"item_count", len(req.Items),
+	)
+	defer span.End()
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+		}
+	}()
+	ctx = withoutSubgraphSpan(ctx)
+
 	if req.Body == nil {
 		return nil, ErrNoMapBody
 	}

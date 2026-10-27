@@ -67,6 +67,11 @@ type runnerConfig struct {
 	namespaces          []namespace.Namespace
 	heartbeatInterval   string
 	pollWait            string
+	// shutdownTimeout bounds how long a graceful stop (SIGTERM) waits for
+	// in-flight handlers to finish and report before the process exits. Empty
+	// means "unset": the runner service applies its own default (10s), so this
+	// layer never materializes one.
+	shutdownTimeout string
 	// seedRequestTimeout bounds one entry-seed admission round trip (one trigger
 	// batch), which is the POST that admits a whole batch's results. Empty means
 	// "unset": the SDK keeps protocol.DefaultEntrySeedRequestTimeout (15s). Kept
@@ -89,18 +94,6 @@ type runnerConfig struct {
 	// empty slice is an explicit empty list from YAML, env, or CLI.
 	httpHostPolicyAllow []string
 	httpHostPolicyDeny  []string
-	// httpBlockPrivateIPs enables the dial-time address guard shared by
-	// xflow.http and xflow.grpc: destinations resolving to loopback, private,
-	// link-local, unspecified, multicast, or otherwise non-public addresses are
-	// refused. Defaults to true; http_host_policy.block_private_ips=false
-	// restores the historical unfiltered dial behavior.
-	httpBlockPrivateIPs bool
-	// httpBlockPrivateIPsAllow is the address guard's own exemption list
-	// (http_host_policy.block_private_ips_allow). It is deliberately separate
-	// from httpHostPolicyAllow: the name-level allow list also switches the
-	// policy into allowlist-only mode, so reusing it here would make one
-	// private-host exemption break every public destination not listed.
-	httpBlockPrivateIPsAllow []string
 	// supplyPullAllowedHosts is the runner-level allowlist for supply pull
 	// sources (xflow.supply.http). Non-empty means only matching hosts may be
 	// pulled and whatever addresses they resolve to are permitted (private
@@ -197,6 +190,8 @@ func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
 	cmd.Flags().BoolVar(&cfg.autoLabels, "auto-labels", cfg.autoLabels, "Add environment-derived xflow.io/* labels (os, arch, env, hostname)")
 	cmd.Flags().StringVar(&cfg.heartbeatInterval, "heartbeat-interval", cfg.heartbeatInterval, "Heartbeat interval")
 	cmd.Flags().StringVar(&cfg.pollWait, "poll-wait", cfg.pollWait, "Poll wait duration when no task is available")
+	cmd.Flags().StringVar(&cfg.shutdownTimeout, "shutdown-timeout", cfg.shutdownTimeout,
+		"How long a SIGTERM waits for in-flight handlers to finish; empty uses the 10s default, and it should stay below the orchestrator's terminationGracePeriodSeconds (commonly 30s)")
 	cmd.Flags().StringVar(&cfg.seedRequestTimeout, "seed-request-timeout", cfg.seedRequestTimeout,
 		"Deadline for one entry-seed admission (one Kafka batch); raise it when a large batch exceeds the 15s default")
 	cmd.Flags().StringVar(&cfg.supplyPollInterval, "supply-poll-interval", cfg.supplyPollInterval,
@@ -207,8 +202,6 @@ func bindRunnerFlags(cmd *cobra.Command, cfg *runnerConfig) {
 	cmd.Flags().StringVar(&cfg.browserCDPConnectTimeout, "browser-cdp-connect-timeout", cfg.browserCDPConnectTimeout, "Browser CDP endpoint connect timeout")
 	cmd.Flags().StringArrayVar(&cfg.httpHostPolicyAllow, "http-host-allow", cfg.httpHostPolicyAllow, "Allowlisted navigation/HTTP host rule: exact host, .suffix (apex + descendants), or *.wildcard (descendants only); repeatable")
 	cmd.Flags().StringArrayVar(&cfg.httpHostPolicyDeny, "http-host-deny", cfg.httpHostPolicyDeny, "Denied navigation/HTTP host rule: exact host, .suffix (apex + descendants), or *.wildcard (descendants only); repeatable")
-	cmd.Flags().StringArrayVar(&cfg.httpBlockPrivateIPsAllow, "http-block-private-ips-allow", cfg.httpBlockPrivateIPsAllow, "Host exempt from the dial-time private-IP guard (xflow.http and xflow.grpc): exact host, .suffix (apex + descendants), or *.wildcard (descendants only); repeatable, independent of --http-host-allow")
-	cmd.Flags().BoolVar(&cfg.httpBlockPrivateIPs, "http-block-private-ips", cfg.httpBlockPrivateIPs, "Refuse xflow.http and xflow.grpc dials to loopback, private, link-local, or otherwise non-public addresses (default true)")
 	cmd.Flags().StringVar(&cfg.token, "token", cfg.token, "Runner bearer token (prefer XFLOW_RUNNER_TOKEN env)")
 	cmd.Flags().StringVar(&cfg.tlsServerCA, "tls-server-ca", cfg.tlsServerCA, "Path to server CA bundle (enables TLS)")
 	cmd.Flags().StringVar(&cfg.tlsClientCert, "tls-client-cert", cfg.tlsClientCert, "Path to client TLS certificate (enables mTLS)")
@@ -485,18 +478,10 @@ const standaloneBrowserCDPCapability = "xflow.browser.cdp"
 // points at node.SetHTTPHostPolicy.
 var setRunnerHTTPHostPolicy = xnode.SetHTTPHostPolicy
 
-// setRunnerHTTPPrivateIPBlocking is a seam for lifecycle tests. Production
-// always points at node.SetHTTPPrivateIPBlocking.
-var setRunnerHTTPPrivateIPBlocking = xnode.SetHTTPPrivateIPBlocking
-
 // installRunnerHTTPHostPolicy installs one process-wide policy for both stock
-// HTTP nodes and Browser CDP navigation, plus the dial-time address guard when
-// the runner is configured to block private destinations. Browser-capable
-// runners fail closed when no lists are configured; ordinary runners retain the
-// historical no-name-filtering behavior unless an operator explicitly
-// configures a list. The address guard is independent of the name lists and
-// defaults to enabled, so an ordinary runner refuses non-public destinations
-// even with no allow/deny list configured.
+// HTTP nodes and Browser CDP navigation. Browser-capable runners fail closed
+// when no lists are configured; ordinary runners retain the historical
+// no-name-filtering behavior unless an operator explicitly configures a list.
 func installRunnerHTTPHostPolicy(cfg runnerConfig) func() {
 	configured := cfg.httpHostPolicyAllow != nil || cfg.httpHostPolicyDeny != nil
 	browserCapable := runnerConfigHasCapability(cfg, standaloneBrowserCDPCapability)
@@ -514,14 +499,6 @@ func installRunnerHTTPHostPolicy(cfg runnerConfig) func() {
 		}
 		setRunnerHTTPHostPolicy(policy)
 		restores = append(restores, func() { setRunnerHTTPHostPolicy(nil) })
-	}
-	if cfg.httpBlockPrivateIPs {
-		// The dedicated exemption list, NOT httpHostPolicyAllow: the name-level
-		// allow list also turns the host policy into allowlist-only mode, so
-		// reusing it here would break every public destination the operator did
-		// not list just to let one internal host resolve privately.
-		setRunnerHTTPPrivateIPBlocking(true, copyTrimmedHosts(cfg.httpBlockPrivateIPsAllow))
-		restores = append(restores, func() { setRunnerHTTPPrivateIPBlocking(false, nil) })
 	}
 	return func() {
 		for i := len(restores) - 1; i >= 0; i-- {
@@ -595,6 +572,15 @@ func toSDKRunnerConfig(cfg runnerConfig) (xflowsdk.RunnerConfig, error) {
 			return xflowsdk.RunnerConfig{}, err
 		}
 	}
+	// Empty stays empty here too, for the same reason: the service owns the
+	// graceful-stop default, so an unset CLI value must reach it as zero.
+	shutdownTimeout := time.Duration(0)
+	if cfg.shutdownTimeout != "" {
+		shutdownTimeout, err = parsePositiveDuration("shutdown timeout", cfg.shutdownTimeout)
+		if err != nil {
+			return xflowsdk.RunnerConfig{}, err
+		}
+	}
 	// The allowlist travels to the SDK exactly as the other host-rule fields
 	// do — copied with surrounding whitespace trimmed — because the SDK
 	// compiles it into the pull fetcher's destination policy, where a padded
@@ -619,6 +605,7 @@ func toSDKRunnerConfig(cfg runnerConfig) (xflowsdk.RunnerConfig, error) {
 		TLSClientKey:           cfg.tlsClientKey,
 		HeartbeatInterval:      heartbeat,
 		PollWait:               pollWait,
+		ShutdownTimeout:        shutdownTimeout,
 		SeedRequestTimeout:     seedRequestTimeout,
 		SupplyPollInterval:     supplyPollInterval,
 		SupplyPullAllowedHosts: copyTrimmedHosts(cfg.supplyPullAllowedHosts),

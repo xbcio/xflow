@@ -7,9 +7,12 @@ import (
 	"reflect"
 	"time"
 
+	oteltrace "go.opentelemetry.io/otel/trace"
+
 	enginecore "github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -166,17 +169,28 @@ func (e *Engine) FireAndForget(ctx context.Context, workflowID types.WorkflowID,
 		NodeVersion: node.Version,
 		IssuedAt:    issuedAt,
 		Namespace:   fafNamespace(rec.Namespace),
+		// FAF persists nothing, so the lease is the only place the caller's
+		// trace identity can survive the hand-off to the goroutine that runs the
+		// action. Without it the asynchronous work is a detached root even when
+		// the caller passed a trace id or is inside a span.
+		TraceCarrier: tracing.InjectCarrier(ctx),
 	}
 	if timeout > 0 {
 		lease.ExecutionDeadline = issuedAt.Add(timeout)
 	}
 
-	runnerOpts := make([]execution.RunnerOption, 0, 2)
+	runnerOpts := make([]execution.RunnerOption, 0, 3)
 	if e.resourcePool != nil {
 		runnerOpts = append(runnerOpts, execution.WithResourcePool(e.resourcePool))
 	}
 	if resolver := artifactCodeResolverFor(e.artifactStore); resolver != nil {
 		runnerOpts = append(runnerOpts, execution.WithArtifactCodeResolver(resolver))
+	}
+	// FAF constructs its own Runner rather than going through the backend's
+	// dispatcher, so it needs the tracer explicitly to open xflow.local.task for
+	// the action it runs (WithTracer, see engineConfig.tracer).
+	if e.tracer != nil {
+		runnerOpts = append(runnerOpts, execution.WithTracer(e.tracer))
 	}
 	// The local registration binding was checked before accepting the invocation;
 	// a later shared-registry change cannot turn accepted work into another
@@ -238,7 +252,13 @@ func fafNamespace(value string) namespace.Namespace {
 }
 
 func (e *Engine) runFireAndForget(ctx context.Context, runner *execution.Runner, lease *enginecore.TaskLease, workflowID types.WorkflowID) {
-	runCtx := context.WithoutCancel(ctx)
+	// The action runs asynchronously, and the runner opens xflow.local.task for
+	// it, parented by the lease carrier (which holds this same caller span).
+	// Clearing the inherited active span is what lets that happen:
+	// startLocalTaskSpan suppresses a second attempt span when the ctx already
+	// carries one, so without this the FAF action would run under no attempt
+	// span at all.
+	runCtx := oteltrace.ContextWithSpan(context.WithoutCancel(ctx), nil)
 	if deadline, ok := ctx.Deadline(); ok {
 		var cancel context.CancelFunc
 		runCtx, cancel = context.WithDeadline(runCtx, deadline)

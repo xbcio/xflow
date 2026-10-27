@@ -49,20 +49,33 @@ use the management API: it reads Redis (authoritative) and writes SQL
 (durable secondary) directly, like a maintenance job.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			opts.mysqlDSN = resolveEnvFlag(cmd, "mysql-dsn", "XFLOW_MYSQL_DSN", "")
+			// This subcommand's own --redis-addr shadows the parent's persistent
+			// flag of the same name, so an explicit value is already in redisAddr.
+			// Otherwise fall back to the environment, then the parent's literal
+			// default, which is never read from the environment at registration
+			// time (that would echo a password-bearing URL in --help).
+			addr := redisAddr
+			if addr == "" {
+				addr = resolveEnvFlag(cmd, "redis-addr", "XFLOW_REDIS_ADDR", opts.redisAddr)
+			}
 			if opts.mysqlDSN == "" {
 				return errors.New("--mysql-dsn (or XFLOW_MYSQL_DSN) is required for reconcile")
 			}
-			addr := redisAddr
-			if addr == "" {
-				addr = opts.redisAddr
-			}
-			return runReconcile(opts, addr, dryRun)
+			return runDeadLetterReconcile(opts, addr, dryRun)
 		},
 	}
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Report the diff without writing SQL rows")
 	cmd.Flags().StringVar(&redisAddr, "redis-addr", "", "Override Redis address for the receipt scan (defaults to --redis-addr)")
 	return cmd
 }
+
+// runDeadLetterReconcile is the execution half of the reconcile command. It is
+// a variable only so the CLI tests can observe the connection arguments the
+// RunE resolved: runReconcile opens MySQL before it dials Redis, so an
+// executed case cannot report which Redis address won the precedence without a
+// live database. Production never reassigns it.
+var runDeadLetterReconcile = runReconcile
 
 // reconcileStats summarizes one reconcile run.
 type reconcileStats struct {

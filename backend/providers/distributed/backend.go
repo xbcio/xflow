@@ -96,6 +96,8 @@ type config struct {
 	queueObserver          queue.Observer
 	queueStatsObserver     queue.StatsObserver
 	queueStatsInterval     time.Duration
+	queueMaxDepth          int
+	queueDepthInterval     time.Duration
 	redisConfig            *RedisConfig
 	outboxDiscoveryPage    int
 	outboxReadyIndex       bool
@@ -311,6 +313,43 @@ func WithQueueStatsInterval(d time.Duration) Option {
 	}
 }
 
+// WithQueueMaxDepth bounds producer-side admission on the default Asynq
+// transport: once a task's own asynq queue holds n or more pending+active
+// tasks, the transport's TryEnqueue reports engine.ErrQueueFull instead of
+// enqueuing. Zero (the default) disables the bound. Values <= 0 are ignored.
+//
+// Only FlushOutbox uses the non-blocking path, because it runs on a queue
+// worker and must not park there; Enqueue keeps its blocking semantics. The
+// depth is sampled (see WithQueueDepthSampleInterval), not counted exactly,
+// so callers should expect a burst to overshoot the bound between samples. The
+// fan-out safety this provides is still real: the flush stops once the sampled
+// backlog reaches the bound and leaves the rest of the intent in the outbox.
+//
+// It is a construction error to combine it with WithTransport. The bound lives
+// in the Asynq transport's depth sampler, and an injected transport is opaque
+// to the backend: queue.Transport exposes neither a depth read nor an admission
+// knob, so the bound cannot be applied to it. Rejecting the combination keeps a
+// misconfiguration from silently running unbounded; a custom transport owns its
+// own admission policy.
+func WithQueueMaxDepth(n int) Option {
+	return func(c *config) {
+		if n > 0 {
+			c.queueMaxDepth = n
+		}
+	}
+}
+
+// WithQueueDepthSampleInterval overrides how often the producer-side queue
+// depth cache (see WithQueueMaxDepth) is refreshed. Values <= 0 keep the
+// transport default of 1s. It has no effect unless WithQueueMaxDepth is set.
+func WithQueueDepthSampleInterval(d time.Duration) Option {
+	return func(c *config) {
+		if d > 0 {
+			c.queueDepthInterval = d
+		}
+	}
+}
+
 // WithRedisConfig injects a Redis HA connection description. When present,
 // New builds the appropriate go-redis client (single/sentinel/cluster) using
 // redis.NewUniversalClient and ignores the redisAddr argument. When absent,
@@ -455,6 +494,14 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 		o(cfg)
 	}
 
+	// The depth bound is enforced by the Asynq transport's sampler, and an
+	// injected transport is opaque here (queue.Transport exposes no depth read
+	// or admission knob). Reject the combination before opening any connection
+	// rather than silently running without the bound the caller configured.
+	if cfg.transport != nil && cfg.queueMaxDepth > 0 {
+		return nil, fmt.Errorf("queue max depth %d: WithQueueMaxDepth cannot be applied to a transport injected via WithTransport; configure the bound on that transport", cfg.queueMaxDepth)
+	}
+
 	// The owned set fixes this process's deployment identity, and every derived
 	// surface (leader key, queue suffix, sweep scope) is computed from it here,
 	// before any connection is opened: an ambiguous or invalid set must fail
@@ -517,6 +564,15 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 		}
 		if deploymentSuffix != "" {
 			topts = append(topts, asynqtransport.WithQueueSuffix(deploymentSuffix))
+		}
+		// Producer-side backpressure is opt-in: with no bound the transport
+		// starts no sampler and TryEnqueue always admits. The interval is only
+		// forwarded alongside a bound, where it is meaningful.
+		if cfg.queueMaxDepth > 0 {
+			topts = append(topts, asynqtransport.WithMaxQueueDepth(cfg.queueMaxDepth))
+			if cfg.queueDepthInterval > 0 {
+				topts = append(topts, asynqtransport.WithDepthSampleInterval(cfg.queueDepthInterval))
+			}
 		}
 		if cfg.redisConfig != nil {
 			connOpt, err := cfg.redisConfig.AsAsynqConnOpt()

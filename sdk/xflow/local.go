@@ -68,6 +68,12 @@ func NewLocal(opts ...Option) (*Engine, error) {
 			memOpts = append(memOpts, backendlocal.WithQueueLogger(cfg.logger))
 		}
 	}
+	// The embedded dispatcher opens xflow.local.task per task attempt. Without
+	// this, a local execution is the one deployment shape whose engine-side work
+	// never reaches a trace backend, however the host configured the provider.
+	if cfg.tracer != nil {
+		memOpts = append(memOpts, backendlocal.WithTracer(cfg.tracer))
+	}
 	provider := backendlocal.New(memOpts...)
 	return newFromConfig(cfg, provider)
 }

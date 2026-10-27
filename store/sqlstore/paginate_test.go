@@ -34,7 +34,11 @@ func newSQLCapture(t *testing.T) *sqlCapture {
 			DSN:                       "xflow:xflow@tcp(127.0.0.1:1)/xflow?parseTime=true",
 			SkipInitializeWithVersion: true,
 		}),
-		&gorm.Config{DryRun: true, DisableAutomaticPing: true},
+		// SkipDefaultTransaction is not a production posture: GORM wraps every
+		// write in a transaction, and BeginTransaction dials even under DryRun
+		// (it only checks SkipDefaultTransaction). The capture connection points
+		// at 127.0.0.1:1 on purpose and must never be reached.
+		&gorm.Config{DryRun: true, DisableAutomaticPing: true, SkipDefaultTransaction: true},
 	)
 	if err != nil {
 		t.Fatalf("gorm.Open(dry run): %v", err)
@@ -50,10 +54,21 @@ func newSQLCapture(t *testing.T) *sqlCapture {
 	// is the entire distinction under test.
 	err = db.Callback().Query().After("gorm:query").Register("xflow_test:capture",
 		func(tx *gorm.DB) {
-			c.last = tx.Dialector.Explain(tx.Statement.SQL.String(), tx.Statement.Vars...)
+			c.last = tx.Explain(tx.Statement.SQL.String(), tx.Statement.Vars...)
 		})
 	if err != nil {
 		t.Fatalf("register capture callback: %v", err)
+	}
+	// Update statements (Updates) run through a different callback than
+	// queries, so they need their own capture. Explain is applied here too: the
+	// conditional repair's whole contract is which row the WHERE clause can
+	// match, and that is only visible with the bind values interpolated.
+	err = db.Callback().Update().After("gorm:update").Register("xflow_test:capture_update",
+		func(tx *gorm.DB) {
+			c.last = tx.Explain(tx.Statement.SQL.String(), tx.Statement.Vars...)
+		})
+	if err != nil {
+		t.Fatalf("register update capture callback: %v", err)
 	}
 	return c
 }
@@ -64,6 +79,20 @@ func (c *sqlCapture) sql(t *testing.T, run func()) string {
 	run()
 	if c.last == "" {
 		t.Fatal("dry run produced no SQL; the query never reached the query callback")
+	}
+	return c.last
+}
+
+// updateSQL is sql's counterpart for writes: it captures the statement an
+// Updates call builds. Under DryRun nothing is executed, so a caller must not
+// read the returned RowsAffected as database behavior — the statement is what
+// is under test.
+func (c *sqlCapture) updateSQL(t *testing.T, run func()) string {
+	t.Helper()
+	c.last = ""
+	run()
+	if c.last == "" {
+		t.Fatal("dry run produced no SQL; the write never reached the update callback")
 	}
 	return c.last
 }

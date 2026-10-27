@@ -30,9 +30,15 @@ type GaugeSink interface {
 }
 
 // Metrics records xflow observations in a Prometheus registry.
+//
+// registerer and gatherer need not be the same value: a host can own
+// registration and exposition separately (for example xbc's private registry,
+// which registers through an adapter and gathers through its own contract).
 type Metrics struct {
 	mu              sync.Mutex
-	registry        *prometheus.Registry
+	registerer      prometheus.Registerer
+	gatherer        prometheus.Gatherer
+	local           *prometheus.Registry
 	counters        map[metricVecKey]*prometheus.CounterVec
 	histograms      map[metricVecKey]*prometheus.HistogramVec
 	bytesHistograms map[metricVecKey]*prometheus.HistogramVec
@@ -57,8 +63,38 @@ func NewWithRegistry(registry *prometheus.Registry) *Metrics {
 	if registry == nil {
 		registry = prometheus.NewRegistry()
 	}
+	return newMetrics(registry, registry, registry)
+}
+
+// NewWithRegisterer creates xflow metrics backed by a caller-owned registration
+// and gathering pair. It is the seam for a host registry that does not expose a
+// *prometheus.Registry: registerer receives every collector xflow creates, and
+// gatherer serves them through Handler and through the control plane's metrics
+// merging.
+//
+// A nil registerer creates a fresh isolated registry, matching NewWithRegistry.
+// A nil gatherer falls back to registerer when it also implements
+// prometheus.Gatherer; otherwise the metrics can be recorded but Handler
+// returns an empty body, because there is nothing to gather from.
+func NewWithRegisterer(registerer prometheus.Registerer, gatherer prometheus.Gatherer) *Metrics {
+	var local *prometheus.Registry
+	if registerer == nil {
+		local = prometheus.NewRegistry()
+		registerer = local
+		gatherer = local
+	} else if gatherer == nil {
+		if candidate, ok := registerer.(prometheus.Gatherer); ok {
+			gatherer = candidate
+		}
+	}
+	return newMetrics(registerer, gatherer, local)
+}
+
+func newMetrics(registerer prometheus.Registerer, gatherer prometheus.Gatherer, local *prometheus.Registry) *Metrics {
 	return &Metrics{
-		registry:        registry,
+		registerer:      registerer,
+		gatherer:        gatherer,
+		local:           local,
 		counters:        make(map[metricVecKey]*prometheus.CounterVec),
 		histograms:      make(map[metricVecKey]*prometheus.HistogramVec),
 		bytesHistograms: make(map[metricVecKey]*prometheus.HistogramVec),
@@ -68,12 +104,25 @@ func NewWithRegistry(registry *prometheus.Registry) *Metrics {
 	}
 }
 
-// Registry returns the Prometheus registry backing this metrics collector.
+// Registry returns the Prometheus registry backing this metrics collector, or
+// nil when it was constructed with NewWithRegisterer over a host registry. Use
+// Gatherer for exposition in that case.
 func (m *Metrics) Registry() *prometheus.Registry {
 	if m == nil {
 		return nil
 	}
-	return m.registry
+	return m.local
+}
+
+// Gatherer returns the gatherer this metrics collector was constructed with.
+// It is nil only when NewWithRegisterer was given a registerer that cannot
+// gather; callers that only need exposition should treat nil as "no metrics
+// endpoint" rather than substituting a process-wide default.
+func (m *Metrics) Gatherer() prometheus.Gatherer {
+	if m == nil {
+		return nil
+	}
+	return m.gatherer
 }
 
 // Inc increments a counter by one.
@@ -209,10 +258,10 @@ func (m *Metrics) Set(name string, labels map[string]string, value float64) {
 
 // Handler serves metrics using Prometheus' text exposition format.
 func (m *Metrics) Handler() http.Handler {
-	if m == nil || m.registry == nil {
+	if m == nil || m.gatherer == nil {
 		return http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
 	}
-	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{})
+	return promhttp.HandlerFor(m.gatherer, promhttp.HandlerOpts{})
 }
 
 func (m *Metrics) counter(name string, labels []string) *prometheus.CounterVec {
@@ -226,7 +275,7 @@ func (m *Metrics) counter(name string, labels []string) *prometheus.CounterVec {
 		Name: name,
 		Help: helpText(name),
 	}, labels)
-	if err := m.registry.Register(counter); err != nil {
+	if err := m.registerer.Register(counter); err != nil {
 		m.mu.Unlock()
 		log.Printf("xflow metrics: register counter %q failed: %v", name, err)
 		return nil
@@ -247,7 +296,7 @@ func (m *Metrics) histogram(name string, labels []string) *prometheus.HistogramV
 		Name: name,
 		Help: helpText(name),
 	}, labels)
-	if err := m.registry.Register(histogram); err != nil {
+	if err := m.registerer.Register(histogram); err != nil {
 		m.mu.Unlock()
 		log.Printf("xflow metrics: register histogram %q failed: %v", name, err)
 		return nil
@@ -272,7 +321,7 @@ func (m *Metrics) bytesHistogram(name string, labels []string) *prometheus.Histo
 		Help:    helpText(name),
 		Buckets: byteBuckets,
 	}, labels)
-	if err := m.registry.Register(histogram); err != nil {
+	if err := m.registerer.Register(histogram); err != nil {
 		m.mu.Unlock()
 		log.Printf("xflow metrics: register bytes histogram %q failed: %v", name, err)
 		return nil
@@ -301,7 +350,7 @@ func (m *Metrics) lagHistogram(name string, labels []string) *prometheus.Histogr
 		Help:    helpText(name),
 		Buckets: lagBuckets,
 	}, labels)
-	if err := m.registry.Register(histogram); err != nil {
+	if err := m.registerer.Register(histogram); err != nil {
 		m.mu.Unlock()
 		log.Printf("xflow metrics: register lag histogram %q failed: %v", name, err)
 		return nil
@@ -328,7 +377,7 @@ func (m *Metrics) countHistogram(name string, labels []string) *prometheus.Histo
 		Help:    helpText(name),
 		Buckets: countBuckets,
 	}, labels)
-	if err := m.registry.Register(histogram); err != nil {
+	if err := m.registerer.Register(histogram); err != nil {
 		m.mu.Unlock()
 		log.Printf("xflow metrics: register count histogram %q failed: %v", name, err)
 		return nil
@@ -349,7 +398,7 @@ func (m *Metrics) gauge(name string, labels []string) *prometheus.GaugeVec {
 		Name: name,
 		Help: helpText(name),
 	}, labels)
-	if err := m.registry.Register(gauge); err != nil {
+	if err := m.registerer.Register(gauge); err != nil {
 		m.mu.Unlock()
 		log.Printf("xflow metrics: register gauge %q failed: %v", name, err)
 		return nil
@@ -422,6 +471,11 @@ var metricHelp = map[string]string{
 	"xflow_audit_reconcile_errors_total":             "Audit reconcile per-admission probe/append errors.",
 	"xflow_audit_reconcile_backlog_age_seconds":      "Age of the oldest pending audit admission observed in the last sweep.",
 	"xflow_audit_reconcile_pending":                  "Number of pending audit admissions observed in the last reconcile sweep.",
+	"xflow_execution_drift_scan_total":               "Execution drift repair sweep cycles run, partitioned by result.",
+	"xflow_execution_drift_scan_duration_seconds":    "Duration of one execution drift repair sweep: every scan page plus each candidate's authoritative status read and conditional projection write, measured from the first scan to the last classification. A DryRun sweep classifies without writing, and a sweep cut short by a scan error or lost leadership is observed up to where it stopped.",
+	"xflow_execution_drift_repaired_total":           "Durable execution projections repaired from authoritative state, partitioned by terminal status and result (repaired, or dry_run when only classified).",
+	"xflow_execution_drift_skipped_total":            "Stale-looking executions left untouched, partitioned by reason: running, non_terminal and not_found are authoritative verdicts (not_found means the status key aged out; absence is never written as an outcome); already_advanced means the conditional repair matched no row because the ordinary projection advanced it first; repair_unsupported means the store advertises the scan but not the conditional write.",
+	"xflow_execution_drift_errors_total":             "Execution drift repair per-candidate authority-read or projection-write errors.",
 	"xflow_commit_outcomes_total":                    "Graph commit outcomes, partitioned by outcome (committed/aborted/failed).",
 	"xflow_entry_seed_admission_total":               "Entry-seed admission attempts on the runner (POST /v1/executions, one per trigger batch), partitioned by outcome (accepted/duplicate/conflict/refused/queue_full/timeout/error). This is the only series that separates a deadline breach from the other transport failures: xflow_trigger_batch_admissions_total reports both as state=error, reason=seed_transport, while the two call for opposite responses (lower the batch or raise the deadline, versus investigate the network). A rising timeout rate means the configured batch has outgrown the admission window, and every one of them redelivers and re-executes its whole batch. refused/queue_full are not failures at all: the workflow's own concurrency policy declined the seed and nothing was persisted, so the batch is held back and retried (queue_full = the queue-mode backlog is at max_queued, refused = a slot is taken). Their rate is how a throttled deployment is told apart from a broken one, and it is the only signal that says which wait will release the batch.",
 	"xflow_entry_seed_admission_duration_seconds":    "Duration of the entry-seed admission round trip, partitioned by outcome. Read against the configured admission window (protocol.DefaultEntrySeedRequestTimeout unless the runner raised it): admissions sitting close to that deadline are one traffic spike away from becoming redelivered batches, which the rate alone does not show. Samples in the timeout outcome pile up at the deadline, which is what distinguishes a genuine breach from a slow success. refused/queue_full samples are the healthy fast round trips — a refusal is decided and answered immediately — so their latency tracks the control plane's responsiveness during a throttle rather than any cost of waiting.",

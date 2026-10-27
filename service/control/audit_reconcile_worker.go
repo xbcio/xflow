@@ -317,7 +317,21 @@ func (w *AuditReconcileWorker) ReconcileOnce(ctx context.Context) int {
 	}
 
 	settled := 0
-	for _, rec := range candidates {
+	for i, rec := range candidates {
+		// Leadership can change while a bounded sweep is in flight; stop
+		// settling rather than keep writing outcomes the new leader will scan
+		// again (the append is idempotent, but the work is not ours to do).
+		if i > 0 && i%leaderRecheckInterval == 0 && leaderLost(w.elector) {
+			if w.log != nil {
+				w.log.Info("audit reconcile stopped early",
+					"outcome", SweepPassOutcomeSkippedNotLeader,
+					"settled", settled,
+					"inspected", i,
+					"candidates", len(candidates),
+				)
+			}
+			break
+		}
 		settled += w.settle(ctx, rec)
 	}
 	return settled

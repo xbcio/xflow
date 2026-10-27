@@ -220,6 +220,7 @@ handler 在 `init()` 或进程启动时调用 `node.Register`，server 端通过
 | `Token` | runner bearer token | — |
 | `HeartbeatInterval` | 心跳间隔，0 使用默认 | 5s |
 | `PollWait` | 无任务时 poll 等待，0 使用默认 | 1s |
+| `ShutdownTimeout` | 优雅停止预算，从 Run 的 context 被取消时开始计时：等待 in-flight handler 完成并上报、以及随后的 activation tracker 清理（关闭 consumer/连接等）共用这一份预算。预算耗尽后本进程放弃未完成工作，由 server 回收 lease 并重放（at-least-once）；应小于编排器的 `terminationGracePeriodSeconds`（常见 30s），因为其后的 goodbye deregister 与 `Runner.Close` 还会在预算之外追加各自的固定上限 | 10s（0 或负值取默认） |
 | `ReportMetrics` | 是否向 server 上报 Prometheus 指标 | false |
 
 ### 7.2 关键默认常量

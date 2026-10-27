@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/node/supply"
 	"github.com/xbcio/xflow/store"
 )
 
@@ -116,17 +118,27 @@ func TestRunnerServiceConfigSupplyGateHonoursPrivateCA(t *testing.T) {
 
 	// A trigger capability is required for the gate to be built at all (see
 	// runnerHostsTriggers); xflow.trigger.kafka is the SAS-shaped one.
+	//
+	// An isolated registry, not the process-wide supply.Default: that one keeps
+	// content for the life of the process, so under -count>1 a later round finds
+	// the supply already cached and ready and the gate's IsReady fast path skips
+	// the very fetch this test counts.
+	reg := supply.NewRegistry()
 	svcCfg, err := buildRunnerServiceConfig(RunnerConfig{
 		RunnerID:     "tls-probe",
 		ServerURL:    srv.URL,
 		TLSServerCA:  caPath,
 		Capabilities: []string{"xflow.trigger.kafka"},
-	})
+	}, func(o *runnerOptions) { o.supplyRegistry = reg })
 	if err != nil {
 		t.Fatalf("buildRunnerServiceConfig: %v", err)
 	}
 	if svcCfg.SupplyGate == nil {
 		t.Fatal("SupplyGate is nil; the trigger-hosting branch did not run, so this test proves nothing")
+	}
+	if svcCfg.SupplyRegistry != reg {
+		t.Fatal("the heartbeat's SupplyRegistry is not the injected registry; " +
+			"the gate and the heartbeat would report different supply state")
 	}
 
 	err = svcCfg.SupplyGate.Admit(context.Background(), "wf-tls-probe", []engine.SupplyRequirement{
@@ -138,5 +150,24 @@ func TestRunnerServiceConfigSupplyGateHonoursPrivateCA(t *testing.T) {
 	}
 	if got := fetched.Load(); got != 1 {
 		t.Errorf("supply endpoint hit %d times, want 1", got)
+	}
+
+	// The identity check above covers the heartbeat only. Pin where the GATE
+	// publishes: a gate built against supply.Default would still leave
+	// SupplyRegistry == reg, so the split is invisible until the content is
+	// inspected. Admit runs against the context's default namespace, matching
+	// what namespace.FromContext resolves for this caller.
+	key := supply.KeyOf(namespace.Default, supplyName)
+	snap, ok := reg.Get(key)
+	if !ok {
+		t.Fatal("Admit did not publish the fetched supply into the injected registry; " +
+			"the gate writes somewhere other than the registry the heartbeat reports from")
+	}
+	if want := store.ContentHash(content); snap.Hash != want {
+		t.Errorf("injected registry cached hash %q, want %q", snap.Hash, want)
+	}
+	if snap, ok := supply.Default.Get(key); ok {
+		t.Errorf("the gate published %q (hash %s) into supply.Default; "+
+			"the injected registry is this runner's only supply sink", supplyName, snap.Hash)
 	}
 }

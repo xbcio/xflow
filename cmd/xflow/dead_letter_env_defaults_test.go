@@ -13,16 +13,18 @@ import (
 )
 
 // TestDeadLetterCLIResolvesConnectionConfigFromTheEnvironment drives the
-// envOr defaults at dead_letter.go:84-93, the documented way an operator
-// configures this CLI without repeating four flags on every invocation.
+// post-parse connection resolution in newDeadLetterClient and resolveEnvFlag,
+// the documented way an operator configures this CLI without repeating four
+// flags on every invocation.
 //
-// Nothing reached them before. Grepping the package for the four keys returns
-// only dead_letter.go and dead_letter_reconcile.go; the only variable any test
-// in the package ever sets is USER. The two existing tests that look like they
-// would cover this do not: dead_letter_api_cli_test.go:21 proves --server is
-// required when it is absent, which in that process is true only because the
-// variable happens to be unset, and dead_letter_api_env_test.go builds an
-// apiDeadLetterClient by hand and never touches the command tree. Every other
+// Nothing on the dead-letter API path resolved them from the environment
+// before this test: the only variable the pre-existing dead-letter API tests
+// set is USER. The two existing tests that look like they would cover this do
+// not: TestDeadLetterCLIRequiresServerOrBreakGlass proves
+// --server is required when it is absent, which in that process is true only
+// because the variable happens to be unset, and dead_letter_api_env_test.go
+// builds an apiDeadLetterClient by hand and never touches the command tree.
+// Every other
 // API-path test passes --server and --token explicitly, and an explicit flag
 // overrides a default unconditionally in cobra, so none of them can tell a
 // working fallback from a deleted one.

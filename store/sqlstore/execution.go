@@ -19,6 +19,8 @@ type executionRepo struct {
 
 var _ store.Executions = (*executionRepo)(nil)
 var _ store.LatestExecutionReader = (*executionRepo)(nil)
+var _ store.ExecutionDriftScanner = (*executionRepo)(nil)
+var _ store.ExecutionDriftRepairer = (*executionRepo)(nil)
 
 func (r *executionRepo) CreateExecution(ctx context.Context, rec *store.ExecutionRecord) error {
 	if err := store.ValidateExecutionWorkflowID(string(rec.WorkflowID)); err != nil {
@@ -56,6 +58,29 @@ func (r *executionRepo) UpdateExecutionStatus(ctx context.Context, id types.Exec
 		return fmt.Errorf("update execution status %q: %w", id, store.ErrNotFound)
 	}
 	return nil
+}
+
+// RepairRunningExecutionStatus implements store.ExecutionDriftRepairer.
+//
+// The status predicate is the whole contract. The scan and this write are not
+// atomic: by the time the repair runs, the ordinary projection path may already
+// have advanced the row to a terminal status with its error_msg. Rewriting
+// unconditionally would then overwrite a real failure reason with the empty
+// string this repair carries (it copies a status, not a message). Matching only
+// a row that still reads "running" makes that race a no-op instead, and
+// RowsAffected is how the caller tells the two cases apart.
+func (r *executionRepo) RepairRunningExecutionStatus(ctx context.Context, id types.ExecutionID, status types.ExecutionStatus) (bool, error) {
+	result := r.db.WithContext(ctx).
+		Model(&dbExecution{}).
+		Where("execution_id = ? AND status = ?", string(id), string(types.ExecutionStatusRunning)).
+		Updates(map[string]any{
+			"status":    string(status),
+			"error_msg": "",
+		})
+	if err := wrapDBErr(fmt.Sprintf("repair execution status %q", id), result.Error); err != nil {
+		return false, err
+	}
+	return result.RowsAffected > 0, nil
 }
 
 func (r *executionRepo) GetExecution(ctx context.Context, id types.ExecutionID) (*store.ExecutionRecord, error) {
@@ -230,6 +255,65 @@ WHERE rn = 1`, string(ns), ids).Find(&rows).Error
 	for i := range rows {
 		rec := fromDBExecution(&rows[i])
 		out[rec.WorkflowID] = rec
+	}
+	return out, nil
+}
+
+// ListStaleRunningExecutions implements store.ExecutionDriftScanner: the
+// durable projection's "running" rows whose updated_at has not moved for the
+// caller's staleness window, strictly after the caller's cursor in the scan's
+// total order. Only the columns the repair and the cursor need are read; the
+// rest of the row (definition, params, runtime) is not.
+//
+// The cursor predicate is the parameterised form of the same order the query
+// sorts by, `updated_at ASC, id ASC`: a row is after the cursor when its
+// updated_at is greater, or equal with a greater primary key. It is a
+// half-open window on purpose — a row already returned by a previous page can
+// never be returned again, which is what lets a sweep page past candidates it
+// cannot repair instead of re-reading the same oldest batch forever.
+//
+// Two fail-closed choices, both about not widening a repair into a sweep:
+// a non-positive limit is refused instead of being read as "no limit", and a
+// malformed owned entry is refused before any SQL is built. An empty owned set
+// is the legacy cross-namespace scan the interface documents.
+func (r *executionRepo) ListStaleRunningExecutions(ctx context.Context, owned []namespace.Namespace, updatedBefore time.Time, after store.ExecutionDriftCursor, limit int) ([]store.ExecutionDriftCandidate, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("list stale running executions: limit must be positive, got %d", limit)
+	}
+	q := r.db.WithContext(ctx).
+		Model(&dbExecution{}).
+		Select("id", "execution_id", "namespace", "updated_at").
+		Where("status = ?", string(types.ExecutionStatusRunning)).
+		Where("updated_at < ?", updatedBefore)
+	// Zero-value check rather than a separate "has cursor" flag: a real row
+	// cannot have id 0, and updated_at is written on insert, so the pair is
+	// zero only when the caller is starting from the beginning.
+	if !after.UpdatedAt.IsZero() || after.RowID != 0 {
+		q = q.Where("(updated_at > ? OR (updated_at = ? AND id > ?))", after.UpdatedAt, after.UpdatedAt, after.RowID)
+	}
+	if len(owned) > 0 {
+		values := make([]string, 0, len(owned))
+		for _, ns := range owned {
+			if err := store.ValidateNamespaceScope(ns); err != nil {
+				return nil, err
+			}
+			values = append(values, string(ns))
+		}
+		q = q.Where("namespace IN ?", values)
+	}
+	var rows []dbExecution
+	err := q.Order("updated_at ASC").Order("id ASC").Limit(limit).Find(&rows).Error
+	if err := wrapDBErr("list stale running executions", err); err != nil {
+		return nil, err
+	}
+	out := make([]store.ExecutionDriftCandidate, 0, len(rows))
+	for i := range rows {
+		out = append(out, store.ExecutionDriftCandidate{
+			ID:        rows[i].ExecutionID,
+			Namespace: namespace.Namespace(rows[i].Namespace),
+			UpdatedAt: rows[i].UpdatedAt,
+			RowID:     rows[i].ID,
+		})
 	}
 	return out, nil
 }

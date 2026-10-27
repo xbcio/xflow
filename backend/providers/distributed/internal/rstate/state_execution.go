@@ -383,9 +383,7 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 
 	// Cache graph for CheckCompletion only after the durable create path has
 	// accepted the execution.
-	s.mu.Lock()
-	s.graphs[e.ID] = e.Graph
-	s.mu.Unlock()
+	s.graphs.Put(e.ID, e.Graph, e.Graph.EstimatedHeapBytes())
 	return nil
 }
 
@@ -432,9 +430,7 @@ func (s *Store) cleanupCreatedExecution(ctx context.Context, e *engine.Execution
 	// go with it. Leaving it would only cost a no-op drain that repairs it
 	// later; removing it here keeps "a member implies a ready set" true.
 	s.refreshOutboxReadyIndex(ctx, t, e.ID)
-	s.mu.Lock()
-	delete(s.graphs, e.ID)
-	s.mu.Unlock()
+	s.graphs.Delete(e.ID)
 }
 
 func buildExecutionRecord(ctx context.Context, e *engine.ExecutionSnapshot, now time.Time) (*store.ExecutionRecord, error) {
@@ -1125,9 +1121,15 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 	if err != nil {
 		return nil, fmt.Errorf("get execution %q: %w", id, err)
 	}
-	s.mu.RLock()
-	g := s.graphs[id]
-	s.mu.RUnlock()
+	g, _ := s.graphs.Get(id)
+	if g == nil {
+		// Cold cache — a fresh process, or an entry the idle sweep dropped.
+		// Re-read the persisted graph so the returned snapshot keeps carrying
+		// it; LoadGraph also re-seeds the cache.
+		if g, err = s.LoadGraph(ctx, id); err != nil {
+			return nil, err
+		}
+	}
 	var params map[string]any
 	if raw, err := paramsCmd.Bytes(); err == nil {
 		if err := json.Unmarshal(raw, &params); err != nil {

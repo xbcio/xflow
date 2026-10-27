@@ -241,7 +241,7 @@ func TestSubWorkflowAcquireRouteCheckedBenignRefusals(t *testing.T) {
 			t.Fatalf("node = (%+v, %v), want no lease written on an inactive execution", node, err)
 		}
 		eng.mu.RLock()
-		_, cached := eng.graphs[task.ExecutionID]
+		_, cached := eng.graphs.Get(task.ExecutionID)
 		eng.mu.RUnlock()
 		if cached {
 			t.Fatalf("graph for %q is still cached after the acquire reported a terminal execution", task.ExecutionID)

@@ -17,6 +17,7 @@ import (
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/execution"
 	"github.com/xbcio/xflow/namespace"
+	"github.com/xbcio/xflow/observability/tracing"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -192,7 +193,26 @@ func expiredDeadlineResult(deadline time.Time) (Result, bool) {
 
 // Execute compiles (or fetches from cache) req.Package, runs it to completion
 // on a fresh backend, and returns its collected boundary exits.
-func (e *Executor) Execute(ctx context.Context, req Request) (Result, error) {
+func (e *Executor) Execute(ctx context.Context, req Request) (out Result, err error) {
+	// One span per sub-graph EXECUTION. A group or a subflow executes once, so
+	// this is the natural outer boundary of the member work it contains; a map
+	// body calls Execute once per ITEM, which is why MapBodyExecutor suppresses
+	// it (see withoutSubgraphSpan) and reports under its batch span instead.
+	// member_count is filled in after the package resolves: the package is the
+	// only thing that knows how many members the sub-graph has.
+	var span tracing.Span
+	if !subgraphSpanSuppressed(ctx) {
+		ctx, span = subgraphTracer().Start(ctx, "xflow.subgraph.execute",
+			"package_hash", req.PackageHash,
+		)
+		defer span.End()
+		defer func() {
+			if err != nil {
+				span.RecordError(err)
+			}
+		}()
+	}
+
 	// Checked before Resolve so an already-late request does not pay for a
 	// compile it cannot use. Checked again after it, because a slow compile can
 	// consume the remaining budget on its own.
@@ -207,6 +227,9 @@ func (e *Executor) Execute(ctx context.Context, req Request) (Result, error) {
 	compiled, pkg, err := e.cache.Resolve(payload, e.inventoryFromRegistry())
 	if err != nil {
 		return Result{}, err
+	}
+	if span != nil {
+		span.Set("member_count", compiled.NodeCount())
 	}
 
 	// The second of the two checks the entry comment describes. A cold cache
@@ -357,6 +380,13 @@ func (e *Executor) Execute(ctx context.Context, req Request) (Result, error) {
 	// unchanged.
 	submitCtx = engine.WithTraceID(submitCtx, inputTraceID(entryInput))
 	submitCtx = engine.WithSpanID(submitCtx, inputSpanID(entryInput))
+	// Persist the carrier of whichever span is active here so the member's own
+	// dispatch/execute spans chain off it. For a group or subflow that is this
+	// execution's span above; for a map body it is the enclosing
+	// xflow.map.body batch span (per-item spans are suppressed). Without it the
+	// inner execution is a fresh root and the trace ends one level below the
+	// node that started it.
+	submitCtx = engine.WithTraceCarrier(submitCtx, tracing.InjectCarrier(ctx))
 
 	// entryInput.Runtime is passed as the inner submission's runtime, not left
 	// behind: $vars is the union of the workflow's static Context.Vars (which

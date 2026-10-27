@@ -79,9 +79,7 @@ func TestCommitLeasedNodeDoesNotGuessTheGraphType(t *testing.T) {
 	// Make the graph unavailable the way a restart plus an expired key does:
 	// drop the in-memory cache AND the Redis key. LoadGraph now returns
 	// (nil, nil) — the shape the old code read as "acyclic".
-	state.mu.Lock()
-	delete(state.graphs, id)
-	state.mu.Unlock()
+	state.graphs.Delete(id)
 	if err := rdb.Del(ctx, execKey(namespace.FromContext(ctx), id, "graph")).Err(); err != nil {
 		t.Fatalf("delete graph key: %v", err)
 	}

@@ -80,10 +80,11 @@ expected state until a reseal pass completes.
 Requires --mysql-dsn (or XFLOW_MYSQL_DSN) and a current master key.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			opts.mysqlDSN = resolveEnvFlag(cmd, "mysql-dsn", "XFLOW_MYSQL_DSN", "")
 			return runSupplyKeysStatus(cmd.Context(), opts)
 		},
 	}
-	cmd.Flags().StringVar(&opts.mysqlDSN, "mysql-dsn", envOr("XFLOW_MYSQL_DSN", ""),
+	cmd.Flags().StringVar(&opts.mysqlDSN, "mysql-dsn", "",
 		"MySQL DSN to inspect (env: XFLOW_MYSQL_DSN)")
 	cmd.Flags().StringVar(&opts.masterKeyFile, "master-key-file", "",
 		"Path to a 0600 file holding the base64-encoded current master key; XFLOW_MASTER_KEY takes precedence")
