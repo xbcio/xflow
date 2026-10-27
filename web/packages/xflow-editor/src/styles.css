@@ -4410,7 +4410,9 @@ button.xflow-editor-overview__run:hover {
 }
 
 .xflow-editor-node-search__option em {
-  color: var(--xflow-text-tertiary);
+  /* Secondary, not tertiary: the active row's hover wash drops tertiary to
+   * 3.93:1 in dark at this 11px size. */
+  color: var(--xflow-text-secondary);
   flex: 0 0 auto;
   font-family: SFMono-Regular, Consolas, monospace;
   font-size: var(--xflow-font-xs);

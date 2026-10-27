@@ -199,6 +199,13 @@ describe("xflow.editor top bar (§6.3)", () => {
     // The options half is the baseline's 34px key, not AntD's 32px icon button.
     expect(css).toMatch(/\.xflow-editor-run-split__options\s*\{[^}]*min-width:\s*34px\s*;/);
   });
+
+  it("keeps the locate list's 11px type label on the secondary text colour", () => {
+    // Tertiary over the active row's wash is 3.93:1 in dark, under AA for 11px.
+    expect(css).toMatch(
+      /\.xflow-editor-node-search__option em\s*\{[^}]*color:\s*var\(--xflow-text-secondary\)\s*;[^}]*font-size:\s*var\(--xflow-font-xs\)\s*;/
+    );
+  });
 });
 
 describe("xflow.editor responsive rules (§7.1 breakpoints)", () => {
