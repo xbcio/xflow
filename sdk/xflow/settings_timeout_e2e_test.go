@@ -31,6 +31,14 @@ import (
 // hanging the package.
 const settingsTimeoutWaitLimit = 20 * time.Second
 
+// settingsTimeoutClockSlackAllowance is how far ahead of the wall clock a timed
+// out execution's stored deadline may still be when Wait returns. The engine
+// tolerates up to 50ms between a node's monotonic lease timer and the stored
+// wall-clock deadline before it calls the node's end an execution timeout; this
+// is twice that, so the check still catches a deadline that is genuinely in the
+// future (a budget that was never spent) without flaking on the tolerance.
+const settingsTimeoutClockSlackAllowance = 100 * time.Millisecond
+
 // newSettingsTimeoutEngine builds a local engine that can run defs. The
 // handlers are registered through WithNodes because the back door below skips
 // the registration AddWorkflow would do for typed nodes.
@@ -368,8 +376,15 @@ func TestSettingsTimeoutRerunStartsANewClock(t *testing.T) {
 	if err != nil || parentSnap == nil {
 		t.Fatalf("GetExecution(parent) = %+v, %v", parentSnap, err)
 	}
-	if !time.Now().After(parentSnap.Deadline) {
-		t.Fatalf("parent deadline %v is not in the past once the parent timed out", parentSnap.Deadline)
+	// The deadline must not be far in the future. It need not be strictly past:
+	// the node's lease timer runs on the monotonic clock while the stored deadline
+	// is wall clock, so the timer can fire a few milliseconds before the wall
+	// clock reaches the deadline, and the engine then treats it as the execution
+	// timeout (it allows a small clock slack for exactly that), letting Wait
+	// return a moment early.
+	if ahead := time.Until(parentSnap.Deadline); ahead > settingsTimeoutClockSlackAllowance {
+		t.Fatalf("parent deadline %v is %v in the future once the parent timed out, want at most %v",
+			parentSnap.Deadline, ahead, settingsTimeoutClockSlackAllowance)
 	}
 
 	rerunPhase.Store(true)
