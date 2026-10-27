@@ -5151,6 +5151,10 @@ export function XFlowEditor({
       // tight, and the space is a rendering rule, so it is off for the whole
       // editor instead of patched per button.
       button={{ autoInsertSpace: false }}
+      // rc-dialog / rc-drawer hardcode the close button's aria-label as
+      // "Close"; the editor has no locale pack, so name it per kind here.
+      drawer={{ closable: { "aria-label": "关闭" } }}
+      modal={{ closable: { "aria-label": "关闭" } }}
       getPopupContainer={(trigger) => {
         // Inside a compact drawer, popups must live in the drawer: its focus
         // trap pulls focus back from anything outside and closes the popup.

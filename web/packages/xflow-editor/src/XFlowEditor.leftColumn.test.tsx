@@ -577,6 +577,18 @@ describe("dual-zone left column (§6.0.1)", () => {
     expect(document.activeElement).toBe(key);
   });
 
+  it("names the compact right drawer close button 关闭", async () => {
+    const container = mockEditorWidth();
+    render(<XFlowEditor value={workflow} />);
+    act(() => container.setWidth(1279));
+
+    fireEvent.click(within(screen.getByRole("complementary", { name: "紧凑导航" })).getByRole("button", { name: "属性面板" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "属性" });
+    expect(within(dialog).getByRole("button", { name: "关闭" })).toBeTruthy();
+    expect(within(dialog).queryByRole("button", { name: "Close" })).toBeNull();
+  });
+
   it("draws the compact right drawer inside the workbench body too, so both start under the top bar", async () => {
     const container = mockEditorWidth();
     render(<XFlowEditor value={workflow} />);

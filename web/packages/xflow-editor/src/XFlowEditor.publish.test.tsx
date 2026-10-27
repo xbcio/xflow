@@ -417,6 +417,16 @@ describe("XFlowEditor publish wiring (§6.10)", () => {
     expect(document.querySelector('[aria-live="polite"]')?.textContent).toContain("已发布 v1.3.1");
   });
 
+  it("names the dialog close button 关闭 rather than rc-dialog's hardcoded \"Close\"", async () => {
+    render(<XFlowEditor capabilities={allCapabilities} value={workflow} onLoadVersions={async () => versions} onPublish={async (next) => next} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "发布" }));
+    const dialog = await screen.findByRole("dialog");
+
+    expect(within(dialog).getByRole("button", { name: "关闭" })).toBeTruthy();
+    expect(within(dialog).queryByRole("button", { name: "Close" })).toBeNull();
+  });
+
   it("maps a version-immutable rejection into the dialog instead of closing it", async () => {
     const onPublish = vi.fn(async () => {
       throw Object.assign(new Error("version exists"), { status: 409, code: "workflow_version_immutable" });
