@@ -6030,6 +6030,30 @@ components:
           type: integer
         timezone:
           type: string
+        timeout:
+          type: integer
+          format: int64
+          description: |
+            Go duration (nanoseconds) for the whole execution: an execution
+            budget counted from submission, including time spent queued behind
+            `concurrency` and time spent suspended. When it elapses the
+            execution ends with the `timeout` status; this does not go through
+            `on_error`. Omit or use 0 for no budget. A negative value, or a
+            non-zero value on a `faf` workflow, is rejected at compile time.
+            Independent of the per-node `timeout`.
+
+            The budget is enforced at run time. The execution ends with the
+            `timeout` status and the error `execution deadline exceeded`; the
+            outcome is always fatal and is never routed by `on_error`. Nodes
+            still running are cut off at the deadline, suspended nodes are
+            canceled, and the sub-workflow children of the execution are
+            canceled with it. A rerun is a new execution and starts a new
+            clock. A node's lease is clamped to the execution deadline, but
+            expiry is also driven by a background sweep, so the terminal state
+            can land later than the deadline by up to one sweep interval (about
+            1s on the local backend, 5s on the embedded cluster backend, 10s by
+            default on the control plane). It is not millisecond-exact. A node
+            whose own `timeout` is shorter ends by that timeout first.
         on_error:
           type: string
           enum: ["", stop, error_output, main_output, continue]

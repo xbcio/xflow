@@ -305,7 +305,9 @@ export function WorkflowSettings({
           />
         ) : (
           <>
-            <p className="xflow-editor-variable-hint">超时、时区、错误策略等执行级设置。</p>
+            <p className="xflow-editor-variable-hint">
+              超时、时区、错误策略等执行级设置。执行超时是整个执行的预算（整数纳秒，含排队与挂起等待），0 或留空为不限；到期后执行以超时终态结束，不走错误策略。
+            </p>
             {brokenSettings ? (
               <p className="xflow-editor-variable-notice" role="status">
                 JSON 源码未通过解析，修正后才能在此编辑；保存与运行已被阻止。
@@ -314,15 +316,15 @@ export function WorkflowSettings({
             <SettingRow label="超时">
               <LiteralInput
                 ariaLabel="执行超时"
-                mode="auto"
-                placeholder="例如 30s 或 300"
+                mode="json"
+                placeholder="纳秒，例如 1800000000000；留空不限"
                 readOnly={settingsReadOnly}
                 value={settings.timeout}
                 onCommit={(next) =>
                   writeSettings((current) => {
                     const nextSettings = { ...current };
                     if (next === undefined) delete nextSettings.timeout;
-                    else nextSettings.timeout = next as string | number;
+                    else nextSettings.timeout = next as number;
                     return nextSettings;
                   })
                 }

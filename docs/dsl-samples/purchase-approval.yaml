@@ -55,8 +55,8 @@ context:
     org_service: "https://org.internal.example.com"
 
 settings:
-  # settings 层没有 timeout 字段（写了不会被读取）；时限是节点级 timeout，
-  # 下面的审批节点用的就是 $vars.approval_timeout。
+  # settings.timeout 是整个执行的预算（整数纳秒，从提交时刻起算，含排队与挂起，
+  # 0/缺省 = 不限）；本样例没有设置，审批的时限是节点级 timeout（$vars.approval_timeout）。
   timezone: "Asia/Shanghai"
 
 credentials:
