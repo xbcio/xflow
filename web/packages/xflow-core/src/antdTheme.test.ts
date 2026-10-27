@@ -9,6 +9,19 @@ import { foundationTokens, paletteTokens, type Appearance } from "./tokens";
  */
 const appearances: Appearance[] = ["light", "dark"];
 
+/** WCAG 2.x contrast ratio between two opaque #rrggbb colours. */
+function contrastRatio(a: string, b: string): number {
+  const luminance = (hex: string) => {
+    const [r, g, bl] = [1, 3, 5].map((i) => {
+      const c = parseInt(hex.slice(i, i + 2), 16) / 255;
+      return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * bl;
+  };
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
 describe("buildAntdTheme", () => {
   for (const mode of appearances) {
     describe(mode, () => {
@@ -41,6 +54,13 @@ describe("buildAntdTheme", () => {
           colorFillTertiary: palette.hover,
           controlItemBgHover: palette.hover,
         });
+      });
+
+      it("paints the label of a solid danger button with onDanger, readable on the error fill", () => {
+        expect(components.Button.dangerColor).toBe(palette.onDanger);
+        // A solid danger button fills with colorError and takes dangerColor as its text.
+        expect(token.colorError).toBe(palette.danger);
+        expect(contrastRatio(components.Button.dangerColor, token.colorError)).toBeGreaterThanOrEqual(4.5);
       });
 
       it("parses focus, radius, type and elevation from the foundation scale", () => {

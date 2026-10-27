@@ -54,6 +54,12 @@ export interface Palette {
   primary: string;
   onPrimary: string;
   /**
+   * Text on a solid `danger` fill. Light's red is deep enough for white
+   * (4.94:1); dark's is bright, so white drops to 2.80:1 and the label takes the
+   * app-ground ink instead (6.69:1).
+   */
+  onDanger: string;
+  /**
    * Solid primary fill that carries `onPrimary` text at AA. `primary` stays the
    * brand accent (rings, glows, decorative bars); a fill with white text needs a
    * deeper blue because the brand value only reaches 3.85:1.
@@ -157,6 +163,8 @@ export const palettes: Record<Appearance, Palette> = {
     textTertiary: "#616b79",
     primary: "#2f7cff",
     onPrimary: "#ffffff",
+    // White on #d1333b measures 4.94:1, so the light danger fill keeps white text.
+    onDanger: "#ffffff",
     // White on #1f69e0 measures 5.05:1; hover/active keep darkening instead of
     // AntD's default lightening, which would drop the label back under AA.
     primarySolid: "#1f69e0",
@@ -197,6 +205,8 @@ export const palettes: Record<Appearance, Palette> = {
     textTertiary: "#8f97a3",
     primary: "#4c8dff",
     onPrimary: "#ffffff",
+    // White on #ff6a62 measures only 2.80:1; the app-ground ink gives 6.69:1.
+    onDanger: "#111213",
     // White on #2d6fdd measures 4.74:1 (the dark brand value is 3.20:1). AntD
     // re-derives a seed through its dark palette generator, which only deepens
     // this fill (#2961bf, 5.90:1). Hover and active deepen rather than brighten

@@ -105,8 +105,9 @@ describe("token vocabulary", () => {
     // The solid-primary triad and the focus ring are opaque AA values for the
     // same reason, so they are palette keys rather than derived expressions.
     // Stage 1b adds the five surface steps plus elev0/elev4 (elev1-3 already existed);
-    // stage 1c adds borderSubtle for separators.
-    expect(Object.keys(paletteTokens.light)).toHaveLength(23 + 4 + 3 + 4 + 7 + 1);
+    // stage 1c adds borderSubtle for separators; onDanger is the label colour
+    // for a solid danger fill.
+    expect(Object.keys(paletteTokens.light)).toHaveLength(23 + 4 + 3 + 4 + 7 + 1 + 1);
     for (const key of ["highlight", "hoverSubtle", "insetShadow", "shadow", "borderSubtle"]) {
       expect(Object.keys(paletteTokens.light), key).toContain(key);
     }
@@ -157,6 +158,11 @@ describe("token vocabulary", () => {
       for (const key of ["primarySolid", "primarySolidHover", "primarySolidActive"] as const) {
         expect(contrast(rgbOf(palette.onPrimary), rgbOf(palette[key])), key).toBeGreaterThanOrEqual(4.5);
       }
+    });
+
+    it(`${appearance}: a solid danger fill carries its onDanger label at AA`, () => {
+      const palette = paletteTokens[appearance];
+      expect(contrast(rgbOf(palette.onDanger), rgbOf(palette.danger))).toBeGreaterThanOrEqual(4.5);
     });
 
     it(`${appearance}: the focus ring stays at 3:1 on every surface it is drawn on`, () => {

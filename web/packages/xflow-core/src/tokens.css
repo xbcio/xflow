@@ -78,6 +78,7 @@
     --xflow-text-tertiary: #616b79;
     --xflow-primary: #2f7cff;
     --xflow-on-primary: #ffffff;
+    --xflow-on-danger: #ffffff;
     --xflow-primary-solid: #1f69e0;
     --xflow-primary-solid-hover: #1a5fcf;
     --xflow-primary-solid-active: #164fb0;
@@ -164,6 +165,7 @@
     --xflow-text-tertiary: #8f97a3;
     --xflow-primary: #4c8dff;
     --xflow-on-primary: #ffffff;
+    --xflow-on-danger: #111213;
     --xflow-primary-solid: #2d6fdd;
     --xflow-primary-solid-hover: #2a66cc;
     --xflow-primary-solid-active: #255fb8;

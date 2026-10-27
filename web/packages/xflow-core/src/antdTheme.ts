@@ -271,7 +271,7 @@ export function buildAntdTheme(mode: Appearance, options: AntdThemeOptions = {})
     },
     components: {
       Button: {
-        dangerColor: palette.danger,
+        dangerColor: palette.onDanger,
         dangerShadow: "none",
         defaultActiveBg: palette.hover,
         defaultActiveBorderColor: palette.primary,
