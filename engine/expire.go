@@ -76,7 +76,21 @@ func deadlineReached(now, deadline time.Time) bool {
 //
 // Slot release and queue promotion are done by the store's terminal write; an
 // execution that expires while still queued leaves the line there.
-func (e *Engine) ExpireExecution(ctx context.Context, id types.ExecutionID) (outcome ExpireOutcome, err error) {
+func (e *Engine) ExpireExecution(ctx context.Context, id types.ExecutionID) (ExpireOutcome, error) {
+	return e.expireExecution(ctx, id, 0)
+}
+
+// expireExecution is ExpireExecution with a tolerance on its own deadline
+// check: the execution counts as due when the deadline is at most slack away.
+//
+// The tolerance is not a public knob. A caller that was told the execution's
+// deadline passed by a clock other than this process's wall clock (a node
+// timeout cut off by a timer, see expireIfLeaseTimeoutReached) has already
+// applied the same tolerance to its own comparison; this check must agree, or
+// the guard would call it, be answered NotDue by the stricter check here, and
+// hand the commit back to on_error after all. Every other caller (the sweep,
+// the public entry point) passes zero and keeps the exact comparison.
+func (e *Engine) expireExecution(ctx context.Context, id types.ExecutionID, slack time.Duration) (outcome ExpireOutcome, err error) {
 	ctx, span := e.startExecutionSpan(ctx, id, "xflow.execution.expire",
 		"execution_id", string(id),
 	)
@@ -125,7 +139,7 @@ func (e *Engine) ExpireExecution(ctx context.Context, id types.ExecutionID) (out
 			return e.expireAlreadyTerminal(ctx, id)
 		}
 		resumed = true
-	} else if !deadlineReached(time.Now(), snap.Deadline) {
+	} else if !deadlineReached(time.Now().Add(slack), snap.Deadline) {
 		return ExpireOutcomeNotDue, nil
 	}
 
