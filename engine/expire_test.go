@@ -646,16 +646,16 @@ func TestExpireExecutionExpiresTheWholeExecution(t *testing.T) {
 	if write < 0 || hook < 0 || cascade < 0 || ack < 0 {
 		t.Fatalf("missing calls in %v", rig.log.snapshot())
 	}
-	if !(write < cascade && cascade < ack) {
+	if write >= cascade || cascade >= ack {
 		t.Fatalf("order = %v, want the timeout write, then the cascade, then the ack", rig.log.snapshot())
 	}
-	if !(write < hook) {
+	if write >= hook {
 		t.Fatalf("order = %v, want the completion hook after the durable timeout write", rig.log.snapshot())
 	}
 	// The hook is announced BEFORE the cascade, not after it. A Resumed call
 	// never announces again, so a hook placed after a cascade that can fail on a
 	// store error would be lost for good the first time that happens.
-	if !(hook < cascade) {
+	if hook >= cascade {
 		t.Fatalf("order = %v, want the completion hook before the cascade", rig.log.snapshot())
 	}
 	// The ack is the very last call: the entry may only be withdrawn once
