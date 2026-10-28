@@ -2963,13 +2963,32 @@ func (d *RedisRunnerDirectory) Runner(ctx context.Context, runnerID string) (Run
 // cost one round-trip and one full pass over the fleet-wide debt ledgers per
 // runner -- O(runners) round-trips and O(runners x fleet debt) bytes for data
 // the ledgers already hold once.
+//
+// Errors are swallowed by contract: see ActivationRunnerLister. A caller that
+// must tell a Redis failure apart from an empty fleet uses ListRunnerSnapshots.
 func (d *RedisRunnerDirectory) ListLiveRunners(ctx context.Context) []RunnerSnapshot {
-	runnerIDs, err := d.rdb.HKeys(ctx, d.keys.runnerSession).Result()
+	snapshots, err := d.listRunnerSnapshots(ctx)
 	if err != nil {
 		return nil
 	}
+	return snapshots
+}
+
+// ListRunnerSnapshots implements RunnerSnapshotLister: the same pipelined bulk
+// fetch as ListLiveRunners, with the Redis errors propagated instead of
+// swallowed, so a caller can distinguish an unreachable directory from a fleet
+// with no runners.
+func (d *RedisRunnerDirectory) ListRunnerSnapshots(ctx context.Context) ([]RunnerSnapshot, error) {
+	return d.listRunnerSnapshots(ctx)
+}
+
+func (d *RedisRunnerDirectory) listRunnerSnapshots(ctx context.Context) ([]RunnerSnapshot, error) {
+	runnerIDs, err := d.rdb.HKeys(ctx, d.keys.runnerSession).Result()
+	if err != nil {
+		return nil, fmt.Errorf("list runner sessions: %w", err)
+	}
 	if len(runnerIDs) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	pipe := d.rdb.Pipeline()
@@ -2990,7 +3009,7 @@ func (d *RedisRunnerDirectory) ListLiveRunners(ctx context.Context) []RunnerSnap
 	drainObservationCmd := pipe.HMGet(ctx, d.keys.runnerDrainObservation, runnerIDs...)
 	ledgerCommands := d.queueRedisControlLedger(ctx, pipe)
 	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
-		return nil
+		return nil, fmt.Errorf("read runner snapshots: %w", err)
 	}
 
 	n := len(runnerIDs)
@@ -3039,7 +3058,7 @@ func (d *RedisRunnerDirectory) ListLiveRunners(ctx context.Context) []RunnerSnap
 		}
 		out = append(out, snap)
 	}
-	return out
+	return out, nil
 }
 
 // ListRunners returns the IDs of every registered runner. It implements the

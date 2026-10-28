@@ -21,6 +21,7 @@ var _ engine.OutboxFailureRecorder = (*Store)(nil)
 var _ engine.OutboxLeaser = (*Store)(nil)
 var _ engine.OutboxReleaser = (*Store)(nil)
 var _ engine.OutboxMetricsReader = (*Store)(nil)
+var _ engine.NamespacedOutboxLister = (*Store)(nil)
 
 type redisOutboxEntry struct {
 	ID         string      `json:"id"`
@@ -577,9 +578,43 @@ func (s *Store) scanOutboxMetricsForNamespace(ctx context.Context, t namespace.N
 	return nil
 }
 
-// ListOutboxExecutions reports executions with ready outbox work. Discovery is
-// the readiness index; the keyspace scan is its fallback and its staleness
-// bound.
+// ListOutboxExecutions reports the IDs of executions with ready outbox work. It
+// is ListOutboxExecutionRefs with the namespaces dropped, kept because it is part
+// of engine.AtomicStateStore; the dispatcher prefers the refs, since an ID alone
+// cannot be flushed outside the default namespace.
+//
+// Two executions that share an ID in different namespaces are one ID here.
+func (s *Store) ListOutboxExecutions(ctx context.Context, limit int) ([]types.ExecutionID, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	refs, err := s.ListOutboxExecutionRefs(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[types.ExecutionID]struct{}, len(refs))
+	out := make([]types.ExecutionID, 0, len(refs))
+	for _, ref := range refs {
+		if _, dup := seen[ref.ID]; dup {
+			continue
+		}
+		seen[ref.ID] = struct{}{}
+		out = append(out, ref.ID)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out, nil
+}
+
+// ListOutboxExecutionRefs reports executions with ready outbox work, each with
+// the namespace it lives in, ordered by (namespace, ID). Discovery is the
+// readiness index; the keyspace scan is its fallback and its staleness bound.
+//
+// THE NAMESPACE IS PART OF THE ANSWER because the outbox is keyed by it:
+// LeaseOutbox and every other outbox method build their keys from the namespace
+// on the caller's context, and the dispatcher's context carries none. A bare ID
+// found in a dedicated namespace was therefore looked up under "default" and
+// never delivered. Discovery already knows the namespace -- it is what it
+// iterates -- so dropping it was the defect, not a limitation.
 //
 // DISCOVERY IS THE INDEX. One ZRANGEBYSCORE per namespace returns every
 // execution whose earliest ready entry is due, in time proportional to the
@@ -614,7 +649,7 @@ func (s *Store) scanOutboxMetricsForNamespace(ctx context.Context, t namespace.N
 // is not counted and not returned, and is removed from the index by the read
 // that found it; an index whose due head is all orphans therefore reports
 // nothing here, which is what keeps it from hiding the live backlog behind the
-// orphans. See readOutboxReadyIndex.
+// orphans. See readOutboxReadyIndexRefs.
 //
 // THE SWEEP IS THROTTLED ONLY ONCE THE INDEX HAS PROVEN ITSELF. While the index
 // has carried work in this process, the scan runs once every
@@ -629,7 +664,7 @@ func (s *Store) scanOutboxMetricsForNamespace(ctx context.Context, t namespace.N
 // index failure, so a healthy index that goes quiet reverts to the cadence
 // above instead of keeping the throttle it no longer earns. See
 // noteOutboxIndexFailure.
-func (s *Store) ListOutboxExecutions(ctx context.Context, limit int) ([]types.ExecutionID, error) {
+func (s *Store) ListOutboxExecutionRefs(ctx context.Context, limit int) ([]engine.OutboxExecutionRef, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
@@ -640,7 +675,7 @@ func (s *Store) ListOutboxExecutions(ctx context.Context, limit int) ([]types.Ex
 		return nil, fmt.Errorf("list namespaces for outbox discovery: %w", err)
 	}
 	budget := splitNamespaceScanBudget(limit, len(namespaces))
-	ids := make(map[types.ExecutionID]struct{})
+	refs := make(map[engine.OutboxExecutionRef]struct{})
 	now := time.Now().UTC()
 	s.outboxDiscoveryCalls++
 	// Both decisions come from the state BEFORE this call, so a call that proves
@@ -654,7 +689,7 @@ func (s *Store) ListOutboxExecutions(ctx context.Context, limit int) ([]types.Ex
 	indexed := 0
 	if readIndex {
 		for i, t := range namespaces {
-			added, err := s.readOutboxReadyIndex(ctx, t, now, budget[i], ids)
+			added, err := s.readOutboxReadyIndexRefs(ctx, t, now, budget[i], refs)
 			if err != nil {
 				// Abandon the index for this call and sweep instead: an index
 				// that cannot be read is an index this drain must not depend on.
@@ -668,22 +703,27 @@ func (s *Store) ListOutboxExecutions(ctx context.Context, limit int) ([]types.Ex
 	// Only LIVE members are counted by the read, so this cannot be earned by a
 	// page of orphans: an index that returns nothing but members whose execution
 	// has no outbox has delivered no work, and must not throttle away the sweep
-	// that is the only thing left to find it. See readOutboxReadyIndex.
+	// that is the only thing left to find it. See readOutboxReadyIndexRefs.
 	if indexed > 0 {
 		s.outboxIndexProven.Store(true)
 	}
 	if sweep {
 		for i, t := range namespaces {
-			if err := s.scanOutboxExecutionsForNamespace(ctx, t, budget[i], ids); err != nil {
+			if err := s.scanOutboxExecutionRefsForNamespace(ctx, t, budget[i], refs); err != nil {
 				return nil, err
 			}
 		}
 	}
-	out := make([]types.ExecutionID, 0, len(ids))
-	for id := range ids {
-		out = append(out, id)
+	out := make([]engine.OutboxExecutionRef, 0, len(refs))
+	for ref := range refs {
+		out = append(out, ref)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Namespace != out[j].Namespace {
+			return out[i].Namespace < out[j].Namespace
+		}
+		return out[i].ID < out[j].ID
+	})
 	return out, nil
 }
 
@@ -714,7 +754,7 @@ func splitNamespaceScanBudget(limit, namespaces int) []int {
 	return budget
 }
 
-// scanOutboxExecutionsForNamespace advances one page of this namespace's
+// scanOutboxExecutionRefsForNamespace advances one page of this namespace's
 // ready-index scan. The cursor is kept per namespace and per Redis master so a
 // resumed scan neither re-reads the keyspace from zero nor reuses a node-local
 // cursor on another master.
@@ -724,7 +764,7 @@ func splitNamespaceScanBudget(limit, namespaces int) []int {
 // the whole page. The SCAN count is the same number, so a page and the budget
 // that consumes it stay in step; Redis treats COUNT as a hint, so an
 // over-delivering page is still truncated here.
-func (s *Store) scanOutboxExecutionsForNamespace(ctx context.Context, t namespace.Namespace, limit int, ids map[types.ExecutionID]struct{}) error {
+func (s *Store) scanOutboxExecutionRefsForNamespace(ctx context.Context, t namespace.Namespace, limit int, refs map[engine.OutboxExecutionRef]struct{}) error {
 	if limit <= 0 {
 		return nil
 	}
@@ -739,10 +779,13 @@ func (s *Store) scanOutboxExecutionsForNamespace(ctx context.Context, t namespac
 		if !ok {
 			continue
 		}
-		if _, seen := ids[id]; seen {
+		// Keyed by (namespace, ID): the same ID in another namespace is another
+		// execution and must not be taken for a repeat of this one.
+		ref := engine.OutboxExecutionRef{Namespace: t, ID: id}
+		if _, seen := refs[ref]; seen {
 			continue
 		}
-		ids[id] = struct{}{}
+		refs[ref] = struct{}{}
 		added++
 		if added >= limit {
 			break

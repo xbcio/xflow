@@ -629,6 +629,20 @@ func (s *Store) seedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 	keys = append(keys, execKey(t, execID, "created_at_ms"), execKey(t, execID, "updated_at_ms"))
 	args = append(args, nowMs)
 
+	// Register the admission namespace in the discovery registry, before the Lua
+	// creates anything under it, for the same reason CreateExecution and
+	// SeedExecution do: the outbox dispatcher, the lease sweeper and the other
+	// maintenance loops find a namespace's keys by iterating that registry, and
+	// the default namespace is the only one it always contains. A namespace whose
+	// executions are admitted only through this path was never registered, so its
+	// seeded outbox was written and indexed but never discovered. Non-fatal, and
+	// skipped for a transient execution, exactly as in those paths. Throttled,
+	// unlike those paths, because entry-seed is the collection hot path: see
+	// registerNamespaceThrottled.
+	if !s.isTransient(ctx, execID) {
+		_ = s.registerNamespaceThrottled(ctx, t)
+	}
+
 	// Run Lua.
 	res, err := seedExecutionFromEntryLua.Run(ctx, s.rdb, keys, args...).Slice()
 	if err != nil {

@@ -256,6 +256,17 @@ func NewServer(engine EngineFacade, runners RunnerDirectory, opts ...ServerOptio
 	return srv
 }
 
+// RunnerSnapshots enumerates every runner registered with this control plane's
+// raw runner directory, propagating infrastructure failures (see
+// EnumerateRunnerSnapshots). It is the read-only handle an embedding host needs
+// to ask placement questions of the runner fleet without being handed the
+// directory itself; liveness is left to the caller. On a Redis-backed directory
+// each call costs one HKEYS plus one pipeline of fifteen HMGETs and four
+// ledger HGETALLs.
+func (s *Server) RunnerSnapshots(ctx context.Context) ([]RunnerSnapshot, error) {
+	return EnumerateRunnerSnapshots(ctx, s.core.runners)
+}
+
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	protocol.RegisterRunnerRoutes(mux, s)

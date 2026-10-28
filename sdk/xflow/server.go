@@ -709,6 +709,9 @@ type Server struct {
 	// driftOnce is reconcileOnce's counterpart for the execution drift repair
 	// worker; the two workers start independently.
 	driftOnce sync.Once
+	// claimNow is CanClaim's clock. Nil means time.Now; tests set it to age
+	// every registered runner past the liveness window without sleeping.
+	claimNow func() time.Time
 }
 
 // NewServer creates an embeddable control-plane server. RedisAddr empty means
@@ -1385,6 +1388,162 @@ func (s *Server) GetWorkflowVersion(ctx context.Context, id types.WorkflowID, ve
 // backend.ErrWorkflowNotFound for an id that resolves in no namespace.
 func (s *Server) RollbackWorkflow(ctx context.Context, id types.WorkflowID, version string) (apiserver.WorkflowRollbackResult, error) {
 	return s.api.RollbackWorkflow(ctx, namespace.FromContext(ctx), id, version)
+}
+
+// The values ClaimGap.Reason takes. They are the control.SelectorReject*
+// constants re-exported, so a caller can compare against them without importing
+// service/control; a test pins each pair equal. ClaimReasonPolicy is declared
+// for completeness with the claim path's label set but CanClaim never produces
+// it: see CanClaim.
+const (
+	ClaimReasonLabelPending  = control.SelectorRejectLabelPending
+	ClaimReasonLabelRequired = control.SelectorRejectLabelRequired
+	ClaimReasonCapability    = control.SelectorRejectCapability
+	ClaimReasonPolicy        = control.SelectorRejectPolicy
+	ClaimReasonNamespace     = control.SelectorRejectNamespace
+)
+
+// ClaimGap names one node of a workflow that no live runner can claim right
+// now, and why.
+type ClaimGap struct {
+	// NodeID is the node's name in the workflow, or the group's name when the
+	// node belongs to a co-location group (a group is dispatched to a runner as
+	// one unit, so it is the unit that has the gap).
+	NodeID string
+	// NodeType is the node type that has to be hosted. It is "xflow.group" for a
+	// group unit.
+	NodeType string
+	// Reason is one of the ClaimReason* constants (the control.SelectorReject*
+	// values), the same labels the claim path puts on
+	// xflow_runner_selector_rejected_total{reason}:
+	//
+	//   - "namespace": no live runner serves the workflow's namespace.
+	//   - "capability": runners serve the namespace, but none hosts this node
+	//     type (or the version or feature it needs).
+	//   - "label_required": the effective selector is in required mode and no
+	//     such runner satisfies its labels.
+	//   - "label_pending": the effective selector is in default mode and no
+	//     such runner satisfies its labels. The claim path would let any capable
+	//     runner take the work once its 30s grace window elapsed; CanClaim does
+	//     not model that fallback. See CanClaim.
+	//
+	// "policy" is never produced; see CanClaim.
+	Reason string
+}
+
+// CanClaim reports whether every node of the workflow that is dispatched to a
+// runner currently has a live runner able to claim it. ok is true if and only
+// if gaps is empty and err is nil. err reports an infrastructure failure only
+// (the workflow or the runner directory could not be read), and then ok is
+// false and gaps is nil: an unanswerable question must not read as "no runner
+// available" or as "all clear".
+//
+// # Semantics are strict
+//
+// A node counts as claimable only when some live runner passes the same
+// predicates the dispatch path applies at claim time (control.RunnerSelector's
+// IsLive, MatchCapabilities, MatchLabels, and the namespace rule of
+// ClaimForRunner) with the selector's labels ENFORCED. That is stricter than
+// the claim path for a default-mode selector. The claim path treats default-mode
+// labels as a preference: when no label-matching runner takes an assignment
+// within a 30s grace window, any capable runner may. CanClaim does not wait for
+// or model that fallback. If no live runner satisfies the labels it records a
+// gap (Reason "label_pending" for a default-mode selector, "label_required" for
+// a required-mode one), even though the work would eventually be handed to a
+// non-matching runner. The caller is deciding whether work may start where the
+// workflow asked for it to run, and the fallback is exactly the case where it
+// would not. In particular a send-from-the-right-environment pre-check or a
+// timer eligibility gate should treat any gap as "not yet".
+//
+// The effective selector is the one the compiler resolved onto the node (a
+// node-level selector takes priority over the workflow-level one unless the
+// workflow is in required mode, where the two are ANDed; a group carries its own
+// selector), so CanClaim and the dispatch path read the same labels. The
+// workflow checked is the record currently registered under id in the
+// namespace carried by ctx, the same scoping as ListWorkflowVersions; an id
+// registered in another namespace is backend.ErrWorkflowNotFound.
+//
+// # Which nodes are counted
+//
+// Only units whose work is dispatched to a runner. Trigger nodes (placed by
+// the entry-activation reconciler, not claimed), supply nodes (not scheduled),
+// xflow.subworkflow nodes (run by the engine) and nodes marked disabled are
+// not counted. A node pinned by pin_data is not counted when
+// pin_data_mode is "always" on an acyclic workflow, where the engine serves its
+// mock output; under "test_only" it is counted, because a production execution
+// dispatches it. A workflow with nothing to dispatch is trivially claimable.
+//
+// # What is not covered
+//
+//   - RunnerPolicy is not checked, so "policy" is never a Reason. A directory
+//     snapshot does not carry the policy, and reading it would reach into the
+//     directory's per-runner records. The gap is narrow: runner registration
+//     already refuses capabilities and namespaces outside the runner's policy,
+//     so a runner that passes the capability and namespace checks here has
+//     passed its policy for them.
+//   - Capacity and load are not considered: a runner with no free slots is
+//     still a candidate. A runner that is draining is not.
+//   - The answer is a point-in-time read. A runner can register, expire or be
+//     drained the moment after, so a true result is a precondition for starting
+//     work, not a reservation.
+//
+// # Cost
+//
+// Each call makes two reads, neither cached.
+//
+// The workflow-registry read is one HGET on the distributed registry, but the
+// reply is the whole stored record: it is JSON-decoded on every call, including
+// the compiled graph. When the stored record carries no graph (older records,
+// or one whose graph payload no longer decodes), the registry recompiles the
+// definition from source on that call. The local registry returns its in-memory
+// record.
+//
+// The runner-directory read enumerates every registered runner once. With the
+// Redis directory that is one HKEYS plus a pipeline of fifteen HMGETs and four
+// ledger HGETALLs, sized by the fleet.
+//
+// CanClaim does not cache: a caller that checks often (a per-send or per-tick
+// gate) should cache the verdict itself, for a period it chooses.
+func (s *Server) CanClaim(ctx context.Context, id types.WorkflowID) (ok bool, gaps []ClaimGap, err error) {
+	ns := namespace.FromContext(ctx)
+	registry := s.api.Backend().WorkflowRegistry()
+	if registry == nil {
+		return false, nil, errors.New("xflow: CanClaim: backend has no workflow registry")
+	}
+	rec, err := registry.GetWorkflow(ctx, id)
+	if err != nil {
+		return false, nil, fmt.Errorf("xflow: CanClaim: read workflow %q: %w", id, err)
+	}
+	// The local registry is not namespace-scoped by its ctx the way the
+	// distributed one is, so the record's own namespace is compared, as
+	// triggerRuntime.hostedWorkflow does.
+	if fafNamespace(rec.Namespace) != ns {
+		return false, nil, fmt.Errorf("xflow: CanClaim: read workflow %q in namespace %q: %w", id, ns, backend.ErrWorkflowNotFound)
+	}
+	if rec.Graph == nil {
+		return false, nil, fmt.Errorf("xflow: CanClaim: workflow %q has no compiled graph", id)
+	}
+	units, err := engine.DispatchableUnits(rec.Graph)
+	if err != nil {
+		return false, nil, fmt.Errorf("xflow: CanClaim: workflow %q: %w", id, err)
+	}
+	if len(units) == 0 {
+		return true, nil, nil
+	}
+	snapshots, err := s.api.ControlServer().RunnerSnapshots(ctx)
+	if err != nil {
+		return false, nil, fmt.Errorf("xflow: CanClaim: read runner directory: %w", err)
+	}
+	now := time.Now()
+	if s.claimNow != nil {
+		now = s.claimNow()
+	}
+	for _, unit := range units {
+		if claimable, reason := control.ClassifyUnitClaim(snapshots, unit.Routing, ns, now); !claimable {
+			gaps = append(gaps, ClaimGap{NodeID: unit.Name, NodeType: unit.Routing.NodeType, Reason: reason})
+		}
+	}
+	return len(gaps) == 0, gaps, nil
 }
 
 func (s *Server) addWorkflow(ctx context.Context, wf *WorkflowBuilder, replace bool) (WorkflowRegistration, error) {
