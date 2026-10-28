@@ -127,10 +127,13 @@ func TestLocalDeadlineExpiryFeedsTheSweepMetrics(t *testing.T) {
 	waitForExecutionTimeout(t, eng, id)
 
 	const name = "xflow_execution_deadline_expired_total"
+	// The label is selected literally, not through the engine constant: this is
+	// the assertion that notices the published value drifting (a dashboard
+	// selects source="embedded", not whatever the constant becomes).
 	waitForTransientCondition(t, 5*time.Second, func() bool {
 		var found bool
 		forEachSample(t, m, name, func(labels map[string]string, _ float64) {
-			if labels["source"] == engine.DeadlineExpiredSourceEmbedded {
+			if labels["source"] == "embedded" {
 				found = true
 			}
 		})
@@ -139,12 +142,12 @@ func TestLocalDeadlineExpiryFeedsTheSweepMetrics(t *testing.T) {
 
 	total := 0.0
 	forEachSample(t, m, name, func(labels map[string]string, v float64) {
-		if labels["source"] == engine.DeadlineExpiredSourceEmbedded {
+		if labels["source"] == "embedded" {
 			total += v
 		}
 	})
 	if total != 1 {
 		t.Fatalf("%s{source=%q} = %v, want 1: an embedded deployment's timeout must reach the caller's registry",
-			name, engine.DeadlineExpiredSourceEmbedded, total)
+			name, "embedded", total)
 	}
 }
