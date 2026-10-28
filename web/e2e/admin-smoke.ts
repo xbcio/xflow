@@ -29,9 +29,10 @@ async function tableSurface(page: Page): Promise<{ token: string; card: string }
  * original three intents:
  *
  *   1. The Tailwind layer still wins: the centre's master grid must compute to
- *      a real two-track grid with the `gap-4` gutter (16px), and the CSSOM
- *      layer order plus a cascade probe must show AntD's reset is layered
- *      before `utilities` instead of leaking out unlayered.
+ *      a real grid with the `gap-4` gutter (16px) — single-track below 1440,
+ *      two-track with a 320px rail at 1440 — and the CSSOM layer order plus a
+ *      cascade probe must show AntD's reset is layered before `utilities`
+ *      instead of leaking out unlayered.
  *   2. Design tokens drive surfaces: the table card's background must be the
  *      resolved `--xflow-surface-raised` value from tokens.css, not a literal —
  *      checked in both light and dark so a hard-coded light colour cannot pass.
@@ -87,6 +88,20 @@ export async function assertAdminSmoke(page: Page): Promise<void> {
   await expect(layout).toBeVisible({ timeout: 45_000 });
 
   // 1. Tailwind utilities, computed, plus the layer order they depend on.
+  // Below 1440 the rail sinks under the table (AL-01), so Desktop Chrome's
+  // 1280 default viewport must compute exactly one track with the `gap-4`
+  // gutter — a literal width would tie the probe to one viewport. At 1440 the
+  // `min-[1440px]` variant kicks in and the rail becomes a second 320px track.
+  await expect
+    .poll(() =>
+      layout.evaluate((element) => {
+        const style = window.getComputedStyle(element);
+        const tracks = style.gridTemplateColumns.split(" ");
+        return `${style.display}|${style.columnGap}|${tracks.length}|${tracks.join(" ")}`;
+      }),
+    )
+    .toMatch(/^grid\|16px\|1\|\d+(?:\.\d+)?px$/);
+  await page.setViewportSize({ width: 1440, height: 900 });
   await expect
     .poll(() =>
       layout.evaluate((element) => {
