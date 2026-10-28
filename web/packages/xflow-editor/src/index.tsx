@@ -2415,7 +2415,7 @@ export function XFlowEditor({
   const nodeSearchRef = React.useRef<InputRef | null>(null);
   /** The element to focus again when the locate panel closes. */
   const locateTriggerRef = React.useRef<HTMLElement | null>(null);
-  const title = draftWorkflow.name ?? "Untitled workflow";
+  const title = draftWorkflow.name ?? "未命名工作流";
   const nodes = draftWorkflow.nodes ?? [];
   // §6.13: one declared-category map from the schemas, shared by the canvas, the
   // outline, the node library and the diagnostics mix.
@@ -5169,7 +5169,7 @@ export function XFlowEditor({
     >
       <section
         className={`xflow-editor ${className ?? ""}`}
-        aria-label={`${title} editor`}
+        aria-label={`${title} 编辑器`}
         ref={editorRootRef}
         data-appearance={activeAppearance}
         data-canvas-tool={canvasTool}

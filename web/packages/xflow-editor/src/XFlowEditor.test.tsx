@@ -183,11 +183,19 @@ describe("XFlowEditor", () => {
     expect(screen.getByText("· 节点不可拖动、不可连线")).toBeTruthy();
   });
 
+  it("names an untitled workflow in Chinese instead of the English fallback", () => {
+    render(<XFlowEditor value={{ ...workflow, name: undefined }} />);
+
+    expect(screen.getByRole("region", { name: "未命名工作流 编辑器" })).toBeTruthy();
+    // The toolbar shows the same fallback the region is named after.
+    expect(screen.getByText("未命名工作流")).toBeTruthy();
+  });
+
   it("drives the canvas tool from shortcuts and keeps history in the toolbar", () => {
     const handleChange = vi.fn();
     render(<XFlowEditor value={workflow} onChange={handleChange} />);
 
-    const editor = screen.getByRole("region", { name: "Purchase approval editor" });
+    const editor = screen.getByRole("region", { name: "Purchase approval 编辑器" });
     const tools = screen.getByRole("group", { name: "常用画布与历史工具" });
     const undo = within(tools).getByRole("button", { name: "撤销" }) as HTMLButtonElement;
     const redo = within(tools).getByRole("button", { name: "重做" }) as HTMLButtonElement;
@@ -258,7 +266,7 @@ describe("XFlowEditor", () => {
       />
     );
 
-    expect(screen.getByRole("region", { name: "Purchase approval editor" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Purchase approval 编辑器" })).toBeTruthy();
     expect(screen.getByRole("toolbar", { name: "编辑器工具栏" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "节点" })).toBeTruthy();
     // §6.0.1: the left column is two zones, the library over the outline tree.
@@ -321,7 +329,7 @@ describe("XFlowEditor", () => {
     mockSystemColorScheme(true);
     const dark = render(<XFlowEditor value={workflow} />);
 
-    const darkEditor = screen.getByRole("region", { name: "Purchase approval editor" });
+    const darkEditor = screen.getByRole("region", { name: "Purchase approval 编辑器" });
     expect(darkEditor.getAttribute("data-appearance")).toBe("system");
     expect(darkEditor.getAttribute("data-theme")).toBe("dark");
 
@@ -329,7 +337,7 @@ describe("XFlowEditor", () => {
     mockSystemColorScheme(false);
     render(<XFlowEditor value={workflow} />);
 
-    const lightEditor = screen.getByRole("region", { name: "Purchase approval editor" });
+    const lightEditor = screen.getByRole("region", { name: "Purchase approval 编辑器" });
     expect(lightEditor.getAttribute("data-appearance")).toBe("system");
     expect(lightEditor.getAttribute("data-theme")).toBe("light");
   });
@@ -545,7 +553,7 @@ describe("XFlowEditor", () => {
 
   it("uses the controlled light and dark appearances on the editor root", () => {
     const { rerender } = render(<XFlowEditor value={workflow} appearance="light" />);
-    const editor = screen.getByRole("region", { name: "Purchase approval editor" });
+    const editor = screen.getByRole("region", { name: "Purchase approval 编辑器" });
 
     expect(editor.getAttribute("data-theme")).toBe("light");
 
@@ -558,7 +566,7 @@ describe("XFlowEditor", () => {
     const lightMatchMedia = mockSystemColorScheme(false);
     const lightEditor = render(<XFlowEditor value={workflow} appearance="system" />);
 
-    expect(screen.getByRole("region", { name: "Purchase approval editor" }).getAttribute("data-theme")).toBe("light");
+    expect(screen.getByRole("region", { name: "Purchase approval 编辑器" }).getAttribute("data-theme")).toBe("light");
     expect(lightMatchMedia).toHaveBeenCalledWith("(prefers-color-scheme: dark)");
 
     lightEditor.unmount();
@@ -566,7 +574,7 @@ describe("XFlowEditor", () => {
     const darkMatchMedia = mockSystemColorScheme(true);
     render(<XFlowEditor value={workflow} appearance="system" />);
 
-    expect(screen.getByRole("region", { name: "Purchase approval editor" }).getAttribute("data-theme")).toBe("dark");
+    expect(screen.getByRole("region", { name: "Purchase approval 编辑器" }).getAttribute("data-theme")).toBe("dark");
     expect(darkMatchMedia).toHaveBeenCalledWith("(prefers-color-scheme: dark)");
   });
 
@@ -594,7 +602,7 @@ describe("XFlowEditor", () => {
   it("updates the uncontrolled editor root after selecting an appearance", async () => {
     render(<XFlowEditor value={workflow} />);
 
-    const editor = screen.getByRole("region", { name: "Purchase approval editor" });
+    const editor = screen.getByRole("region", { name: "Purchase approval 编辑器" });
     const { appearance } = await openThemeSettings();
 
     fireEvent.click(within(appearance).getByText("浅色"));
@@ -611,7 +619,7 @@ describe("XFlowEditor", () => {
   it("enters the immersive layout from the wide-screen theme settings", async () => {
     render(<XFlowEditor value={workflow} />);
 
-    const editor = screen.getByRole("region", { name: "Purchase approval editor" });
+    const editor = screen.getByRole("region", { name: "Purchase approval 编辑器" });
     expect(editor.getAttribute("data-layout")).toBe("a");
     expect(editor.getAttribute("data-layout-policy")).toBe("auto");
 
@@ -628,7 +636,7 @@ describe("XFlowEditor", () => {
   it("updates the resolved system theme and cleans its media-query listener", () => {
     const systemColorScheme = mockSystemColorScheme(false);
     const { unmount } = render(<XFlowEditor value={workflow} appearance="system" />);
-    const editor = screen.getByRole("region", { name: "Purchase approval editor" });
+    const editor = screen.getByRole("region", { name: "Purchase approval 编辑器" });
 
     expect(editor.getAttribute("data-appearance")).toBe("system");
     expect(editor.getAttribute("data-theme")).toBe("light");
@@ -669,7 +677,7 @@ describe("XFlowEditor", () => {
         />
       );
 
-      const editor = screen.getByRole("region", { name: "Purchase approval editor" });
+      const editor = screen.getByRole("region", { name: "Purchase approval 编辑器" });
       const { appearance } = await openThemeSettings();
       fireEvent.click(within(appearance).getByText(label));
 
@@ -684,7 +692,7 @@ describe("XFlowEditor", () => {
     const container = mockEditorWidth();
     render(<XFlowEditor value={workflow} />);
 
-    const editor = screen.getByRole("region", { name: "Purchase approval editor" });
+    const editor = screen.getByRole("region", { name: "Purchase approval 编辑器" });
     expect(editor.getAttribute("data-layout")).toBe("a");
 
     // Compact (§6.0): both panes are rails with drawers; the inspector no longer
@@ -778,7 +786,7 @@ describe("XFlowEditor", () => {
 
     // Back on the desktop layout the panel is still collapsed.
     act(() => container.setWidth(1600));
-    expect(screen.getByRole("region", { name: "Purchase approval editor" }).getAttribute("data-layout")).toBe("a");
+    expect(screen.getByRole("region", { name: "Purchase approval 编辑器" }).getAttribute("data-layout")).toBe("a");
     expect(screen.queryByRole("region", { name: "节点" })).toBeNull();
 
     try {
@@ -812,7 +820,7 @@ describe("XFlowEditor", () => {
     // immersive from it must not remount the canvas.
     act(() => container.setWidth(1279));
 
-    const editor = screen.getByRole("region", { name: "Purchase approval editor" });
+    const editor = screen.getByRole("region", { name: "Purchase approval 编辑器" });
     const preview = screen.getByRole("region", { name: "Purchase approval 预览" });
     expect(editor.getAttribute("data-layout")).toBe("c");
 
@@ -851,7 +859,7 @@ describe("XFlowEditor", () => {
     const media = mockSystemColorScheme(false);
     const container = mockEditorWidth();
     render(<XFlowEditor value={workflow} />);
-    const editor = screen.getByRole("region", { name: "Purchase approval editor" });
+    const editor = screen.getByRole("region", { name: "Purchase approval 编辑器" });
 
     act(() => container.setWidth(1279));
     expect(editor.getAttribute("data-layout")).toBe("c");
@@ -881,7 +889,7 @@ describe("XFlowEditor", () => {
     mockSystemColorScheme(false);
     const container = mockEditorWidth();
     render(<XFlowEditor value={workflow} />);
-    const editor = screen.getByRole("region", { name: "Purchase approval editor" });
+    const editor = screen.getByRole("region", { name: "Purchase approval 编辑器" });
 
     act(() => container.setWidth(1023));
     expect(editor.getAttribute("data-layout")).toBe("c");
@@ -924,7 +932,7 @@ describe("XFlowEditor", () => {
     mockSystemColorScheme(false);
     const container = mockEditorWidth();
     render(<XFlowEditor value={workflow} />);
-    const editor = screen.getByRole("region", { name: "Purchase approval editor" });
+    const editor = screen.getByRole("region", { name: "Purchase approval 编辑器" });
 
     // Layout a: each secondary action keeps its own top-bar button.
     for (const name of ["撤销", "重做", "校验", "主题设置"]) {
@@ -1056,7 +1064,7 @@ describe("XFlowEditor", () => {
     try {
       render(<XFlowEditor value={workflow} />);
       expect(
-        screen.getByRole("region", { name: "Purchase approval editor" }).getAttribute("data-layout")
+        screen.getByRole("region", { name: "Purchase approval 编辑器" }).getAttribute("data-layout")
       ).toBe("c");
     } finally {
       measure.mockRestore();
@@ -1433,7 +1441,7 @@ describe("XFlowEditor", () => {
     rerender(<XFlowEditor value={parentReplacement} onChange={handleChange} />);
 
     await waitFor(() => {
-      expect(screen.getByRole("region", { name: "Parent replacement editor" })).toBeTruthy();
+      expect(screen.getByRole("region", { name: "Parent replacement 编辑器" })).toBeTruthy();
       expect(within(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).getByDisplayValue("Parent replacement")).toBeTruthy();
       expect(canvasNode("external_start")).toBeTruthy();
     });

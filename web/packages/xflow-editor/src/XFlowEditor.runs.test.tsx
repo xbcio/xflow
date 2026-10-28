@@ -162,7 +162,7 @@ describe("运行记录 mode (§6.8)", () => {
     // P2 ruling 2: 预览 is gone, not a third segment.
     expect(screen.queryByRole("radio", { name: "预览" })).toBeNull();
 
-    const editor = screen.getByRole("region", { name: "Runs editor" });
+    const editor = screen.getByRole("region", { name: "Runs 编辑器" });
     expect(editor.getAttribute("data-view-mode")).toBe("runs");
     expect(screen.getByRole("region", { name: "执行" })).toBeTruthy();
     expect(screen.queryByRole("region", { name: "节点" })).toBeNull();
@@ -424,7 +424,7 @@ describe("运行记录 mode (§6.8)", () => {
     const onSelectExecution = vi.fn();
     render(<XFlowEditor {...runsProps} onSelectExecution={onSelectExecution} />);
 
-    const top = screen.getByRole("region", { name: "Runs editor" });
+    const top = screen.getByRole("region", { name: "Runs 编辑器" });
     fireEvent.click(within(top).getByRole("button", { name: /重跑自 exec-parent/ }));
     expect(onSelectExecution).toHaveBeenCalledWith("exec-parent");
   });
@@ -437,7 +437,7 @@ describe("运行记录 mode (§6.8)", () => {
     expect(screen.getByText("沿用原执行结果")).toBeTruthy();
     expect(screen.getByText("重跑起点")).toBeTruthy();
 
-    const top = screen.getByRole("region", { name: "Runs editor" });
+    const top = screen.getByRole("region", { name: "Runs 编辑器" });
     // EL-19: the id is shown once, in the status bar; the top bar keeps only
     // the state chip and the lineage.
     expect(within(top).getByLabelText("当前执行").textContent).not.toContain("exec-runs-1");
@@ -499,7 +499,7 @@ describe("运行记录 mode (§6.8)", () => {
 
   it("offers the top-bar 重跑… entry only for a failed terminal execution", async () => {
     const { rerender } = render(<XFlowEditor {...runsProps} onRerun={vi.fn()} />);
-    const top = screen.getByRole("region", { name: "Runs editor" });
+    const top = screen.getByRole("region", { name: "Runs 编辑器" });
     // Ruling 2026-10-21: a successful run offers no rerun action.
     expect(within(top).queryByRole("button", { name: /重跑…/ })).toBeNull();
 
