@@ -17,10 +17,11 @@ import (
 // This file is the SDK-level end-to-end proof for settings.timeout, the
 // execution budget: every case registers a workflow, submits it through
 // Engine.Invoke on a NewLocal engine and reads the outcome through Wait and
-// Inspect. The workflow builder has no setting for the budget, so a workflow is
-// built, given settings.timeout on its definition, compiled and registered
-// through the registry the engine wraps (the same back door
-// invoke_attribution_test.go uses).
+// Inspect. Most cases predate WorkflowBuilder.Timeout, so they set
+// settings.timeout on the built definition and register through the registry
+// the engine wraps (the same back door invoke_attribution_test.go uses);
+// TestWorkflowBuilderTimeoutEndsExecutionAsTimeout registers through
+// AddWorkflow to cover the builder switch itself.
 //
 // The local backend sweeps for overdue executions every second, so every budget
 // here is a few seconds: long enough that a healthy run is nowhere near it,
@@ -192,6 +193,50 @@ func TestSettingsTimeoutRunningNodeEndsTheExecutionAsTimeout(t *testing.T) {
 					tc.onError, n.Name, n.Status, types.NodeStatusPending)
 			}
 		})
+	}
+}
+
+// TestWorkflowBuilderTimeoutEndsExecutionAsTimeout is the builder's own
+// end-to-end case: Timeout(budget) is the only place the budget is set, the
+// workflow is registered through the production AddWorkflow path rather than
+// the definition back door the other cases use, and the run still ends as
+// timeout.
+func TestWorkflowBuilderTimeoutEndsExecutionAsTimeout(t *testing.T) {
+	const budget = 2500 * time.Millisecond
+	eng := newSettingsTimeoutEngine(t, settingsTimeoutHold)
+	ctx, cancel := context.WithTimeout(context.Background(), settingsTimeoutWaitLimit)
+	defer cancel()
+
+	wf := Workflow("builder-timeout-ends-execution").Timeout(budget)
+	start := wf.Node("start", node.Start())
+	hold := wf.Node("hold", settingsTimeoutHold.New(nil))
+	wf.Connect(start, hold)
+	workflowID, err := eng.AddWorkflow(ctx, wf)
+	if err != nil {
+		t.Fatalf("AddWorkflow() error = %v", err)
+	}
+
+	id, err := eng.Invoke(ctx, workflowID, Start(), nil)
+	if err != nil {
+		t.Fatalf("Invoke() error = %v", err)
+	}
+	result, err := eng.Wait(ctx, id)
+	if err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+	if result.Status != types.ExecutionStatusTimeout || result.Error != engine.ExecutionDeadlineExceededError {
+		t.Fatalf("Wait() = %q error %q, want timeout %q\n%s",
+			result.Status, result.Error, engine.ExecutionDeadlineExceededError, describeExecution(ctx, eng, id))
+	}
+
+	// The stored deadline proves the value reached the compiled graph, not
+	// merely the builder field or the definition.
+	snap, err := eng.eng.State().GetExecution(ctx, id)
+	if err != nil || snap == nil {
+		t.Fatalf("GetExecution() = %+v, %v", snap, err)
+	}
+	if want := snap.CreatedAt.Add(budget); !snap.Deadline.Equal(want) {
+		t.Fatalf("stored deadline = %v, want CreatedAt + Timeout = %v", snap.Deadline, want)
 	}
 }
 
