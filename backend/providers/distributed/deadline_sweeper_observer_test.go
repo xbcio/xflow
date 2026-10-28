@@ -3,6 +3,7 @@ package distributed
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -134,6 +135,41 @@ func TestEmbeddedBackendDeadlineSweeperNilObserverStillSweeps(t *testing.T) {
 
 	bindSweep(t, b, eng)
 	waitForTimeout(t, b, "exec-no-observer", 10*time.Second)
+}
+
+// panickingDeadlineObserver panics on every call, standing in for a
+// host-supplied observer with a bug of its own.
+type panickingDeadlineObserver struct {
+	calls atomic.Int64
+}
+
+func (p *panickingDeadlineObserver) OnExecutionDeadlineExpired(context.Context, string) {
+	p.calls.Add(1)
+	panic("observer exploded")
+}
+
+// TestEmbeddedBackendDeadlineSweeperSurvivesAPanickingObserver pins the recovery
+// the embedded sweeper wraps around the observer callback. The sweep runs in its
+// own goroutine, so an unrecovered panic would leave that goroutine and take
+// every later deadline with it: both overdue executions must reach timeout,
+// which is only possible if the sweep went on after the first call panicked.
+func TestEmbeddedBackendDeadlineSweeperSurvivesAPanickingObserver(t *testing.T) {
+	rdb := newRedisStateTestClient(t)
+	observer := &panickingDeadlineObserver{}
+	b, eng := newSweepBackend(t, rdb.Options().Addr, nil, WithDeadlineExpiredObserver(observer))
+	past := time.Now().UTC().Add(-time.Minute)
+	ids := []types.ExecutionID{"exec-panic-running", "exec-panic-paused"}
+	seedExecution(t, b, sweepTestGraph(t), ids[0], types.ExecutionStatusRunning, past)
+	seedExecution(t, b, sweepTestGraph(t), ids[1], types.ExecutionStatusPaused, past)
+
+	bindSweep(t, b, eng)
+	for _, id := range ids {
+		waitForTimeout(t, b, id, 10*time.Second)
+	}
+	if got := observer.calls.Load(); got < int64(len(ids)) {
+		t.Fatalf("observer called %d times, want at least %d: a recovered panic must not swallow the next expiry",
+			got, len(ids))
+	}
 }
 
 // TestDeadlineExpiredObserverNilOptionKeepsConfiguredObserver pins the nil
