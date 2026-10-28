@@ -324,8 +324,10 @@ describe("node search and workflow settings", () => {
     const message = "需要非负整数纳秒，例如 1800000000000；0 或留空不限";
 
     // A JSON string, a negative number, a fraction, a boolean, null, an array and
-    // an object all parse as JSON yet cannot be a Go time.Duration.
-    for (const text of ['"30s"', "-5", "1.5", "true", "null", "[]", "{}"]) {
+    // an object all parse as JSON yet cannot be a Go time.Duration. Numbers past
+    // the safe-integer range are rejected too, even when JSON parses them as integers
+    // (9007199254740993 rounds to 9007199254740992).
+    for (const text of ['"30s"', "-5", "1.5", "true", "null", "[]", "{}", "1e21", "9007199254740993"]) {
       fireEvent.change(timeout(), { target: { value: text } });
       expect(timeout().getAttribute("aria-invalid")).toBe("true");
       expect(within(inspector()).getByRole("alert").textContent).toBe(message);
