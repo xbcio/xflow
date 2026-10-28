@@ -158,6 +158,13 @@ func WithTracer(t tracing.Tracer) Option {
 // nothing, which leaves xflow_execution_deadline_expired_total{source="embedded"}
 // at zero for an in-process deployment that has no control plane to report the
 // transition.
+//
+// The report is at-least-once, not exactly-once. The timeout write is fenced
+// and read back rather than assumed, so a concurrent expirer that won the same
+// transition can still leave the sweep answering Expired, and it reports the
+// transition it observed either way. A deployment with several sweepers over
+// one store (NewCluster replicas) reports one expiry once per sweeper, so treat
+// the count as an upper bound on the expirations behind it.
 func WithDeadlineExpiredObserver(obs engine.DeadlineExpiredObserver) Option {
 	return func(c *config) {
 		if obs != nil {
