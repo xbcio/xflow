@@ -157,6 +157,8 @@ describe("运行记录 mode (§6.8)", () => {
     if (!modeSegmented) throw new Error("mode segmented not found");
     const radios = within(modeSegmented).getAllByRole("radio").map((radio) => radio.closest("label")?.textContent);
     expect(radios).toEqual(["编辑", "运行记录"]);
+    // The root is the radiogroup; rc-segmented's own name is English.
+    expect(screen.getByRole("radiogroup", { name: "视图模式" })).toBe(modeSegmented);
     // P2 ruling 2: 预览 is gone, not a third segment.
     expect(screen.queryByRole("radio", { name: "预览" })).toBeNull();
 

@@ -85,6 +85,13 @@ describe("ExecutionListPanel (§6.8)", () => {
     expect(onLoad.mock.calls[1][0]).toMatchObject({ page: 1, status: "failed" });
   });
 
+  it("names the status filter as a radiogroup for screen readers", () => {
+    render(<ExecutionListPanel state={state([])} onLoad={vi.fn()} />);
+
+    // rc-segmented would otherwise call the radiogroup "segmented control".
+    expect(screen.getByRole("radiogroup", { name: "执行状态" })).toBeTruthy();
+  });
+
   it("maps the range menu onto created_after rather than filtering rows locally", () => {
     const onLoad = vi.fn();
     render(<ExecutionListPanel state={state([row()])} onLoad={onLoad} />);

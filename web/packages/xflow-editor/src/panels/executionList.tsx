@@ -222,6 +222,7 @@ export function ExecutionListPanel({
     >
       <div className="xflow-editor-exec-filters">
         <Segmented
+          aria-label="执行状态"
           className="xflow-editor-exec-filters__status"
           classNames={{
             item: "xflow-editor-exec-filters__item",

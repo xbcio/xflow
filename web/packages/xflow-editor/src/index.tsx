@@ -5245,6 +5245,7 @@ export function XFlowEditor({
         </div>
         {canViewExecutions ? (
           <Segmented
+            aria-label="视图模式"
             classNames={{
               item: "xflow-editor-mode-segmented__item",
               label: "xflow-editor-mode-segmented__label",

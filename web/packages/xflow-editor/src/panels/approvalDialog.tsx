@@ -533,6 +533,7 @@ export function ApprovalDialog({
             <div className="xflow-editor-approval__field">
               <span className="xflow-editor-approval__label">位置</span>
               <Segmented
+                aria-label="加签位置"
                 className="xflow-editor-approval__positions"
                 options={[
                   { label: "在我之前", value: "before" },

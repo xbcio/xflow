@@ -569,6 +569,8 @@ describe("approval dialog (§6.12)", () => {
     fireEvent.change(within(dialog).getByPlaceholderText("输入审批人标识"), {
       target: { value: "bob" }
     });
+    // "位置" is the visible label; the radiogroup itself needs a name too.
+    expect(within(dialog).getByRole("radiogroup", { name: "加签位置" })).toBeTruthy();
     fireEvent.click(within(dialog).getByRole("radio", { name: "在我之前" }));
     fireEvent.click(within(dialog).getByRole("button", { name: "加签" }));
 
