@@ -329,6 +329,7 @@ var exemptStoreMethods = map[string]string{
 	"ListDeadlineExceededExecutions": "scan; repairs the deadline index only",
 	"ListCancelingExecutions":        "scan; repairs the canceling index only",
 	"ListOutboxExecutions":           "scan; reads the outbox discovery index",
+	"ListOutboxExecutionRefs":        "scan; reads the outbox discovery index across namespaces",
 	"OutboxMetrics":                  "metrics read",
 	"ScanReplayReceipts":             "scan; reads receipts",
 	"AuditStats":                     "in-process counters",

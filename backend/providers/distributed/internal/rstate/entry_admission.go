@@ -484,16 +484,6 @@ func (s *Store) seedExecutionFromEntry(ctx context.Context, req engine.SeedExecu
 		s.rememberTransient(execID, transientMark{durableConfirmed: true})
 	}
 
-	// Register the namespace in the discovery registry before the execution
-	// exists, as createExecution and SeedExecution do. The maintenance loops (the
-	// deadline sweep among them) SCAN or list only registered namespaces, so a
-	// non-default namespace whose executions are created solely by this path
-	// would otherwise be invisible to them. Non-fatal for the same reason as
-	// there: the next durable write retries it.
-	if !s.isTransient(ctx, execID) {
-		_ = s.registerNamespace(ctx, t)
-	}
-
 	// Phase 1: Pre-seed structural keys (idempotent SET NX patterns won't
 	// overwrite). This uses a pipeline for the keys the Lua script reads but
 	// does not create itself (remaining, failed, in-degree).
