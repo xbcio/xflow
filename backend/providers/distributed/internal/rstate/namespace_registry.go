@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 
@@ -39,6 +40,41 @@ func (s *Store) registerNamespace(ctx context.Context, t namespace.Namespace) er
 	if err := s.rdb.SAdd(ctx, namespaceSetKey, string(t)).Err(); err != nil {
 		return fmt.Errorf("register namespace %q: %w", t, err)
 	}
+	return nil
+}
+
+// namespaceRegisterInterval is how long registerNamespaceThrottled trusts its own
+// earlier SADD. It is deliberately finite: the registry is only a cache of
+// "which namespaces have data", so a Redis that was flushed or failed over must
+// be repopulated by the next seed rather than stay empty until a restart.
+const namespaceRegisterInterval = time.Minute
+
+// registerNamespaceThrottled is registerNamespace for the entry-seed path, which
+// is the collection hot path: it issues the SADD at most once per
+// namespaceRegisterInterval per namespace per Store, instead of once per seed.
+//
+// The window is only started by a SADD that succeeded, so a failed registration
+// is retried by the very next seed. Two concurrent first calls may both issue
+// the SADD; it is idempotent, so that costs one redundant command, not
+// correctness. The record is process-local and expires, never a permanent
+// "already registered" fact.
+func (s *Store) registerNamespaceThrottled(ctx context.Context, t namespace.Namespace) error {
+	if t == "" {
+		t = namespace.Default
+	}
+	now := time.Now
+	if s.nsClock != nil {
+		now = s.nsClock
+	}
+	if last, ok := s.nsRegisteredAt.Load(t); ok {
+		if elapsed := now().Sub(last.(time.Time)); elapsed >= 0 && elapsed < namespaceRegisterInterval {
+			return nil
+		}
+	}
+	if err := s.registerNamespace(ctx, t); err != nil {
+		return err
+	}
+	s.nsRegisteredAt.Store(t, now())
 	return nil
 }
 

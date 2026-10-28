@@ -134,6 +134,12 @@ type Store struct {
 	// from. It stays nil until ConfigureBlob runs, and a nil blob leaves every
 	// code path exactly as it was. See blob.go.
 	blob atomic.Pointer[blobRuntime]
+
+	// nsRegisteredAt maps a namespace to the instant this process last SADDed it
+	// into the registry from the entry-seed path (see registerNamespaceThrottled).
+	// nsClock is that throttle's clock; nil means time.Now, tests replace it.
+	nsRegisteredAt sync.Map // namespace.Namespace -> time.Time
+	nsClock        func() time.Time
 }
 
 // Option configures a Store at construction time.

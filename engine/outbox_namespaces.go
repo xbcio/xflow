@@ -26,8 +26,8 @@ type OutboxExecutionRef struct {
 // dispatcher runs on a context that carries no namespace, so every key the flush
 // builds resolves to the default namespace. Discovery then finds the execution
 // and the flush looks for its outbox in the wrong place and finds nothing. The
-// work is never delivered — a timer resume, or the backoff of a failed node,
-// leaves the execution running forever — and nothing reports it, because an
+// work is never delivered -- a timer resume, or the backoff of a failed node,
+// leaves the execution running forever -- and nothing reports it, because an
 // empty claim is a normal result. Returning the namespace lets the dispatcher
 // flush each execution under the namespace it was found in.
 //
@@ -101,6 +101,10 @@ func sortDedupeOutboxRefs(refs []OutboxExecutionRef) []OutboxExecutionRef {
 // flushContext returns the context FlushOutbox must run on for this ref. A ref
 // that names a namespace carries it on the context, which is where every store
 // method reads it from; a ref without one leaves ctx as it was.
+//
+// FlushOutbox and everything it starts -- the lease keeper's renewals, the ack,
+// the release, the failure record and the dead-letter -- inherit this context,
+// so anchoring it once here is what puts the whole delivery under the namespace.
 func (r OutboxExecutionRef) flushContext(ctx context.Context) context.Context {
 	if r.Namespace == "" {
 		return ctx

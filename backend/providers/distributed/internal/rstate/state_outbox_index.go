@@ -61,7 +61,7 @@ import (
 //     set costs one no-op claim that re-arms it; a member whose execution has no
 //     outbox left is an ORPHAN, and it is removed by the read that found it,
 //     because leaving it to a drain does not repair it when the drain is what
-//     the orphan is starving. See readOutboxReadyIndex.
+//     the orphan is starving. See readOutboxReadyIndexRefs.
 //   - An absent, empty, mistyped or disabled index changes nothing. The
 //     dispatcher falls back to sweeping, which is what it did before.
 //
@@ -214,7 +214,10 @@ import (
 //
 //   - ConfigureOutboxReadyIndex(false) disables reading and writing it.
 //   - A backend with no index at all (the local provider's memoryState) is
-//     unaffected: the engine only ever calls ListOutboxExecutions.
+//     unaffected: it does not implement engine.NamespacedOutboxLister, so the
+//     dispatcher falls back to ListOutboxExecutions. This store implements
+//     both; the dispatcher prefers ListOutboxExecutionRefs, which reads the same
+//     index and sweep and additionally reports each execution's namespace.
 //   - A Redis error on the index read abandons the index for that call and
 //     sweeps immediately.
 //
