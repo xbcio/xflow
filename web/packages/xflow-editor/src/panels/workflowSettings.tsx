@@ -44,6 +44,14 @@ const retryStrategies: { value: RetryStrategy; label: string }[] = [
   { value: "exponential", label: "exponential：指数退避" }
 ];
 
+/** settings.timeout is Go `time.Duration`: integer nanoseconds, so "30s", -5 and 1.5 cannot be written. */
+function timeoutError(value: unknown): string | undefined {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    return "需要非负整数纳秒，例如 1800000000000；0 或留空不限";
+  }
+  return undefined;
+}
+
 /** Writes a top-level object field, dropping it when empty so the DSL stays clean. */
 function withObjectField<K extends "runner_selector" | "settings">(
   workflow: WorkflowDef,
@@ -319,6 +327,7 @@ export function WorkflowSettings({
                 mode="json"
                 placeholder="纳秒，例如 1800000000000；留空不限"
                 readOnly={settingsReadOnly}
+                validate={timeoutError}
                 value={settings.timeout}
                 onCommit={(next) =>
                   writeSettings((current) => {
