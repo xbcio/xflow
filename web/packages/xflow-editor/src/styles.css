@@ -492,6 +492,18 @@
   flex: 1 1 auto;
 }
 
+/* AntD's modal starts 100px down and the content adds a 22px title line, its
+ * 8px header gap and 20px of padding on each side, so the reference body has
+ * to fit in `100dvh - 270px`. Without the cap it ran 25.5px past a 720px
+ * viewport (45.5px past a 700px one) with no way to reach the note; 18rem
+ * keeps 18px of clearance under that chrome and still shows the whole list at
+ * 900px tall. */
+.xflow-editor .xflow-editor-shortcuts {
+  max-height: calc(100dvh - 18rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 .xflow-editor-shortcuts__group + .xflow-editor-shortcuts__group {
   border-top: 1px solid var(--xflow-border-subtle);
   margin-top: var(--xflow-space-3);

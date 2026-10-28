@@ -954,6 +954,27 @@ describe("xflow.editor small-text tones, hit targets and forced colours", () => 
   });
 });
 
+describe("xflow.editor shortcuts dialog viewport fit", () => {
+  /** The declaration block of the rule whose selector list is exactly `selector`. */
+  const block = (selector: string): string => {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = css.match(new RegExp(`(?:^|\\})\\s*${escaped}\\s*\\{([^}]*)\\}`));
+    expect(match, `${selector} has a rule`).not.toBeNull();
+    return match?.[1] ?? "";
+  };
+
+  it("caps the scroll body so a 720px-tall viewport keeps the whole dialog inside", () => {
+    // The modal starts 100px down and adds 22px of title, an 8px header gap and
+    // 20px of content padding on each side: 170px of chrome. Without the cap the
+    // 576px reference ran 25.5px past a 720px viewport and 45.5px past a 700px
+    // one; 18rem covers that 270px with 18px to spare.
+    const body = block(".xflow-editor .xflow-editor-shortcuts");
+    expect(body).toMatch(/max-height:\s*calc\(100dvh - 18rem\)\s*;/);
+    expect(body).toMatch(/overflow-y:\s*auto\s*;/);
+    expect(body).toMatch(/overscroll-behavior:\s*contain\s*;/);
+  });
+});
+
 // E-C: once the wildcard `!important` reduced-motion fallback is gone, every
 // duration must come from tokens.css. This is the grep guard over the three
 // sheets that paint inside the xflow roots; token definitions and comments are
