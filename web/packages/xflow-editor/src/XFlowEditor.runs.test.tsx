@@ -188,6 +188,40 @@ describe("运行记录 mode (§6.8)", () => {
     expect(screen.getByRole("button", { name: "发布" })).toBeTruthy();
   });
 
+  it("makes the workflow identity fields read-only in the replay", () => {
+    const onChange = vi.fn();
+    const { rerender } = render(<XFlowEditor {...runsProps} onChange={onChange} />);
+    // The replay's 基本 section edits the snapshot definition, never a draft.
+    const settings = (): HTMLElement => {
+      const region = screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
+      if (region.querySelector(".xflow-editor-inspector-head")) fireEvent.keyDown(window, { key: "Escape" });
+      return screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
+    };
+    const field = (label: string) => within(settings()).getByLabelText(label) as HTMLInputElement;
+
+    for (const label of ["工作流名称", "工作流版本", "工作流描述"]) {
+      expect(field(label).readOnly).toBe(true);
+    }
+    for (const [label, text] of [
+      ["工作流名称", "重放改名"],
+      ["工作流版本", "9"],
+      ["工作流描述", "回放描述"]
+    ]) {
+      fireEvent.change(field(label), { target: { value: text } });
+    }
+    expect(onChange).not.toHaveBeenCalled();
+
+    // Back in 编辑, neither the draft's identity nor its dirty state moved, and
+    // the same fields accept input again.
+    rerender(<XFlowEditor {...runsProps} onChange={onChange} mode="edit" />);
+    expect(field("工作流名称").value).toBe("Runs");
+    expect(field("工作流版本").value).toBe("4");
+    expect(field("工作流描述").value).toBe("");
+    expect(field("工作流名称").readOnly).toBe(false);
+    fireEvent.change(field("工作流名称"), { target: { value: "编辑改名" } });
+    expect((onChange.mock.calls.at(-1)?.[0] as WorkflowDef).name).toBe("编辑改名");
+  });
+
   it("reopens a collapsed left column from the 执行 rail key", () => {
     render(<XFlowEditor capabilities={allCapabilities} value={workflow} />);
     fireEvent.click(screen.getByRole("button", { name: "收起左栏" }));

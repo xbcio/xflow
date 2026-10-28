@@ -393,7 +393,13 @@ export function WorkflowSettings({
     if (brokenSettings) setSettingsSource(true);
   }, [brokenSettings]);
 
-  const updateMeta = (patch: Partial<WorkflowDef>) => onChangeWith?.((latest) => ({ ...latest, ...patch }));  const writeRunner = (update: (current: RunnerSelector) => RunnerSelector) =>
+  // The replay's identity fields are read-only: `readOnly` stops real keystrokes,
+  // and this guard keeps a change event from writing the snapshot into the draft.
+  const updateMeta = (patch: Partial<WorkflowDef>) => {
+    if (readOnly) return;
+    onChangeWith?.((latest) => ({ ...latest, ...patch }));
+  };
+  const writeRunner = (update: (current: RunnerSelector) => RunnerSelector) =>
     onChangeWith?.((latest) => withObjectField(latest, "runner_selector", update(latest.runner_selector ?? {})));
   const writeSettings = (update: (current: WorkflowExecutionSettings) => WorkflowExecutionSettings) =>
     onChangeWith?.((latest) => withObjectField(latest, "settings", update(latest.settings ?? {})));
@@ -444,6 +450,7 @@ export function WorkflowSettings({
             aria-label="工作流名称"
             className="xflow-editor-field"
             classNames={editorInputClassNames}
+            readOnly={readOnly}
             value={workflow.name ?? ""}
             onChange={(event) => updateMeta({ name: event.target.value })}
           />
@@ -468,6 +475,7 @@ export function WorkflowSettings({
             aria-label="工作流版本"
             className="xflow-editor-field"
             classNames={editorInputClassNames}
+            readOnly={readOnly}
             value={workflow.version ?? ""}
             onChange={(event) => updateMeta({ version: event.target.value })}
           />
@@ -516,6 +524,7 @@ export function WorkflowSettings({
             aria-label="工作流描述"
             className="xflow-editor-field"
             classNames={editorInputClassNames}
+            readOnly={readOnly}
             value={workflow.description ?? ""}
             onChange={(event) => updateMeta({ description: event.target.value })}
           />
