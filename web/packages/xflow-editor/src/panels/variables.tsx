@@ -199,19 +199,37 @@ export function LiteralInput({
   const [error, setError] = React.useState<string>();
   const textRef = React.useRef(text);
   textRef.current = text;
+  const errorRef = React.useRef(error);
+  errorRef.current = error;
+  /** The model value the current editing session started from, used to undo rejected edits. */
+  const editStart = React.useRef<{ active: boolean; value: unknown }>({ active: false, value });
   React.useEffect(() => {
+    // While an edit is rejected, the typed text and its message stay on screen:
+    // the model behind them is reverting to the session's starting value, and
+    // syncing to that would erase the text the user is still fixing.
+    if (errorRef.current) return;
     const parsed = parseLiteral(textRef.current, mode);
     const current = parsed.error ? undefined : parsed.value ?? emptyValue;
     if (!parsed.error && serializeJson(current) === serializeJson(value)) return;
     setText(displayLiteral(value, mode));
     setError(undefined);
   }, [emptyValue, mode, value]);
+  const beginEdit = () => {
+    if (editStart.current.active) return;
+    editStart.current = { active: true, value };
+  };
   const change = (next: string) => {
+    beginEdit();
     setText(next);
     const parsed = parseLiteral(next, mode);
     const problem = parsed.error ?? (next.trim() ? validate?.(parsed.value) : undefined);
     setError(problem);
-    if (problem) return;
+    if (problem) {
+      // A rejected literal never stays in the model: put it back to where this
+      // edit began, so a save cannot persist a rejected prefix (e.g. "30" from "30s").
+      if (serializeJson(editStart.current.value) !== serializeJson(value)) onCommit(editStart.current.value);
+      return;
+    }
     const committed = parsed.value ?? emptyValue;
     if (serializeJson(committed) !== serializeJson(value)) onCommit(committed);
   };
@@ -226,7 +244,11 @@ export function LiteralInput({
         readOnly={readOnly}
         status={error ? "error" : undefined}
         value={text}
+        onBlur={() => {
+          editStart.current.active = false;
+        }}
         onChange={(event) => change(event.target.value)}
+        onFocus={beginEdit}
       />
       {error ? <span className="xflow-editor-variable-error" role="alert">{error}</span> : null}
     </span>

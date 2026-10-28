@@ -2,6 +2,7 @@
 // credential references), the ⌘K node search (jump by name, next to the outline), and
 // the Inspector's workflow settings shown with no node selected.
 
+import * as React from "react";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkflowDef } from "@xflow/core";
@@ -40,6 +41,29 @@ afterEach(() => {
   if (originalClipboard) Object.defineProperty(navigator, "clipboard", originalClipboard);
   else Reflect.deleteProperty(navigator, "clipboard");
 });
+
+/** A controlled host that stores the editor's payload, as a real workbench does. */
+function ControlledEditor({
+  initial,
+  onChange,
+  onSave
+}: {
+  initial: WorkflowDef;
+  onChange?: (next: WorkflowDef) => void;
+  onSave?: React.ComponentProps<typeof XFlowEditor>["onSave"];
+}): React.ReactElement {
+  const [value, setValue] = React.useState(initial);
+  return (
+    <XFlowEditor
+      value={value}
+      onChange={(next) => {
+        onChange?.(next);
+        setValue(next);
+      }}
+      onSave={onSave}
+    />
+  );
+}
 
 /** Opens an editor AntD Select and clicks the option titled `label`. */
 const pickEditorOption = (combo: HTMLElement, label: string): void => {
@@ -565,6 +589,46 @@ describe("node search and workflow settings", () => {
     fireEvent.change(timeout(), { target: { value: "0" } });
     expect(within(inspector()).queryByRole("alert")).toBeNull();
     expect(lastWorkflow(handleChange).settings).toEqual({ timeout: 0 });
+  });
+
+  it("restores 执行超时 to the edit's starting value when typed text turns invalid", () => {
+    const handleChange = vi.fn();
+    const onSave = vi.fn(async (next: WorkflowDef) => next);
+    render(<ControlledEditor initial={{ ...workflow, settings: { timeout: 1800000000000 } }} onChange={handleChange} onSave={onSave} />);
+    const inspector = () => screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
+    fireEvent.keyDown(window, { key: "Escape" });
+    const timeout = () => within(inspector()).getByLabelText("执行超时") as HTMLInputElement;
+    const save = () => screen.getByRole("button", { name: "保存" }) as HTMLButtonElement;
+
+    // Legal integer prefixes still commit as they are typed (the existing semantics).
+    fireEvent.change(timeout(), { target: { value: "3" } });
+    expect(lastWorkflow(handleChange).settings?.timeout).toBe(3);
+    expect(save().disabled).toBe(false);
+    fireEvent.change(timeout(), { target: { value: "30" } });
+    expect(lastWorkflow(handleChange).settings?.timeout).toBe(30);
+
+    // The rejected "30s" must not leave the 30 behind: the model returns to the
+    // value the edit started from, while the typed text and error stay visible.
+    fireEvent.change(timeout(), { target: { value: "30s" } });
+    expect(lastWorkflow(handleChange).settings?.timeout).toBe(1800000000000);
+    expect(timeout().value).toBe("30s");
+    expect(timeout().getAttribute("aria-invalid")).toBe("true");
+    expect(within(inspector()).getByRole("alert")).toBeTruthy();
+    expect(save().disabled).toBe(true);
+
+    // Each invalid shape reverts the same way, from a committed prefix.
+    for (const text of ["1.5", "9007199254740993", "abc", "-5"]) {
+      fireEvent.change(timeout(), { target: { value: "3" } });
+      expect(lastWorkflow(handleChange).settings?.timeout).toBe(3);
+      fireEvent.change(timeout(), { target: { value: text } });
+      expect(lastWorkflow(handleChange).settings?.timeout).toBe(1800000000000);
+      expect(within(inspector()).getByRole("alert")).toBeTruthy();
+    }
+
+    // Clearing is still a legal edit that removes the field and the message.
+    fireEvent.change(timeout(), { target: { value: "" } });
+    expect(lastWorkflow(handleChange).settings?.timeout).toBeUndefined();
+    expect(within(inspector()).queryByRole("alert")).toBeNull();
   });
 
   it("accepts non-negative integer nanoseconds and a cleared 执行超时", () => {
