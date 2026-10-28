@@ -1254,9 +1254,9 @@ func TestExpireExecutionEarlyReturnsLeaveNoMemo(t *testing.T) {
 			name: "graph missing",
 			prepare: func(rig *expireRig) {
 				rig.eng.EvictExecution(rig.id)
-				rig.state.fakeState.mu.Lock()
-				rig.state.fakeState.executions[rig.id].Graph = nil
-				rig.state.fakeState.mu.Unlock()
+				rig.state.mu.Lock()
+				rig.state.executions[rig.id].Graph = nil
+				rig.state.mu.Unlock()
 			},
 			want: ExpireOutcomeGone,
 		},
@@ -1381,9 +1381,9 @@ func TestExpireExecutionChildAlreadyConcludedStillAcknowledges(t *testing.T) {
 		{
 			name: "child gone",
 			prepare: func(t *testing.T, rig *expireSubWorkflowRig, childID types.ExecutionID) {
-				rig.state.fakeState.mu.Lock()
-				delete(rig.state.fakeState.executions, childID)
-				rig.state.fakeState.mu.Unlock()
+				rig.state.mu.Lock()
+				delete(rig.state.executions, childID)
+				rig.state.mu.Unlock()
 			},
 		},
 	}
@@ -1596,9 +1596,9 @@ func TestExpireExecutionExpiredNotifiesTheParent(t *testing.T) {
 	ctx := context.Background()
 	rig := newExpireSubWorkflowRig(t)
 	childID := rig.link.ChildExecutionID
-	rig.state.fakeState.mu.Lock()
-	rig.state.fakeState.executions[childID].Deadline = pastDeadline
-	rig.state.fakeState.mu.Unlock()
+	rig.state.mu.Lock()
+	rig.state.executions[childID].Deadline = pastDeadline
+	rig.state.mu.Unlock()
 	if got := rig.nodeStatus(t); got != types.NodeStatusWaiting {
 		t.Fatalf("precondition: parked node = %q, want waiting", got)
 	}

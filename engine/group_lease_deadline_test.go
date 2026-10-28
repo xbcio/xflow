@@ -73,7 +73,7 @@ func groupClampRig(t *testing.T, bounded bool, groupTimeout time.Duration, execD
 	}
 	execID := types.ExecutionID("exec-group-clamp-1")
 	state := &groupDeadlineState{fakeGroupLeaseState: &fakeGroupLeaseState{fakeState: newFakeState()}}
-	if err := state.fakeState.CreateExecution(context.Background(), &ExecutionSnapshot{
+	if err := state.CreateExecution(context.Background(), &ExecutionSnapshot{
 		ID:       execID,
 		Graph:    g,
 		Status:   types.ExecutionStatusRunning,

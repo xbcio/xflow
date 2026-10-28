@@ -378,10 +378,10 @@ func TestSubWorkflowChildTimingOutBeforeItsParentFollowsOnError(t *testing.T) {
 
 			// The rig seeds an already-reached parent deadline; push it out so only
 			// the child's budget has run out, and drop the engine's memo of it.
-			rig.state.fakeState.mu.Lock()
-			rig.state.fakeState.executions[rig.parentID].Deadline = time.Now().Add(time.Hour)
-			rig.state.fakeState.executions[childID].Deadline = pastDeadline
-			rig.state.fakeState.mu.Unlock()
+			rig.state.mu.Lock()
+			rig.state.executions[rig.parentID].Deadline = time.Now().Add(time.Hour)
+			rig.state.executions[childID].Deadline = pastDeadline
+			rig.state.mu.Unlock()
 			rig.eng.EvictExecution(rig.parentID)
 			rig.log.track = childID
 			rig.log.clear()
