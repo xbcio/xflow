@@ -1145,6 +1145,13 @@ func (d *MemoryRunnerDirectory) ListLiveRunners(_ context.Context) []RunnerSnaps
 	return out
 }
 
+// ListRunnerSnapshots implements RunnerSnapshotLister. The memory directory has
+// no infrastructure that can fail mid-enumeration, so the error is always nil;
+// the list is the same snapshot set ListLiveRunners returns.
+func (d *MemoryRunnerDirectory) ListRunnerSnapshots(ctx context.Context) ([]RunnerSnapshot, error) {
+	return d.ListLiveRunners(ctx), nil
+}
+
 // LiveRunnerDescriptors implements RunnerDescriptorDirectory.
 func (d *MemoryRunnerDirectory) LiveRunnerDescriptors(_ context.Context, now time.Time) ([]RunnerDescriptorRecord, error) {
 	d.mu.RLock()

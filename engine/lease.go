@@ -369,8 +369,7 @@ func (e *Engine) TaskRouting(ctx context.Context, t *Task) (TaskRouting, error) 
 	// callers ask this before any assignment is built, so a sub-workflow task
 	// that somehow reached the queue dies loudly here instead of hanging a
 	// parent on a child that was never created.
-	switch t.Type {
-	case TaskTypeNodeAdvance, TaskTypeNodeSkip, TaskTypeSubWorkflow:
+	if !RoutableTaskType(t.Type) {
 		return TaskRouting{}, fmt.Errorf("task type %d for %q/%q: %w: engine-owned tasks are consumed by the engine, never routed to a runner",
 			t.Type, t.ExecutionID, t.NodeName, types.ErrPermanent)
 	}
@@ -400,19 +399,30 @@ func (e *Engine) TaskRouting(ctx context.Context, t *Task) (TaskRouting, error) 
 
 	unitIdx := t.UnitIdx
 	if unitIdx >= 0 && unitIdx < g.UnitCount() && g.UnitKindAt(unitIdx) == graph.UnitGroup {
-		gm := g.GroupMetaAt(unitIdx)
-		pkg, _, err := graph.ProjectGroupPackage(g, unitIdx)
-		if err != nil {
-			return TaskRouting{}, fmt.Errorf("project group package for routing: %w", err)
-		}
-		return TaskRouting{
-			NodeType:       GroupNodeType,
-			RunnerSelector: cloneRunnerSelector(gm.RunnerSelector),
-			Requirements:   RequirementsFromGraphPackage(pkg.Requirements),
-		}, nil
+		return groupTaskRouting(g, unitIdx)
 	}
+	return nodeTaskRouting(g.NodeAt(t.NodeIdx)), nil
+}
 
-	meta := g.NodeAt(t.NodeIdx)
+// groupTaskRouting is the routing of a co-location group unit. It reads only
+// the compiled graph, so TaskRouting and RunnerRoutings cannot disagree about
+// what a group asks of a runner.
+func groupTaskRouting(g *graph.Graph, unitIdx int) (TaskRouting, error) {
+	gm := g.GroupMetaAt(unitIdx)
+	pkg, _, err := graph.ProjectGroupPackage(g, unitIdx)
+	if err != nil {
+		return TaskRouting{}, fmt.Errorf("project group package for routing: %w", err)
+	}
+	return TaskRouting{
+		NodeType:       GroupNodeType,
+		RunnerSelector: cloneRunnerSelector(gm.RunnerSelector),
+		Requirements:   RequirementsFromGraphPackage(pkg.Requirements),
+	}, nil
+}
+
+// nodeTaskRouting is the routing of an ordinary (ungrouped) node. See
+// groupTaskRouting for why it is shared.
+func nodeTaskRouting(meta graph.NodeMeta) TaskRouting {
 	return TaskRouting{
 		NodeType:       meta.Type,
 		NodeVersion:    meta.Version,
@@ -421,7 +431,7 @@ func (e *Engine) TaskRouting(ctx context.Context, t *Task) (TaskRouting, error) 
 			NodeType:    meta.Type,
 			NodeVersion: meta.Version,
 		}}),
-	}, nil
+	}
 }
 
 func cloneRunnerSelector(selector *types.RunnerSelector) *types.RunnerSelector {
