@@ -6038,13 +6038,15 @@ components:
             budget counted from submission, including time spent queued behind
             `concurrency` and time spent suspended. When it elapses the
             execution ends with the `timeout` status; this does not go through
-            `on_error`. Omit or use 0 for no budget. A negative value, or a
+            `on_error` (except for the clock-drift case described below). Omit
+            or use 0 for no budget. A negative value, or a
             non-zero value on a `faf` workflow, is rejected at compile time.
             Independent of the per-node `timeout`.
 
             The budget is enforced at run time. The execution ends with the
             `timeout` status and the error `execution deadline exceeded`; the
-            outcome is always fatal and is never routed by `on_error`. Nodes
+            outcome is always fatal and is never routed by `on_error` (except
+            for the clock-drift case described below). Nodes
             still running are cut off at the deadline, suspended nodes are
             canceled, and the sub-workflow children of the execution are
             canceled with it. A rerun is a new execution and starts a new
@@ -6054,10 +6056,11 @@ components:
             1s on the local backend, 5s on the embedded cluster backend, 10s by
             default on the control plane). It is not millisecond-exact. The
             deadline is a server wall-clock instant, and a node cut off exactly
-            at it is re-checked against the server clock with a 50 ms tolerance
-            for clock drift. Keep runners and server instances within 50 ms of
+            at it is re-checked against the server clock with a 50ms tolerance
+            for clock drift. Keep runners and server instances within 50ms of
             each other (for example with NTP or chrony); a larger skew can make
-            that timeout take the ordinary `on_error` path first. A node whose
+            an ordinary node's timeout take its `on_error` path first. A group
+            timeout is always fatal and never consults `on_error`. A node whose
             own `timeout` is shorter ends by that timeout first.
         on_error:
           type: string

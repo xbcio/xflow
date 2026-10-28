@@ -239,7 +239,7 @@ SAS 是第一个宿主：它此前手工装配，配置里漏了 `SupportsEncryp
 
 runner 可横向扩缩容：跑多个 runner 实例即可线性扩展执行吞吐。
 
-**时钟要求**：`settings.timeout` 的截止时刻是服务端墙钟上的绝对时刻，运行中节点的超时由 runner 计时、再由服务端墙钟复核，这一复核只有 50ms 的内部容差。集群部署必须用 NTP/chrony 同步 runner 与服务端、以及多个服务端实例之间的时钟，偏差应小于 50ms；否则临近截止时刻的节点超时可能先按普通节点失败进入 `on_error`（语义见 [DSL-SPECIFICATION.md](./DSL-SPECIFICATION.md) 的 `settings.timeout` 一节）。
+**时钟要求**：`settings.timeout` 的截止时刻是服务端墙钟上的绝对时刻，运行中节点的超时由 runner 计时、再由服务端墙钟复核，这一复核仅当租约被执行截止时刻钳制时才给 50ms 的容差。集群部署必须用 NTP/chrony 同步 runner 与服务端、以及多个服务端实例之间的时钟，偏差应小于 50ms；否则临近截止时刻的节点超时可能先按普通节点失败进入 `on_error`（语义见 [DSL-SPECIFICATION.md](./DSL-SPECIFICATION.md) 的 `settings.timeout` 一节）。
 
 **MVP 现有边界**：
 - Runner Protocol 已提供 HTTP+JSON long polling 与 gRPC 通道；**streaming / credit-flow control 仍是实验性传输优化**，不应视为生产级可靠性承诺。
