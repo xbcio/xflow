@@ -42,4 +42,10 @@ func TestExecutionDeadlineExpiredHasHelpText(t *testing.T) {
 	if !strings.Contains(help, "settings.timeout") || !strings.Contains(help, "source") {
 		t.Errorf("help text for %s does not describe what it counts and its labels: %q", name, help)
 	}
+	// A deployment with no control plane reports through its embedded sweeper.
+	// The help text is the only place a reader learns that source value exists.
+	if !strings.Contains(help, "embedded") {
+		t.Errorf("help text for %s does not name the embedded source, so the series "+
+			"a NewLocal/NewCluster expiry produces cannot be interpreted: %q", name, help)
+	}
 }
