@@ -16,8 +16,9 @@ import (
 
 // This file is the SDK-level end-to-end proof for settings.timeout, the
 // execution budget: every case registers a workflow, submits it through
-// Engine.Invoke on a NewLocal engine and reads the outcome through Wait and
-// Inspect. Most cases predate WorkflowBuilder.Timeout, so they set
+// Engine.Invoke on a NewLocal engine and reads the outcome through Wait, using
+// Inspect or GetExecution where it needs the stored record. Most cases predate
+// WorkflowBuilder.Timeout, so they set
 // settings.timeout on the built definition and register through the registry
 // the engine wraps (the same back door invoke_attribution_test.go uses);
 // TestWorkflowBuilderTimeoutEndsExecutionAsTimeout registers through
