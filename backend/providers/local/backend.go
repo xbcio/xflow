@@ -17,14 +17,15 @@ import (
 type Option func(*config)
 
 type config struct {
-	concurrency   int
-	queueCapacity int
-	resourcePool  types.ResourcePool
-	artifactCode  func(ctx context.Context, digest string) ([]byte, error)
-	registry      *execution.Registry
-	logger        engine.Logger
-	store         store.Store
-	tracer        tracing.Tracer
+	concurrency             int
+	queueCapacity           int
+	resourcePool            types.ResourcePool
+	artifactCode            func(ctx context.Context, digest string) ([]byte, error)
+	registry                *execution.Registry
+	logger                  engine.Logger
+	store                   store.Store
+	tracer                  tracing.Tracer
+	deadlineExpiredObserver engine.DeadlineExpiredObserver
 }
 
 // WithConcurrency sets the number of in-memory queue consumer goroutines. Default is 4.
@@ -149,6 +150,22 @@ func WithTracer(t tracing.Tracer) Option {
 	}
 }
 
+// WithDeadlineExpiredObserver installs an observer for executions the embedded
+// deadline sweeper drives into timeout. It is optional and must not block the
+// sweep.
+//
+// Without one the sweeper still expires overdue executions; it just reports
+// nothing, which leaves xflow_execution_deadline_expired_total{source="embedded"}
+// at zero for an in-process deployment that has no control plane to report the
+// transition.
+func WithDeadlineExpiredObserver(obs engine.DeadlineExpiredObserver) Option {
+	return func(c *config) {
+		if obs != nil {
+			c.deadlineExpiredObserver = obs
+		}
+	}
+}
+
 // WithRegistry injects an external handler registry. Use this when the inner
 // engine must resolve handlers registered outside its own backend (e.g. group
 // runtime injecting the outer runner's member handlers).
@@ -168,6 +185,9 @@ type Backend struct {
 	artifactCode     func(ctx context.Context, digest string) ([]byte, error)
 	logger           engine.Logger
 	tracer           tracing.Tracer
+	// deadlineExpiredObserver reports the executions the embedded deadline
+	// sweeper drives into timeout. Nil reports nothing.
+	deadlineExpiredObserver engine.DeadlineExpiredObserver
 }
 
 // New creates a memory backend with its components but does NOT start the queue.
@@ -200,6 +220,8 @@ func New(opts ...Option) *Backend {
 		artifactCode:     cfg.artifactCode,
 		logger:           cfg.logger,
 		tracer:           cfg.tracer,
+
+		deadlineExpiredObserver: cfg.deadlineExpiredObserver,
 	}
 }
 
@@ -413,12 +435,22 @@ func (b *Backend) runDeadlineSweeper(ctx context.Context, expirer engine.Executi
 	if b.logger != nil {
 		logger = b.logger
 	}
-	sweep := engine.NewDeadlineSweep(engine.DeadlineSweepConfig{
+	sweepCfg := engine.DeadlineSweepConfig{
 		Lister:  b.state,
 		Expirer: expirer,
 		Batch:   deadlineSweepBatch,
 		Logger:  logger,
-	})
+	}
+	if b.deadlineExpiredObserver != nil {
+		observer := b.deadlineExpiredObserver
+		sweepCfg.OnExpired = func(execCtx context.Context, _ engine.DeadlineExpiredExecution) {
+			// The observer is host-supplied: a panic here would otherwise leave
+			// this goroutine and take every later deadline with it.
+			defer func() { _ = recover() }()
+			observer.OnExecutionDeadlineExpired(execCtx, engine.DeadlineExpiredSourceEmbedded)
+		}
+	}
+	sweep := engine.NewDeadlineSweep(sweepCfg)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
