@@ -9,7 +9,8 @@ import { describe, expect, it } from "vitest";
 const read = (name: string) => readFileSync(`${import.meta.dirname}/${name}`, "utf8");
 
 const source = read("index.tsx");
-const css = read("styles.css").replace(/\/\*[\s\S]*?\*\//g, "");
+const rawCss = read("styles.css");
+const css = rawCss.replace(/\/\*[\s\S]*?\*\//g, "");
 
 /**
  * Classes index.tsx emits that styles.css deliberately has no rule for. Each is
@@ -409,6 +410,14 @@ describe("xflow-preview node card motion (EL-03)", () => {
     expect(css).toMatch(
       /@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.xflow-preview-node\s*\{\s*transition:\s*none;\s*\}\s*\.xflow-preview-node\[data-status="running"\]::after\s*\{\s*animation:\s*none;/
     );
+  });
+
+  it("lets the read-only card receive clicks past xyflow's node wrapper", () => {
+    // xyflow inlines `pointer-events: none` on the node wrapper when nothing is
+    // selectable or draggable; without opting back in, the card's own onClick
+    // never runs and the press lands on the pane, clearing the selection.
+    expect(declarationsOf(".xflow-preview-node")["pointer-events"]).toBe("auto");
+    expect(rawCss).toContain("the card opts back in");
   });
 });
 

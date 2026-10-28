@@ -681,6 +681,10 @@
        fade in (EL-03). An outline never affects layout. */
     outline: 2px solid transparent;
     outline-offset: 2px;
+    /* xyflow inlines `pointer-events: none` on the node wrapper when nothing is
+       selectable or draggable; the card opts back in so its own onClick still
+       runs in read-only replay instead of the press landing on the pane. */
+    pointer-events: auto;
     position: relative;
     /* Feedback only: shadow and border on hover, the ring on selection. `all`
        would also animate the card's own geometry on every re-render. */
