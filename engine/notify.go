@@ -52,6 +52,12 @@ func (e *Engine) notifyExecutionComplete(ctx context.Context, id types.Execution
 // right: correctness lives in the reclaim backstop, and this path only exists
 // to make the common case fast.
 //
+// Concluding is also where the child's conclusion is recorded in the parent's
+// slot (resolveSubWorkflowConclusion), while the child's records still exist to
+// be read. That makes this the primary writer of the conclusion; the reclaim
+// path writes it too, so a notification lost before the record is still covered
+// as long as the child's records outlive the wait's lease.
+//
 // An execution with no ParentNode is not a sub-workflow child — a submission,
 // and a rerun, both have none — and is skipped without further work.
 func (e *Engine) notifySubWorkflowParent(ctx context.Context, childID types.ExecutionID) {

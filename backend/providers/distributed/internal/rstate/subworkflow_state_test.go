@@ -3,6 +3,7 @@ package rstate
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -196,5 +197,91 @@ func TestRedisGetSubWorkflowLinkAbsent(t *testing.T) {
 	state, _, _ := newTestRedisState(t)
 	if _, ok, err := state.GetSubWorkflowLink(context.Background(), "no-such-exec", "sub"); ok || err != nil {
 		t.Fatalf("GetSubWorkflowLink(absent) ok=%v err=%v, want false/nil", ok, err)
+	}
+}
+
+// TestRedisSubWorkflowConclusionLivesInTheParentsSlot pins the key layout the
+// recovery depends on: the conclusion shares the PARENT's hash tag (so it
+// expires with the parent's records, not the child's), is keyed by child, and
+// carries the parent's execution TTL from the moment it is written.
+func TestRedisSubWorkflowConclusionLivesInTheParentsSlot(t *testing.T) {
+	state, _, rdb := newTestRedisState(t)
+	ctx := context.Background()
+	id := types.ExecutionID("rstate-sub-conclusion-slot")
+	conclusion := engine.SubWorkflowConclusion{
+		ChildExecutionID: "child-exec-slot",
+		Status:           types.ExecutionStatusSuccess,
+		Output:           map[string]any{"work": map[string]any{"total": float64(7)}},
+	}
+	if err := state.RecordSubWorkflowConclusion(ctx, id, "sub", conclusion); err != nil {
+		t.Fatalf("RecordSubWorkflowConclusion() error = %v", err)
+	}
+
+	key := subWorkflowConclusionKey(namespace.FromContext(ctx), id, "sub", conclusion.ChildExecutionID)
+	if want := "{" + string(id) + "}"; !strings.Contains(key, want) {
+		t.Fatalf("conclusion key %q does not carry the parent's hash tag %q", key, want)
+	}
+	if !strings.HasSuffix(key, ":conclusion:"+string(conclusion.ChildExecutionID)) {
+		t.Fatalf("conclusion key %q is not keyed by child", key)
+	}
+	ttl, err := rdb.TTL(ctx, key).Result()
+	if err != nil || ttl <= 0 {
+		t.Fatalf("conclusion TTL = %v err=%v, want the parent's positive execution TTL", ttl, err)
+	}
+	if linkTTL := rdb.TTL(ctx, subWorkflowLinkKey(namespace.FromContext(ctx), id, "sub")).Val(); linkTTL > 0 {
+		t.Fatalf("recording a conclusion created a link key (TTL %v): it must not touch the link", linkTTL)
+	}
+}
+
+// TestRedisSubWorkflowConclusionRoundTripsACompressedOutput pins the codec seam:
+// a child result large enough to be stored compressed is read back identically,
+// and a store that has compression switched OFF still reads it, because the
+// value — not the process configuration — says whether it is compressed.
+func TestRedisSubWorkflowConclusionRoundTripsACompressedOutput(t *testing.T) {
+	state, _, rdb := newTestRedisState(t)
+	state.ConfigureOutputCompression(true)
+	ctx := context.Background()
+	id := types.ExecutionID("rstate-sub-conclusion-zstd")
+	big := strings.Repeat("compressible child output ", 400)
+	conclusion := engine.SubWorkflowConclusion{
+		ChildExecutionID: "child-exec-zstd",
+		Status:           types.ExecutionStatusSuccess,
+		Output:           map[string]any{"work": map[string]any{"blob": big}},
+	}
+	if err := state.RecordSubWorkflowConclusion(ctx, id, "sub", conclusion); err != nil {
+		t.Fatalf("RecordSubWorkflowConclusion() error = %v", err)
+	}
+	raw, err := rdb.Get(ctx, subWorkflowConclusionKey(namespace.FromContext(ctx), id, "sub", conclusion.ChildExecutionID)).Bytes()
+	if err != nil {
+		t.Fatalf("read the stored conclusion: %v", err)
+	}
+	if len(raw) >= len(big) {
+		t.Fatalf("stored conclusion is %d bytes for a %d byte output: it was not compressed", len(raw), len(big))
+	}
+
+	state.ConfigureOutputCompression(false)
+	got, ok, err := state.GetSubWorkflowConclusion(ctx, id, "sub", conclusion.ChildExecutionID)
+	if err != nil || !ok {
+		t.Fatalf("GetSubWorkflowConclusion() ok=%v err=%v, want true/nil", ok, err)
+	}
+	work, isMap := got.Output["work"].(map[string]any)
+	if !isMap || work["blob"] != big {
+		t.Fatalf("conclusion output did not survive the compressed round trip")
+	}
+}
+
+// TestRedisSubWorkflowConclusionReadFailsLoudlyOnCorruption pins that an
+// unreadable conclusion is an error and never "no conclusion": reporting
+// absence would send the reclaim down the rebuild path and run the child again.
+func TestRedisSubWorkflowConclusionReadFailsLoudlyOnCorruption(t *testing.T) {
+	state, _, rdb := newTestRedisState(t)
+	ctx := context.Background()
+	id := types.ExecutionID("rstate-sub-conclusion-corrupt")
+	key := subWorkflowConclusionKey(namespace.FromContext(ctx), id, "sub", "child-exec-corrupt")
+	if err := rdb.Set(ctx, key, "{not json", time.Minute).Err(); err != nil {
+		t.Fatalf("seed a corrupt conclusion: %v", err)
+	}
+	if _, ok, err := state.GetSubWorkflowConclusion(ctx, id, "sub", "child-exec-corrupt"); err == nil || ok {
+		t.Fatalf("GetSubWorkflowConclusion(corrupt) ok=%v err=%v, want an error", ok, err)
 	}
 }

@@ -54,6 +54,15 @@ type subgraphLeaseEngine interface {
 	BuildSubgraphLease(ctx context.Context, t *engine.Task) (*engine.TaskLease, *engine.SubgraphLeasePayload, error)
 }
 
+// failBatchEngine is the optional interface for engines that can settle a batch
+// as failed without running it. The concrete *engine.Engine implements it. It is
+// separate from subgraphLeaseEngine so an engine that can build batch leases but
+// cannot fail one keeps the old requeue-and-report behavior rather than gaining
+// a new error.
+type failBatchEngine interface {
+	FailBatchTask(ctx context.Context, t *engine.Task, cause error) error
+}
+
 // dispatchSubgraphLease handles the BuildSubgraphLease + FinalizeClaim flow for
 // batch tasks, mirroring dispatchGroupLease.
 //
@@ -77,6 +86,7 @@ func (c *Core) dispatchSubgraphLease(ctx context.Context, claim Claim) (protocol
 	// without it the whole remote body execution has no remote parent.
 	dispatchCtx, dispatchSpan := c.startDispatchSpan(ctx, &claim.Assignment.Task)
 	lease, payload, err := se.BuildSubgraphLease(dispatchCtx, &claim.Assignment.Task)
+	failer, canFailBatch := c.engine.(failBatchEngine)
 	switch {
 	case err == nil:
 		lease.SubgraphPayload = payload
@@ -99,6 +109,34 @@ func (c *Core) dispatchSubgraphLease(ctx context.Context, claim Claim) (protocol
 
 	case errors.Is(err, engine.ErrExecutionInactive):
 		dispatchSpan.End()
+		if settleErr := c.dropClaimAfterHandoffResolution(ctx, claim); settleErr != nil {
+			c.requeueClaimAfterDispatchFailure(ctx, claim)
+			return protocol.PollTaskResponse{}, normalizeRunnerError(settleErr, c.logger, "poll")
+		}
+		return protocol.PollTaskResponse{}, nil
+
+	case canFailBatch && types.IsPermanent(err):
+		// The batch's items can never be read back, so no redelivery will ever
+		// build its lease. Requeueing and returning the error would hand the same
+		// claim to the next poll and, because the runner's pollLoop ends its
+		// session on any poll error, drop the session every time while the parent
+		// map node never hears about this batch. Settling the batch as failed
+		// lets the map node finish according to its own OnError instead.
+		dispatchSpan.RecordError(err)
+		dispatchSpan.End()
+		if c.logger != nil {
+			c.logger.Warn("batch lease permanently unbuildable; failing the batch",
+				"execution_id", string(claim.Assignment.Task.ExecutionID),
+				"node_name", claim.Assignment.Task.NodeName,
+				"claim", string(claim.ClaimID),
+				"err", err)
+		}
+		if failErr := failer.FailBatchTask(ctx, &claim.Assignment.Task, err); failErr != nil {
+			// The commit itself failed, so the batch is still unsettled: keep the
+			// claim so a later poll retries the settlement.
+			c.requeueClaimAfterDispatchFailure(ctx, claim)
+			return protocol.PollTaskResponse{}, normalizeRunnerError(failErr, c.logger, "poll")
+		}
 		if settleErr := c.dropClaimAfterHandoffResolution(ctx, claim); settleErr != nil {
 			c.requeueClaimAfterDispatchFailure(ctx, claim)
 			return protocol.PollTaskResponse{}, normalizeRunnerError(settleErr, c.logger, "poll")

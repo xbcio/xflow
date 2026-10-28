@@ -132,6 +132,8 @@ type serverConfig struct {
 	// backpressure; see WithServerQueueBackpressure.
 	queueMaxDepth            int
 	queueDepthInterval       time.Duration
+	kafkaQueue               *distributed.KafkaConfig // WithServerKafkaQueue; nil keeps Asynq
+	blob                     *distributed.BlobConfig  // WithServerBlob; nil leaves the blob layer off
 	enableRunnerMetricsProxy bool
 	runnerMetricsInterval    time.Duration
 	enableManagement         bool
@@ -608,6 +610,50 @@ func WithServerOutputCompression(enabled bool) ServerOption {
 	return func(c *serverConfig) { c.outputCompression = enabled }
 }
 
+// WithServerKafkaQueue carries tasks over Kafka instead of the default Asynq.
+// Without this option the server uses Asynq, exactly as before.
+//
+// Redis stays the scheduling authority — execution state, the durable outbox
+// and task leases all remain there, and Kafka only carries the tasks — so the
+// server still needs ServerConfig.RedisAddr or RedisConfig. Setting this option
+// on a server with neither makes NewServer return an error rather than
+// silently running the in-memory backend, which has no task transport to
+// replace.
+//
+// Every process of one deployment must select the same transport, and tasks
+// already waiting in Asynq queues are not moved to Kafka when a running
+// deployment switches over; drain them first. Runners are unaffected: they
+// receive work from the server over the runner protocol and never touch the
+// task queue.
+//
+// The configuration is validated, and the deployment's topics are checked (and
+// created when KafkaConfig.CreateTopics is set), while the server's backend is
+// built, so an invalid configuration or an unreachable broker fails NewServer.
+// See distributed.WithKafkaQueue for the full contract.
+func WithServerKafkaQueue(cfg distributed.KafkaConfig) ServerOption {
+	return func(c *serverConfig) { c.kafkaQueue = &cfg }
+}
+
+// WithServerBlob keeps batch items above BlobConfig.InlineMax in a blob store
+// instead of in Redis, and runs a collector that reclaims blobs nothing
+// references any more. Without this option the server behaves exactly as
+// before.
+//
+// The blob layer extends the durable Redis-backed mode, so the server still
+// needs ServerConfig.RedisAddr or RedisConfig and a ServerConfig.Store. Setting
+// this option on a server with no Redis makes NewServer return an error rather
+// than silently running the in-memory backend, which has no blob layer.
+//
+// BlobConfig.Store and BlobConfig.Index are built by the caller. Enabled stays
+// false unless set, and while it is false the server only reads references that
+// already exist. When the server has a metrics registry and BlobConfig.Observer
+// is nil, the metrics adapter is installed; the configuration passed in is
+// copied and never modified. See distributed.WithBlobStore for the full
+// contract.
+func WithServerBlob(cfg distributed.BlobConfig) ServerOption {
+	return func(c *serverConfig) { c.blob = &cfg }
+}
+
 // WithServerQueueBackpressure bounds how many tasks may sit in each asynq
 // queue before the server stops offering more work to it: once a task's own
 // queue holds maxDepth pending+active tasks, the outbox flush receives
@@ -987,6 +1033,8 @@ func buildServerAPIConfig(cfg ServerConfig, sc *serverConfig) apiserver.Config {
 		OutboxDiscoveryPage: sc.outboxDiscoveryPage,
 
 		OutputCompression: sc.outputCompression,
+		KafkaQueue:        sc.kafkaQueue,
+		Blob:              sc.blob,
 
 		QueueMaxDepth:            sc.queueMaxDepth,
 		QueueDepthSampleInterval: sc.queueDepthInterval,

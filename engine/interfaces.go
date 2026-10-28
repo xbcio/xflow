@@ -694,9 +694,41 @@ type SubWorkflowLink struct {
 	ActivationID int
 }
 
+// SubWorkflowConclusion is the parent-side record of how a child execution
+// ended: the minimum the parent node needs to be concluded without the child's
+// own records.
+//
+// It exists because the child's records are not permanent. Once they expire (or
+// a retention policy shortens them) the parent's reclaim can no longer read the
+// child's terminal state, finds "no such execution", and would rebuild the child
+// under the same derived id and run it again. The conclusion is therefore
+// written to the PARENT's slot while the child record still exists, and read back
+// when it does not.
+//
+// Output is the child's public node-output map — the shape Inspect reports, with
+// the privacy projection already applied — and is recorded for a successful
+// child only: a failed, timed-out or canceled child contributes no output to the
+// parent node, only Status and Error. The node's own `output:` mapping is NOT
+// applied here; it is a pure function of Output evaluated at commit time, so a
+// recorded conclusion and a live child produce the same node result.
+type SubWorkflowConclusion struct {
+	// ChildExecutionID is the child this conclusion belongs to. It is part of the
+	// read key, not just a payload field: a retry mints the next generation's
+	// child, and a conclusion for the previous one must stay invisible to it.
+	ChildExecutionID types.ExecutionID
+	// Status is the child's terminal execution status.
+	Status types.ExecutionStatus
+	// Error is the child's terminal error text, empty when it recorded none.
+	Error string
+	// Output is the child's public node-output map, nil unless Status is success
+	// and some node produced output.
+	Output map[string]any
+}
+
 // SubWorkflowLinkStore is the optional StateStore capability an
 // xflow.subworkflow node needs: a single-slot transition that parks a claimed
-// node on a child execution and records the link, and a read of that link.
+// node on a child execution and records the link, a read of that link, and a
+// record of how the child concluded.
 //
 // It is deliberately not "begin the wait and create the child" in one
 // transaction. The child lives in its own execution slot — a different key, and
@@ -726,6 +758,24 @@ type SubWorkflowLinkStore interface {
 	// link exists — the node never parked, or the execution is gone. An
 	// implementation must not error on absence.
 	GetSubWorkflowLink(ctx context.Context, id types.ExecutionID, nodeName string) (SubWorkflowLink, bool, error)
+	// RecordSubWorkflowConclusion stores how conclusion.ChildExecutionID ended
+	// under the parent's node, in the PARENT's slot so it outlives the child's
+	// records. It is an unconditional idempotent write: a child's terminal state
+	// is unique, so recording it twice writes the same content. It does not fence
+	// on the link — a conclusion for a child the link no longer names (a retry
+	// moved on) is harmless because GetSubWorkflowConclusion is keyed by child.
+	//
+	// The write lives as long as the parent's own records do and, like the link,
+	// is cleared with them; it is not touched by RevokeLease or ResetNodeForRetry.
+	// Callers record BEFORE committing the parent node from the conclusion, so a
+	// crash between the two leaves the reclaim a conclusion to read rather than a
+	// child to rebuild.
+	RecordSubWorkflowConclusion(ctx context.Context, parentID types.ExecutionID, nodeName string, conclusion SubWorkflowConclusion) error
+	// GetSubWorkflowConclusion returns the conclusion recorded for one child of a
+	// node. ok=false means none was recorded for exactly that child — absence is
+	// not an error, and it is the answer for every link written before the
+	// capability recorded conclusions.
+	GetSubWorkflowConclusion(ctx context.Context, parentID types.ExecutionID, nodeName string, childID types.ExecutionID) (SubWorkflowConclusion, bool, error)
 }
 
 // DurableSignalDeliverer atomically consumes an external signal that wakes a

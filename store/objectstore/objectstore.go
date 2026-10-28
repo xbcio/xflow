@@ -76,11 +76,11 @@ type PutOptions struct {
 //   - No ListObjects: every backend pays a real implementation cost for it (an
 //     extra index in SQL, pagination cursors in S3) and there is no consumer.
 //   - No multipart upload: excluded by the 16 MiB per-object ceiling.
-//   - No DeleteObject: no consumer yet. Cleanup is an operator-driven, offline
-//     activity, and a local filesystem cache can evict with os.Remove without
-//     going through the contract. It is the first method that should be added,
-//     but adding it before there is a caller would repeat the mistake of
-//     GroupArtifact: defined, unused, and not necessarily the right shape.
+//   - No DeleteObject on Store itself: deletion is offered as the optional
+//     Deleter interface instead. Its only consumer is blob lifecycle management
+//     (store/blob), and most Store implementations never delete, so widening
+//     Store would force every implementation and test fake to grow a method
+//     only one caller uses. HTTPStore is read-only and does not implement it.
 //
 // Get and Head are kept separate on purpose — that part of S3's shape is worth
 // copying. Head is a SELECT without the content column in SQL, and a real HEAD
@@ -98,4 +98,27 @@ type Store interface {
 	// HeadObject returns metadata only, never the content. A missing key is
 	// reported as an error wrapping ErrNotFound.
 	HeadObject(ctx context.Context, key string) (*Object, error)
+}
+
+// Deleter is an optional capability of a Store: removing an object's bytes.
+// Callers discover it with a type assertion on the Store they hold:
+//
+//	if d, ok := s.(objectstore.Deleter); ok { ... }
+//
+// A Store that does not implement it (HTTPStore, which is read-only) simply
+// cannot have its objects deleted through this package.
+type Deleter interface {
+	// DeleteObject removes the object stored under key. Deleting a key that does
+	// not exist returns nil, so a retry after a partial failure is safe.
+	//
+	// An implementation backed by directories (FSStore) does not remove the
+	// empty directories a delete leaves behind: doing so races a concurrent
+	// PutObject creating the same directory chain, and an empty directory is
+	// harmless in a content-addressed layout.
+	//
+	// DeleteObject gives no ordering guarantee against a concurrent PutObject of
+	// the same key: the put may land before or after the delete. A caller that
+	// must not lose a freshly written object (a blob garbage collector, for
+	// instance) fences that itself rather than relying on this method.
+	DeleteObject(ctx context.Context, key string) error
 }

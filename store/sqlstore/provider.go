@@ -203,6 +203,8 @@ var autoMigrateModels = []any{
 	&dbScheduleOverride{},
 	&dbArtifactBlob{},
 	&dbArtifact{},
+	&dbBlobObject{},
+	&dbBlobLink{},
 	&dbRegistrationCode{},
 	&dbEnrollAudit{},
 	&dbIssuedIdentity{},

@@ -79,6 +79,14 @@ func absentSuspendSpec() *types.SuspendSpec {
 // sweepers that reach one through state they find in Redis. Errors are ignored: a
 // refusal is the expected answer, and the assertion is on what is left behind.
 var absentWriteCases = map[string]absentCase{
+	// A conclusion is its own SET under the parent's key space; it must not
+	// invent the parent's status key when the parent was never created.
+	"RecordSubWorkflowConclusion": func(ctx context.Context, h *absentHarness, id types.ExecutionID) {
+		_ = h.s.RecordSubWorkflowConclusion(ctx, id, "a", engine.SubWorkflowConclusion{
+			ChildExecutionID: types.ExecutionID("child-" + string(id)),
+			Status:           types.ExecutionStatusSuccess,
+		})
+	},
 	"UpdateExecutionStatus": func(ctx context.Context, h *absentHarness, id types.ExecutionID) {
 		_ = h.s.UpdateExecutionStatus(ctx, id, types.ExecutionStatusTimeout, "err")
 	},
@@ -315,6 +323,8 @@ var exemptStoreMethods = map[string]string{
 	"GetOutputs":                 "reader",
 	"GetSubExecutionResults":     "reader",
 	"GetSubWorkflowLink":         "reader",
+	"GetSubWorkflowConclusion":   "reader",
+	"ResolveItems":               "reader; resolves a blob reference",
 	"ListDeadLetters":            "reader",
 	"ListOutbox":                 "reader",
 	"ListSuspendedNodes":         "reader",
@@ -323,18 +333,26 @@ var exemptStoreMethods = map[string]string{
 	"ConcurrencyQueuePosition":   "reader",
 	"WatchExecution":             "subscribes to the done channel",
 
+	// Batch-item blobs. ExternalizeItems writes a blob and its link under the
+	// execution's key space, never a status key, and does nothing at all (no
+	// Redis command) unless ConfigureBlob enabled the layer, so no case can
+	// reach it on this harness.
+	"ExternalizeItems": "writes a blob and link, never a status; inert without ConfigureBlob",
+
 	// Index and metric scans. They read the keyspace; the only writes they make are
 	// to their own index (deadline, canceling, outbox-ready), never to a status.
 	"ListExpiredLeases":              "scan; reads lease indexes",
 	"ListDeadlineExceededExecutions": "scan; repairs the deadline index only",
 	"ListCancelingExecutions":        "scan; repairs the canceling index only",
 	"ListOutboxExecutions":           "scan; reads the outbox discovery index",
+	"ListOutboxExecutionRefs":        "scan; reads the outbox discovery index and namespaces",
 	"OutboxMetrics":                  "metrics read",
 	"ScanReplayReceipts":             "scan; reads receipts",
 	"AuditStats":                     "in-process counters",
 	"FoldsArrivalsIntoCommit":        "capability flag",
 
 	// Wiring. Called before the store serves anything; no Redis write.
+	"ConfigureBlob":              "wiring",
 	"ConfigureOutboxReadyIndex":  "wiring",
 	"ConfigureOutputCompression": "wiring",
 	"ConfigureOwnedNamespaces":   "wiring",

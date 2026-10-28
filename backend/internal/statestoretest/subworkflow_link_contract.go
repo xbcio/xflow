@@ -358,4 +358,166 @@ func RunSubWorkflowLinkContract(t *testing.T, newStore func(*testing.T) SubWorkf
 			t.Fatalf("GetSubWorkflowLink(absent) ok=%v err=%v, want false/nil", ok, err)
 		}
 	})
+
+	runSubWorkflowConclusionContract(t, newStore)
+}
+
+func contractSubWorkflowConclusion(childID types.ExecutionID) engine.SubWorkflowConclusion {
+	return engine.SubWorkflowConclusion{
+		ChildExecutionID: childID,
+		Status:           types.ExecutionStatusSuccess,
+		Output: map[string]any{
+			"work": map[string]any{"total": float64(7), "tags": []any{"a", "b"}},
+		},
+	}
+}
+
+// runSubWorkflowConclusionContract pins the recorded child conclusion: the
+// parent-side record that lets a parent node be concluded after the child's own
+// records are gone. Every case is about one property the reclaim path relies on.
+func runSubWorkflowConclusionContract(t *testing.T, newStore func(*testing.T) SubWorkflowLinkStore) {
+	ctx := context.Background()
+
+	t.Run("ConclusionRoundTrips", func(t *testing.T) {
+		store := newStore(t)
+		id := engine.NewExecutionID()
+		want := contractSubWorkflowConclusion("child-exec-concluded")
+		want.Error = "child said why"
+		if err := store.RecordSubWorkflowConclusion(ctx, id, "sub", want); err != nil {
+			t.Fatalf("RecordSubWorkflowConclusion() error = %v", err)
+		}
+		got, ok, err := store.GetSubWorkflowConclusion(ctx, id, "sub", want.ChildExecutionID)
+		if err != nil || !ok {
+			t.Fatalf("GetSubWorkflowConclusion() ok=%v err=%v, want true/nil", ok, err)
+		}
+		if got.ChildExecutionID != want.ChildExecutionID || got.Status != want.Status || got.Error != want.Error {
+			t.Fatalf("conclusion = %+v, want %+v", got, want)
+		}
+		work, isMap := got.Output["work"].(map[string]any)
+		if !isMap || work["total"] != float64(7) {
+			t.Fatalf("conclusion output = %#v, want the recorded output back", got.Output)
+		}
+		if tags, isList := work["tags"].([]any); !isList || len(tags) != 2 {
+			t.Fatalf("conclusion output tags = %#v, want the nested list back", work["tags"])
+		}
+	})
+
+	t.Run("ConclusionWithoutOutputRoundTrips", func(t *testing.T) {
+		store := newStore(t)
+		id := engine.NewExecutionID()
+		failed := engine.SubWorkflowConclusion{
+			ChildExecutionID: "child-exec-failed",
+			Status:           types.ExecutionStatusFailed,
+			Error:            "charge declined",
+		}
+		if err := store.RecordSubWorkflowConclusion(ctx, id, "sub", failed); err != nil {
+			t.Fatalf("RecordSubWorkflowConclusion() error = %v", err)
+		}
+		got, ok, err := store.GetSubWorkflowConclusion(ctx, id, "sub", failed.ChildExecutionID)
+		if err != nil || !ok {
+			t.Fatalf("GetSubWorkflowConclusion() ok=%v err=%v, want true/nil", ok, err)
+		}
+		if got.Status != failed.Status || got.Error != failed.Error || got.Output != nil {
+			t.Fatalf("conclusion = %+v, want the failure with no output", got)
+		}
+	})
+
+	t.Run("ConclusionIsKeyedByChild", func(t *testing.T) {
+		store := newStore(t)
+		id := engine.NewExecutionID()
+		if err := store.RecordSubWorkflowConclusion(ctx, id, "sub", contractSubWorkflowConclusion("child-exec-gen1")); err != nil {
+			t.Fatalf("RecordSubWorkflowConclusion() error = %v", err)
+		}
+		// A retry waits on the next generation's child; the previous
+		// generation's answer must be invisible to it, and so must another
+		// node's.
+		if _, ok, err := store.GetSubWorkflowConclusion(ctx, id, "sub", "child-exec-gen2"); ok || err != nil {
+			t.Fatalf("conclusion of another child ok=%v err=%v, want false/nil", ok, err)
+		}
+		if _, ok, err := store.GetSubWorkflowConclusion(ctx, id, "other", "child-exec-gen1"); ok || err != nil {
+			t.Fatalf("conclusion under another node ok=%v err=%v, want false/nil", ok, err)
+		}
+		if _, ok, err := store.GetSubWorkflowConclusion(ctx, engine.NewExecutionID(), "sub", "child-exec-gen1"); ok || err != nil {
+			t.Fatalf("conclusion under another parent ok=%v err=%v, want false/nil", ok, err)
+		}
+	})
+
+	t.Run("RecordingTwiceIsIdempotent", func(t *testing.T) {
+		store := newStore(t)
+		id := engine.NewExecutionID()
+		want := contractSubWorkflowConclusion("child-exec-twice")
+		for i := 0; i < 2; i++ {
+			if err := store.RecordSubWorkflowConclusion(ctx, id, "sub", want); err != nil {
+				t.Fatalf("RecordSubWorkflowConclusion() attempt %d error = %v", i+1, err)
+			}
+		}
+		got, ok, err := store.GetSubWorkflowConclusion(ctx, id, "sub", want.ChildExecutionID)
+		if err != nil || !ok || got.Status != want.Status {
+			t.Fatalf("conclusion after two records = %+v ok=%v err=%v, want the same one", got, ok, err)
+		}
+	})
+
+	t.Run("AbsentConclusionIsNotAnError", func(t *testing.T) {
+		store := newStore(t)
+		if _, ok, err := store.GetSubWorkflowConclusion(ctx, engine.NewExecutionID(), "sub", "child-exec-none"); ok || err != nil {
+			t.Fatalf("GetSubWorkflowConclusion(absent) ok=%v err=%v, want false/nil", ok, err)
+		}
+	})
+
+	t.Run("RecordRefusesAnonymousConclusions", func(t *testing.T) {
+		store := newStore(t)
+		id := engine.NewExecutionID()
+		if err := store.RecordSubWorkflowConclusion(ctx, id, "sub", engine.SubWorkflowConclusion{Status: types.ExecutionStatusSuccess}); err == nil {
+			t.Fatal("RecordSubWorkflowConclusion(no child id) accepted a conclusion nothing can read back")
+		}
+		if err := store.RecordSubWorkflowConclusion(ctx, id, "", contractSubWorkflowConclusion("c")); err == nil {
+			t.Fatal("RecordSubWorkflowConclusion(no node name) accepted a conclusion nothing can read back")
+		}
+	})
+
+	// The conclusion is only worth recording if it survives what happens to a
+	// parked node afterwards: the sweeper's reclaim, a retry reset, and the next
+	// generation parking over the link.
+	t.Run("ConclusionSurvivesReclaimRetryResetAndRepark", func(t *testing.T) {
+		store := newStore(t)
+		id := engine.NewExecutionID()
+		lease := leasedSubWorkflowNode(t, ctx, store, id, types.NodeStatusRunning)
+		link := contractSubWorkflowLink("child-exec-survivor")
+		if accepted, err := store.BeginSubWorkflowWait(ctx, lease, link, nil); err != nil || !accepted {
+			t.Fatalf("park accepted=%v err=%v", accepted, err)
+		}
+		if err := store.RecordSubWorkflowConclusion(ctx, id, "sub", contractSubWorkflowConclusion(link.ChildExecutionID)); err != nil {
+			t.Fatalf("RecordSubWorkflowConclusion() error = %v", err)
+		}
+		revoked, err := store.RevokeLease(ctx, id, "sub", lease.LeaseToken)
+		if err != nil || !revoked {
+			t.Fatalf("RevokeLease() revoked=%v err=%v, want true/nil", revoked, err)
+		}
+		if _, ok, err := store.GetSubWorkflowConclusion(ctx, id, "sub", link.ChildExecutionID); !ok || err != nil {
+			t.Fatalf("conclusion after a reclaim ok=%v err=%v, want it kept", ok, err)
+		}
+		// Re-parking over the link (a redelivery after the reclaim) rewrites the
+		// link but must leave the conclusion alone: the reclaim path reads it right
+		// after the park.
+		reclaimLease := leasedSubWorkflowNode(t, ctx, store, id, types.NodeStatusRunning)
+		if accepted, err := store.BeginSubWorkflowWait(ctx, reclaimLease, link, nil); err != nil || !accepted {
+			t.Fatalf("re-park accepted=%v err=%v", accepted, err)
+		}
+		if _, ok, err := store.GetSubWorkflowConclusion(ctx, id, "sub", link.ChildExecutionID); !ok || err != nil {
+			t.Fatalf("conclusion after a re-park ok=%v err=%v, want it kept", ok, err)
+		}
+		reset, err := store.ResetNodeForRetryWithOutbox(ctx, id, "sub", reclaimLease.LeaseToken, engine.OutboxEntry{
+			ID: "retry/sub/conclusion",
+			Task: engine.Task{
+				ExecutionID: id, NodeName: "sub", NodeIdx: 0,
+				Type: engine.TaskTypeSubWorkflow, ActivationID: 1,
+			},
+		})
+		if err != nil || !reset {
+			t.Fatalf("ResetNodeForRetryWithOutbox() reset=%v err=%v, want true/nil", reset, err)
+		}
+		if _, ok, err := store.GetSubWorkflowConclusion(ctx, id, "sub", link.ChildExecutionID); !ok || err != nil {
+			t.Fatalf("conclusion after a retry reset ok=%v err=%v, want it kept", ok, err)
+		}
+	})
 }

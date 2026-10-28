@@ -82,6 +82,34 @@ type Config struct {
 	// rstate/output_codec.go for the measurements and the decoder's size bound.
 	// Ignored by the in-memory backend, which does not compress.
 	OutputCompression bool
+	// KafkaQueue selects Kafka as the task transport of the Redis-backed
+	// backend instead of the default Asynq. Nil (the default) keeps Asynq.
+	//
+	// Redis stays the scheduling authority — state, the durable outbox and task
+	// leases remain there, Kafka only carries the tasks — so it needs RedisAddr
+	// or RedisConfig. Setting it without one makes New return an error: the
+	// in-memory backend has no task transport to replace, and ignoring the
+	// setting would leave an operator believing tasks flow through Kafka.
+	// Every process of one deployment must select the same transport, and tasks
+	// already waiting in Asynq queues are not moved to Kafka; drain them first.
+	// The configuration is validated, and the deployment's topics are checked,
+	// when the backend is built, so a bad setting fails startup. See
+	// distributed.WithKafkaQueue.
+	KafkaQueue *distributed.KafkaConfig
+	// Blob turns on the blob layer of the Redis-backed backend: batch items
+	// above Blob.InlineMax are kept in Blob.Store instead of in Redis, and a
+	// background collector reclaims blobs nothing references any more. Nil (the
+	// default) leaves the backend exactly as before.
+	//
+	// It needs RedisAddr or RedisConfig and a durable Store; setting it without
+	// Redis makes New return an error, and without a Store the backend refuses
+	// it, rather than running with the layer silently off. Blob.Store and
+	// Blob.Index are built by the caller; Blob.Enabled stays false unless set,
+	// and while it is false the backend only reads references that already
+	// exist and never stores a payload. Blob.Observer, when nil and Metrics is
+	// set, defaults to the metrics adapter; the caller's struct is never
+	// modified. See distributed.WithBlobStore.
+	Blob *distributed.BlobConfig
 	// QueueMaxDepth bounds producer-side admission per asynq queue: once a
 	// task's own queue holds this many pending+active tasks, the transport's
 	// TryEnqueue reports engine.ErrQueueFull and the outbox flush stops
@@ -543,6 +571,41 @@ func metricsInboxFor(cp *control.ControlPlane) prometheus.Gatherer {
 // reconcile passes; every write refreshes it.
 const entryActivationStoreTTL = 24 * time.Hour
 
+// errKafkaQueueNoRedis is returned when Config.KafkaQueue is set but no Redis
+// is configured. The in-memory backend has no task transport to replace, so the
+// setting cannot take effect; failing startup beats running on a transport the
+// operator did not choose.
+var errKafkaQueueNoRedis = errors.New("apiserver: Config.KafkaQueue requires a Redis-backed control plane (set RedisAddr or RedisConfig); the in-memory backend has no task transport to replace")
+
+// kafkaQueueObserver returns the producer-side observer that counts Kafka
+// produce errors, or nil when there is nothing to observe. Only the Kafka
+// transport has such a series (the Asynq path has none), so the observer exists
+// only when Kafka was selected and metrics are on: a default deployment
+// registers and exports nothing new.
+func kafkaQueueObserver(cfg Config) distributed.QueueObserver {
+	if cfg.KafkaQueue == nil || cfg.Metrics == nil {
+		return nil
+	}
+	return metrics.NewKafkaQueueMetrics(cfg.Metrics)
+}
+
+// errBlobNoRedis is returned when Config.Blob is set but no Redis is configured.
+// The blob layer extends the durable Redis-backed mode, which the in-memory
+// backend does not have, so the setting cannot take effect; failing startup
+// beats running with large payloads still inline.
+var errBlobNoRedis = errors.New("apiserver: Config.Blob requires a Redis-backed control plane (set RedisAddr or RedisConfig); the in-memory backend has no blob layer")
+
+// blobObserver returns the metrics adapter for the blob layer, or nil when
+// there is nothing to install: no blob selection, no metrics, or an observer
+// the caller already supplied. A default deployment registers and exports
+// nothing new.
+func blobObserver(cfg Config) distributed.BlobObserver {
+	if cfg.Blob == nil || cfg.Blob.Observer != nil || cfg.Metrics == nil {
+		return nil
+	}
+	return metrics.NewBlobMetrics(cfg.Metrics)
+}
+
 // buildControlPlane assembles a *control.ControlPlane from cfg. It mirrors
 // cmd/server's buildControlPlane for backend selection (memory when neither
 // RedisAddr nor RedisConfig is set, distributed otherwise) but does NOT start
@@ -578,6 +641,12 @@ func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 
 	useRedis := cfg.RedisConfig != nil || cfg.RedisAddr != ""
 	if !useRedis {
+		if cfg.KafkaQueue != nil {
+			return nil, errKafkaQueueNoRedis
+		}
+		if cfg.Blob != nil {
+			return nil, errBlobNoRedis
+		}
 		ccfg.Backend = backendlocal.New(
 			backendlocal.WithConcurrency(cfg.Concurrency),
 			// The same cfg.Logger the distributed branch below has always
@@ -604,6 +673,20 @@ func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 			// The backend derives the leader key, sweep scope and queue names
 			// from the same set the control plane filters its workers by.
 			distributed.WithOwnedNamespaces(cfg.OwnedNamespaces),
+		}
+		if cfg.KafkaQueue != nil {
+			opts = append(opts, distributed.WithKafkaQueue(*cfg.KafkaQueue))
+		}
+		if obs := kafkaQueueObserver(cfg); obs != nil {
+			opts = append(opts, distributed.WithQueueObserver(obs))
+		}
+		if cfg.Blob != nil {
+			// A copy, so the observer default never reaches the caller's struct.
+			bc := *cfg.Blob
+			if obs := blobObserver(cfg); obs != nil {
+				bc.Observer = obs
+			}
+			opts = append(opts, distributed.WithBlobStore(bc))
 		}
 		if cfg.Metrics != nil {
 			opts = append(opts,

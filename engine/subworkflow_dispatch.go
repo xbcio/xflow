@@ -388,7 +388,8 @@ func (e *Engine) startSubWorkflowChild(ctx context.Context, task *Task, g *graph
 	if e.subWorkflowResolver == nil {
 		return subWorkflowChild{}, fmt.Errorf("node %q: %w (%w)", task.NodeName, ErrSubWorkflowUnsupported, types.ErrPermanent)
 	}
-	if _, ok := e.state.(SubWorkflowLinkStore); !ok {
+	linkStore, ok := e.state.(SubWorkflowLinkStore)
+	if !ok {
 		return subWorkflowChild{}, fmt.Errorf("node %q: state store does not implement SubWorkflowLinkStore: %w (%w)",
 			task.NodeName, ErrSubWorkflowUnsupported, types.ErrPermanent)
 	}
@@ -470,6 +471,19 @@ func (e *Engine) startSubWorkflowChild(ctx context.Context, task *Task, g *graph
 		// crash between the create and the park, or a reclaim. Creating again
 		// would overwrite its live state, because every backend's create is an
 		// unconditional write, so this is a resume and not a create.
+		return child, nil
+	}
+	// The child's records are gone, but its conclusion may not be: it was
+	// recorded in the parent's slot while the child still existed, precisely so
+	// that the child's retention could end before the parent's wait did. The
+	// derived id pins (parent, node, activation, generation), so a conclusion
+	// under this id is THIS generation's final answer — creating the child again
+	// would run it a second time and let the rerun's result replace the one the
+	// parent was already owed. This is a resume as well: the caller parks and
+	// concludes from the recorded conclusion, and no child is created.
+	if _, recorded, err := linkStore.GetSubWorkflowConclusion(ctx, task.ExecutionID, task.NodeName, child.ID); err != nil {
+		return subWorkflowChild{}, fmt.Errorf("read sub-workflow conclusion %q/%q for child %q: %w", task.ExecutionID, task.NodeName, child.ID, err)
+	} else if recorded {
 		return child, nil
 	}
 

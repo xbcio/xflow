@@ -94,6 +94,9 @@ func (e *Engine) expandLoopSplit(ctx context.Context, lease *TaskLease, g *graph
 			Task: expansionBatchTask(lease, childID, i, batch, data),
 		})
 	}
+	if err := e.externalizeExpansionBatches(ctx, lease.Task.ExecutionID, data, batches, entries); err != nil {
+		return fmt.Errorf("externalize loop/split batch items %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
+	}
 	started, err := expander.BeginTaskExpansionWithOutbox(ctx, lease, children, entries)
 	if err != nil {
 		return fmt.Errorf("begin durable loop/split expansion %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)
@@ -299,7 +302,30 @@ func (e *Engine) ExecuteBatch(ctx context.Context, t *Task) (err error) {
 		return nil
 	}
 
-	result, err := e.runBatchBody(ctx, g, lease, t, batchIndex, items)
+	// Stored items are read back in only now, after the checks that make this
+	// batch a no-op: an inactive or superseded batch must not cost a store read,
+	// nor fail on one. view is t with the array restored; t itself is not
+	// modified. When t carries its items inline view is t and nothing is re-read.
+	view, err := e.resolveBatchView(ctx, t)
+	if err != nil {
+		// A permanent read failure (the blob is gone, damaged or not ours) cannot
+		// be fixed by running this task again: returning it would send the queue
+		// through every retry and then archive the task, with the map node stuck
+		// Waiting behind a batch that never reports. Settle the batch as failed
+		// instead, so the map node reaches a verdict. Anything not marked
+		// permanent keeps the old behaviour and is retried.
+		if types.IsPermanent(err) {
+			return e.settleUnreadableBatch(ctx, lease, childExecID, t, err)
+		}
+		return err
+	}
+	if view != t {
+		if _, _, items, err = expansionBatchLease(view); err != nil {
+			return err
+		}
+	}
+
+	result, err := e.runBatchBody(ctx, g, lease, view, batchIndex, items)
 	if err != nil {
 		return err
 	}

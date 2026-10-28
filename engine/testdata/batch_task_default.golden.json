@@ -1,0 +1,430 @@
+[
+  {
+    "name": "bare: no batch_size, no namespace, zero IssuedAt, no all_items",
+    "activation_id": 4,
+    "auto_depth": 5,
+    "task": {
+      "execution_id": "exec-1",
+      "node_name": "map1/_batch/0",
+      "node_idx": 3,
+      "type": 4,
+      "payload": {
+        "Triggered": 0,
+        "Name": "",
+        "Data": {
+          "_batch_exec": true,
+          "batch_index": 0,
+          "child_exec_id": "exec-1/sub/map1/lease-1/0",
+          "items": [
+            "a",
+            2,
+            {
+              "k": "v"
+            },
+            null
+          ],
+          "parent_activation_id": 4,
+          "parent_attempt": 2,
+          "parent_auto_depth": 5,
+          "parent_exec_id": "exec-1",
+          "parent_lease_id": "lease-1",
+          "parent_lease_token": "token-1",
+          "parent_node": "map1",
+          "parent_node_idx": 3
+        }
+      }
+    }
+  },
+  {
+    "name": "batch_size int with all_items",
+    "activation_id": 4,
+    "auto_depth": 5,
+    "task": {
+      "execution_id": "exec-1",
+      "node_name": "map1/_batch/1",
+      "node_idx": 3,
+      "type": 4,
+      "payload": {
+        "Triggered": 0,
+        "Name": "",
+        "Data": {
+          "_batch_exec": true,
+          "all_items": [
+            "a",
+            2,
+            {
+              "k": "v"
+            },
+            null,
+            "e"
+          ],
+          "batch_index": 1,
+          "batch_size": 2,
+          "child_exec_id": "exec-1/sub/map1/lease-1/1",
+          "items": [
+            "a",
+            2,
+            {
+              "k": "v"
+            },
+            null
+          ],
+          "parent_activation_id": 4,
+          "parent_attempt": 2,
+          "parent_auto_depth": 5,
+          "parent_exec_id": "exec-1",
+          "parent_lease_id": "lease-1",
+          "parent_lease_token": "token-1",
+          "parent_node": "map1",
+          "parent_node_idx": 3
+        }
+      }
+    }
+  },
+  {
+    "name": "batch_size float64 (JSON round trip)",
+    "activation_id": 4,
+    "auto_depth": 5,
+    "task": {
+      "execution_id": "exec-1",
+      "node_name": "map1/_batch/2",
+      "node_idx": 3,
+      "type": 4,
+      "payload": {
+        "Triggered": 0,
+        "Name": "",
+        "Data": {
+          "_batch_exec": true,
+          "all_items": [
+            "a",
+            2,
+            {
+              "k": "v"
+            },
+            null,
+            "e"
+          ],
+          "batch_index": 2,
+          "batch_size": 2,
+          "child_exec_id": "exec-1/sub/map1/lease-1/2",
+          "items": [
+            "a",
+            2,
+            {
+              "k": "v"
+            },
+            null
+          ],
+          "parent_activation_id": 4,
+          "parent_attempt": 2,
+          "parent_auto_depth": 5,
+          "parent_exec_id": "exec-1",
+          "parent_lease_id": "lease-1",
+          "parent_lease_token": "token-1",
+          "parent_node": "map1",
+          "parent_node_idx": 3
+        }
+      }
+    }
+  },
+  {
+    "name": "batch_size zero is dropped",
+    "activation_id": 4,
+    "auto_depth": 5,
+    "task": {
+      "execution_id": "exec-1",
+      "node_name": "map1/_batch/3",
+      "node_idx": 3,
+      "type": 4,
+      "payload": {
+        "Triggered": 0,
+        "Name": "",
+        "Data": {
+          "_batch_exec": true,
+          "all_items": [
+            "a",
+            2,
+            {
+              "k": "v"
+            },
+            null,
+            "e"
+          ],
+          "batch_index": 3,
+          "child_exec_id": "exec-1/sub/map1/lease-1/3",
+          "items": [
+            "a",
+            2,
+            {
+              "k": "v"
+            },
+            null
+          ],
+          "parent_activation_id": 4,
+          "parent_attempt": 2,
+          "parent_auto_depth": 5,
+          "parent_exec_id": "exec-1",
+          "parent_lease_id": "lease-1",
+          "parent_lease_token": "token-1",
+          "parent_node": "map1",
+          "parent_node_idx": 3
+        }
+      }
+    }
+  },
+  {
+    "name": "batch_size of the wrong type is dropped",
+    "activation_id": 4,
+    "auto_depth": 5,
+    "task": {
+      "execution_id": "exec-1",
+      "node_name": "map1/_batch/4",
+      "node_idx": 3,
+      "type": 4,
+      "payload": {
+        "Triggered": 0,
+        "Name": "",
+        "Data": {
+          "_batch_exec": true,
+          "all_items": [
+            "a",
+            2,
+            {
+              "k": "v"
+            },
+            null,
+            "e"
+          ],
+          "batch_index": 4,
+          "child_exec_id": "exec-1/sub/map1/lease-1/4",
+          "items": [
+            "a",
+            2,
+            {
+              "k": "v"
+            },
+            null
+          ],
+          "parent_activation_id": 4,
+          "parent_attempt": 2,
+          "parent_auto_depth": 5,
+          "parent_exec_id": "exec-1",
+          "parent_lease_id": "lease-1",
+          "parent_lease_token": "token-1",
+          "parent_node": "map1",
+          "parent_node_idx": 3
+        }
+      }
+    }
+  },
+  {
+    "name": "namespace set, IssuedAt zero",
+    "activation_id": 4,
+    "auto_depth": 5,
+    "task": {
+      "execution_id": "exec-1",
+      "node_name": "map1/_batch/5",
+      "node_idx": 3,
+      "type": 4,
+      "payload": {
+        "Triggered": 0,
+        "Name": "",
+        "Data": {
+          "_batch_exec": true,
+          "all_items": [
+            "a",
+            2,
+            {
+              "k": "v"
+            },
+            null,
+            "e"
+          ],
+          "batch_index": 5,
+          "batch_size": 2,
+          "child_exec_id": "exec-1/sub/map1/lease-1/5",
+          "items": [
+            "a",
+            2,
+            {
+              "k": "v"
+            },
+            null
+          ],
+          "parent_activation_id": 4,
+          "parent_attempt": 2,
+          "parent_auto_depth": 5,
+          "parent_exec_id": "exec-1",
+          "parent_lease_id": "lease-1",
+          "parent_lease_token": "token-1",
+          "parent_namespace": "tenant-b",
+          "parent_node": "map1",
+          "parent_node_idx": 3
+        }
+      }
+    }
+  },
+  {
+    "name": "namespace empty, IssuedAt set",
+    "activation_id": 4,
+    "auto_depth": 5,
+    "task": {
+      "execution_id": "exec-1",
+      "node_name": "map1/_batch/6",
+      "node_idx": 3,
+      "type": 4,
+      "payload": {
+        "Triggered": 0,
+        "Name": "",
+        "Data": {
+          "_batch_exec": true,
+          "all_items": [
+            "a",
+            2,
+            {
+              "k": "v"
+            },
+            null,
+            "e"
+          ],
+          "batch_index": 6,
+          "batch_size": 2,
+          "child_exec_id": "exec-1/sub/map1/lease-1/6",
+          "items": [
+            "a",
+            2,
+            {
+              "k": "v"
+            },
+            null
+          ],
+          "parent_activation_id": 4,
+          "parent_attempt": 2,
+          "parent_auto_depth": 5,
+          "parent_exec_id": "exec-1",
+          "parent_issued_at": "2026-10-26T00:30:15.123456789Z",
+          "parent_lease_id": "lease-1",
+          "parent_lease_token": "token-1",
+          "parent_node": "map1",
+          "parent_node_idx": 3
+        }
+      }
+    }
+  },
+  {
+    "name": "namespace and IssuedAt both set",
+    "activation_id": 4,
+    "auto_depth": 5,
+    "task": {
+      "execution_id": "exec-1",
+      "node_name": "map1/_batch/7",
+      "node_idx": 3,
+      "type": 4,
+      "payload": {
+        "Triggered": 0,
+        "Name": "",
+        "Data": {
+          "_batch_exec": true,
+          "all_items": [
+            "a",
+            2,
+            {
+              "k": "v"
+            },
+            null,
+            "e"
+          ],
+          "batch_index": 7,
+          "batch_size": 2,
+          "child_exec_id": "exec-1/sub/map1/lease-1/7",
+          "items": [
+            "a",
+            2,
+            {
+              "k": "v"
+            },
+            null
+          ],
+          "parent_activation_id": 4,
+          "parent_attempt": 2,
+          "parent_auto_depth": 5,
+          "parent_exec_id": "exec-1",
+          "parent_issued_at": "2026-10-26T00:30:15.123456789Z",
+          "parent_lease_id": "lease-1",
+          "parent_lease_token": "token-1",
+          "parent_namespace": "tenant-b",
+          "parent_node": "map1",
+          "parent_node_idx": 3
+        }
+      }
+    }
+  },
+  {
+    "name": "all_items absent when data items is not []any",
+    "activation_id": 4,
+    "auto_depth": 5,
+    "task": {
+      "execution_id": "exec-1",
+      "node_name": "map1/_batch/8",
+      "node_idx": 3,
+      "type": 4,
+      "payload": {
+        "Triggered": 0,
+        "Name": "",
+        "Data": {
+          "_batch_exec": true,
+          "batch_index": 8,
+          "batch_size": 2,
+          "child_exec_id": "exec-1/sub/map1/lease-1/8",
+          "items": [
+            "a",
+            2,
+            {
+              "k": "v"
+            },
+            null
+          ],
+          "parent_activation_id": 4,
+          "parent_attempt": 2,
+          "parent_auto_depth": 5,
+          "parent_exec_id": "exec-1",
+          "parent_issued_at": "2026-10-26T00:30:15.123456789Z",
+          "parent_lease_id": "lease-1",
+          "parent_lease_token": "token-1",
+          "parent_namespace": "tenant-b",
+          "parent_node": "map1",
+          "parent_node_idx": 3
+        }
+      }
+    }
+  },
+  {
+    "name": "nil batch items, empty data",
+    "activation_id": 4,
+    "auto_depth": 5,
+    "task": {
+      "execution_id": "exec-1",
+      "node_name": "map1/_batch/9",
+      "node_idx": 3,
+      "type": 4,
+      "payload": {
+        "Triggered": 0,
+        "Name": "",
+        "Data": {
+          "_batch_exec": true,
+          "batch_index": 9,
+          "child_exec_id": "exec-1/sub/map1/lease-1/9",
+          "items": null,
+          "parent_activation_id": 4,
+          "parent_attempt": 2,
+          "parent_auto_depth": 5,
+          "parent_exec_id": "exec-1",
+          "parent_lease_id": "lease-1",
+          "parent_lease_token": "token-1",
+          "parent_node": "map1",
+          "parent_node_idx": 3
+        }
+      }
+    }
+  }
+]

@@ -129,6 +129,11 @@ type Store struct {
 	// (dead-letter listings are already operator-scoped); it only prevents
 	// accidental cross-execution or stale-cursor replay.
 	cursorKey []byte
+
+	// blob is the blob store ExternalizeItems writes to and ResolveItems reads
+	// from. It stays nil until ConfigureBlob runs, and a nil blob leaves every
+	// code path exactly as it was. See blob.go.
+	blob atomic.Pointer[blobRuntime]
 }
 
 // Option configures a Store at construction time.

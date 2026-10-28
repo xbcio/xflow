@@ -22,6 +22,49 @@ type Observer interface {
 	OnEnqueue(op string, elapsed time.Duration, err error)
 }
 
+// ProduceErrorObserver is an optional extension of Observer. A transport that
+// can classify its own produce failures calls OnProduceError, once per failed
+// enqueue, with a kind from a small fixed vocabulary that the transport
+// documents; an Observer that does not implement it is simply not told.
+//
+// It is a separate method, not a richer err handed to OnEnqueue, because the
+// classification lives inside the transport and the error OnEnqueue receives is
+// the one the caller gets back: wrapping it to carry a label would change what
+// observers and callers compare against. The parameter is a primitive so a
+// metrics adapter outside this internal package can implement it without
+// importing a backend provider. Implementations must be non-blocking, and must
+// treat a kind they do not know as unknown, never as a new label value.
+type ProduceErrorObserver interface {
+	OnProduceError(kind string)
+}
+
+// KafkaStatsObserver is an optional extension of Observer for the Kafka
+// transport: its consumer calls it on the ConsumerConfig.StatsInterval while
+// it runs. It is separate from StatsObserver on purpose. Kafka's lag counts
+// records the group has not committed yet, per partition, and a retry is a
+// record on the delay topic rather than a retry-set entry, so neither maps onto
+// the pending/active/retry/oldest-age sample an alert built for Asynq reads.
+// The parameters are primitives for the same reason as ProduceErrorObserver.
+//
+// Every runner of a deployment consumes the same groups and so reports the same
+// numbers; a gauge written by all of them just takes the latest equal value.
+// Implementations must be non-blocking. A sample that cannot be read is not
+// reported: a missing sample means "not measured", never zero.
+type KafkaStatsObserver interface {
+	// OnKafkaLag reports the lag of the consumer group of one consumed topic:
+	// the sum over its partitions of the log end offset minus the offset the
+	// group has committed, so records fetched but not yet handled still count.
+	// role is "default", "batch" or "delay". A partition the group has not
+	// committed on is counted from where its reader would start (the first
+	// retained offset, or the end under StartFromLatest).
+	OnKafkaLag(role string, lag int64)
+	// OnKafkaDLQDepth reports how many records the dead-letter topic holds now:
+	// the sum over its partitions of end minus first retained offset. Retention
+	// shrinks it, so it counts the dead letters still visible, not all that ever
+	// arrived.
+	OnKafkaDLQDepth(depth int64)
+}
+
 // TaskHandler processes a single dequeued task. It is supplied by the backend
 // (typically the embedded execution dispatcher) and invoked by a Transport's
 // consumer loop for every delivered task.

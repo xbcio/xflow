@@ -106,6 +106,34 @@ type serverConfig struct {
 	redisSentinelPassword string
 	redisDB               int
 	redisTLS              bool
+	// kafka* select the optional Kafka task transport (see buildKafkaConfig).
+	// All zero means Asynq, the default. kafkaSASLPassword is the flag value;
+	// XFLOW_KAFKA_SASL_PASSWORD overrides it and is read at parse time, never
+	// stored in a flag default or printed. kafkaPartitions and
+	// kafkaReplicationFactor have no default on purpose: they are required with
+	// kafkaCreateTopics and an error otherwise.
+	kafkaBrokers           string
+	kafkaTLS               bool
+	kafkaSASLMechanism     string
+	kafkaSASLUsername      string
+	kafkaSASLPassword      string
+	kafkaCreateTopics      bool
+	kafkaPartitions        int
+	kafkaReplicationFactor int
+	// kafka is the validated transport configuration built from the kafka*
+	// fields by parseServerConfig; nil selects Asynq.
+	kafka *distributed.KafkaConfig
+	// blob* select the optional blob layer (see buildBlobConfig). Only blobDir
+	// switches it on; the rest tune it. blobGCGrace and blobGCBatch carry
+	// non-zero flag defaults because the library has none, so blobRequested
+	// compares them with those defaults instead of with zero.
+	blobDir             string
+	blobInlineMax       int
+	blobEnableRefWrites bool
+	blobGCGrace         time.Duration
+	blobGCBatch         int
+	blobGCInterval      time.Duration
+	blobCompress        bool
 	// authPolicy is the path to runners.yaml. Empty means DisabledAuthenticator
 	// (dev / MVP behavior).
 	authPolicy string
@@ -267,6 +295,21 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	fs.StringVar(&cfg.redisSentinelPassword, "redis-sentinel-password", "", "Redis sentinel password; falls back to --redis-password if empty")
 	fs.IntVar(&cfg.redisDB, "redis-db", 0, "Redis logical database (single/sentinel)")
 	fs.BoolVar(&cfg.redisTLS, "redis-tls", false, "Enable TLS for Redis connections")
+	fs.StringVar(&cfg.kafkaBrokers, "kafka-brokers", "", "Comma-separated Kafka bootstrap brokers (host:port). Setting any --kafka-* flag carries tasks over Kafka instead of Asynq and needs --redis or --redis-mode (Redis stays the scheduling authority). Every xflow-server of one deployment must choose the same transport; Asynq backlog is not migrated")
+	fs.BoolVar(&cfg.kafkaTLS, "kafka-tls", false, "Encrypt Kafka broker connections with TLS, verified against the system root CAs")
+	fs.StringVar(&cfg.kafkaSASLMechanism, "kafka-sasl-mechanism", "", "Kafka SASL mechanism: plain|scram-sha-256|scram-sha-512 (empty disables SASL)")
+	fs.StringVar(&cfg.kafkaSASLUsername, "kafka-sasl-username", "", "Kafka SASL username")
+	fs.StringVar(&cfg.kafkaSASLPassword, "kafka-sasl-password", "", "Kafka SASL password. Prefer the "+envKafkaSASLPassword+" environment variable, which takes precedence: a flag value shows in the process list")
+	fs.BoolVar(&cfg.kafkaCreateTopics, "kafka-create-topics", false, "Create the deployment's Kafka topics at startup when missing; needs --kafka-partitions and --kafka-replication-factor. Otherwise the topics must already exist")
+	fs.IntVar(&cfg.kafkaPartitions, "kafka-partitions", 0, "Partitions of each topic --kafka-create-topics creates (required with it, an error without it)")
+	fs.IntVar(&cfg.kafkaReplicationFactor, "kafka-replication-factor", 0, "Replication factor of each topic --kafka-create-topics creates (required with it, an error without it)")
+	fs.StringVar(&cfg.blobDir, "blob-dir", "", "Directory of the blob store; setting it enables the blob layer for large batch payloads. Needs --mysql-dsn (blob metadata) and a Redis backend. With more than one xflow-server every replica must mount the same shared volume at this path")
+	fs.IntVar(&cfg.blobInlineMax, "blob-inline-max", 0, "Largest encoded payload in bytes kept inline instead of in the blob store (0 = library default, 64 KiB); needs --blob-dir")
+	fs.BoolVar(&cfg.blobEnableRefWrites, "blob-enable-ref-writes", false, "Write new large payloads to the blob store, which makes them Refs. A version that does not know Refs silently loses that data, so upgrade EVERY replica to a Ref-aware version before enabling this and never roll back afterwards. Without it the layer only reads existing Refs; needs --blob-dir")
+	fs.DurationVar(&cfg.blobGCGrace, "blob-gc-grace", defaultBlobGCGrace, "How long an unreferenced blob is kept before the collector may delete it (must be positive); needs --blob-dir")
+	fs.IntVar(&cfg.blobGCBatch, "blob-gc-batch", defaultBlobGCBatch, "Blobs one collection pass examines at most (must be positive); needs --blob-dir")
+	fs.DurationVar(&cfg.blobGCInterval, "blob-gc-interval", 0, "Wait between collection passes (0 = the collection loop's own default); needs --blob-dir")
+	fs.BoolVar(&cfg.blobCompress, "blob-compress", false, "Compress blobs with zstd when that makes them smaller; needs --blob-dir")
 	fs.BoolVar(&cfg.memory, "memory", false, "Use in-memory backend")
 	fs.IntVar(&cfg.concurrency, "concurrency", cfg.concurrency, "Queue consumer concurrency")
 	fs.IntVar(&cfg.outboxDiscoveryPage, "outbox-discovery-page", 0,
@@ -349,6 +392,7 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	if err := applyAPILimitEnv(&cfg.apiLimits, os.LookupEnv); err != nil {
 		return serverConfig{}, err
 	}
+	applyKafkaEnv(&cfg, os.LookupEnv)
 	if err := applyQueueEnv(&cfg, os.LookupEnv); err != nil {
 		return serverConfig{}, err
 	}
@@ -444,6 +488,23 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	}
 	if cfg.apiLimits.Mode == apiserver.APIRateLimitModeRedis && cfg.memory {
 		return serverConfig{}, fmt.Errorf("--api-rate-limit-mode=redis needs a Redis backend (--redis or --redis-mode); it cannot share a rate through --memory")
+	}
+	// Kafka only carries the tasks; Redis stays the scheduling authority, and the
+	// in-memory backend has no task transport to replace. Refuse here, before
+	// anything connects, instead of letting the setting be ignored.
+	if cfg.kafkaRequested() && cfg.memory {
+		return serverConfig{}, fmt.Errorf("--kafka-* settings need a Redis backend (--redis or --redis-mode); they cannot take effect with --memory or without Redis")
+	}
+	kafkaCfg, err := buildKafkaConfig(cfg)
+	if err != nil {
+		return serverConfig{}, err
+	}
+	cfg.kafka = kafkaCfg
+	// The blob layer keeps bytes on a shared volume and metadata in the
+	// database, and it rides on the Redis-backed backend. Refuse any selection
+	// that cannot work here, before anything opens.
+	if err := validateBlobFlags(cfg); err != nil {
+		return serverConfig{}, err
 	}
 	return cfg, nil
 }
@@ -836,6 +897,69 @@ func buildRedisConfig(cfg serverConfig) (*distributed.RedisConfig, error) {
 	return rc, nil
 }
 
+// envKafkaSASLPassword names the environment variable that supplies the Kafka
+// SASL password. It overrides --kafka-sasl-password when non-empty, the same
+// precedence XFLOW_MASTER_KEY has over --master-key-file: a secret belongs in the
+// environment, not in an argv that every local user can read.
+const envKafkaSASLPassword = "XFLOW_KAFKA_SASL_PASSWORD"
+
+// applyKafkaEnv overlays the Kafka SASL password environment variable onto cfg.
+func applyKafkaEnv(cfg *serverConfig, lookup func(string) (string, bool)) {
+	if v, ok := lookup(envKafkaSASLPassword); ok && v != "" {
+		cfg.kafkaSASLPassword = v
+	}
+}
+
+// kafkaRequested reports whether any Kafka setting was given. The password
+// counts, so a credential supplied without brokers is reported as a
+// misconfiguration instead of silently leaving the deployment on Asynq.
+func (c serverConfig) kafkaRequested() bool {
+	return c.kafkaBrokers != "" || c.kafkaTLS || c.kafkaSASLMechanism != "" ||
+		c.kafkaSASLUsername != "" || c.kafkaSASLPassword != "" ||
+		c.kafkaCreateTopics || c.kafkaPartitions != 0 || c.kafkaReplicationFactor != 0
+}
+
+// buildKafkaConfig turns the --kafka-* flags into the transport configuration,
+// or nil when none was given (Asynq stays the transport). It validates with the
+// same rules distributed.New applies, so a bad setting fails at flag parsing,
+// before any connection is opened. Nothing is defaulted here: partitions and
+// the replication factor stay as given, and Validate rejects them when they are
+// missing with --kafka-create-topics or present without it.
+//
+// The SASL password is scrubbed from a Validate error: the SCRAM mechanism
+// builder quotes the password in its SASLprep failure, and a startup error ends
+// up in logs.
+func buildKafkaConfig(cfg serverConfig) (*distributed.KafkaConfig, error) {
+	if !cfg.kafkaRequested() {
+		return nil, nil
+	}
+	if cfg.kafkaBrokers == "" {
+		return nil, fmt.Errorf("--kafka-brokers is required when any other --kafka-* setting or %s is given", envKafkaSASLPassword)
+	}
+	kc := &distributed.KafkaConfig{
+		Brokers:           splitAddrs(cfg.kafkaBrokers),
+		SASLMechanism:     cfg.kafkaSASLMechanism,
+		SASLUsername:      cfg.kafkaSASLUsername,
+		SASLPassword:      cfg.kafkaSASLPassword,
+		CreateTopics:      cfg.kafkaCreateTopics,
+		Partitions:        cfg.kafkaPartitions,
+		ReplicationFactor: cfg.kafkaReplicationFactor,
+	}
+	if cfg.kafkaTLS {
+		// A nil RootCAs verifies against the system roots, and the broker name
+		// is taken from each broker address.
+		kc.TLS = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	if err := kc.Validate(); err != nil {
+		msg := err.Error()
+		if cfg.kafkaSASLPassword != "" {
+			msg = strings.ReplaceAll(msg, cfg.kafkaSASLPassword, "[redacted]")
+		}
+		return nil, fmt.Errorf("kafka flags: %s", msg)
+	}
+	return kc, nil
+}
+
 func splitAddrs(s string) []string {
 	parts := strings.Split(s, ",")
 	addrs := make([]string, 0, len(parts))
@@ -956,6 +1080,11 @@ func buildServerOptions(cfg serverConfig, deps serverDeps) []xflowsdk.ServerOpti
 	}
 	if cfg.enableRunnerMetricsProxy {
 		serverOpts = append(serverOpts, xflowsdk.WithServerRunnerMetricsProxy())
+	}
+	// Conditional because the option takes a value: nil (no --kafka-* flag) must
+	// leave the transport at Asynq. parseServerConfig already validated it.
+	if cfg.kafka != nil {
+		serverOpts = append(serverOpts, xflowsdk.WithServerKafkaQueue(*cfg.kafka))
 	}
 	// The drift repair worker is opt-in because it writes to the durable
 	// projection. The other knobs are forwarded only with it: passing them
@@ -1175,6 +1304,11 @@ func runServer(ctx context.Context, cfg serverConfig) error {
 	} else if cfg.redis != "" {
 		log.Printf("xflow-server: using distributed backend (redis=%s)", cfg.redis)
 	}
+	if cfg.kafka != nil {
+		// Never log the credentials: brokers are addresses, the rest are flags.
+		log.Printf("xflow-server: carrying tasks over Kafka (brokers=%d tls=%v sasl=%q create_topics=%v)",
+			len(cfg.kafka.Brokers), cfg.kafka.TLS != nil, cfg.kafka.SASLMechanism, cfg.kafka.CreateTopics)
+	}
 
 	// registrationCodeStore / issuedIdentityStore back the runner enrollment
 	// endpoint. Both are constructed here, in one place, so there is a single
@@ -1222,6 +1356,11 @@ func runServer(ctx context.Context, cfg serverConfig) error {
 		durableAudit:          durableAudit,
 		supplyAtRest:          supplyAtRest,
 	})
+	// The blob option needs enrollDB, which exists only here: buildServerOptions
+	// runs from tests with no database, so the option is appended after it.
+	if serverOpts, err = appendBlobOption(serverOpts, cfg, enrollDB); err != nil {
+		return fmt.Errorf("blob store: %w", err)
+	}
 
 	srv, err := xflowsdk.NewServer(xflowsdk.ServerConfig{
 		RedisAddr:   redisAddr, // legacy single-node path

@@ -80,6 +80,18 @@ type OutboxMetricsSnapshot struct {
 	//
 	// A store that cannot answer it reports zero.
 	Ready int
+	// DecodeFailures is how many pending outbox entry bodies the scan could not
+	// decode while looking for the oldest creation time.
+	//
+	// The entry envelope is plain JSON written by this package, so in normal
+	// operation this is always zero. It guards against a future change to the
+	// envelope format that older readers (or a mixed-version fleet) cannot parse,
+	// which would otherwise silently shrink OldestPendingAt. An entry that fails
+	// to decode is still counted in Pending, but is excluded from the age
+	// computation, so OldestPendingAt can under-report while this is non-zero.
+	//
+	// A store that cannot answer it reports zero.
+	DecodeFailures int
 }
 
 // OutboxFailureRecorder is an optional StateStore capability that durably

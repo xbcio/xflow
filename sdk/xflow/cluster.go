@@ -40,6 +40,37 @@ type ClusterConfig struct {
 	// ship the code everywhere first and enable this afterwards, and disabling it
 	// again needs no migration. See rstate/output_codec.go.
 	OutputCompression bool
+
+	// Kafka selects Kafka as the task transport instead of the default Asynq.
+	// Nil (the default) keeps Asynq, exactly as before.
+	//
+	// Redis stays the scheduling authority — execution state, the durable
+	// outbox and task leases all remain there, and Kafka only carries the
+	// tasks — so RedisAddr is still required. Every process of one deployment
+	// (API pods, worker pods, the server) must select the same transport:
+	// a producer on one and a consumer on the other never meet. Tasks already
+	// waiting in Asynq queues are not migrated to Kafka when a running
+	// deployment switches over; drain them first.
+	//
+	// The configuration is validated, and the deployment's topics are checked
+	// (and created when KafkaConfig.CreateTopics is set), inside NewCluster; an
+	// invalid configuration or an unreachable broker makes it return an error.
+	// See distributed.WithKafkaQueue.
+	Kafka *distributed.KafkaConfig
+
+	// Blob turns on the blob layer: batch items above Blob.InlineMax are kept in
+	// Blob.Store instead of in Redis, and a background collector reclaims blobs
+	// nothing references any more. Nil (the default) leaves the backend exactly
+	// as before.
+	//
+	// The blob layer is part of the durable mode, so it needs a persistent store
+	// (ClusterConfig.Store, or xflow.WithStore); NewCluster returns an error
+	// without one. Blob.Store and Blob.Index are built by the caller, and
+	// Blob.Enabled stays false unless set: while it is false the backend only
+	// reads references that already exist and never stores a payload. The
+	// collector runs only in consuming processes, so a deployment needs at least
+	// one with DisableConsumer false. See distributed.WithBlobStore.
+	Blob *distributed.BlobConfig
 }
 
 // NewCluster creates a distributed engine backed by Redis/Asynq and an optional
@@ -85,6 +116,12 @@ func NewCluster(clusterCfg ClusterConfig, opts ...Option) (*Engine, error) {
 	}
 	if cfg.executionMode == ExecutionModeTransient {
 		asynqOpts = append(asynqOpts, distributed.WithTransientMode(cfg.transientTTL, cfg.transientCompletionTTL))
+	}
+	if clusterCfg.Kafka != nil {
+		asynqOpts = append(asynqOpts, distributed.WithKafkaQueue(*clusterCfg.Kafka))
+	}
+	if clusterCfg.Blob != nil {
+		asynqOpts = append(asynqOpts, distributed.WithBlobStore(*clusterCfg.Blob))
 	}
 	if pool := resolveResourcePool(cfg); pool != nil && !clusterCfg.DisableConsumer {
 		// Only worker pods need a pool; API-only pods don't dispatch handlers.

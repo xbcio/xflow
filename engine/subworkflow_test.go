@@ -36,6 +36,14 @@ func (s *subWorkflowCapableState) GetSubWorkflowLink(context.Context, types.Exec
 	return SubWorkflowLink{}, false, errSubWorkflowDoubleUnused
 }
 
+func (s *subWorkflowCapableState) RecordSubWorkflowConclusion(context.Context, types.ExecutionID, string, SubWorkflowConclusion) error {
+	return errSubWorkflowDoubleUnused
+}
+
+func (s *subWorkflowCapableState) GetSubWorkflowConclusion(context.Context, types.ExecutionID, string, types.ExecutionID) (SubWorkflowConclusion, bool, error) {
+	return SubWorkflowConclusion{}, false, errSubWorkflowDoubleUnused
+}
+
 // subWorkflowChildGraph compiles the minimal child target: start -> work.
 func subWorkflowChildGraph(t *testing.T) *graph.Graph {
 	t.Helper()

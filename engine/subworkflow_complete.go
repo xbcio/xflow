@@ -12,6 +12,10 @@ import (
 // subWorkflowConclusion translates a concluded child execution into the parent
 // node's verdict.
 //
+// It works on the recorded SubWorkflowConclusion rather than the child's
+// snapshot, so a live child and a conclusion read back after the child's records
+// expired are judged by exactly one mapping.
+//
 // The mapping is deliberately total over the terminal statuses and partial
 // elsewhere: ok=false hands the caller "not concluded yet" (running, queued,
 // paused, canceling) so the wait stands and nothing is committed. A canceled
@@ -19,7 +23,7 @@ import (
 // did not deliver its result, and the way to recover is the node's own retry or
 // on_error — unless the CANCEL came from the parent's own cancel cascade, which
 // the completion is skipped for before it ever reaches this mapping.
-func subWorkflowConclusion(child *ExecutionSnapshot) (types.NodeStatus, string, bool) {
+func subWorkflowConclusion(child SubWorkflowConclusion) (types.NodeStatus, string, bool) {
 	switch child.Status {
 	case types.ExecutionStatusSuccess:
 		return types.NodeStatusSuccess, "", true
@@ -36,12 +40,77 @@ func subWorkflowConclusion(child *ExecutionSnapshot) (types.NodeStatus, string, 
 // childExecutionReason renders the node failure message: the child's terminal
 // state and its identity, so an operator reading the parent's node error can
 // tell which execution to go look at.
-func childExecutionReason(child *ExecutionSnapshot, outcome string) string {
-	reason := fmt.Sprintf("child execution %q %s", child.ID, outcome)
+func childExecutionReason(child SubWorkflowConclusion, outcome string) string {
+	reason := fmt.Sprintf("child execution %q %s", child.ChildExecutionID, outcome)
 	if child.Error != "" {
 		reason += ": " + child.Error
 	}
 	return reason
+}
+
+// resolveSubWorkflowConclusion answers how the child ended, for a caller that
+// is about to conclude the parent node from it. ok=false means the child has not
+// concluded and nothing was recorded for it.
+//
+// A child whose record exists is read live and, when terminal, its conclusion is
+// RECORDED in the parent's slot before it is returned. That order is the whole
+// guarantee: the caller commits the parent node only from a conclusion that is
+// already durable, so there is no instant at which the parent has acted on the
+// child's result while neither the child's record nor a conclusion can be read
+// back — the instant a rebuild-and-rerun would slip through. If the record
+// fails, the error is returned and the caller must not commit; the wait's
+// reclaim redelivery retries, and it costs latency, not correctness.
+//
+// A child whose record is gone falls back to the recorded conclusion. Absent
+// both, there is nothing to conclude from (and nothing this path may invent): a
+// link written before conclusions were recorded behaves exactly as it did.
+func (e *Engine) resolveSubWorkflowConclusion(ctx context.Context, parentID types.ExecutionID, nodeName string, childID types.ExecutionID) (SubWorkflowConclusion, bool, error) {
+	store, ok := e.state.(SubWorkflowLinkStore)
+	if !ok {
+		// Unreachable: the plan checked the capability before the child existed.
+		return SubWorkflowConclusion{}, false, fmt.Errorf("state store does not implement SubWorkflowLinkStore: %w", ErrSubWorkflowUnsupported)
+	}
+	// recorded is the fallback for a child whose records are gone: the
+	// conclusion written while they existed is the only thing left to conclude
+	// from.
+	recorded := func() (SubWorkflowConclusion, bool, error) {
+		conclusion, found, err := store.GetSubWorkflowConclusion(ctx, parentID, nodeName, childID)
+		if err != nil {
+			return SubWorkflowConclusion{}, false, fmt.Errorf("read sub-workflow conclusion %q/%q for child %q: %w", parentID, nodeName, childID, err)
+		}
+		return conclusion, found, nil
+	}
+	snap, err := e.state.GetExecution(ctx, childID)
+	if err != nil {
+		return SubWorkflowConclusion{}, false, fmt.Errorf("read child execution %q: %w", childID, err)
+	}
+	if snap == nil {
+		// The child's records are gone — retention expired them between its
+		// terminal transition and this delivery.
+		return recorded()
+	}
+	conclusion := SubWorkflowConclusion{ChildExecutionID: childID, Status: snap.Status, Error: snap.Error}
+	if _, _, concluded := subWorkflowConclusion(conclusion); !concluded {
+		return SubWorkflowConclusion{}, false, nil
+	}
+	if snap.Status == types.ExecutionStatusSuccess {
+		// Only a success carries output into the parent. It is read BEFORE the
+		// record because it must be part of it: the child's nodes are about to
+		// become unreadable, and the node's `output:` mapping needs them.
+		conclusion.Output, err = e.subWorkflowChildOutput(ctx, childID)
+		if errors.Is(err, ErrExecutionNotFound) {
+			// The records expired between the status read and the output read —
+			// the same "gone" answer, reached a moment later.
+			return recorded()
+		}
+		if err != nil {
+			return SubWorkflowConclusion{}, false, err
+		}
+	}
+	if err := store.RecordSubWorkflowConclusion(ctx, parentID, nodeName, conclusion); err != nil {
+		return SubWorkflowConclusion{}, false, fmt.Errorf("record sub-workflow conclusion %q/%q for child %q: %w", parentID, nodeName, childID, err)
+	}
+	return conclusion, true, nil
 }
 
 // completeSubWorkflowNode concludes a parked parent node from the child the
@@ -100,24 +169,19 @@ func (e *Engine) completeSubWorkflowNode(ctx context.Context, parentID types.Exe
 	if !found || link.ChildExecutionID != childID {
 		return false, nil
 	}
-	child, err := e.state.GetExecution(ctx, childID)
+	conclusion, concluded, err := e.resolveSubWorkflowConclusion(ctx, parentID, nodeName, childID)
 	if err != nil {
-		return false, fmt.Errorf("read child execution %q: %w", childID, err)
+		return false, err
 	}
-	if child == nil {
-		// The child's records are gone — retention expired them between its
-		// terminal transition and this delivery. Nothing can be concluded from
-		// a result that no longer exists; the wait's lease still stands, and its
-		// reclaim redelivery re-creates the child under the same derived id
-		// rather than minting a second one.
-		return false, nil
-	}
-	status, reason, concluded := subWorkflowConclusion(child)
 	if !concluded {
+		// Not concluded yet, and nothing recorded: the wait stands. A child whose
+		// records are gone AND whose conclusion was never recorded (a link from
+		// before conclusions were recorded) lands here too; the wait's lease still
+		// stands and its reclaim redelivery decides it.
 		return false, nil
 	}
 	lease := subWorkflowLinkLease(parentID, nodeName, idx, g, link)
-	return true, e.commitSubWorkflowConclusion(ctx, lease, g, g.NodeAt(idx), childID, status, reason)
+	return true, e.commitSubWorkflowConclusion(ctx, lease, g, g.NodeAt(idx), conclusion)
 }
 
 // concludeTerminalChild is the reclaim side of the completion: a redelivery
@@ -133,18 +197,14 @@ func (e *Engine) completeSubWorkflowNode(ctx context.Context, parentID types.Exe
 // that predates the current claim would be refused forever, livelocking the
 // node between reclaims.
 func (e *Engine) concludeTerminalChild(ctx context.Context, lease *TaskLease, g *graph.Graph, meta graph.NodeMeta, child subWorkflowChild) (bool, error) {
-	snap, err := e.state.GetExecution(ctx, child.ID)
+	conclusion, concluded, err := e.resolveSubWorkflowConclusion(ctx, lease.Task.ExecutionID, lease.Task.NodeName, child.ID)
 	if err != nil {
-		return false, fmt.Errorf("read child execution %q: %w", child.ID, err)
+		return false, err
 	}
-	if snap == nil {
-		return false, nil
-	}
-	status, reason, concluded := subWorkflowConclusion(snap)
 	if !concluded {
 		return false, nil
 	}
-	return true, e.commitSubWorkflowConclusion(ctx, lease, g, meta, child.ID, status, reason)
+	return true, e.commitSubWorkflowConclusion(ctx, lease, g, meta, conclusion)
 }
 
 // commitSubWorkflowConclusion applies the child's verdict to the parent node
@@ -158,10 +218,11 @@ func (e *Engine) concludeTerminalChild(ctx context.Context, lease *TaskLease, g 
 // commitLegacyNodeWithClassification), not the acyclic-only ones: a parent graph
 // may be cyclic, and those helpers are the ones that redirect by graph shape
 // instead of assuming it.
-func (e *Engine) commitSubWorkflowConclusion(ctx context.Context, lease *TaskLease, g *graph.Graph, meta graph.NodeMeta, childID types.ExecutionID, status types.NodeStatus, reason string) error {
+func (e *Engine) commitSubWorkflowConclusion(ctx context.Context, lease *TaskLease, g *graph.Graph, meta graph.NodeMeta, conclusion SubWorkflowConclusion) error {
 	privateOutput := privateOutputForTask(g, &lease.Task)
+	status, reason, _ := subWorkflowConclusion(conclusion)
 	if status == types.NodeStatusSuccess {
-		output, err := e.subWorkflowNodeOutput(ctx, meta, childID)
+		output, err := subWorkflowNodeOutput(meta, conclusion.Output)
 		if err != nil {
 			// A declared output map that cannot be evaluated is this node's
 			// failure, not a crash: routing it through the failure pipeline
@@ -225,18 +286,12 @@ func subWorkflowLinkLease(parentID types.ExecutionID, nodeName string, nodeIdx i
 	}
 }
 
-// subWorkflowNodeOutput renders the parent node's output from the child
-// execution.
-//
-// The default is the child's public node-output map — node name to output, the
-// same shape the SDK reports as Result.Output — built through Inspect so the
-// privacy projection is the one the audit surface applies (a private node's
-// output is withheld rather than leaked through the parent). A declared
-// `output:` map replaces it, evaluated with $child as its only root: the
-// mapping is a pure function of the child's public result, and giving it a
-// wider environment would make the same expression mean different things
-// depending on where in the parent the node happened to sit.
-func (e *Engine) subWorkflowNodeOutput(ctx context.Context, meta graph.NodeMeta, childID types.ExecutionID) (map[string]any, error) {
+// subWorkflowChildOutput reads the child's public node-output map — node name
+// to output, the same shape the SDK reports as Result.Output — built through
+// Inspect so the privacy projection is the one the audit surface applies (a
+// private node's output is withheld rather than leaked through the parent). nil
+// when no node produced output.
+func (e *Engine) subWorkflowChildOutput(ctx context.Context, childID types.ExecutionID) (map[string]any, error) {
 	detail, err := e.Inspect(ctx, childID)
 	if err != nil {
 		return nil, fmt.Errorf("read child execution result %q: %w", childID, err)
@@ -250,8 +305,21 @@ func (e *Engine) subWorkflowNodeOutput(ctx context.Context, meta graph.NodeMeta,
 	if len(child) == 0 {
 		// Absent rather than empty, matching the SDK's result shape: a child
 		// whose nodes produced nothing has no output map, not an empty one.
-		child = nil
+		return nil, nil
 	}
+	return child, nil
+}
+
+// subWorkflowNodeOutput renders the parent node's output from the child's
+// public output map.
+//
+// The default is that map itself. A declared `output:` map replaces it,
+// evaluated with $child as its only root: the mapping is a pure function of the
+// child's public result, and giving it a wider environment would make the same
+// expression mean different things depending on where in the parent the node
+// happened to sit. Being pure is also what lets a recorded conclusion stand in
+// for the live child — the same map in gives the same node result out.
+func subWorkflowNodeOutput(meta graph.NodeMeta, child map[string]any) (map[string]any, error) {
 	raw, present := meta.Parameters["output"]
 	if !present || raw == nil {
 		return child, nil

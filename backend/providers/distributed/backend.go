@@ -35,6 +35,21 @@ const defaultLeaderLeaseTTL = 15 * time.Second
 // code can implement it without importing a concrete broker package.
 type QueueObserver = queue.Observer
 
+// QueueProduceErrorObserver is the optional extension of QueueObserver that a
+// transport able to classify its own produce failures calls once per failed
+// enqueue, with a kind from a fixed vocabulary. It is an alias for
+// queue.ProduceErrorObserver, so metrics code can implement it without
+// importing a concrete broker package. Only the Kafka transport reports kinds.
+type QueueProduceErrorObserver = queue.ProduceErrorObserver
+
+// QueueKafkaStatsObserver is the optional extension of QueueObserver that the
+// Kafka transport's consumer calls on the stats interval with consumer group lag
+// and dead-letter depth. It is an alias for queue.KafkaStatsObserver, so metrics
+// code can implement it without importing a concrete broker package. Kafka's
+// numbers are kept apart from QueueStatsObserver, whose Asynq pending/active/
+// retry samples they do not match.
+type QueueKafkaStatsObserver = queue.KafkaStatsObserver
+
 // QueueStatsObserver receives periodic queue-depth samples from a consumer's
 // queues (pending/active/retry counts and oldest-pending age). It is a
 // technology-neutral alias for queue.StatsObserver, kept structural so metrics
@@ -93,6 +108,8 @@ type config struct {
 	transientTTL           time.Duration
 	transientCompletionTTL time.Duration
 	transport              queue.Transport
+	kafkaQueue             *KafkaConfig
+	blob                   *BlobConfig
 	queueObserver          queue.Observer
 	queueStatsObserver     queue.StatsObserver
 	queueStatsInterval     time.Duration
@@ -272,6 +289,12 @@ func WithShutdownObserver(obs ShutdownObserver) Option {
 // WithTransport injects a custom task transport, replacing the default Asynq
 // transport entirely. This is the seam that makes the queue technology
 // pluggable: a broker only has to implement queue.Transport.
+//
+// The injected transport owns its queue names, so the per-deployment queue
+// separation of WithOwnedNamespaces does not apply to it; New logs a warning
+// when a dedicated deployment is combined with an injected transport. It is
+// mutually exclusive with WithKafkaQueue: giving both makes New return an error
+// instead of silently preferring one.
 func WithTransport(t queue.Transport) Option {
 	return func(c *config) {
 		if t != nil {
@@ -281,8 +304,9 @@ func WithTransport(t queue.Transport) Option {
 }
 
 // WithQueueObserver installs a producer-side enqueue observer on the default
-// Asynq transport. It is ignored when a custom transport is injected via
-// WithTransport (that transport carries its own observer wiring).
+// Asynq transport, or on the Kafka transport selected with WithKafkaQueue. It
+// is ignored when a custom transport is injected via WithTransport (that
+// transport carries its own observer wiring).
 func WithQueueObserver(obs QueueObserver) Option {
 	return func(c *config) {
 		if obs != nil {
@@ -305,7 +329,9 @@ func WithQueueStatsObserver(obs QueueStatsObserver) Option {
 }
 
 // WithQueueStatsInterval overrides how often the queue-depth observer is
-// sampled. Values <= 0 mean queue.DefaultStatsInterval.
+// sampled, and how often the Kafka transport samples consumer group lag and
+// dead-letter depth for an observer that implements QueueKafkaStatsObserver.
+// Values <= 0 mean queue.DefaultStatsInterval.
 func WithQueueStatsInterval(d time.Duration) Option {
 	return func(c *config) {
 		if d > 0 {
@@ -409,6 +435,10 @@ type Backend struct {
 	// outboxDiscoveryPage is the outbox dispatcher's per-drain discovery page;
 	// zero leaves engine.DefaultOutboxDiscoveryPage in place.
 	outboxDiscoveryPage int
+
+	// blob is the validated, defaulted blob configuration, or nil when the blob
+	// layer is off. The collection loop is built from it in bindHandler.
+	blob *BlobConfig
 }
 
 // State returns the StateStore implementation.
@@ -519,6 +549,17 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 	if err != nil {
 		return nil, fmt.Errorf("leader lock key: %w", err)
 	}
+	// An unusable transport selection (WithKafkaQueue together with
+	// WithTransport, or an invalid KafkaConfig) fails here, like the owned set,
+	// before any connection exists to release.
+	if err := validateKafkaSelection(cfg); err != nil {
+		return nil, err
+	}
+	// The blob selection is validated here for the same reason: an unusable one
+	// must not leave a Redis client behind.
+	if err := validateBlobSelection(cfg, db); err != nil {
+		return nil, err
+	}
 
 	var rdb redis.UniversalClient
 	if cfg.redisConfig != nil {
@@ -545,18 +586,43 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 	state.ConfigureTransient(cfg.transient, cfg.transientTTL, cfg.transientCompletionTTL)
 	state.ConfigureOutboxReadyIndex(cfg.outboxReadyIndex)
 	state.ConfigureOutputCompression(cfg.outputCompression)
+	if cfg.blob != nil {
+		// Defaults are filled once, here, and the filled copy is what the collector
+		// is later built from, so both sides of the grace contract see one value.
+		bc := cfg.blob.withDefaults()
+		cfg.blob = &bc
+		if err := state.ConfigureBlob(bc.stateConfig()); err != nil {
+			// No transport exists yet; rdb is the only thing to release.
+			_ = rdb.Close()
+			return nil, fmt.Errorf("distributed: configure blob: %w", err)
+		}
+	}
 
-	// Default to the Asynq transport; WithTransport can inject an alternative.
+	// Default to the Asynq transport. WithTransport injects an alternative, and
+	// WithKafkaQueue selects the built-in Kafka transport; the two are mutually
+	// exclusive (validateKafkaSelection), so at most one of them applies.
 	// If a RedisConfig was injected, map it to the corresponding asynq HA
 	// connection option (single/sentinel/cluster) and use NewWithConnOpt.
 	// Otherwise keep the legacy single-address string path via New(redisAddr).
 	transport := cfg.transport
-	if transport != nil && deploymentSuffix != "" && cfg.logger != nil {
+	if cfg.transport != nil && deploymentSuffix != "" && cfg.logger != nil {
 		// An injected transport owns its own queue names, so the per-deployment
 		// queue separation cannot be applied to it. Leader lock and sweep scope
-		// still follow the owned set; queues do not.
+		// still follow the owned set; queues do not. The Kafka transport is not
+		// in this case: it derives its topic names from the same suffix.
 		cfg.logger.Warn("distributed backend: injected transport bypasses per-deployment queue separation",
 			"deployment", deploymentSuffix)
+	}
+	if cfg.kafkaQueue != nil {
+		kt, err := buildKafkaTransport(cfg, deploymentSuffix)
+		if err != nil {
+			// rdb has been Pinged successfully and is owned by this function
+			// until a Backend is returned; on failure it must be released. The
+			// Kafka transport has already closed itself.
+			_ = rdb.Close()
+			return nil, err
+		}
+		transport = kt
 	}
 	if transport == nil {
 		var topts []asynqtransport.Option
@@ -615,6 +681,8 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 		outboxDiscoveryPage: cfg.outboxDiscoveryPage,
 		queueStatsObserver:  cfg.queueStatsObserver,
 		queueStatsInterval:  cfg.queueStatsInterval,
+
+		blob: cfg.blob,
 	}, nil
 }
 
@@ -958,6 +1026,23 @@ func (b *Backend) bindHandler(eng *engine.Engine, handler func(context.Context, 
 		outboxDispatcher.Run(outboxCtx)
 	}()
 
+	// The blob collector is acquired after the outbox dispatcher, so it is released
+	// before it (see the rollback and stop paths). stopGC is a no-op when the blob
+	// layer is off.
+	stopGC := func() {}
+	if b.blob != nil {
+		run, err := buildBlobGC(*b.blob)
+		if err != nil {
+			cancelOutbox()
+			<-outboxDone
+			if stopConsumer != nil {
+				stopConsumer()
+			}
+			return nil, b.closeOwnedResources(fmt.Errorf("distributed: start blob gc: %w", err))
+		}
+		stopGC = startBlobGC(context.Background(), run, b.blob.gcOptions(b.logger))
+	}
+
 	// 3. Start the lease timeout monitor (durable only). Transient mode has no
 	//    suspend/timeout semantics, so the poll would be pure overhead.
 	var tm *timeout.Monitor
@@ -978,6 +1063,7 @@ func (b *Backend) bindHandler(eng *engine.Engine, handler func(context.Context, 
 				// dispatcher and wait, then stop consumer. The transport,
 				// Redis client, and ResourcePool are released via
 				// closeOwnedResources (mirroring the normal stop order).
+				stopGC()
 				if tm != nil {
 					tm.Stop()
 					<-tmDone
@@ -1027,6 +1113,7 @@ func (b *Backend) bindHandler(eng *engine.Engine, handler func(context.Context, 
 			if stopConsumer != nil {
 				stopConsumer()
 			}
+			stopGC()
 			cancelOutbox()
 			<-outboxDone
 			<-sweepDone

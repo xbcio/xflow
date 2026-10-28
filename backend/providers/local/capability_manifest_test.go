@@ -1,6 +1,7 @@
 package local
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/xbcio/xflow/backend/internal/statestoretest"
@@ -67,6 +68,13 @@ func memoryCapabilityManifest() *statestoretest.Manifest {
 func TestMemoryCapabilityManifest(t *testing.T) {
 	manifest := memoryCapabilityManifest()
 	manifest.Verify(t, New().State())
-	manifest.CheckSet(t, statestoretest.AllCapabilities()...)
+	// NamespacedOutboxLister is deliberately left out: the in-memory outbox is
+	// keyed by execution ID alone, so there is no namespace for discovery to
+	// report. The capability stays undeclared and its contract subtest reports
+	// CAPABILITY-SKIP rather than being given a partition it does not have.
+	expected := slices.DeleteFunc(statestoretest.AllCapabilities(), func(c statestoretest.Capability) bool {
+		return c == statestoretest.CapabilityNamespacedOutboxLister
+	})
+	manifest.CheckSet(t, expected...)
 	t.Logf("%s", manifest.Summary())
 }

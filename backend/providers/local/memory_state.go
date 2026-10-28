@@ -59,9 +59,14 @@ type memoryState struct {
 	// RevokeLease/ResetNodeForRetry: the link outlives the wait so a reclaimed
 	// redelivery resumes the same child, and a retry overwrites it when the
 	// next generation parks.
-	subWorkflowLinks map[string]*engine.SubWorkflowLink      // key: execID+"/"+nodeName
-	groupUnits       map[string]*groupUnitState              // key: "<execID>/<unitIdx>"
-	admissions       map[engine.AdmissionKey]*admissionEntry // trigger admission keys
+	subWorkflowLinks map[string]*engine.SubWorkflowLink // key: execID+"/"+nodeName
+	// subWorkflowConclusions is how each child ended, recorded in the parent's
+	// key space so it outlives the child's own records. Keyed per child
+	// (execID+"/"+nodeName+"/"+childID) so a retry's next generation never reads
+	// the previous generation's conclusion; cleared with the parent's records.
+	subWorkflowConclusions map[string]*engine.SubWorkflowConclusion
+	groupUnits             map[string]*groupUnitState              // key: "<execID>/<unitIdx>"
+	admissions             map[engine.AdmissionKey]*admissionEntry // trigger admission keys
 	// idempotency holds the claims of keyed submissions, keyed by the
 	// deterministic execution ID the key derives (engine.IdempotentStateStore).
 	idempotency map[types.ExecutionID]*idempotencyClaim
@@ -128,36 +133,37 @@ type execEntry struct {
 
 func newMemoryState() *memoryState {
 	return &memoryState{
-		executions:          make(map[types.ExecutionID]*execEntry),
-		nodes:               make(map[string]*engine.NodeSnapshot),
-		inDegrees:           make(map[string]int),
-		activeIns:           make(map[string]int),
-		remaining:           make(map[types.ExecutionID]int),
-		failed:              make(map[types.ExecutionID]int),
-		advanced:            make(map[string]bool),
-		scheduled:           make(map[string]string),
-		outbox:              make(map[types.ExecutionID]map[string]memoryOutboxEntry),
-		deadOutbox:          make(map[types.ExecutionID]map[string]memoryOutboxEntry),
-		replayReceipts:      make(map[types.ExecutionID]map[string]*memoryReplayReceipt),
-		replayEntryIdx:      make(map[types.ExecutionID]map[string]string),
-		outputs:             make(map[string]map[string]any),
-		privateOutputs:      make(map[string]bool),
-		suspended:           make(map[string]*types.SuspendSpec),
-		signals:             make(map[string]map[string]any),
-		signalSets:          make(map[string]map[string]map[string]any),
-		resumed:             make(map[string]bool),
-		subExecs:            make(map[string][]*engine.SubExecution),
-		subWorkflowLinks:    make(map[string]*engine.SubWorkflowLink),
-		groupUnits:          make(map[string]*groupUnitState),
-		doneCh:              make(map[types.ExecutionID]chan struct{}),
-		eventWatchers:       make(map[types.ExecutionID][]chan engine.ExecutionEvent),
-		cancelingSince:      make(map[types.ExecutionID]time.Time),
-		mirrorLocks:         make(map[types.ExecutionID]*execMirrorLock),
-		mirrorSkip:          make(map[types.ExecutionID]bool),
-		mirrorCreatePending: make(map[types.ExecutionID]bool),
-		mirrorConflict:      make(map[types.ExecutionID]bool),
-		rolledBack:          make(map[types.ExecutionID]bool),
-		deadlines:           make(map[types.ExecutionID]time.Time),
+		executions:             make(map[types.ExecutionID]*execEntry),
+		nodes:                  make(map[string]*engine.NodeSnapshot),
+		inDegrees:              make(map[string]int),
+		activeIns:              make(map[string]int),
+		remaining:              make(map[types.ExecutionID]int),
+		failed:                 make(map[types.ExecutionID]int),
+		advanced:               make(map[string]bool),
+		scheduled:              make(map[string]string),
+		outbox:                 make(map[types.ExecutionID]map[string]memoryOutboxEntry),
+		deadOutbox:             make(map[types.ExecutionID]map[string]memoryOutboxEntry),
+		replayReceipts:         make(map[types.ExecutionID]map[string]*memoryReplayReceipt),
+		replayEntryIdx:         make(map[types.ExecutionID]map[string]string),
+		outputs:                make(map[string]map[string]any),
+		privateOutputs:         make(map[string]bool),
+		suspended:              make(map[string]*types.SuspendSpec),
+		signals:                make(map[string]map[string]any),
+		signalSets:             make(map[string]map[string]map[string]any),
+		resumed:                make(map[string]bool),
+		subExecs:               make(map[string][]*engine.SubExecution),
+		subWorkflowLinks:       make(map[string]*engine.SubWorkflowLink),
+		groupUnits:             make(map[string]*groupUnitState),
+		doneCh:                 make(map[types.ExecutionID]chan struct{}),
+		eventWatchers:          make(map[types.ExecutionID][]chan engine.ExecutionEvent),
+		cancelingSince:         make(map[types.ExecutionID]time.Time),
+		mirrorLocks:            make(map[types.ExecutionID]*execMirrorLock),
+		mirrorSkip:             make(map[types.ExecutionID]bool),
+		mirrorCreatePending:    make(map[types.ExecutionID]bool),
+		mirrorConflict:         make(map[types.ExecutionID]bool),
+		rolledBack:             make(map[types.ExecutionID]bool),
+		deadlines:              make(map[types.ExecutionID]time.Time),
+		subWorkflowConclusions: make(map[string]*engine.SubWorkflowConclusion),
 	}
 }
 

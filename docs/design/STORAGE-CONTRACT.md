@@ -63,6 +63,32 @@ capability cannot run a graph containing sub-workflow nodes; the engine refuses
 such a submission with `ErrSubWorkflowUnsupported` rather than degrading to
 "create the child and drop the link".
 
+The same capability records how the child **concluded**:
+`RecordSubWorkflowConclusion` / `GetSubWorkflowConclusion` hold the child's
+terminal status, error, and (for a success) its public node-output map, keyed
+by parent, node, and child ID. The record lives in the parent's key space with
+the parent's hash tag and TTL, so it outlives the child's own keys; a child
+that retention has already expired therefore no longer looks like a child that
+never ran. Without it, a parent whose wait is reclaimed after the child's keys
+are gone finds no child under the derived ID and rebuilds it, running the
+child's handlers a second time.
+
+The record is one plain `SET` (no Lua, no read-modify-write): a child's
+terminal state is unique, so the write is unconditional and idempotent. Order
+is the guarantee. The engine records the conclusion **before** it commits the
+parent node, from whichever path first sees the child terminal — the child's
+completion notification or the parent's reclaim redelivery — and a record that
+fails stops the commit, so the redelivery retries (latency, not correctness).
+There is therefore no window in which the parent has acted on the child's
+result but the conclusion is unreadable. The remaining crash window — the
+child's terminal commit succeeded and the notifier died before recording —
+leaves the child's own keys in place, and any later reclaim records the
+conclusion from them. The read side prefers the child's live records, falls back
+to the recorded conclusion when they are gone, and, when neither exists (a wait
+parked before conclusions were recorded), keeps the previous behavior. A retry
+mints the next generation's child, whose ID differs, so an earlier
+generation's conclusion is never read for it.
+
 For an acyclic execution, `CommitNode` is the durable linearization point. The
 Redis Lua transition validates the active lease identity (lease ID, token,
 attempt, and activation), then atomically:

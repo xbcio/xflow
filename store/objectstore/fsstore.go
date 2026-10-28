@@ -174,6 +174,7 @@ type FSStore struct {
 }
 
 var _ Store = (*FSStore)(nil)
+var _ Deleter = (*FSStore)(nil)
 
 // NewFSStore creates a store rooted at dir. The directory must already exist;
 // subdirectories are created on demand during PutObject.
@@ -304,6 +305,52 @@ func (s *FSStore) HeadObject(ctx context.Context, key string) (*Object, error) {
 		ETag:         digestFromKey(key),
 		LastModified: info.ModTime(),
 	}, nil
+}
+
+// DeleteObject removes the file for key. A key that does not exist is not an
+// error, so a retried delete is safe. Like every other method it goes through
+// resolve, so a key that escapes root (or, under PartitionByNamespace, the
+// caller's own namespace subtree) is rejected before anything is touched. A key
+// that names a directory is refused rather than removed.
+//
+// DeleteObject does not prune the shard directories it leaves empty. Pruning
+// races a concurrent PutObject: that put's MkdirAll creates the directory chain
+// one level at a time, and a prune running between two of those steps removes
+// an ancestor it has just created, which fails the put. An empty directory is
+// harmless in the content-addressed layout (there are at most 256x256 shard
+// directories per tree and PutObject recreates them anyway), so the cost of
+// leaving them is nil and the race is gone. Eviction sweeps still prune; see
+// pruneEmptyDirs.
+//
+// It does not order itself against a concurrent PutObject of the same key; see
+// Deleter.
+func (s *FSStore) DeleteObject(ctx context.Context, key string) error {
+	path, err := s.resolve(ctx, key)
+	if err != nil {
+		return err
+	}
+
+	// Lstat first so a key that names a directory is refused instead of removed:
+	// os.Remove deletes an empty directory as readily as a file, and a key is
+	// only ever meant to address a file.
+	info, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("objectstore/fs: delete %s: %w", key, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("objectstore/fs: delete %s: key is a directory", key)
+	}
+
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("objectstore/fs: delete %s: %w", key, err)
+	}
+	return nil
 }
 
 // resolve maps key to an absolute path and validates that it stays within the

@@ -165,6 +165,41 @@ CREATE TABLE IF NOT EXISTS xflow_artifacts (
     INDEX idx_content_hash (content_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Blob 生命周期元数据（不参与调度，只被 GC 与写者读写）。
+-- namespace 与 digest 必须逐字节比较：表的默认排序是大小写不敏感的，会把
+-- "Tenant" 与 "tenant" 折成同一行，让两个租户共用一条对象记录、一组 link
+-- 和一把 GC 围栏。digest 是未压缩字节的 sha256 小写 hex。
+-- generation 是围栏凭据：GC 领取（state=deleting）后写者若把对象救活，
+-- generation 必须递增，先前领到的凭据随即失效。
+-- 没有引用计数列：link 只能靠 expire_at 清扫，没有可靠的「执行清理」事件，
+-- 计数必然漂移。
+-- 时间列一律由 Go 侧 UTC 时间绑定写入，所以这里不写 DEFAULT CURRENT_TIMESTAMP。
+CREATE TABLE IF NOT EXISTS xflow_blob_objects (
+    namespace    VARCHAR(64)  CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT '租户，逐字节比较',
+    digest       CHAR(64)     CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT '未压缩字节的 sha256 小写 hex',
+    size_bytes   BIGINT       NOT NULL              COMMENT '未压缩字节数，等于 Ref.Size',
+    stored_bytes BIGINT       NOT NULL              COMMENT '落盘字节数（压缩后），第二个写者必须读回这一列而不是记自己的值',
+    codec        VARCHAR(16)  NOT NULL DEFAULT ''   COMMENT '压缩编码：zstd 或空串；读取只信字节里的帧头',
+    generation   BIGINT       NOT NULL              COMMENT '围栏凭据，救活对象时递增',
+    state        VARCHAR(16)  NOT NULL              COMMENT '生命周期：live 或 deleting',
+    last_ref_at  DATETIME(3)  NOT NULL              COMMENT '最近一次写入或 link 的 UTC 时间；早于宽限期才可作为候选',
+    PRIMARY KEY (namespace, digest),
+    INDEX idx_blob_object_last_ref (last_ref_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 执行对 blob 的引用，带过期时间。expire_at 必须大于执行保留期 + 宽限期。
+-- idx_blob_link_object (namespace, digest, expire_at) 让「本对象还有没有未过期
+-- link」在索引内判定；idx_blob_link_expire 供清扫扫描。
+CREATE TABLE IF NOT EXISTS xflow_blob_links (
+    namespace  VARCHAR(64)  CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT '租户，逐字节比较',
+    exec_id    VARCHAR(64)  CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT '持有引用的执行',
+    digest     CHAR(64)     CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT '指向的对象',
+    expire_at  DATETIME(3)  NOT NULL              COMMENT '过期时间（UTC）；过期后不再保护字节',
+    PRIMARY KEY (namespace, exec_id, digest),
+    INDEX idx_blob_link_expire (expire_at),
+    INDEX idx_blob_link_object (namespace, digest, expire_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- 注册码。明文永不落库，只存 sha256 的 32 字节原文（不是 hex）。
 -- code_hash 必须是 BINARY(32)：任何会截断或补齐的列类型都会让此后每一次
 -- 查找都对不上，而且是静默对不上。

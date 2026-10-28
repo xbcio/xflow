@@ -83,3 +83,41 @@ func matchesSubWorkflowLease(node *engine.NodeSnapshot, lease *engine.TaskLease)
 		node.Attempt == lease.Attempt &&
 		node.ActivationID == lease.Task.ActivationID
 }
+
+// subWorkflowConclusionKey keys one child's conclusion under its parent node. The
+// child id is part of the key so a retry's next generation can never read the
+// previous generation's conclusion; the execID/ prefix is what lets execution
+// deletion clear it with the parent's other records.
+func subWorkflowConclusionKey(parentID types.ExecutionID, nodeName string, childID types.ExecutionID) string {
+	return memoryNodeKey(parentID, nodeName) + "/" + string(childID)
+}
+
+// RecordSubWorkflowConclusion stores how a child ended under the mutex, as an
+// unconditional idempotent write: a child's terminal state is unique, so a
+// repeat writes the same content. It is not fenced on the link or the node, for
+// the same reason the Redis backend's is not — the reclaim path must be able to
+// record while the parent's lease is stale.
+func (s *memoryState) RecordSubWorkflowConclusion(_ context.Context, parentID types.ExecutionID, nodeName string, conclusion engine.SubWorkflowConclusion) error {
+	if conclusion.ChildExecutionID == "" || nodeName == "" {
+		return engine.ErrInvalidLeaseToken
+	}
+	conclusion.Output = cloneData(conclusion.Output)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.subWorkflowConclusions[subWorkflowConclusionKey(parentID, nodeName, conclusion.ChildExecutionID)] = &conclusion
+	return nil
+}
+
+// GetSubWorkflowConclusion reads the conclusion recorded for exactly one child.
+// Absence is not an error.
+func (s *memoryState) GetSubWorkflowConclusion(_ context.Context, parentID types.ExecutionID, nodeName string, childID types.ExecutionID) (engine.SubWorkflowConclusion, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	conclusion := s.subWorkflowConclusions[subWorkflowConclusionKey(parentID, nodeName, childID)]
+	if conclusion == nil {
+		return engine.SubWorkflowConclusion{}, false, nil
+	}
+	out := *conclusion
+	out.Output = cloneData(out.Output)
+	return out, true, nil
+}

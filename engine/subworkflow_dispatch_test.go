@@ -26,6 +26,12 @@ import (
 type subWorkflowLinkState struct {
 	*fakeState
 	links map[string]SubWorkflowLink // key: execID+"/"+nodeName
+	// conclusions are the recorded child conclusions, keyed
+	// execID+"/"+nodeName+"/"+childID like the real backends key them.
+	conclusions map[string]SubWorkflowConclusion
+	// recordError, when set, makes RecordSubWorkflowConclusion fail — the shape of
+	// a store outage between a child's terminal commit and the parent's commit.
+	recordError error
 	// onExecutionCreated, when set, runs after an execution is durably created.
 	// It is how a test lands work in the create-then-park window, which has no
 	// link for any other actor to observe.
@@ -39,8 +45,9 @@ var _ SubWorkflowLinkStore = (*subWorkflowLinkState)(nil)
 
 func newSubWorkflowLinkState() *subWorkflowLinkState {
 	return &subWorkflowLinkState{
-		fakeState: newFakeState(),
-		links:     make(map[string]SubWorkflowLink),
+		fakeState:   newFakeState(),
+		links:       make(map[string]SubWorkflowLink),
+		conclusions: make(map[string]SubWorkflowConclusion),
 	}
 }
 
@@ -97,6 +104,23 @@ func (s *subWorkflowLinkState) GetSubWorkflowLink(_ context.Context, id types.Ex
 	defer s.mu.Unlock()
 	link, ok := s.links[string(id)+"/"+nodeName]
 	return link, ok, nil
+}
+
+func (s *subWorkflowLinkState) RecordSubWorkflowConclusion(_ context.Context, parentID types.ExecutionID, nodeName string, conclusion SubWorkflowConclusion) error {
+	if s.recordError != nil {
+		return s.recordError
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.conclusions[string(parentID)+"/"+nodeName+"/"+string(conclusion.ChildExecutionID)] = conclusion
+	return nil
+}
+
+func (s *subWorkflowLinkState) GetSubWorkflowConclusion(_ context.Context, parentID types.ExecutionID, nodeName string, childID types.ExecutionID) (SubWorkflowConclusion, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	conclusion, ok := s.conclusions[string(parentID)+"/"+nodeName+"/"+string(childID)]
+	return conclusion, ok, nil
 }
 
 // ---------------------------------------------------------------------------

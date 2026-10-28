@@ -8,6 +8,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/types"
 )
@@ -445,8 +446,10 @@ func (s *Store) earliestReadyScore(ctx context.Context, t namespace.Namespace, i
 	return scored[0].Score, true, nil
 }
 
-// readOutboxReadyIndex adds this namespace's due executions to ids, up to
-// limit, and reports how many it added.
+// readOutboxReadyIndexRefs adds this namespace's due executions to refs, up to
+// limit, and reports how many it added. refs is keyed by (namespace, ID): the ID
+// alone is not an identity, and a set keyed by it would let one namespace's
+// execution hide a same-named one in another from the dispatcher.
 //
 // "Due" is the same predicate the per-execution ready ZSET uses: score <= now.
 // A member scored in the future is either leased by a live deliverer or waiting
@@ -478,7 +481,7 @@ func (s *Store) earliestReadyScore(ctx context.Context, t namespace.Namespace, i
 // all orphans, so one call reaches the work behind a dead head instead of
 // returning it a page at a time. It terminates because every batch either adds
 // at least one live id, removes at least one stale member, or ends the read.
-func (s *Store) readOutboxReadyIndex(ctx context.Context, t namespace.Namespace, now time.Time, limit int, ids map[types.ExecutionID]struct{}) (int, error) {
+func (s *Store) readOutboxReadyIndexRefs(ctx context.Context, t namespace.Namespace, now time.Time, limit int, refs map[engine.OutboxExecutionRef]struct{}) (int, error) {
 	if limit <= 0 {
 		return 0, nil
 	}
@@ -508,11 +511,11 @@ func (s *Store) readOutboxReadyIndex(ctx context.Context, t namespace.Namespace,
 				stale = append(stale, member)
 				continue
 			}
-			id := types.ExecutionID(member)
-			if _, seen := ids[id]; seen {
+			ref := engine.OutboxExecutionRef{Namespace: t, ID: types.ExecutionID(member)}
+			if _, seen := refs[ref]; seen {
 				continue
 			}
-			ids[id] = struct{}{}
+			refs[ref] = struct{}{}
 			added++
 			if added >= limit {
 				break

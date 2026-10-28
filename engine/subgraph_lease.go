@@ -143,6 +143,22 @@ func (e *Engine) BuildSubgraphLease(ctx context.Context, t *Task) (*TaskLease, *
 	}
 	meta := g.NodeAt(parentLease.Task.NodeIdx)
 
+	// Stored items are read back in only now, once the execution is known to be
+	// live: an inactive execution must still answer ErrExecutionInactive, which
+	// the caller settles by dropping the claim, not a store failure it would
+	// requeue. view is t with the array restored and is read by the batching
+	// context below; lease.Task keeps t itself, so the lease a queue or runner
+	// directory persists does not grow by the array the reference exists to keep
+	// out. When t carries its items inline view is t and nothing is re-read.
+	view, err := e.resolveBatchView(ctx, t)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build subgraph lease: %w", err)
+	}
+	if view != t {
+		if _, _, items, err = expansionBatchLease(view); err != nil {
+			return nil, nil, fmt.Errorf("build subgraph lease: %w", err)
+		}
+	}
 	batchIndex, err := batchIndexOf(t)
 	if err != nil {
 		return nil, nil, fmt.Errorf("build subgraph lease: %w", err)
@@ -203,7 +219,7 @@ func (e *Engine) BuildSubgraphLease(ctx context.Context, t *Task) (*TaskLease, *
 		payload.Package = body.Package
 		payload.PackageHash = body.Hash
 	}
-	payload.AllItems, payload.BatchSize = mapBatchingContext(t, len(items))
+	payload.AllItems, payload.BatchSize = mapBatchingContext(view, len(items))
 	// The runtime half of $vars and the outer trace identity: see the fields'
 	// doc comments. Read from the execution snapshot because a batch task
 	// carries no input of its own.
@@ -286,11 +302,29 @@ func (e *Engine) CommitSubgraphResult(ctx context.Context, lease *TaskLease, res
 		},
 	}
 
+	return e.settleExpandedBatch(ctx, parentLease, payload.ChildExecID, &lease.Task, status, batchResult)
+}
+
+// settleExpandedBatch records one batch's verdict through the parent's expansion
+// fence and, when it is the last batch to report, finalizes the map node.
+//
+// It is the part of committing a batch that does not depend on where the verdict
+// came from: a runner's reported result (CommitSubgraphResult) and a batch the
+// engine itself gave up on (FailBatchTask) must be fenced, counted at the
+// barrier and finalized by the same code, or they could disagree about when the
+// map node is done.
+//
+// parentLease is the lease of the MAP node, not of the batch; batch is the task
+// of the batch being settled, which completeLoopSplit needs to rebuild the bound
+// a timed-out batch was cut off at. The outcome tells
+// the caller what the fence decided; a non-nil error is always the transient
+// kind and leaves the batch unsettled so the caller can retry.
+func (e *Engine) settleExpandedBatch(ctx context.Context, parentLease *TaskLease, childExecID types.ExecutionID, batch *Task, status types.ExecutionStatus, batchResult map[string]any) (CommitOutcome, error) {
 	expander, ok := e.state.(LeaseExpander)
 	if !ok {
 		return CommitOutcomeTransientError, ErrAtomicCommitUnsupported
 	}
-	allDone, accepted, results, err := expander.CompleteExpandedSubExecution(ctx, parentLease, payload.ChildExecID, status, batchResult)
+	allDone, accepted, results, err := expander.CompleteExpandedSubExecution(ctx, parentLease, childExecID, status, batchResult)
 	if err != nil {
 		return CommitOutcomeTransientError, err
 	}
@@ -310,7 +344,7 @@ func (e *Engine) CommitSubgraphResult(ctx context.Context, lease *TaskLease, res
 	if !active {
 		return CommitOutcomeExecutionInactive, nil
 	}
-	if err := e.completeLoopSplit(ctx, parentLease, g, results, &lease.Task); err != nil {
+	if err := e.completeLoopSplit(ctx, parentLease, g, results, batch); err != nil {
 		return CommitOutcomeTransientError, err
 	}
 	return CommitOutcomeAccepted, nil

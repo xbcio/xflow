@@ -893,6 +893,11 @@ func (s *memoryState) rollbackCreatedExecution(id types.ExecutionID) {
 			delete(s.subWorkflowLinks, key)
 		}
 	}
+	for key := range s.subWorkflowConclusions {
+		if strings.HasPrefix(key, prefix) {
+			delete(s.subWorkflowConclusions, key)
+		}
+	}
 	for key := range s.groupUnits {
 		if strings.HasPrefix(key, prefix) {
 			delete(s.groupUnits, key)

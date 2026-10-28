@@ -1261,7 +1261,7 @@ func (d *OutboxDispatcher) drain(ctx context.Context) {
 	if page <= 0 {
 		page = DefaultOutboxDiscoveryPage
 	}
-	ids, err := state.ListOutboxExecutions(ctx, page)
+	refs, err := discoverOutboxRefs(ctx, state, page)
 	if err != nil {
 		d.engine.notifyOutboxError(ctx, "list_executions", err)
 		if d.engine.logger != nil {
@@ -1269,9 +1269,8 @@ func (d *OutboxDispatcher) drain(ctx context.Context) {
 		}
 		return
 	}
-	discovered = len(ids)
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-	d.flushPage(ctx, ids, start)
+	discovered = len(refs)
+	d.flushPage(ctx, refs, start)
 	d.observeMetrics(ctx, state)
 }
 
@@ -1292,36 +1291,36 @@ func (d *OutboxDispatcher) drain(ctx context.Context) {
 // each execution to a fixed point (it loops until a claim comes back empty), so
 // a flushed execution has either leased all its ready work or been pruned from
 // the due page. Whatever is left is picked up by the next drain.
-func (d *OutboxDispatcher) flushPage(ctx context.Context, ids []types.ExecutionID, start time.Time) {
+func (d *OutboxDispatcher) flushPage(ctx context.Context, refs []OutboxExecutionRef, start time.Time) {
 	workers := d.flushConcurrency
 	if workers <= 0 {
 		workers = DefaultOutboxFlushConcurrency
 	}
-	if workers > len(ids) {
-		workers = len(ids)
+	if workers > len(refs) {
+		workers = len(refs)
 	}
 	if workers <= 1 {
-		for i, id := range ids {
+		for i, ref := range refs {
 			if i > 0 && d.budgetSpent(start) {
 				return
 			}
-			d.flushOne(ctx, id)
+			d.flushOne(ctx, ref)
 		}
 		return
 	}
 
 	sem := make(chan struct{}, workers)
 	var wg sync.WaitGroup
-	submit := func(id types.ExecutionID) {
+	submit := func(ref OutboxExecutionRef) {
 		wg.Add(1)
 		sem <- struct{}{}
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			d.flushOne(ctx, id)
+			d.flushOne(ctx, ref)
 		}()
 	}
-	for i, id := range ids {
+	for i, ref := range refs {
 		// One flush is allowed to finish past the budget — it is in flight by the
 		// time the budget is checked again — so the bound is the budget plus at
 		// most one flush.
@@ -1331,7 +1330,7 @@ func (d *OutboxDispatcher) flushPage(ctx context.Context, ids []types.ExecutionI
 		if ctx.Err() != nil {
 			break
 		}
-		submit(id)
+		submit(ref)
 	}
 	wg.Wait()
 }
@@ -1345,9 +1344,14 @@ func (d *OutboxDispatcher) budgetSpent(start time.Time) bool {
 // flushOne flushes a single execution's outbox, reporting a delivery failure
 // without aborting the rest of the page: one execution's store error is not
 // evidence about any other execution's.
-func (d *OutboxDispatcher) flushOne(ctx context.Context, id types.ExecutionID) {
-	if err := d.engine.FlushOutbox(ctx, id); err != nil && d.engine.logger != nil {
-		d.engine.logger.Error("flush durable outbox failed", "execution_id", string(id), "err", err)
+//
+// The flush runs on the ref's namespace, not on the dispatcher's context: the
+// store builds every outbox key from the namespace the context carries, and the
+// dispatcher's carries none. See NamespacedOutboxLister.
+func (d *OutboxDispatcher) flushOne(ctx context.Context, ref OutboxExecutionRef) {
+	if err := d.engine.FlushOutbox(ref.flushContext(ctx), ref.ID); err != nil && d.engine.logger != nil {
+		d.engine.logger.Error("flush durable outbox failed",
+			"namespace", string(ref.Namespace), "execution_id", string(ref.ID), "err", err)
 	}
 }
 

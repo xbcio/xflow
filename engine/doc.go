@@ -49,6 +49,9 @@
 //     its absence degrades to a legacy create-then-enqueue path.
 //   - OutboxLeaser — exclusive delivery lease on outbox entries; absent
 //     stores fall back to ListOutbox with at-least-once duplicates.
+//   - NamespacedOutboxLister — outbox discovery that reports each execution's
+//     namespace; absent stores are discovered by bare ID and flushed on the
+//     dispatcher's own context.
 //   - DurableLeaseExpander / DurableLeaseSuspender — fan-out and suspend
 //     transitions.
 //   - types.SuspendingHandler — handler capability asserted in execution,

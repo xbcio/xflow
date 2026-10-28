@@ -417,6 +417,56 @@ type dbArtifact struct {
 
 func (dbArtifact) TableName() string { return "xflow_artifacts" }
 
+// dbBlobObject is the GORM persistence type for xflow_blob_objects — the
+// lifecycle and garbage-collection metadata of the blobs a store/blob.Store
+// holds. It stores no bytes and takes no part in scheduling.
+//
+// namespace and digest are compared byte for byte. The default table collation
+// is case insensitive, which would fold "Tenant" and "tenant" into one row and
+// let two tenants share one object record, one link set, and one GC fence.
+type dbBlobObject struct {
+	Namespace string `gorm:"column:namespace;type:varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;primaryKey"`
+	// Digest is the lowercase hex SHA-256 of the uncompressed bytes.
+	Digest string `gorm:"column:digest;type:char(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;primaryKey"`
+	// SizeBytes is the uncompressed length and must match Ref.Size; a row whose
+	// size differs from the digest the writer computed is rejected by Register
+	// rather than overwritten.
+	SizeBytes   int64  `gorm:"column:size_bytes;not null"`
+	StoredBytes int64  `gorm:"column:stored_bytes;not null"`
+	Codec       string `gorm:"column:codec;type:varchar(16);not null;default:''"`
+	// Generation is the fence credential: a writer that revives a claimed object
+	// increments it, so a claim taken earlier stops validating.
+	Generation int64 `gorm:"column:generation;not null"`
+	// State is blob.ObjectLive or blob.ObjectDeleting.
+	State string `gorm:"column:state;type:varchar(16);not null"`
+	// LastRefAt is when a writer or a link last touched the object; garbage
+	// requires it to be older than the collector's grace period. The collector
+	// scans oldest-first with a bounded batch and its filter has no equality
+	// part (live and claimed objects are both candidates), so this is a plain
+	// range index.
+	LastRefAt time.Time `gorm:"column:last_ref_at;not null;index:idx_blob_object_last_ref"`
+}
+
+func (dbBlobObject) TableName() string { return "xflow_blob_objects" }
+
+// dbBlobLink is the GORM persistence type for xflow_blob_links — one execution's
+// claim on one blob, with the deadline after which the claim stops protecting
+// the bytes. There is deliberately no reference count: links are only ever
+// removed by expiry, so a count would drift.
+type dbBlobLink struct {
+	Namespace string `gorm:"column:namespace;type:varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;primaryKey;index:idx_blob_link_object,priority:1"`
+	ExecID    string `gorm:"column:exec_id;type:varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;primaryKey"`
+	Digest    string `gorm:"column:digest;type:char(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;primaryKey;index:idx_blob_link_object,priority:2"`
+	// ExpireAt is in two indexes. idx_blob_link_expire serves the pruning scan,
+	// the only range scan over links. idx_blob_link_object is
+	// (namespace, digest, expire_at), which answers "does this object have an
+	// unexpired link" from the index alone: the primary key leads with
+	// (namespace, exec_id), which a lookup by object cannot use.
+	ExpireAt time.Time `gorm:"column:expire_at;not null;index:idx_blob_link_expire;index:idx_blob_link_object,priority:3"`
+}
+
+func (dbBlobLink) TableName() string { return "xflow_blob_links" }
+
 // dbRegistrationCode persists a reusable runner enrollment credential. Only the
 // sha256 of the code is stored — code_hash is the raw 32 bytes, not hex, so a
 // truncating column type would corrupt every future lookup rather than fail
