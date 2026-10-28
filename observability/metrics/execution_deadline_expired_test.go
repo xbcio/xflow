@@ -54,4 +54,12 @@ func TestExecutionDeadlineExpiredHasHelpText(t *testing.T) {
 	if !strings.Contains(help, "at-least-once") || !strings.Contains(help, "exactly-once") {
 		t.Errorf("help text for %s does not bound its accuracy under concurrent expirers: %q", name, help)
 	}
+	// The series covers deadline-pass transitions only. A reader who took it for
+	// every timeout terminal state would over-read it, so the help has to name
+	// the commit paths whose expiries it never sees.
+	for _, want := range []string{"never reach this series", "runner-reported node timeout", "sub-workflow"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("help text for %s does not scope itself to the deadline pass (missing %q): %q", name, want, help)
+		}
+	}
 }
