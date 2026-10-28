@@ -225,7 +225,7 @@ function ExecList() {
         }
       />
       <div className="xflow-pv-exec-filters">
-        <Segmented size="small" value={wbExecFilters[0]} options={wbExecFilters} />
+        <Segmented aria-label="执行状态" size="small" value={wbExecFilters[0]} options={wbExecFilters} />
         <Button size="small">最近 24 小时</Button>
       </div>
       <div className="xflow-pv-exec-list" role="list">
@@ -351,7 +351,7 @@ export function RunsSection() {
         </div>
         <span className="mx-auto">
           <Todo label="需新字段">
-            <Segmented value="runs" options={[{ value: 'edit', label: '编辑' }, { value: 'runs', label: '运行记录' }]} />
+            <Segmented aria-label="视图模式" value="runs" options={[{ value: 'edit', label: '编辑' }, { value: 'runs', label: '运行记录' }]} />
           </Todo>
         </span>
         <div className="xflow-pv-top-right">

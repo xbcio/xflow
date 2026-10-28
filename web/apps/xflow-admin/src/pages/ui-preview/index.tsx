@@ -241,6 +241,7 @@ export default function UiPreviewPage() {
                 </span>
                 <Switch className="xflow-pv-switch" size="small" checked={todoVisible} onChange={setTodoVisible} />
                 <Segmented
+                  aria-label="外观"
                   value={appearance}
                   onChange={(value) => setAppearance(value as Appearance)}
                   options={[

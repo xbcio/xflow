@@ -72,6 +72,7 @@ export function SpecControl({ field }: { field: FieldSpec }) {
     case 'seg':
       return (
         <Segmented
+          aria-label={field.label}
           className="xflow-pv-spec-control"
           size="small"
           block

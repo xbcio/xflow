@@ -430,6 +430,7 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
         <span className="mx-auto">
           <Todo label="需新字段">
             <Segmented
+              aria-label="视图模式"
               value="edit"
               options={[{ value: 'edit', label: '编辑' }, { value: 'runs', label: '运行记录' }]}
             />

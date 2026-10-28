@@ -214,7 +214,7 @@ export function ListExecSection() {
       current="executions"
       top={
         <>
-          <Segmented size="small" value={adminExecFilters[0]} options={adminExecFilters} />
+          <Segmented aria-label="执行状态" size="small" value={adminExecFilters[0]} options={adminExecFilters} />
           <Button size="small" icon={<DownIcon />} iconPosition="end">
             最近 24 小时
           </Button>

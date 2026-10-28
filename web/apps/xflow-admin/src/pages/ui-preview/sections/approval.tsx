@@ -142,7 +142,7 @@ function AddSignerDialog() {
         </div>
         <div className="xflow-pv-field">
           <span className="xflow-pv-field-label">位置</span>
-          <Segmented value={wbApproval.addSigner.positions[1]} options={wbApproval.addSigner.positions} />
+          <Segmented aria-label="加签位置" value={wbApproval.addSigner.positions[1]} options={wbApproval.addSigner.positions} />
           <p className="xflow-pv-hint">{wbApproval.addSigner.hint}</p>
         </div>
         <div className="xflow-pv-field">
