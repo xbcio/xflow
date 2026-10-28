@@ -3,6 +3,7 @@ package local
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -124,6 +125,52 @@ func TestBackendDeadlineSweeperNilObserverStillSweeps(t *testing.T) {
 	snap, err := b.state.GetExecution(context.Background(), id)
 	if err != nil || snap == nil || snap.Status != types.ExecutionStatusTimeout {
 		t.Fatalf("execution = %+v, %v, want timeout", snap, err)
+	}
+}
+
+// panickingDeadlineObserver panics on every call, standing in for a
+// host-supplied observer with a bug of its own.
+type panickingDeadlineObserver struct {
+	calls atomic.Int64
+}
+
+func (p *panickingDeadlineObserver) OnExecutionDeadlineExpired(context.Context, string) {
+	p.calls.Add(1)
+	panic("observer exploded")
+}
+
+// TestBackendDeadlineSweeperSurvivesAPanickingObserver pins the recovery the
+// backend wraps around the observer callback. The sweep runs in its own
+// goroutine, so an unrecovered panic would leave that goroutine and take every
+// later deadline with it: both overdue executions must be driven into timeout,
+// which can only happen if the loop went on after the first call panicked.
+func TestBackendDeadlineSweeperSurvivesAPanickingObserver(t *testing.T) {
+	observer := &panickingDeadlineObserver{}
+	b := New(WithDeadlineExpiredObserver(observer))
+	eng := engine.New(b.State(), b.Queue())
+	past := time.Now().UTC().Add(-time.Second)
+	ids := []types.ExecutionID{"exec-panic-running", "exec-panic-paused"}
+	statuses := []types.ExecutionStatus{types.ExecutionStatusRunning, types.ExecutionStatusPaused}
+	for i, id := range ids {
+		if err := b.state.CreateExecution(context.Background(), &engine.ExecutionSnapshot{
+			ID: id, Graph: nodeStateGraph(t), Status: statuses[i], Deadline: past,
+		}); err != nil {
+			t.Fatalf("CreateExecution(%s) error = %v", id, err)
+		}
+	}
+
+	runSweeperInBackground(t, b, eng)
+	waitForDeadlineIndexEmpty(t, b.state, 5*time.Second)
+
+	for _, id := range ids {
+		snap, err := b.state.GetExecution(context.Background(), id)
+		if err != nil || snap == nil || snap.Status != types.ExecutionStatusTimeout {
+			t.Fatalf("execution %s = %+v, %v, want timeout: a panicking observer must not stop the sweep", id, snap, err)
+		}
+	}
+	if got := observer.calls.Load(); got < int64(len(ids)) {
+		t.Fatalf("observer called %d times, want at least %d: a recovered panic must not swallow the next expiry",
+			got, len(ids))
 	}
 }
 
