@@ -49,6 +49,7 @@ const (
 	CapabilityDurableSignalDeliverer      Capability = "DurableSignalDeliverer"
 	CapabilityNodeLeaseRenewer            Capability = "NodeLeaseRenewer"
 	CapabilityCancelingExecutionLister    Capability = "CancelingExecutionLister"
+	CapabilityExecutionDeadlineExpirer    Capability = "ExecutionDeadlineExpirer"
 	CapabilityBatchOutputReader           Capability = "BatchOutputReader"
 	CapabilityExecutionInputContextReader Capability = "ExecutionInputContextReader"
 	CapabilityExecutionTraceCarrierReader Capability = "ExecutionTraceCarrierReader"
@@ -165,6 +166,14 @@ var capabilitySpecs = map[Capability]capabilitySpec{
 		summary: "listing executions stuck in the canceling status (ListCancelingExecutions)",
 		implements: func(v any) bool {
 			_, ok := v.(engine.CancelingExecutionLister)
+			return ok
+		},
+	},
+	CapabilityExecutionDeadlineExpirer: {
+		iface:   "engine.ExecutionDeadlineExpirer",
+		summary: "listing and acknowledging executions past their settings.timeout deadline (ListDeadlineExceededExecutions, AckDeadlineExpired)",
+		implements: func(v any) bool {
+			_, ok := v.(engine.ExecutionDeadlineExpirer)
 			return ok
 		},
 	},

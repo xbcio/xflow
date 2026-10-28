@@ -481,6 +481,27 @@ export function WorkflowSettings({
             }
           />
         </SettingRow>
+        <SettingRow label="执行超时">
+          <LiteralInput
+            ariaLabel="执行超时"
+            mode="json"
+            placeholder="纳秒，例如 1800000000000；留空不限"
+            readOnly={settingsReadOnly}
+            value={settings.timeout}
+            onCommit={(next) =>
+              writeSettings((current) => {
+                const nextSettings = { ...current };
+                if (next === undefined) delete nextSettings.timeout;
+                else nextSettings.timeout = next as number;
+                return nextSettings;
+              })
+            }
+          />
+        </SettingRow>
+        <Hint
+          help="到期后执行以超时终态结束，不走错误策略。"
+          text="执行超时是整个执行的预算（整数纳秒，含排队与挂起等待），0 或留空为不限。"
+        />
         <SettingRow label="描述">
           <Input
             aria-label="工作流描述"

@@ -64,7 +64,23 @@ func TestExecuteBatchBodyStopsABodyPastTheRequestDeadline(t *testing.T) {
 	if len(results) != 1 || results[0].Err == nil {
 		t.Fatalf("results = %+v, want the one item failed by the deadline", results)
 	}
+	// Err is plain text by the time the batch is committed, so the item carries
+	// the cause itself: it is what BatchResultForCommit turns into the batch's
+	// timeout marker.
+	if !results[0].Timeout {
+		t.Fatalf("results[0].Timeout = false, want true for an item stopped by the deadline: %+v", results[0])
+	}
 	if handler.completed.Load() > 0 {
 		t.Fatal("body member ran to completion past the batch deadline")
+	}
+}
+
+// The control for the Timeout flag: an item that fails for any reason other than
+// running out of time must not carry it, or every failed batch would be taken
+// for an execution timeout once the execution's deadline had passed.
+func TestExecuteBatchBodyLeavesTimeoutUnsetOnAnOrdinaryFailure(t *testing.T) {
+	item := batchOfOneFailingMember(t, "test.transientfail", transientHandler{})
+	if item.Timeout {
+		t.Fatalf("item.Timeout = true for a failure that was not a timeout: %+v", item)
 	}
 }

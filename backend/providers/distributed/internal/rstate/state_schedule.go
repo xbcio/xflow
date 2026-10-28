@@ -29,6 +29,13 @@ func (s *Store) DecrementInDegree(ctx context.Context, id types.ExecutionID, uni
 }
 
 func (s *Store) CheckCompletion(ctx context.Context, id types.ExecutionID, totalNodes int) (bool, bool, error) {
+	// For an execution that does not exist this answers (false, false, nil), even
+	// when its node keys are still there: checkCompletionLua refuses to finalize an
+	// execution that has no status key. The local backend answers (true, false, nil)
+	// for the same input, and the two differ on purpose: a true here means the
+	// script already wrote the terminal status, which it did not and must not do
+	// for an execution nothing created; a true from the local backend only means
+	// every node is terminal, and its caller writes the status.
 	g, ok := s.graphs.Get(id)
 	if !ok {
 		// Cold entry: this replica never loaded the graph, or the idle sweep
@@ -56,11 +63,11 @@ func (s *Store) CheckCompletion(ctx context.Context, id types.ExecutionID, total
 		// is another terminal transition that never passes through
 		// UpdateExecutionStatus and has to record the marker itself.
 		s.markExecutionTerminalBestEffort(ctx, id, types.ExecutionStatusSuccess)
-		s.releaseWorkflowSlotAfterTerminal(ctx, id, types.ExecutionStatusSuccess)
+		s.afterExecutionTerminal(ctx, id, types.ExecutionStatusSuccess)
 		return true, false, nil
 	case -1:
 		s.markExecutionTerminalBestEffort(ctx, id, types.ExecutionStatusFailed)
-		s.releaseWorkflowSlotAfterTerminal(ctx, id, types.ExecutionStatusFailed)
+		s.afterExecutionTerminal(ctx, id, types.ExecutionStatusFailed)
 		return true, true, nil
 	default:
 		return false, false, nil

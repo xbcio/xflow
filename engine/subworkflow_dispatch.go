@@ -120,6 +120,11 @@ func (e *Engine) handleSubWorkflowNode(ctx context.Context, task *Task, flush bo
 // id is found rather than re-created, and the park is re-written under the new
 // lease generation.
 func (e *Engine) executeSubWorkflow(ctx context.Context, task *Task, g *graph.Graph, meta graph.NodeMeta) error {
+	// Read before the claim: a read failure here leaves no lease behind.
+	execDeadline, err := e.executionDeadline(ctx, task.ExecutionID, g)
+	if err != nil {
+		return err
+	}
 	lease, err := e.acquireSubWorkflowLease(ctx, task, meta)
 	if err != nil {
 		return err
@@ -175,7 +180,7 @@ func (e *Engine) executeSubWorkflow(ctx context.Context, task *Task, g *graph.Gr
 		// generation started (if any) and releases its claim — leaving the node
 		// Running would hand the sweeper a lease it can only reclaim into the
 		// same abandoned path, once per TTL, until the execution expires.
-		e.cancelSubWorkflowChild(ctx, child.ID)
+		_ = e.cancelSubWorkflowChild(ctx, child.ID)
 		if _, err := e.state.RevokeLease(ctx, lease.Task.ExecutionID, lease.Task.NodeName, lease.LeaseToken); err != nil && e.logger != nil {
 			e.logger.Error("release sub-workflow claim for a canceling parent failed",
 				"execution_id", string(lease.Task.ExecutionID), "node_name", lease.Task.NodeName, "err", err)
@@ -200,6 +205,10 @@ func (e *Engine) executeSubWorkflow(ctx context.Context, task *Task, g *graph.Gr
 			waitEnd = prev.WaitDeadline
 		}
 	}
+	// The wait also ends with the execution: a parent cannot wait past its own
+	// deadline, whatever the node timeout says, and an unbounded node still
+	// ends with its execution. Re-clamping a resumed wait is idempotent.
+	waitEnd = clampToExecutionDeadline(execDeadline, waitEnd)
 	// Park first, conclude second — the order is the invariant every
 	// conclusion below depends on: the park is what writes the link and the
 	// node's ChildExecutionID, and a commit preserves the claimed node's id, so
@@ -235,6 +244,16 @@ func (e *Engine) executeSubWorkflow(ctx context.Context, task *Task, g *graph.Gr
 		return nil
 	}
 	if nodeTimeout > 0 && resumed && !time.Now().UTC().Before(prev.WaitDeadline) {
+		// The parked wait end may be the execution's own deadline (waitEnd is
+		// clamped to it above), so an over wait does not say which budget ran
+		// out. The execution's deadline wins a tie: it is settled as the
+		// execution's timeout, which cancels the child itself, and on_error never
+		// sees it. A graph without settings.timeout is not read at all.
+		if handled, err := e.expireIfExecutionDeadlineReached(ctx, task.ExecutionID, g, time.Now()); err != nil {
+			return err
+		} else if handled {
+			return nil
+		}
 		// The wait has used up the node timeout while the child is still
 		// running: fail the node through the ordinary pipeline — the conclusion
 		// a runner-executed node reaches when its handler outlives the same
@@ -254,7 +273,7 @@ func (e *Engine) executeSubWorkflow(ctx context.Context, task *Task, g *graph.Gr
 		err := e.failSubWorkflowStart(ctx, lease, g, meta, fmt.Errorf(
 			"node %q: the wait on child execution %q exceeded the node timeout %s",
 			task.NodeName, child.ID, nodeTimeout))
-		e.cancelSubWorkflowChild(ctx, child.ID)
+		_ = e.cancelSubWorkflowChild(ctx, child.ID)
 		return err
 	}
 	return nil

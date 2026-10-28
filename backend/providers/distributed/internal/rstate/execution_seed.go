@@ -281,7 +281,10 @@ func (s *Store) SeedExecution(ctx context.Context, req engine.SeedExecutionReque
 
 	execID := req.Execution.ID
 	t := namespace.FromContext(ctx)
-	ttl := s.getExecTTL(ctx, execID)
+	// The creation retention starts from the base rule, not getExecTTL: the
+	// deadline is sized in below from the snapshot in hand, and getExecTTL would
+	// read deadline_ms before this call has written it and memoize "no budget".
+	ttl := s.baseExecTTL(ctx, execID)
 
 	// Step 0: the slot decision, before anything is written.
 	status := types.ExecutionStatusRunning
@@ -344,6 +347,14 @@ func (s *Store) SeedExecution(ctx context.Context, req engine.SeedExecutionReque
 		s.ttlMu.Unlock()
 	}
 
+	// The keys must also outlive the execution's deadline; see createExecution.
+	if want := retentionPastDeadline(ttl, req.Execution.Deadline); want > ttl {
+		ttl = want
+		s.ttlMu.Lock()
+		s.execTTLs[execID] = ttl
+		s.ttlMu.Unlock()
+	}
+
 	// Persist the retention record for the same reason createExecution does:
 	// GetExecutionRetention treats its absence as "window unknown", so a creation
 	// path that skips the record degrades every later no-evidence drop on this
@@ -384,12 +395,26 @@ func (s *Store) SeedExecution(ctx context.Context, req engine.SeedExecutionReque
 	// rides along for the same reason: a seeded rerun must name the definition
 	// it runs without the definition being re-read. The registration namespace
 	// is immutable metadata too, and the seed path is the only one a rerun
-	// takes — a rerun's dispatch resolves its sub-workflows from it.
+	// takes — a rerun's dispatch resolves its sub-workflows from it. The time
+	// budget's deadline rides along too: it is immutable and, like the rest, it
+	// must be readable from the instant the Lua makes the execution leasable --
+	// and it stays outside the Lua so that script's key and argument positions
+	// do not move.
+	//
+	// The deadline is registered in the namespace's index first, and a failure
+	// fails the seed: an execution with a deadline and no entry is one the sweep
+	// can never find (execution_deadline_index.go).
+	if err := s.registerExecutionDeadline(ctx, t, execID, req.Execution.Deadline, false); err != nil {
+		return engine.SeedExecutionResponse{}, err
+	}
 	if req.Execution.ParentID != "" || req.Execution.RerunFrom != "" ||
 		req.Execution.ParentNode != "" || req.Execution.Depth > 0 ||
 		req.Execution.WorkflowID != "" || req.Execution.WorkflowVersion != "" ||
-		req.Execution.Namespace != "" {
+		req.Execution.Namespace != "" || !req.Execution.Deadline.IsZero() {
 		linkPipe := s.rdb.TxPipeline()
+		if !req.Execution.Deadline.IsZero() {
+			linkPipe.Set(ctx, execKey(t, execID, "deadline_ms"), req.Execution.Deadline.UnixMilli(), ttl)
+		}
 		if req.Execution.ParentID != "" {
 			linkPipe.Set(ctx, execKey(t, execID, "parent"), string(req.Execution.ParentID), ttl)
 		}
@@ -415,6 +440,9 @@ func (s *Store) SeedExecution(ctx context.Context, req engine.SeedExecutionReque
 			return engine.SeedExecutionResponse{}, fmt.Errorf("persist rerun origin for %q: %w", execID, err)
 		}
 	}
+	// The deadline just written is remembered so this replica's getExecTTL does
+	// not read it back; zero is remembered as "no time budget".
+	s.rememberExecDeadline(execID, req.Execution.Deadline)
 
 	// Prime the verdict when the graph is NOT transient: this call is
 	// authoritative for the execution, and the durable marker above is already in
@@ -572,7 +600,7 @@ func (s *Store) SeedExecution(ctx context.Context, req engine.SeedExecutionReque
 
 	s.markOutboxReadyIndex(ctx, t, execID)
 	s.markExecutionTerminalBestEffort(ctx, execID, finalStatus)
-	s.releaseWorkflowSlotAfterTerminal(ctx, execID, finalStatus)
+	s.afterExecutionTerminal(ctx, execID, finalStatus)
 	if req.Admission != nil {
 		s.completePromotions(ctx, t, concTag, admit.promoted)
 	}

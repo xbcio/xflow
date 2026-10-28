@@ -239,6 +239,14 @@ type WorkflowSettings struct {
 	OnError     string               `json:"on_error,omitempty"`
 	PinDataMode string               `json:"pin_data_mode,omitempty"`
 	Retry       *RetrySettings       `json:"retry,omitempty"`
+	// Timeout is the whole-execution budget, counted from the moment the
+	// execution is admitted (submission), so it includes time spent queued
+	// behind settings.concurrency and time spent suspended. 0 means no budget,
+	// which is also the spelling of "unset". Negative values are rejected at
+	// compile time, as is a non-zero value on a FAF workflow (which persists no
+	// execution to expire). The wire form is the same integer nanoseconds as
+	// ConcurrencySettings.QueueTimeout.
+	Timeout time.Duration `json:"timeout,omitempty"`
 }
 
 // Values of ConcurrencySettings.Mode.

@@ -191,3 +191,133 @@ func TestSubWorkflowDispatchFailsWhenThePostStartParentReadFails(t *testing.T) {
 		t.Fatalf("child status = %s, want running: the failed re-read decides nothing", child.Status)
 	}
 }
+
+// TestSubWorkflowCancelStaysBestEffortWhenTheChildCancelFails pins that the
+// error the cascade now reports to ExpireExecution does not reach Cancel: a
+// child that cannot be stopped costs that child's cancellation, not the
+// parent's. Cancel still returns nil, still finalizes the parked node, and
+// still ends the parent canceled.
+func TestSubWorkflowCancelStaysBestEffortWhenTheChildCancelFails(t *testing.T) {
+	ctx := context.Background()
+	rig := newExpireSubWorkflowRig(t)
+	childID := rig.link.ChildExecutionID
+	rig.state.failListSuspendedFor(childID, errors.New("injected: child list suspended nodes failed"))
+
+	if err := rig.eng.Cancel(ctx, rig.parentID); err != nil {
+		t.Fatalf("Cancel(parent) = %v, want nil: a failed child cancel is logged, not returned", err)
+	}
+
+	parent, err := rig.state.GetExecution(ctx, rig.parentID)
+	if err != nil || parent == nil || parent.Status != types.ExecutionStatusCanceled {
+		t.Fatalf("parent = %+v (err %v), want canceled", parent, err)
+	}
+	if got := rig.nodeStatus(t); got != types.NodeStatusCanceled {
+		t.Fatalf("parked node = %q, want canceled: Cancel must still finalize the wait", got)
+	}
+	child, err := rig.state.GetExecution(ctx, childID)
+	if err != nil || child == nil || child.Status != types.ExecutionStatusCanceling {
+		t.Fatalf("child = %+v (err %v), want canceling: its own cancel failed half way", child, err)
+	}
+}
+
+// TestSubWorkflowDispatchBackstopStaysBestEffortWhenTheChildCancelFails pins
+// that the reclaim backstop does not turn a child it cannot stop into a failed
+// delivery. The child's read fails (keyed on the child's id, so it cannot reach
+// the parent or any other execution), the dispatch still releases its claim and
+// answers handled with no error, and the child is left running. Failing the
+// delivery instead would not help the child, and would keep the claim for the
+// sweeper to reclaim into the same abandoned path; the next redelivery, once the
+// child can be read, stops it.
+func TestSubWorkflowDispatchBackstopStaysBestEffortWhenTheChildCancelFails(t *testing.T) {
+	ctx := context.Background()
+	g := resolvedSubWorkflowParent(t)
+	rig := newSubWorkflowRig(t, g, nil, subWorkflowStubResolver(t))
+	rig.dispatch(t, rig.task)
+	childID := rig.link(t).ChildExecutionID
+	rig.queue.Drain()
+
+	if err := rig.state.UpdateExecutionStatus(ctx, rig.parentID, types.ExecutionStatusCanceling, ""); err != nil {
+		t.Fatalf("mark the parent canceling: %v", err)
+	}
+	rig.revoke(t)
+	rig.state.readError = func(id types.ExecutionID) error {
+		if id == childID {
+			return errors.New("injected: child read failed")
+		}
+		return nil
+	}
+
+	// dispatch requires handled with no error: that is the pin.
+	rig.dispatch(t, rig.task)
+
+	rig.state.readError = nil
+	if child := rig.child(t, childID); child.Status != types.ExecutionStatusRunning {
+		t.Fatalf("child status = %s, want running: its cancel could not even read it", child.Status)
+	}
+	node := rig.node(t)
+	if node.Status != types.NodeStatusPending || node.LeaseToken != "" {
+		t.Fatalf("node status = %s lease token %q, want pending with no lease: the failed child cancel must not keep the claim",
+			node.Status, node.LeaseToken)
+	}
+
+	rig.dispatch(t, rig.task)
+
+	if child := rig.child(t, childID); child.Status != types.ExecutionStatusCanceled {
+		t.Fatalf("child status = %s, want canceled by the redelivery once it can be read", child.Status)
+	}
+}
+
+// TestSubWorkflowNodeTimeoutStaysBestEffortWhenTheChildCancelFails pins the
+// other dispatch-time cancel. The node's verdict is committed before the child
+// is stopped, so a child whose own cancel fails half way (keyed on the child's
+// id: it lists its suspended nodes after marking itself canceling) costs that
+// child's cancellation, not the node's failure: the dispatch still answers
+// handled with no error, and the node is failed with the timeout as its reason.
+func TestSubWorkflowNodeTimeoutStaysBestEffortWhenTheChildCancelFails(t *testing.T) {
+	ctx := context.Background()
+	g := resolvedSubWorkflowParent(t)
+	rig := newExpireSubWorkflowRigOf(t, g)
+	childID := rig.link.ChildExecutionID
+	idx, ok := g.NodeIndex("sub")
+	if !ok {
+		t.Fatal(`the graph has no node named "sub"`)
+	}
+
+	// Age the wait past its bound and let the sweeper reclaim it, as the
+	// timeout test does: the redelivery is what observes the expiry.
+	expired := rig.link
+	expired.WaitDeadline = time.Now().UTC().Add(-time.Second)
+	rig.state.links[string(rig.parentID)+"/sub"] = expired
+	node, err := rig.state.GetNode(ctx, rig.parentID, "sub")
+	if err != nil || node == nil {
+		t.Fatalf("read the parked node: node=%v err=%v", node, err)
+	}
+	if revoked, err := rig.state.RevokeLease(ctx, rig.parentID, "sub", node.LeaseToken); err != nil || !revoked {
+		t.Fatalf("RevokeLease: revoked=%v err=%v", revoked, err)
+	}
+	rig.state.failListSuspendedFor(childID, errors.New("injected: child list suspended nodes failed"))
+
+	handled, err := rig.eng.handleSystemTask(ctx, &Task{
+		ExecutionID:  rig.parentID,
+		NodeName:     "sub",
+		NodeIdx:      idx,
+		UnitIdx:      g.UnitIndexForNode(idx),
+		Type:         TaskTypeSubWorkflow,
+		ActivationID: 1,
+	}, true)
+	if err != nil || !handled {
+		t.Fatalf("handleSystemTask = (%v, %v), want (true, nil): the failed child cancel is logged, not returned", handled, err)
+	}
+
+	node, err = rig.state.GetNode(ctx, rig.parentID, "sub")
+	if err != nil || node == nil || node.Status != types.NodeStatusFailed {
+		t.Fatalf("node = %+v (err %v), want failed after the wait's node timeout", node, err)
+	}
+	if !strings.Contains(node.Error, "node timeout") {
+		t.Fatalf("node error = %q, want the timeout reason", node.Error)
+	}
+	child, err := rig.state.GetExecution(ctx, childID)
+	if err != nil || child == nil || child.Status != types.ExecutionStatusCanceling {
+		t.Fatalf("child = %+v (err %v), want canceling: its own cancel failed half way", child, err)
+	}
+}

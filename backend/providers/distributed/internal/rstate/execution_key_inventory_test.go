@@ -122,12 +122,13 @@ func TestCreatedExecutionKeyInventoryCoverage(t *testing.T) {
 				e.ParentNode = "start"
 				e.Depth = 1
 				e.RerunFrom = "end"
+				e.Deadline = time.UnixMilli(1_900_000_000_123).UTC()
 			},
 			withSkipEntry: true,
 			wantSuffixes: []string{
 				"namespace", "params", "runtime", "scope", "test_run",
 				"trace_id", "span_id", "trace_carrier", "parent",
-				"parent_node", "depth", "rerun_from", "schedule:0",
+				"parent_node", "depth", "rerun_from", "deadline_ms", "schedule:0",
 				"outbox:ready", "outbox:body",
 			},
 		},

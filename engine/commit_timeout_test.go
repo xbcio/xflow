@@ -183,6 +183,56 @@ func TestCommitTaskTimeoutIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestCommitTaskTimeoutNilCausePinsNodeTimeoutCode: a nil cause makes
+// CommitTaskTimeout build its own permanent timeout error. The engine renders
+// that error to text for the node snapshot, so the structured Code survives
+// only on the commit's runtime-evidence receipt (EffectiveClassification.Code).
+// Both are asserted against the literal wire value rather than
+// types.NodeTimeoutErrorCode, so this test pins the production string
+// independently of the constant: the execution-level timeout split recognises
+// a node timeout by this code.
+func TestCommitTaskTimeoutNilCausePinsNodeTimeoutCode(t *testing.T) {
+	buf := NewRuntimeEvidenceBuffer(8)
+	eng, queue := newTestEngineWithBuffer(t, buf)
+	lease := buildAcceptedLeaseForTest(t, eng, queue, "start")
+	ctx := context.Background()
+
+	if err := eng.CommitTaskTimeout(ctx, lease, nil); err != nil {
+		t.Fatalf("CommitTaskTimeout(nil cause) error = %v", err)
+	}
+
+	var receipt *RuntimeEvidenceEvent
+drain:
+	for {
+		select {
+		case ev := <-buf.Events():
+			if ev.Type == RuntimeEvidenceCommit {
+				ev := ev
+				receipt = &ev
+			}
+		default:
+			break drain
+		}
+	}
+	if receipt == nil {
+		t.Fatal("no commit receipt published for the nil-cause timeout commit")
+	}
+	if receipt.ErrorCode != "node.timeout" {
+		t.Fatalf("commit receipt ErrorCode = %q, want %q", receipt.ErrorCode, "node.timeout")
+	}
+	if receipt.Permanent == nil || !*receipt.Permanent {
+		t.Fatalf("commit receipt Permanent = %v, want true (a timeout must not be retried)", receipt.Permanent)
+	}
+
+	node, err := eng.state.GetNode(ctx, lease.Task.ExecutionID, "start")
+	if err != nil || node == nil {
+		t.Fatalf("GetNode() = %v, %v", node, err)
+	}
+	if want := "node.timeout: node execution exceeded its deadline"; node.Error != want {
+		t.Fatalf("node snapshot Error = %q, want %q", node.Error, want)
+	}
+}
+
 // TestCommitTaskTimeoutRejectsGroupLease: CommitTaskTimeout is a node-only
 // commit path (g.NodeAt(t.NodeIdx) → commitAcyclicNodeError). A group unit
 // leases through its own state (group:<unitIdx>:status/meta), not through the

@@ -30,6 +30,11 @@ type BatchItemResult struct {
 	Data map[string]any
 	// Err is non-nil when this item's body execution failed.
 	Err error
+	// Timeout reports that Err is the body running out of time. Err itself is
+	// plain text by the time it reaches BatchResultForCommit, so this is the only
+	// place the cause survives; BatchResultForCommit turns it into the batch's
+	// batchTimeoutKey marker.
+	Timeout bool
 }
 
 // BatchBodyExecutor runs the body sub-graph once per item of one batch.
@@ -184,6 +189,12 @@ func BatchResultForCommit(results []BatchItemResult, continueOnError bool, uses 
 	var first error
 	succeeded := 0
 	for _, r := range results {
+		if r.Timeout {
+			// Written whether the batch ends up failed or, under
+			// continue_on_error, successful: the execution's deadline is spent
+			// either way, and completeLoopSplit is the one place that can say so.
+			data[batchTimeoutKey] = true
+		}
 		if r.Err == nil {
 			succeeded++
 			continue

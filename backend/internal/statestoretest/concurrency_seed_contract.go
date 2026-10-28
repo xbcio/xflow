@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/engine/graph"
@@ -51,6 +52,12 @@ func RunConcurrencySeedContract(t *testing.T, manifest *Manifest, newStore Concu
 	})
 	t.Run("DuplicateAfterCompletionReleasesItsCharge", func(t *testing.T) {
 		seedDuplicateAfterCompletionReleasesItsCharge(t, newStore(t))
+	})
+	t.Run("StampsTheExecutionDeadline", func(t *testing.T) {
+		seedStampsTheExecutionDeadline(t, newStore(t))
+	})
+	t.Run("StampsNoDeadlineWithoutATimeout", func(t *testing.T) {
+		seedStampsNoDeadlineWithoutATimeout(t, newStore(t))
 	})
 }
 
@@ -436,4 +443,49 @@ func seedDuplicateAfterCompletionReleasesItsCharge(t *testing.T, state engine.St
 	if _, err := limited.CreateExecutionWithConcurrency(ctx, next, entries, admission); err != nil {
 		t.Fatalf("submission after the redelivery error = %v, want the retry to have given its charge back", err)
 	}
+}
+
+// seedStampsTheExecutionDeadline is the entry-seed deadline stamp
+// (RunEntryAdmissionContract pins it without a limit) on the concurrency-limited
+// path, which creates the execution in a different transition. It covers both
+// verdicts that create one: a seed admitted to a free slot, and a seed parked
+// behind a holder. The parked one has to carry the deadline too, because the
+// budget starts at creation and the wait for a slot is spent out of it; a
+// queued execution with no deadline could sit in line forever past its
+// settings.timeout.
+func seedStampsTheExecutionDeadline(t *testing.T, state engine.StateStore) {
+	ctx := context.Background()
+	const timeout = 90 * time.Second
+	g := triggerGroupWithDownstreamGraphSettings(t, &types.WorkflowSettings{Timezone: "UTC", Timeout: timeout})
+	admission := queueAdmissionFor(t, g, 1, 0, 0)
+
+	admitted := seedLimited(t, state, ctx, entrySeedRequest(t, g, "k-seed-deadline-admitted"), admission)
+	if admitted.State != engine.AdmissionStateAccepted || admitted.Queued {
+		t.Fatalf("seed into a free slot = %+v, want it admitted and running", admitted)
+	}
+	requireSeedDeadlineStamped(t, state, ctx, admitted.ExecutionID, timeout)
+
+	parked := seedLimited(t, state, ctx, entrySeedRequest(t, g, "k-seed-deadline-parked"), admission)
+	if parked.State != engine.AdmissionStateAccepted || !parked.Queued {
+		t.Fatalf("seed over the limit = %+v, want it parked", parked)
+	}
+	if got := executionStatus(t, state, ctx, parked.ExecutionID); got != types.ExecutionStatusQueued {
+		t.Fatalf("parked seed status = %q, want %q", got, types.ExecutionStatusQueued)
+	}
+	requireSeedDeadlineStamped(t, state, ctx, parked.ExecutionID, timeout)
+}
+
+// seedStampsNoDeadlineWithoutATimeout is the other half on the same path: a
+// workflow that declares no settings.timeout is stamped with nothing, so the
+// zero time keeps meaning "no budget" for it.
+func seedStampsNoDeadlineWithoutATimeout(t *testing.T, state engine.StateStore) {
+	ctx := context.Background()
+	g := triggerGroupWithDownstreamGraph(t)
+	admission := queueAdmissionFor(t, g, 1, 0, 0)
+
+	resp := seedLimited(t, state, ctx, entrySeedRequest(t, g, "k-seed-deadline-none"), admission)
+	if resp.State != engine.AdmissionStateAccepted || resp.Queued {
+		t.Fatalf("seed into a free slot = %+v, want it admitted and running", resp)
+	}
+	requireSeedDeadlineStamped(t, state, ctx, resp.ExecutionID, 0)
 }

@@ -458,11 +458,18 @@ describe("node search and workflow settings", () => {
       concurrency: { limit: 4, mode: "queue", max_queued: 9, queue_timeout: 120000000000 }
     });
 
-    // 基本 carries the timezone; 错误与重试 carries the error policy and retry.
+    // 基本 carries the timezone and the execution timeout; 错误与重试 carries the error policy and retry.
+    // The timeout is the Go time.Duration wire form: integer nanoseconds, never a "30s" string.
+    fireEvent.change(within(inspector()).getByLabelText("执行超时"), { target: { value: "1800000000000" } });
+    expect(lastWorkflow(handleChange).settings).toEqual({
+      timeout: 1800000000000,
+      concurrency: { limit: 4, mode: "queue", max_queued: 9, queue_timeout: 120000000000 }
+    });
     fireEvent.change(within(inspector()).getByLabelText("执行时区"), { target: { value: "Asia/Shanghai" } });
     pickEditorOption(within(inspector()).getByLabelText("执行出错时"), "继续执行");
     pickEditorOption(within(inspector()).getByLabelText("Pin 数据模式"), "总是使用");
     expect(lastWorkflow(handleChange).settings).toEqual({
+      timeout: 1800000000000,
       concurrency: { limit: 4, mode: "queue", max_queued: 9, queue_timeout: 120000000000 },
       timezone: "Asia/Shanghai",
       on_error: "continue",
@@ -508,6 +515,20 @@ describe("node search and workflow settings", () => {
     // An emptied row leaves the DSL rather than writing an empty value.
     fireEvent.change(within(inspector()).getByLabelText("执行时区"), { target: { value: "" } });
     expect(lastWorkflow(handleChange).settings?.timezone).toBeUndefined();
+    fireEvent.change(within(inspector()).getByLabelText("执行超时"), { target: { value: "" } });
+    expect(lastWorkflow(handleChange).settings?.timeout).toBeUndefined();
+  });
+
+  it("rejects a Go duration string in 执行超时 instead of writing it", () => {
+    const handleChange = vi.fn();
+    render(<XFlowEditor value={workflow} onChange={handleChange} />);
+    const inspector = () => screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    // The server decodes settings.timeout as integer nanoseconds and rejects "30s".
+    fireEvent.change(within(inspector()).getByLabelText("执行超时"), { target: { value: "30s" } });
+    expect(handleChange).not.toHaveBeenCalled();
+    expect(within(inspector()).getByRole("alert")).toBeTruthy();
   });
 
   it("reads the bare-int concurrency shorthand into the structured rows", () => {
@@ -534,15 +555,20 @@ describe("node search and workflow settings", () => {
     const source = within(inspector()).getByLabelText("工作流执行设置 JSON") as HTMLTextAreaElement;
     expect(JSON.parse(source.value)).toEqual({});
     fireEvent.change(source, {
-      target: { value: '{ "concurrency": { "limit": 4, "mode": "reject" }, "retry": { "enabled": true } }' }
+      target: {
+        value:
+          '{ "timeout": 60000000000, "concurrency": { "limit": 4, "mode": "reject" }, "retry": { "enabled": true } }'
+      }
     });
     expect(lastWorkflow(handleChange).settings).toEqual({
+      timeout: 60000000000,
       concurrency: { limit: 4, mode: "reject" },
       retry: { enabled: true }
     });
 
     // Back on the rows, they read what the source wrote.
     fireEvent.click(toggle);
+    expect((within(inspector()).getByLabelText("执行超时") as HTMLInputElement).value).toBe("60000000000");
     expect((within(inspector()).getByLabelText("并发上限") as HTMLInputElement).value).toBe("4");
     expect((within(inspector()).getByRole("radio", { name: "拒绝" }) as HTMLInputElement).checked).toBe(true);
     expect(within(inspector()).queryByLabelText("队列上限")).toBeNull();
@@ -560,6 +586,7 @@ describe("node search and workflow settings", () => {
     expect(within(inspector()).getByRole("button", { name: "收起高级" }).getAttribute("aria-expanded")).toBe("true");
     // The parseable commit before it is still what the workflow holds.
     expect(lastWorkflow(handleChange).settings).toEqual({
+      timeout: 60000000000,
       concurrency: { limit: 4, mode: "reject" },
       retry: { enabled: true }
     });

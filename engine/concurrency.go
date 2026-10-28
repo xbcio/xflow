@@ -54,6 +54,18 @@ var ErrConcurrencyQueueFull = errors.New("workflow concurrency queue is full")
 // backend writes this exact text, and the contract tests read it back.
 const ConcurrencyQueueTimeoutError = "concurrency queue timeout"
 
+// ExecutionDeadlineExceededError is the execution-level reason recorded when an
+// execution reaches its settings.timeout deadline and is driven into the
+// timeout terminal state.
+//
+// It is not ConcurrencyQueueTimeoutError: that reason means a queued execution
+// waited past queue_timeout before it ever started, this one means the
+// execution's own absolute deadline passed, wherever it was (running, suspended,
+// paused or queued). The text is observable outside the process, in the
+// execution snapshot and in the runner-facing lease refusal that uses the same
+// string, so it must not change.
+const ExecutionDeadlineExceededError = "execution deadline exceeded"
+
 // ConcurrencyAdmission describes the slot one submission contends for.
 //
 // Limit and Mode are resolved from the submitting execution's own compiled

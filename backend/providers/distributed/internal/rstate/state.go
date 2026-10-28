@@ -48,6 +48,12 @@ type Store struct {
 	// per-execution TTL overrides (set via SubmitOption)
 	ttlMu    sync.RWMutex
 	execTTLs map[types.ExecutionID]time.Duration
+	// execDeadlines memoizes each execution's persisted deadline (zero = no time
+	// budget) so getExecTTL can keep every status write past it without a Redis
+	// read per call. Guarded by ttlMu like execTTLs. The deadline is immutable
+	// after creation, so a memoized value never goes stale; the map is only
+	// bounded, see rememberExecDeadline.
+	execDeadlines map[types.ExecutionID]time.Time
 
 	// per-execution transient overrides (set via per-workflow transient context).
 	// This is a read-through cache over the Redis marker, not the source of
@@ -150,6 +156,7 @@ func New(rdb redis.UniversalClient, db store.Store, execTTL time.Duration, opts 
 		graphCacheMaxBytes:     graphcache.DefaultMaxBytes,
 		graphCacheIdleTTL:      graphcache.DefaultIdleTTL,
 		execTTLs:               make(map[types.ExecutionID]time.Duration),
+		execDeadlines:          make(map[types.ExecutionID]time.Time),
 		execTransient:          make(map[types.ExecutionID]transientMark),
 		leaseRepairCursors:     make(map[namespace.Namespace]redisx.Cursors),
 		outboxDiscoveryCursors: make(map[namespace.Namespace]redisx.Cursors),
@@ -212,8 +219,105 @@ func (s *Store) ttlSecForExec(ctx context.Context, id types.ExecutionID) int {
 	return int(s.execTTL.Seconds())
 }
 
-// getExecTTL returns the per-execution TTL override if set, otherwise the adapter default.
+// getExecTTL returns the retention every write to the execution's keys must use:
+// the retention baseExecTTL resolves, lengthened so the keys outlive the
+// execution's deadline by deadlineGrace.
+//
+// The deadline term is derived here, at the one point every writer funnels
+// through, rather than at each call site. A replica that did not create the
+// execution holds no in-memory override, so a per-call-site extension would be
+// missed by every writer running there and the status key would be shrunk back
+// to the default retention while its deadline is still ahead: the execution
+// would vanish and never time out. The deadline is recomputed against the clock
+// on every call; only the deadline itself is memoized, never the duration.
 func (s *Store) getExecTTL(ctx context.Context, id types.ExecutionID) time.Duration {
+	base := s.baseExecTTL(ctx, id)
+	if base <= 0 {
+		// Unbounded in this store: there is nothing to lengthen.
+		return base
+	}
+	return retentionPastDeadline(base, s.execDeadline(ctx, id))
+}
+
+// execDeadline resolves an execution's deadline for retention purposes: the
+// memo when this replica has seen the execution, otherwise one transactional read
+// of the persisted state (executionDeadline). "No time budget" is memoized as a
+// zero deadline, so an execution without a timeout costs one read per replica
+// rather than one per write.
+//
+// Only a settled answer is memoized. An answer for an execution that does not
+// exist yet, and a failed read, are returned for this call alone: memoizing
+// either would pin the execution to "no budget" on this replica for as long as
+// it runs, and every later write would shrink the status back to the default
+// retention (see executionDeadline).
+//
+// The memo is filled with set-if-absent here. A creation path on this replica
+// may have recorded the authoritative value between the read and this write, and
+// a reader must never overwrite it; the value that ends up in the memo is the one
+// returned.
+func (s *Store) execDeadline(ctx context.Context, id types.ExecutionID) time.Time {
+	s.ttlMu.RLock()
+	deadline, ok := s.execDeadlines[id]
+	s.ttlMu.RUnlock()
+	if ok {
+		return deadline
+	}
+	deadline, settled := s.executionDeadline(ctx, id)
+	if !settled {
+		return deadline
+	}
+	return s.learnExecDeadline(id, deadline)
+}
+
+// execDeadlineMemoCap bounds execDeadlines. Terminalization evicts an entry only
+// on the replica that writes the terminal status, while every replica that
+// touches the execution memoizes it, so without a bound a replica that never
+// finalizes would keep one entry per execution it ever worked on for as long as
+// it runs (the same shape internal/graphcache bounds). The memo is only an
+// optimization, so overflowing it drops it whole and the live executions refill
+// it at one read each.
+const execDeadlineMemoCap = 1 << 16
+
+// rememberExecDeadline records an execution's deadline, zero for "no time
+// budget", overwriting whatever the memo held. It is for the creation paths,
+// which hold the authoritative value they just wrote and spare the first
+// getExecTTL its read. A reader that learned something from Redis must use
+// learnExecDeadline instead, which never overwrites.
+func (s *Store) rememberExecDeadline(id types.ExecutionID, deadline time.Time) {
+	s.ttlMu.Lock()
+	s.storeExecDeadlineLocked(id, deadline)
+	s.ttlMu.Unlock()
+}
+
+// learnExecDeadline records a deadline read from Redis unless the memo already
+// holds one, and returns the deadline the memo holds afterwards. Set-if-absent
+// under the write lock, so a reader racing a creation on this replica cannot
+// replace the creator's value with what it saw before the creation landed.
+func (s *Store) learnExecDeadline(id types.ExecutionID, deadline time.Time) time.Time {
+	s.ttlMu.Lock()
+	defer s.ttlMu.Unlock()
+	if known, ok := s.execDeadlines[id]; ok {
+		return known
+	}
+	s.storeExecDeadlineLocked(id, deadline)
+	return deadline
+}
+
+// storeExecDeadlineLocked writes the memo entry, dropping the memo whole first
+// when it is full. The caller holds ttlMu for writing.
+func (s *Store) storeExecDeadlineLocked(id types.ExecutionID, deadline time.Time) {
+	if _, known := s.execDeadlines[id]; !known && len(s.execDeadlines) >= execDeadlineMemoCap {
+		clear(s.execDeadlines)
+	}
+	s.execDeadlines[id] = deadline
+}
+
+// baseExecTTL returns the per-execution TTL override if set, otherwise the
+// per-workflow transient TTL, otherwise the adapter default. It knows nothing of
+// the execution's deadline: the creation paths size their own retention from the
+// deadline they carry and start from this, so they must not see the lengthening
+// getExecTTL adds.
+func (s *Store) baseExecTTL(ctx context.Context, id types.ExecutionID) time.Duration {
 	s.ttlMu.RLock()
 	ttl := s.execTTLs[id]
 	s.ttlMu.RUnlock()
@@ -570,6 +674,9 @@ func createdExecutionKeys(t namespace.Namespace, id types.ExecutionID, g *graph.
 		execKey(t, id, "workflow_version"),
 		execKey(t, id, "created_at_ms"),
 		execKey(t, id, "updated_at_ms"),
+		// The absolute deadline of the execution's time budget; written once with
+		// the execution, and only when it has a budget.
+		execKey(t, id, "deadline_ms"),
 		execKey(t, id, "parent"),
 		execKey(t, id, "parent_node"),
 		execKey(t, id, "depth"),
@@ -822,6 +929,7 @@ func (s *Store) evictExecutionCaches(id types.ExecutionID) {
 	s.graphs.Delete(id)
 	s.ttlMu.Lock()
 	delete(s.execTTLs, id)
+	delete(s.execDeadlines, id)
 	s.ttlMu.Unlock()
 	s.transientMu.Lock()
 	delete(s.execTransient, id)

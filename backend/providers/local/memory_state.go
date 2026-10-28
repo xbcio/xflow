@@ -111,6 +111,14 @@ type memoryState struct {
 	// not recreate node state; an ID that never existed is a different case
 	// (the state contract leases bare nodes) and is not listed here.
 	rolledBack map[types.ExecutionID]bool
+
+	// deadlines indexes the executions that carry a settings.timeout deadline,
+	// for engine.ExecutionDeadlineExpirer. It is recorded in the same locked
+	// step that creates the execution (register-before-write, atomic under mu).
+	// success, failed and canceled withdraw the entry; timeout keeps it until
+	// AckDeadlineExpired, because the cascade that stops the execution's
+	// remaining nodes runs after the timeout status is written.
+	deadlines map[types.ExecutionID]time.Time
 }
 
 type execEntry struct {
@@ -149,6 +157,7 @@ func newMemoryState() *memoryState {
 		mirrorCreatePending: make(map[types.ExecutionID]bool),
 		mirrorConflict:      make(map[types.ExecutionID]bool),
 		rolledBack:          make(map[types.ExecutionID]bool),
+		deadlines:           make(map[types.ExecutionID]time.Time),
 	}
 }
 
@@ -665,6 +674,9 @@ func (s *memoryState) createExecutionLocked(e *engine.ExecutionSnapshot) {
 		cp.UpdatedAt = cp.CreatedAt
 	}
 	s.executions[e.ID] = &execEntry{snap: cp}
+	if !cp.Deadline.IsZero() {
+		s.deadlines[e.ID] = cp.Deadline
+	}
 	// Reuse a pre-registered done channel from an early waitDone call (race with
 	// CreateExecution), or create a fresh one.
 	if _, ok := s.doneCh[e.ID]; !ok {
@@ -750,6 +762,7 @@ func (s *memoryState) updateExecutionStatusLocked(id types.ExecutionID, status t
 	// Close the done channel on terminal status so Wait() unblocks.
 	if isTerminalStatus(status) {
 		delete(s.cancelingSince, id)
+		s.withdrawDeadlineLocked(id, status)
 		s.releaseWorkflowSlotLocked(id)
 		if !entry.closed {
 			entry.closed = true
@@ -905,6 +918,83 @@ func (s *memoryState) ListCancelingExecutions(_ context.Context, olderThan time.
 }
 
 var _ engine.CancelingExecutionLister = (*memoryState)(nil)
+
+// withdrawDeadlineLocked drops an execution's deadline entry when it reaches a
+// terminal status. timeout is the one terminal status that keeps it: the
+// timeout write precedes the cascade that stops the execution's remaining
+// nodes, so the entry has to stay discoverable until AckDeadlineExpired
+// confirms the cascade finished. Both terminal writers (updateExecutionStatusLocked
+// and finishExecutionLocked) call this so neither can leave an entry behind.
+func (s *memoryState) withdrawDeadlineLocked(id types.ExecutionID, status types.ExecutionStatus) {
+	if status != types.ExecutionStatusTimeout {
+		delete(s.deadlines, id)
+	}
+}
+
+// ListDeadlineExceededExecutions reports the executions whose deadline is at or
+// before the given instant (engine.ExecutionDeadlineExpirer).
+//
+// It reads the index maintained by createExecutionLocked rather than scanning
+// executions, and compares only the before it is handed: the caller owns the
+// clock, which is what lets the boundary be pinned without sleeping. An entry
+// whose execution has meanwhile disappeared or reached success, failed or
+// canceled is repaired here, the only place a withdrawal that was skipped can
+// be dropped, and is never returned. A timeout execution is returned until it
+// is acknowledged, and so is a canceling one (ExpireExecution leaves it to the
+// cancel).
+//
+// The memory backend has no namespace dimension, so Namespace is left empty.
+// Results are ordered by deadline, then ID, so a bounded page favors the
+// executions that have been overdue longest.
+func (s *memoryState) ListDeadlineExceededExecutions(_ context.Context, before time.Time, limit int) ([]engine.DeadlineExpiredExecution, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]engine.DeadlineExpiredExecution, 0, limit)
+	for id, deadline := range s.deadlines {
+		entry, ok := s.executions[id]
+		if !ok {
+			delete(s.deadlines, id)
+			continue
+		}
+		switch entry.snap.Status {
+		case types.ExecutionStatusSuccess, types.ExecutionStatusFailed, types.ExecutionStatusCanceled:
+			delete(s.deadlines, id)
+			continue
+		}
+		if deadline.After(before) {
+			continue
+		}
+		out = append(out, engine.DeadlineExpiredExecution{
+			ExecutionID: id,
+			Deadline:    deadline,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Deadline.Equal(out[j].Deadline) {
+			return out[i].Deadline.Before(out[j].Deadline)
+		}
+		return out[i].ExecutionID < out[j].ExecutionID
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+// AckDeadlineExpired withdraws the entry of an execution ExpireExecution has
+// fully handled. Deleting an absent key is a no-op, which is the idempotence
+// the capability asks for.
+func (s *memoryState) AckDeadlineExpired(_ context.Context, id types.ExecutionID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.deadlines, id)
+	return nil
+}
+
+var _ engine.ExecutionDeadlineExpirer = (*memoryState)(nil)
 
 func (s *memoryState) LoadGraph(_ context.Context, id types.ExecutionID) (*graph.Graph, error) {
 	s.mu.Lock()

@@ -50,8 +50,16 @@ func triggerGroupOnlyGraph(t *testing.T) *graph.Graph {
 // schedule downstream but NOT complete the execution.
 func triggerGroupWithDownstreamGraph(t *testing.T) *graph.Graph {
 	t.Helper()
+	return triggerGroupWithDownstreamGraphSettings(t, nil)
+}
+
+// triggerGroupWithDownstreamGraphSettings is the same graph under the given
+// workflow settings, so a case can give it a settings.timeout.
+func triggerGroupWithDownstreamGraphSettings(t *testing.T, settings *types.WorkflowSettings) *graph.Graph {
+	t.Helper()
 	g, err := graph.Compile(&types.WorkflowDef{
-		Name: "tg-downstream",
+		Name:     "tg-downstream",
+		Settings: settings,
 		Nodes: []types.NodeDef{
 			{Name: "entry", Kind: types.NodeKindTrigger},
 			{Name: "body", Kind: types.NodeKindAction},
@@ -614,4 +622,90 @@ func RunEntryAdmissionContract(t *testing.T, newStore func(*testing.T) EntryAdmi
 			t.Errorf("persisted status = %q, want %q", final.Status, types.ExecutionStatusFailed)
 		}
 	})
+
+	// An engine submission stamps the execution budget before the store sees the
+	// snapshot, but an entry seed never passes through the engine's start path
+	// and hands the store only the graph. The store has to do the stamping, or a
+	// trigger-created execution of a workflow with settings.timeout reads back
+	// with no budget and is never expired.
+	t.Run("StampsTheExecutionDeadline", func(t *testing.T) {
+		s := newStore(t)
+		const timeout = 90 * time.Second
+		g := triggerGroupWithDownstreamGraphSettings(t, &types.WorkflowSettings{Timezone: "UTC", Timeout: timeout})
+		resp, err := s.SeedExecutionFromEntry(ctx, entrySeedRequest(t, g, "k-deadline"))
+		if err != nil {
+			t.Fatalf("SeedExecutionFromEntry: %v", err)
+		}
+		if resp.State != engine.AdmissionStateAccepted {
+			t.Fatalf("state = %q, want accepted", resp.State)
+		}
+		requireSeedDeadlineStamped(t, s, ctx, resp.ExecutionID, timeout)
+	})
+
+	t.Run("StampsNoDeadlineWithoutATimeout", func(t *testing.T) {
+		s := newStore(t)
+		g := triggerGroupWithDownstreamGraph(t)
+		resp, err := s.SeedExecutionFromEntry(ctx, entrySeedRequest(t, g, "k-no-deadline"))
+		if err != nil {
+			t.Fatalf("SeedExecutionFromEntry: %v", err)
+		}
+		requireSeedDeadlineStamped(t, s, ctx, resp.ExecutionID, 0)
+	})
+}
+
+// requireSeedDeadlineStamped reads back an entry-seeded execution and checks the
+// budget the store stamped on it. timeout 0 means the graph declares none and
+// the Deadline must stay the zero time.
+//
+// The deadline is compared with the execution's own CreatedAt, within a second,
+// and not for equality: the Redis backend stamps created_at_ms from its own
+// clock reading, which is not the engine's and may differ by a few
+// milliseconds. What the contract fixes is the size of the budget, not the
+// exact instant it started.
+func requireSeedDeadlineStamped(t *testing.T, state engine.StateStore, ctx context.Context, id types.ExecutionID, timeout time.Duration) {
+	t.Helper()
+	snap, err := state.GetExecution(ctx, id)
+	if err != nil || snap == nil {
+		t.Fatalf("GetExecution(%q) = (%v, %v), want the seeded execution", id, snap, err)
+	}
+	listed := false
+	if state, ok := state.(engine.ExecutionDeadlineExpirer); ok {
+		due, err := state.ListDeadlineExceededExecutions(context.Background(), deadlineContractBase.AddDate(100, 0, 0), 1024)
+		if err != nil {
+			t.Fatalf("ListDeadlineExceededExecutions() error = %v", err)
+		}
+		for _, item := range due {
+			listed = listed || item.ExecutionID == id
+		}
+	}
+	if timeout <= 0 {
+		if !snap.Deadline.IsZero() {
+			t.Fatalf("Deadline = %v for a graph without settings.timeout, want the zero time", snap.Deadline)
+		}
+		if listed {
+			t.Fatalf("execution %q is in the deadline index though its graph declares no settings.timeout", id)
+		}
+		return
+	}
+	if snap.Deadline.IsZero() {
+		t.Fatalf("Deadline is the zero time for a graph with settings.timeout %v: the seed "+
+			"must stamp the budget, or the execution can never be expired", timeout)
+	}
+	if snap.CreatedAt.IsZero() {
+		t.Fatalf("CreatedAt is the zero time, so the budget %v has no start to be measured from", timeout)
+	}
+	budget := snap.Deadline.Sub(snap.CreatedAt)
+	if diff := budget - timeout; diff < -time.Second || diff > time.Second {
+		t.Fatalf("Deadline - CreatedAt = %v, want %v within one second (Deadline %v, CreatedAt %v)",
+			budget, timeout, snap.Deadline, snap.CreatedAt)
+	}
+	// Registering the deadline is half of stamping it: the stored Deadline is
+	// what a lease reads, the index entry is what the sweep finds. A seed that
+	// wrote only the first would leave an execution nothing could expire once its
+	// runner was gone. The listing is asked at an instant far past any budget, so
+	// no case here waits for the deadline to arrive.
+	if _, ok := state.(engine.ExecutionDeadlineExpirer); ok && !listed {
+		t.Fatalf("execution %q has Deadline %v but is not in the deadline index: the sweep can never find it",
+			id, snap.Deadline)
+	}
 }

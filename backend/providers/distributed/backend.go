@@ -134,8 +134,9 @@ func WithTransientMode(activeTTL, completionTTL time.Duration) Option {
 	}
 }
 
-// WithConsumer controls whether Bind starts a task consumer and timeout
-// monitor in this process. Disable it for API-only embedded SDK instances.
+// WithConsumer controls whether Bind starts a task consumer, the timeout
+// monitor and the execution deadline sweeper in this process. Disable it for
+// API-only embedded SDK instances.
 func WithConsumer(enabled bool) Option {
 	return func(c *config) {
 		c.consumer = enabled
@@ -636,7 +637,7 @@ func (b *Backend) Bind(eng *engine.Engine) func() {
 		opts = append(opts, execution.WithArtifactCodeResolver(b.artifactCode))
 	}
 	dispatcher := execution.NewEmbeddedDispatcher(eng, b.registry, opts...)
-	stop, err := b.bindHandler(eng, dispatcher.HandleTask)
+	stop, err := b.bindHandler(eng, dispatcher.HandleTask, true)
 	if err != nil {
 		b.logBindError("Provider.Bind path", err)
 		return noopStop()
@@ -662,7 +663,7 @@ func (b *Backend) StartBinding(eng *engine.Engine) (func(), error) {
 		opts = append(opts, execution.WithArtifactCodeResolver(b.artifactCode))
 	}
 	dispatcher := execution.NewEmbeddedDispatcher(eng, b.registry, opts...)
-	return b.bindHandler(eng, dispatcher.HandleTask)
+	return b.bindHandler(eng, dispatcher.HandleTask, true)
 }
 
 // BindHandler wires a custom task handler into the task transport and starts
@@ -673,7 +674,7 @@ func (b *Backend) StartBinding(eng *engine.Engine) (func(), error) {
 // control-plane path. BindHandler swallows consumer start errors; production
 // callers should use the error-returning alternatives.
 func (b *Backend) BindHandler(eng *engine.Engine, handler func(context.Context, *engine.Task) error) func() {
-	stop, err := b.bindHandler(eng, handler)
+	stop, err := b.bindHandler(eng, handler, true)
 	if err != nil {
 		b.logBindError("BindHandler path", err)
 		return noopStop()
@@ -835,6 +836,13 @@ type bindStartHooks struct {
 	afterConsumerStart func() error // simulate outbox dispatcher start failure
 	afterOutboxStart   func() error // simulate timeout monitor start failure
 	onMonitorDone      func()       // nil in production; called after timeout monitor goroutine exits
+
+	// deadlineSweepInterval overrides defaultDeadlineSweepInterval so a test does
+	// not wait seconds per sweep. Zero keeps the default.
+	deadlineSweepInterval time.Duration
+	// onDeadlineSweeperDone is called by the deadline sweeper goroutine as it
+	// exits, so a test can prove stop waited for it.
+	onDeadlineSweeperDone func()
 }
 
 // closeOwnedResources releases the resources owned by bindHandler in
@@ -867,15 +875,17 @@ func (b *Backend) closeOwnedResources(startupErr error) error {
 
 // bindHandler is the unified internal lifecycle entry: it wires a task handler
 // into the transport and starts the durable outbox dispatcher and lease
-// timeout monitor. Components are acquired in order; on any failure the
-// already-started components are stopped in reverse order and their goroutines
-// awaited before returning. The returned stop func is idempotent and waits for
-// background goroutines to exit before releasing the resources they depend on.
+// timeout monitor, plus the execution deadline sweeper when sweepDeadlines is
+// set (the embedded paths; a control plane runs its own). Components are
+// acquired in order; on any failure the already-started components are stopped
+// in reverse order and their goroutines awaited before returning. The returned
+// stop func is idempotent and waits for background goroutines to exit before
+// releasing the resources they depend on.
 //
 // Fail-closed contract: a consumer start error is returned to the caller
 // (BindTaskHandler propagates it to ControlPlane.Start) rather than logged and
 // ignored, so readiness can never be reported while the consumer is down.
-func (b *Backend) bindHandler(eng *engine.Engine, handler func(context.Context, *engine.Task) error) (func(), error) {
+func (b *Backend) bindHandler(eng *engine.Engine, handler func(context.Context, *engine.Task) error, sweepDeadlines bool) (func(), error) {
 	if !b.consumer {
 		return b.nonConsumerStop(), nil
 	}
@@ -987,6 +997,27 @@ func (b *Backend) bindHandler(eng *engine.Engine, handler func(context.Context, 
 		close(tmDone)
 	}
 
+	// 4. Start the execution deadline sweeper (embedded paths only, durable only).
+	//    BindTaskHandler leaves it to the control plane's leader-gated pass, which
+	//    would otherwise run once per replica. Transient mode skips it for the
+	//    same reason it skips the timeout monitor above. It starts after the last
+	//    step that can fail, so no rollback path has to stop it.
+	sweepDone := make(chan struct{})
+	if sweepDeadlines && !b.transient {
+		interval := b.testHooks.deadlineSweepInterval
+		go func() {
+			defer close(sweepDone)
+			defer func() {
+				if b.testHooks.onDeadlineSweeperDone != nil {
+					b.testHooks.onDeadlineSweeperDone()
+				}
+			}()
+			b.runDeadlineSweeper(outboxCtx, eng, interval)
+		}()
+	} else {
+		close(sweepDone)
+	}
+
 	var stopOnce sync.Once
 	stop := func() {
 		stopOnce.Do(func() {
@@ -998,6 +1029,7 @@ func (b *Backend) bindHandler(eng *engine.Engine, handler func(context.Context, 
 			}
 			cancelOutbox()
 			<-outboxDone
+			<-sweepDone
 			if tm != nil {
 				tm.Stop()
 				<-tmDone
@@ -1043,5 +1075,5 @@ func (b *Backend) BindTaskHandler(eng *engine.Engine, handler func(context.Conte
 	if !b.consumer {
 		return nil, errors.New("distributed: BindTaskHandler requires a backend configured with WithConsumer(true); a non-consumer backend cannot serve a control plane")
 	}
-	return b.bindHandler(eng, handler)
+	return b.bindHandler(eng, handler, false)
 }

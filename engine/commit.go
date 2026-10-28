@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/types"
@@ -147,7 +148,7 @@ func (e *Engine) CommitTaskTimeout(ctx context.Context, lease *TaskLease, cause 
 		return ErrGroupLeaseNotSupported
 	}
 	if cause == nil {
-		cause = types.NewPermanentError("node.timeout", "node execution exceeded its deadline")
+		cause = types.NewPermanentError(types.NodeTimeoutErrorCode, "node execution exceeded its deadline")
 	}
 	t := &lease.Task
 	g, active, err := e.loadActiveGraph(ctx, t.ExecutionID)
@@ -156,6 +157,12 @@ func (e *Engine) CommitTaskTimeout(ctx context.Context, lease *TaskLease, cause 
 	}
 	if !active {
 		return nil
+	}
+	// A node timeout that lands once the execution's own deadline is reached is
+	// the execution's timeout, not a node failure on_error may route around.
+	// The caller gets nil, as for an inactive execution: it was handled.
+	if handled, err := e.expireIfExecutionDeadlineReached(ctx, t.ExecutionID, g, time.Now()); err != nil || handled {
+		return err
 	}
 	if g.AllowCycles() {
 		return e.CommitTaskFailure(ctx, lease, cause)

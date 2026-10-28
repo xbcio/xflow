@@ -593,6 +593,25 @@ func (s *Store) CancelSuspendedNode(ctx context.Context, id types.ExecutionID, n
 // cleanupOnCancel removes timeout ZSET entries for all suspended nodes of a
 // canceled execution and deletes the suspended_nodes SET itself.
 func (s *Store) cleanupOnCancel(ctx context.Context, id types.ExecutionID) {
+	s.cleanupExecutionIndexes(ctx, id, false)
+}
+
+// cleanupOnTimeout is cleanupOnCancel for an execution whose deadline expired,
+// except that it keeps the suspended_nodes SET. Cancel cascades first and writes
+// canceled last, so its cleanup runs after the cascade has finished with the
+// set. ExpireExecution writes the terminal status first and cascades afterwards,
+// and the cascade finds the suspended nodes by listing that set; deleting it
+// here would leave every suspended node parked forever. CancelSuspendedNode
+// removes each node it cancels from the set, and the set expires with the
+// execution's other keys.
+func (s *Store) cleanupOnTimeout(ctx context.Context, id types.ExecutionID) {
+	s.cleanupExecutionIndexes(ctx, id, true)
+}
+
+// cleanupExecutionIndexes drops everything that could still drive work for a
+// terminal execution: the waiter keys, the timeout and lease-expiry indexes, and
+// the outbox. keepSuspendedSet leaves the suspended_nodes SET in place.
+func (s *Store) cleanupExecutionIndexes(ctx context.Context, id types.ExecutionID, keepSuspendedSet bool) {
 	t := namespace.FromContext(ctx)
 	nodes, err := s.rdb.SMembers(ctx, suspendedNodesKey(t, id)).Result()
 	// Resolve the waiter/signal keys for each suspended node BEFORE opening the
@@ -622,7 +641,6 @@ func (s *Store) cleanupOnCancel(ctx context.Context, id types.ExecutionID) {
 	// no worker may recover work from them; removing them prevents stale leases
 	// or undelivered outbox tasks from reviving a canceled execution.
 	pipe.Del(ctx,
-		suspendedNodesKey(t, id),
 		leaseExpiryZSetKey(t, id),
 		outboxReadyKey(t, id),
 		outboxBodyKey(t, id),
@@ -630,6 +648,9 @@ func (s *Store) cleanupOnCancel(ctx context.Context, id types.ExecutionID) {
 		failedNodesKey(t, id),
 		timeoutZSetKey(t, id),
 	)
+	if !keepSuspendedSet {
+		pipe.Del(ctx, suspendedNodesKey(t, id))
+	}
 	_, _ = pipe.Exec(ctx)
 	// Cancellation removes the execution's ready set, so its readiness-index
 	// member has to go too: a member left behind would only cost a no-op drain

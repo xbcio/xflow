@@ -322,7 +322,7 @@ func (c *Core) renewLease(ctx context.Context, req protocol.RenewLeaseRequest, i
 		// name, execution ID, params, or output.
 		c.observeNodeTimeout(ctx, resolved.NodeType)
 		if committer, ok := c.engine.(nodeTimeoutCommitter); ok {
-			cause := types.NewPermanentError("node.timeout", "node execution exceeded its deadline")
+			cause := types.NewPermanentError(types.NodeTimeoutErrorCode, "node execution exceeded its deadline")
 			if err := committer.CommitTaskTimeout(ctx, resolved, cause); err != nil {
 				return protocol.RenewLeaseResponse{}, normalizeRunnerError(err, c.logger, "renew_lease")
 			}

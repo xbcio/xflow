@@ -81,6 +81,11 @@ func (e *Engine) startExecution(ctx context.Context, snap *ExecutionSnapshot, ta
 	if err := e.admitSubWorkflows(snap.Graph); err != nil {
 		return "", err
 	}
+	// Submit, Invoke and a sub-workflow child all create their snapshot here, so
+	// this is the one place the execution deadline is stamped for them. It is
+	// stamped before the concurrency admission below: a queued execution's wait
+	// counts against the budget, so the clock starts at admission.
+	stampExecutionDeadline(snap)
 	admission := concurrencyAdmissionFor(ctx, snap.Graph)
 	if admission != nil {
 		return e.startLimitedExecution(ctx, snap, tasks, admission)

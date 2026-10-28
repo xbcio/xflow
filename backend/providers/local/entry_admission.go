@@ -154,6 +154,18 @@ func (s *memoryState) seedExecutionFromEntryLocked(ctx context.Context, req engi
 		WorkflowVersion: req.WorkflowVersion,
 		Namespace:       string(registrationNamespace),
 	}
+	// An engine submission stamps the execution budget before it reaches the
+	// store; an entry seed never passes through the engine's start path, so the
+	// store stamps it here. Deadline and CreatedAt read the same instant so the
+	// budget starts at creation, and a queued admission spends its wait out of
+	// it, as it does for a submitted execution.
+	now := time.Now().UTC()
+	snap.CreatedAt = now
+	if req.Graph != nil {
+		if d := req.Graph.Timeout(); d > 0 {
+			snap.Deadline = now.Add(d)
+		}
+	}
 	s.noteMirrorModeLocked(ctx, snap)
 	s.markMirrorCreatePendingLocked(execID)
 	s.createExecutionLocked(snap)

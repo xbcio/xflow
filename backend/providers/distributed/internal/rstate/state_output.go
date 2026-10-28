@@ -177,6 +177,10 @@ func (s *Store) extendExecTTL(ctx context.Context, id types.ExecutionID, nodeNam
 	// timestamps expired reports no start line and no duration.
 	pipe.Expire(ctx, execKey(t, id, "created_at_ms"), ttl)
 	pipe.Expire(ctx, execKey(t, id, "updated_at_ms"), ttl)
+	// The time budget is written once with the execution as well. If it lapsed
+	// while status lived on, GetExecution would read back a zero Deadline and
+	// ExpireExecution would report the execution as never due: a silent failure.
+	pipe.Expire(ctx, execKey(t, id, "deadline_ms"), ttl)
 	pipe.Expire(ctx, suspendedNodesKey(t, id), ttl)
 	pipe.Expire(ctx, timeoutZSetKey(t, id), ttl)
 	for _, key := range suspendNodeTTLKeys(t, id, nodeName, spec) {
@@ -189,10 +193,17 @@ func (s *Store) extendExecTTL(ctx context.Context, id types.ExecutionID, nodeNam
 }
 
 // suspendTTL returns the TTL to use when a node is suspended.
-// It picks the larger of the execution's base TTL and spec.Timeout + 1 hour.
+// It picks the largest of the execution's base TTL, spec.Timeout + 1 hour, and
+// the time left to the execution's deadline plus its grace.
 //
 // The base TTL comes from getExecTTL, which resolves the explicit per-execution
-// override first, then the per-workflow transient TTL, then the adapter default.
+// override first, then the per-workflow transient TTL, then the adapter default,
+// and lengthens the result past the execution's deadline (read from the store,
+// not the in-memory override, so a replica that did not create the execution
+// still honors it). A suspended execution can sit parked for longer than the
+// default retention while its time budget is still running; without the deadline
+// term its status would expire at the default and the execution would vanish
+// instead of timing out.
 // Reading s.execTTLs directly would miss the transient case: a per-workflow
 // transient execution never writes that map, so its suspended keys would be
 // EXPIREd to the durable retention window -- hours of extra life for an

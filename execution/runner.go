@@ -644,7 +644,7 @@ func classifyCancelCause(ctx context.Context, deadline time.Time) cancelCause {
 // cancellation produced a transient node.cancelled error.
 func isNodeTimeoutError(err error) bool {
 	var ce *types.ClassifiedError
-	return errors.As(err, &ce) && ce.Code == "node.timeout"
+	return errors.As(err, &ce) && ce.Code == types.NodeTimeoutErrorCode
 }
 
 // nodeExecutionDeadline picks the effective absolute deadline for one handler
@@ -673,10 +673,10 @@ func nodeExecutionDeadline(lease *engine.TaskLease, now time.Time) time.Time {
 // node's output is routinely an HTTP response body carrying a token.
 func newNodeTimeoutError(budget time.Duration) error {
 	if budget <= 0 {
-		return types.NewPermanentError("node.timeout",
+		return types.NewPermanentError(types.NodeTimeoutErrorCode,
 			"node execution exceeded its deadline")
 	}
-	return types.NewPermanentError("node.timeout",
+	return types.NewPermanentError(types.NodeTimeoutErrorCode,
 		fmt.Sprintf("node execution exceeded its %s timeout", budget))
 }
 

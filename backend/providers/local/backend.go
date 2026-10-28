@@ -326,10 +326,17 @@ func (b *Backend) bindHandlerWithOutbox(eng *engine.Engine, handler func(context
 		b.runQueueTimeoutSweeper(outboxCtx, interval)
 	}()
 
+	deadlineDone := make(chan struct{})
+	go func() {
+		defer close(deadlineDone)
+		b.runDeadlineSweeper(outboxCtx, eng, interval)
+	}()
+
 	return func() {
 		cancelOutbox()
 		<-outboxDone
 		<-queueTimeoutDone
+		<-deadlineDone
 		b.queue.Stop()
 	}
 }
@@ -364,6 +371,63 @@ func (b *Backend) runQueueTimeoutSweeper(ctx context.Context, interval time.Dura
 		case <-ticker.C:
 			if _, err := b.state.ExpireQueuedExecutions(ctx, 0); err != nil && b.logger != nil {
 				b.logger.Error("concurrency_queue_timeout_sweep_failed", "err", err)
+			}
+		}
+	}
+}
+
+// deadlineSweepInterval is how often executions past their settings.timeout
+// deadline are expired when the caller does not say otherwise. One second,
+// matching the queue-timeout sweep: an execution can overrun its deadline by up
+// to one tick.
+const deadlineSweepInterval = time.Second
+
+// deadlineSweepBatch bounds how many overdue executions one tick expires. The
+// rest are still listed on the next tick, so a burst of simultaneous deadlines
+// drains over a few ticks instead of holding one tick open.
+const deadlineSweepBatch = 100
+
+// runDeadlineSweeper expires the executions whose settings.timeout deadline has
+// passed with no task left to notice it.
+//
+// A running node enforces the deadline through its own lease; an execution that
+// is parked (suspended, paused, queued) or between tasks has no lease, so
+// without this loop it would outlive its deadline indefinitely in-process.
+// Unlike the queue-timeout sweep this one needs the engine, because expiring an
+// execution is not only a status write: ExpireExecution also cascades the
+// cancellation to what the execution still had suspended or running, and
+// acknowledges the index entry only once that finished.
+//
+// The deadlines live in the store and every tick asks it which ones have
+// passed. The loop body is engine.DeadlineSweep, which sets an execution that
+// fails (or is canceling) aside for a growing window instead of retrying it every
+// tick: the index lists the oldest deadlines first and keeps a failing entry, so
+// a page of entries that never succeed would otherwise hold every slot and starve
+// the later ones, logging one error per entry per second. Its warnings come at
+// 5, 20 and 100 consecutive failures of one execution instead.
+func (b *Backend) runDeadlineSweeper(ctx context.Context, expirer engine.ExecutionExpirer, interval time.Duration) {
+	if interval <= 0 {
+		interval = deadlineSweepInterval
+	}
+	var logger engine.DeadlineSweepLogger
+	if b.logger != nil {
+		logger = b.logger
+	}
+	sweep := engine.NewDeadlineSweep(engine.DeadlineSweepConfig{
+		Lister:  b.state,
+		Expirer: expirer,
+		Batch:   deadlineSweepBatch,
+		Logger:  logger,
+	})
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if _, err := sweep.Sweep(ctx); err != nil && b.logger != nil {
+				b.logger.Error("execution_deadline_sweep_failed", "err", err)
 			}
 		}
 	}

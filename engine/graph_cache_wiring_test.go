@@ -164,6 +164,71 @@ func TestGraphCacheEvictionDropsTraceCarrier(t *testing.T) {
 	}
 }
 
+// seedBoundedGraph is seedGraph for a workflow that declares settings.timeout,
+// with the execution deadline stored on its snapshot so the engine has one to
+// memoize.
+func seedBoundedGraph(t *testing.T, st *fakeState, id types.ExecutionID) *graph.Graph {
+	t.Helper()
+	g, err := graph.Compile(&types.WorkflowDef{
+		Name:     string(id),
+		Settings: &types.WorkflowSettings{Timezone: "UTC", Timeout: time.Hour},
+		Nodes:    []types.NodeDef{{Name: "A", Type: "test.a"}},
+	})
+	if err != nil {
+		t.Fatalf("compile %s: %v", id, err)
+	}
+	st.executions[id] = &ExecutionSnapshot{
+		ID: id, Graph: g, Status: types.ExecutionStatusRunning,
+		Deadline: time.Now().UTC().Add(time.Hour),
+	}
+	return g
+}
+
+// TestGraphCacheEvictionDropsDeadlineMemo is the deadline twin of the
+// trace-carrier test above: a graph the cache drops for capacity must take its
+// execution-deadline memo with it, or the memo becomes the per-execution leak
+// the bound exists to prevent.
+//
+// Which of the two entries a capacity trim picks depends on their last-use
+// timestamps, so the test does not name the victim. It requires exactly one
+// eviction, and that every execution's memo is present if and only if its graph
+// is still cached: a memo left behind by the victim and a memo wiped from the
+// survivor both fail it.
+func TestGraphCacheEvictionDropsDeadlineMemo(t *testing.T) {
+	st := newFakeState()
+	ga := seedBoundedGraph(t, st, "exec-a")
+	gb := seedBoundedGraph(t, st, "exec-b")
+
+	e := New(st, nil, WithGraphCache(ga.EstimatedHeapBytes()+gb.EstimatedHeapBytes()-1, 0))
+	ctx := context.Background()
+	// Memoize both before any eviction, so a memo found afterwards can only be
+	// one the eviction failed to clear.
+	for id, g := range map[types.ExecutionID]*graph.Graph{"exec-a": ga, "exec-b": gb} {
+		if _, err := e.executionDeadline(ctx, id, g); err != nil {
+			t.Fatalf("executionDeadline(%q): %v", id, err)
+		}
+	}
+	if got := deadlineMemoLen(e); got != 2 {
+		t.Fatalf("memo entries before eviction = %d, want 2", got)
+	}
+
+	mustLoad(t, e, ctx, "exec-a")
+	mustLoad(t, e, ctx, "exec-b") // over the byte budget: one of the two is evicted
+
+	if got := e.graphs.Stats().EvictedCapacity; got != 1 {
+		t.Fatalf("capacity evictions = %d, want exactly 1", got)
+	}
+	for _, id := range []types.ExecutionID{"exec-a", "exec-b"} {
+		_, cached := e.graphs.Get(id)
+		e.mu.RLock()
+		_, memoized := e.executionDeadlines[id]
+		e.mu.RUnlock()
+		if memoized != cached {
+			t.Errorf("%s: graph cached = %v, deadline memoized = %v, want them to agree", id, cached, memoized)
+		}
+	}
+}
+
 // TestGraphCacheIdleTTLIsWired proves the option reaches the cache. The sweep
 // is opportunistic — it runs on Put, so the third execution's first load is
 // what expires the idle entry; exec-a's next load must then go back to the

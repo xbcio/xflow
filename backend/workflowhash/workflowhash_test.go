@@ -237,3 +237,35 @@ func TestRuntimePayloadOmitsEmptyDependencyEdges(t *testing.T) {
 		t.Fatalf("dependency_edges must be omitted when empty: %s", b)
 	}
 }
+
+// TestRuntimeSettingsTimeout pins that settings.timeout is part of the runtime
+// identity (it changes what the workflow does) while an unset timeout leaves
+// every stored hash untouched. The expected literal was captured by hashing
+// this exact definition BEFORE WorkflowSettings gained the Timeout field; it is
+// not recomputed from current code.
+func TestRuntimeSettingsTimeout(t *testing.T) {
+	def := func(timeout time.Duration) *types.WorkflowDef {
+		return &types.WorkflowDef{
+			Namespace: "default",
+			Name:      "wf",
+			Version:   "v1",
+			Settings:  &types.WorkflowSettings{Timezone: "UTC", OnError: "stop", Timeout: timeout},
+			Nodes:     []types.NodeDef{{Name: "a", Type: "xflow.transform.set"}},
+		}
+	}
+	const want = "runtime-sha256:v1:ab8aa15019d09cb264b8d517dc17ce9c77ce640f08c7d478140f80b6ef483a97"
+	unset := mustRuntime(t, def(0))
+	if unset != want {
+		t.Fatalf("Runtime(unset timeout) = %q, want %q; the Timeout tag must keep omitempty", unset, want)
+	}
+	set := mustRuntime(t, def(time.Minute))
+	if set == unset {
+		t.Error("a declared settings.timeout did not change the runtime hash")
+	}
+	if !strings.HasPrefix(set, RuntimePrefixV1) {
+		t.Errorf("Runtime(settings.timeout) = %q, want prefix %q (only node-level fields select v2)", set, RuntimePrefixV1)
+	}
+	if other := mustRuntime(t, def(2*time.Minute)); other == set {
+		t.Error("different settings.timeout values produced the same runtime hash")
+	}
+}

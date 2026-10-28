@@ -526,6 +526,86 @@ type CancelingExecutionLister interface {
 	ListCancelingExecutions(ctx context.Context, olderThan time.Time, limit int) ([]CancelingExecution, error)
 }
 
+// DeadlineExpiredExecution is one execution whose execution-level deadline
+// (ExecutionSnapshot.Deadline, stamped from settings.timeout) has been reached,
+// as reported by ExecutionDeadlineExpirer.
+type DeadlineExpiredExecution struct {
+	ExecutionID types.ExecutionID
+	// Namespace is the namespace the execution's keys live under, so a
+	// maintenance sweep can run ExpireExecution against the namespace-scoped
+	// store. It is empty when the backend has no namespace dimension (the
+	// in-memory backend).
+	Namespace namespace.Namespace
+	// Deadline is the absolute execution deadline the backend registered, the
+	// same instant ExecutionSnapshot.Deadline carries.
+	Deadline time.Time
+}
+
+// ExecutionDeadlineExpirer is the optional StateStore capability a
+// leader-driven maintenance sweep uses to find executions whose settings.timeout
+// deadline has passed with no task left to notice it.
+//
+// A running node enforces the deadline through its own lease, but an execution
+// can sit past its deadline with no live lease at all: every task finished and
+// the next one was never scheduled, the only runner died, or the execution is
+// parked (suspended, paused, queued). Nothing on the task path fires for those,
+// and a crash between ExpireExecution's timeout write and its cascade leaves a
+// timeout execution whose nodes are still active. This capability is what makes
+// both discoverable again.
+//
+// It is optional. A backend that does not implement it still gets correct
+// behavior wherever a task or lease observes the deadline, and ExpireExecution
+// can be called directly for any execution; what it loses is the automatic
+// discovery of the cases above.
+//
+// The invariant a backend must hold is REGISTER-BEFORE-WRITE: the entry for an
+// execution is recorded before (or atomically with) the execution becoming
+// visible with a non-zero Deadline, and a failure to record it must fail that
+// write. An execution with a Deadline and no entry is exactly the undiscoverable
+// state this exists to prevent. An execution whose Deadline is the zero time
+// (the workflow declares no settings.timeout) is never registered.
+//
+// Entries are withdrawn by the terminal status write, not by the sweep:
+//   - success, failed and canceled drop the entry in the same write that
+//     records the status, since nothing is left to expire;
+//   - timeout KEEPS the entry until AckDeadlineExpired. The timeout status is
+//     written before the cascade that stops the execution's remaining nodes, so
+//     a sweep must keep seeing a timeout execution until the caller confirms
+//     that cascade finished.
+//
+// ListDeadlineExceededExecutions returns at most limit entries whose Deadline is
+// at or before before and whose execution is either not terminal, or in timeout
+// and not yet acknowledged. It must:
+//   - report the namespace alongside each execution;
+//   - return nothing when limit <= 0;
+//   - drop (or tolerate until dropped) entries whose execution no longer exists
+//     or reached success, failed or canceled;
+//   - be safe to run concurrently with ordinary status writes; and
+//   - not require a namespace in ctx: the scan spans the namespaces the backend
+//     serves.
+//
+// AckDeadlineExpired removes the entry of an execution ExpireExecution has
+// fully handled. It is idempotent: acknowledging an execution that has no entry,
+// or no longer exists, succeeds.
+//
+// Every path that writes the timeout terminal status (ExecutionStatusTimeout),
+// in a backend or in the engine, must write a non-empty reason with it, and that
+// reason must differ from ExecutionDeadlineExceededError. A queue timeout writes
+// ConcurrencyQueueTimeoutError, for example. ExpireExecution tells the timeout
+// this mechanism wrote from any other timeout by that reason alone: an execution
+// already in timeout with exactly ExecutionDeadlineExceededError is treated as
+// this mechanism's own unfinished work and has its cascade replayed (and its
+// parent notified), while any other reason, an empty one included, is left as
+// another mechanism's conclusion and only has its entry acknowledged. The
+// non-empty requirement is for diagnosability: a reasonless timeout cannot be
+// attributed to anything. Only a reason equal to ExecutionDeadlineExceededError
+// is misjudged, because it would be cascaded here as if this mechanism had
+// written it.
+type ExecutionDeadlineExpirer interface {
+	ListDeadlineExceededExecutions(ctx context.Context, before time.Time, limit int) ([]DeadlineExpiredExecution, error)
+	AckDeadlineExpired(ctx context.Context, id types.ExecutionID) error
+}
+
 // LeaseSuspender atomically converts a previously claimed lease into a
 // suspended node. It validates the original lease token, persists optional
 // resume-base output, consumes or registers signals, and clears lease expiry
