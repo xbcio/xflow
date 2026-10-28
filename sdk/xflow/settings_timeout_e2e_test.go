@@ -44,13 +44,23 @@ const settingsTimeoutClockSlackAllowance = 100 * time.Millisecond
 // newSettingsTimeoutEngine builds a local engine that can run defs. The
 // handlers are registered through WithNodes because the back door below skips
 // the registration AddWorkflow would do for typed nodes.
+//
+// The engine also owns the release channel for settingsTimeoutHold. eng.Stop
+// waits for a task whose handler is still running, so a hold node whose context
+// never ends would hang the package until go test's timeout; the channel is
+// closed in a Cleanup registered after Stop's, and Cleanup is LIFO, so the
+// handler returns before the engine is stopped. Every case that mounts
+// settingsTimeoutHold must build its engine here.
 func newSettingsTimeoutEngine(t *testing.T, defs ...types.Handler) *Engine {
 	t.Helper()
 	eng, err := NewLocal(WithNodes(defs...))
 	if err != nil {
 		t.Fatalf("NewLocal() error = %v", err)
 	}
+	release := make(chan struct{})
+	settingsTimeoutHoldRelease.Store(&release)
 	t.Cleanup(eng.Stop)
+	t.Cleanup(func() { close(release) })
 	return eng
 }
 
@@ -88,14 +98,36 @@ func addWorkflowWithTimeout(t *testing.T, eng *Engine, wf *WorkflowBuilder, time
 	return rec.ID
 }
 
+// settingsTimeoutHoldRelease is the channel that releases settingsTimeoutHold.
+// One is created per engine by newSettingsTimeoutEngine and closed in Cleanup,
+// which runs before eng.Stop. It is what keeps a hold node whose context never
+// ends — the regression where settings.timeout is not applied at all — from
+// holding its worker past eng.Stop, which would park the package until go
+// test's own timeout instead of failing the case within
+// settingsTimeoutWaitLimit.
+var settingsTimeoutHoldRelease atomic.Pointer[chan struct{}]
+
 // settingsTimeoutHold is a node that does nothing but occupy its lease until
 // its context ends: the "still running when the budget runs out" case. It is
 // not a suspending node, so the execution deadline sweep cannot find it parked;
-// only the node's own lease (clamped to the execution deadline) can.
+// only the node's own lease (clamped to the execution deadline) can. It also
+// returns as canceled once the engine's release channel is closed, which only
+// happens during Cleanup; with no release channel (a nil channel blocks
+// forever) the context remains the only way out.
 var settingsTimeoutHold = node.Define("test.settings_timeout.hold",
 	func(ctx context.Context, _ *types.Input) (*types.Output, error) {
-		<-ctx.Done()
-		return nil, ctx.Err()
+		var release chan struct{}
+		if p := settingsTimeoutHoldRelease.Load(); p != nil {
+			release = *p
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-release:
+			// Not a success: the case that reached Cleanup never saw its
+			// execution conclude, and a success here would hide that.
+			return nil, context.Canceled
+		}
 	})
 
 // TestSettingsTimeoutRunningNodeEndsTheExecutionAsTimeout is scenario 1: a node
