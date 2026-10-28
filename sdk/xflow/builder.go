@@ -217,8 +217,13 @@ func (w *WorkflowBuilder) OnError(strategy types.OnError) *WorkflowBuilder {
 // at admission, so time spent queued behind settings.concurrency and time spent
 // suspended both count against it. Zero means no budget, which is also the
 // spelling of "unset". An execution that spends the budget ends in the timeout
-// status; the budget is not routed through on_error. A negative value, or a
-// non-zero budget on a FAF workflow, is rejected at compile time (graph.Compile).
+// status with the error "execution deadline exceeded" and is not routed through
+// on_error; the exception is clock drift beyond the engine's 50ms tolerance,
+// where an ordinary (non-group) node cut off at the deadline may be handled as
+// a node failure and enter on_error instead (a group timeout is always fatal).
+// See the settings.timeout clock note in DSL-SPECIFICATION.md. A negative value,
+// or a non-zero budget on a FAF workflow, is rejected at compile time
+// (graph.Compile).
 //
 // A Timeout set on a body builder is ignored: a body is not a deployed
 // workflow, and only its members and wiring are carried into the parent
