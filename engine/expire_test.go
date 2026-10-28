@@ -416,18 +416,18 @@ func (r *expireRig) adopt(t *testing.T, id types.ExecutionID) {
 // setDeadline writes the execution deadline straight into the stored snapshot,
 // so a test does not depend on the wall clock or on a graph timeout.
 func (r *expireRig) setDeadline(d time.Time) {
-	r.state.fakeState.mu.Lock()
-	r.state.fakeState.executions[r.id].Deadline = d
-	r.state.fakeState.mu.Unlock()
+	r.state.mu.Lock()
+	r.state.executions[r.id].Deadline = d
+	r.state.mu.Unlock()
 }
 
 // force overwrites the stored status and reason, the way another actor's
 // terminal write would have left them.
 func (r *expireRig) force(status types.ExecutionStatus, reason string) {
-	r.state.fakeState.mu.Lock()
-	r.state.fakeState.executions[r.id].Status = status
-	r.state.fakeState.executions[r.id].Error = reason
-	r.state.fakeState.mu.Unlock()
+	r.state.mu.Lock()
+	r.state.executions[r.id].Status = status
+	r.state.executions[r.id].Error = reason
+	r.state.mu.Unlock()
 }
 
 func (r *expireRig) snapshot(t *testing.T) *ExecutionSnapshot {
