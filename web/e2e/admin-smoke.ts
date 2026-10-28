@@ -5,14 +5,15 @@ const SERVER_NAMESPACE = "ns-smoke";
 
 /**
  * Resolve the workflow table card's background next to a probe carrying the
- * same `--xflow-panel` variable, so equality proves the surface is derived and
- * not a literal. Callers run it per colour scheme: a hard-coded `#ffffff`
- * passes the light pass and fails the dark one (`--xflow-panel: #1b1c1f`).
+ * same `--xflow-surface-raised` variable, so equality proves the surface is
+ * derived and not a literal. Callers run it per colour scheme: a hard-coded
+ * `#ffffff` passes the light pass and fails the dark one
+ * (`--xflow-surface-raised: #222428`).
  */
 async function tableSurface(page: Page): Promise<{ token: string; card: string }> {
   return page.locator('[data-table="workflows"]').evaluate((element) => {
     const probe = document.createElement("div");
-    probe.style.color = "var(--xflow-panel)";
+    probe.style.color = "var(--xflow-surface-raised)";
     (document.querySelector(".xflow-admin") ?? document.body).appendChild(probe);
     const token = window.getComputedStyle(probe).color;
     const card = window.getComputedStyle(element).backgroundColor;
@@ -32,8 +33,8 @@ async function tableSurface(page: Page): Promise<{ token: string; card: string }
  *      layer order plus a cascade probe must show AntD's reset is layered
  *      before `utilities` instead of leaking out unlayered.
  *   2. Design tokens drive surfaces: the table card's background must be the
- *      resolved `--xflow-panel` value from tokens.css, not a literal — checked
- *      in both light and dark so a hard-coded light colour cannot pass.
+ *      resolved `--xflow-surface-raised` value from tokens.css, not a literal —
+ *      checked in both light and dark so a hard-coded light colour cannot pass.
  *   3. AntD 6 + React 19 runtime: AntD's table must render, and the
  *      `App.useApp()` message instance must really mount DOM. The namespace
  *      guard is a genuine user path that emits one: a `?ns=` outside the
@@ -131,7 +132,7 @@ export async function assertAdminSmoke(page: Page): Promise<void> {
 
   // 2. The card surface resolves from the token, not from a hard-coded colour.
   // Light first, then dark: a literal `#ffffff` passes the light half and must
-  // fail the dark half, where the token resolves to `#1b1c1f`.
+  // fail the dark half, where the token resolves to `#222428`.
   const light = await tableSurface(page);
   expect(light.token).not.toBe("");
   expect(light.card).toBe(light.token);
