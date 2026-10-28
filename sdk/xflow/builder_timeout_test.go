@@ -1,6 +1,7 @@
 package xflow
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -147,5 +148,44 @@ func TestWorkflowBuilderTimeoutFAFRejectedByCompile(t *testing.T) {
 	}
 	if _, err := graph.Compile(def); err == nil || !strings.Contains(err.Error(), "faf workflow cannot define settings.timeout") {
 		t.Fatalf("Compile error = %v, want the faf settings.timeout rejection", err)
+	}
+}
+
+// TestWorkflowBuilderTimeoutNegativeRejectedByAddWorkflow pins the same
+// rejection on the path callers actually take: NewLocal plus AddWorkflow builds
+// and compiles the definition, and the compiler's settings.timeout error must
+// surface from registration rather than from a Definition-only caller. It is a
+// pure registration case: nothing is invoked.
+func TestWorkflowBuilderTimeoutNegativeRejectedByAddWorkflow(t *testing.T) {
+	eng, err := NewLocal()
+	if err != nil {
+		t.Fatalf("NewLocal() error = %v", err)
+	}
+	defer eng.Stop()
+
+	wf := Workflow("workflow-timeout-negative-add-workflow").Timeout(-time.Second)
+	wf.Node("start", node.Start())
+
+	if _, err := eng.AddWorkflow(context.Background(), wf); err == nil || !strings.Contains(err.Error(), "settings.timeout must be >= 0") {
+		t.Fatalf("AddWorkflow() error = %v, want the settings.timeout rejection", err)
+	}
+}
+
+// TestWorkflowBuilderTimeoutFAFRejectedByAddWorkflow is the FAF rejection on
+// the public registration path, added for the same reason as the negative case
+// above: an error only a direct graph.Compile caller sees is not a guard users
+// meet.
+func TestWorkflowBuilderTimeoutFAFRejectedByAddWorkflow(t *testing.T) {
+	eng, err := NewLocal()
+	if err != nil {
+		t.Fatalf("NewLocal() error = %v", err)
+	}
+	defer eng.Stop()
+
+	wf := Workflow("workflow-timeout-faf-add-workflow").FAF().Timeout(time.Minute)
+	wf.LocalNode("only", nil)
+
+	if _, err := eng.AddWorkflow(context.Background(), wf); err == nil || !strings.Contains(err.Error(), "faf workflow cannot define settings.timeout") {
+		t.Fatalf("AddWorkflow() error = %v, want the faf settings.timeout rejection", err)
 	}
 }
