@@ -187,8 +187,18 @@ func WithLogger(l engine.Logger) Option {
 // It is not part of the NewServer path: a server's control plane runs a
 // leader-gated deadline pass that reports the same transition as
 // source="sweeper", and wiring this observer there as well would make the
-// source of one expiry depend on which sweeper won the race. Nil (the default)
-// records nothing.
+// source of one expiry depend on which sweeper won the race. Do not install it
+// on a NewCluster that shares its Redis with a control plane either: the
+// embedded sweeper has no way to know the server is running its own pass, both
+// drive the same deadline index, and one transition is then counted as
+// embedded and as sweeper in an order neither side controls.
+//
+// The count is at-least-once, not exactly-once. The timeout write is fenced at
+// the store and read back, so concurrent expirers (several NewCluster replicas
+// over one Redis) can each observe the same transition and each report it;
+// treat the series as an upper bound on the expirations behind it.
+//
+// Nil (the default) records nothing.
 func WithDeadlineExpiredObserver(obs engine.DeadlineExpiredObserver) Option {
 	return func(c *engineConfig) {
 		if obs != nil {
