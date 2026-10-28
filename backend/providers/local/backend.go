@@ -161,10 +161,11 @@ func WithTracer(t tracing.Tracer) Option {
 //
 // The report is at-least-once, not exactly-once. The timeout write is fenced
 // and read back rather than assumed, so a concurrent expirer that won the same
-// transition can still leave the sweep answering Expired, and it reports the
-// transition it observed either way. A deployment with several sweepers over
-// one store (NewCluster replicas) reports one expiry once per sweeper, so treat
-// the count as an upper bound on the expirations behind it.
+// transition can still leave the sweep answering Expired, and the sweep reports
+// the transition it observed either way. This backend's state is process-local,
+// so a NewLocal deployment has a single reporter; where several sweepers drive
+// one shared store, each can report the same expiry, and there the count is an
+// upper bound on the expirations behind it rather than one report per expiry.
 func WithDeadlineExpiredObserver(obs engine.DeadlineExpiredObserver) Option {
 	return func(c *config) {
 		if obs != nil {
