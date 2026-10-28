@@ -181,6 +181,7 @@ export function LiteralInput({
   placeholder,
   readOnly,
   emptyValue,
+  validate,
   onCommit
 }: {
   ariaLabel: string;
@@ -190,6 +191,8 @@ export function LiteralInput({
   readOnly: boolean;
   /** What blank text commits; `undefined` removes the value. */
   emptyValue?: unknown;
+  /** Extra check on a parsed literal; a message blocks the commit and shows inline. */
+  validate?: (value: unknown) => string | undefined;
   onCommit: (next: unknown) => void;
 }): React.ReactElement {
   const [text, setText] = React.useState(() => displayLiteral(value, mode));
@@ -206,8 +209,9 @@ export function LiteralInput({
   const change = (next: string) => {
     setText(next);
     const parsed = parseLiteral(next, mode);
-    setError(parsed.error);
-    if (parsed.error) return;
+    const problem = parsed.error ?? (next.trim() ? validate?.(parsed.value) : undefined);
+    setError(problem);
+    if (problem) return;
     const committed = parsed.value ?? emptyValue;
     if (serializeJson(committed) !== serializeJson(value)) onCommit(committed);
   };

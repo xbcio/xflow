@@ -542,6 +542,74 @@ describe("node search and workflow settings", () => {
     expect(within(inspector()).getByLabelText("队列上限")).toBeTruthy();
   });
 
+  it("rejects 执行超时 values that are not non-negative integer nanoseconds", () => {
+    const handleChange = vi.fn();
+    render(<XFlowEditor value={workflow} onChange={handleChange} />);
+    const inspector = () => screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
+    fireEvent.keyDown(window, { key: "Escape" });
+    const timeout = () => within(inspector()).getByLabelText("执行超时") as HTMLInputElement;
+    const message = "需要非负整数纳秒，例如 1800000000000；0 或留空不限";
+
+    // A JSON string, a negative number, a fraction, a boolean, null, an array and
+    // an object all parse as JSON yet cannot be a Go time.Duration. Numbers past
+    // the safe-integer range are rejected too, even when JSON parses them as integers
+    // (9007199254740993 rounds to 9007199254740992).
+    for (const text of ['"30s"', "-5", "1.5", "true", "null", "[]", "{}", "1e21", "9007199254740993"]) {
+      fireEvent.change(timeout(), { target: { value: text } });
+      expect(timeout().getAttribute("aria-invalid")).toBe("true");
+      expect(within(inspector()).getByRole("alert").textContent).toBe(message);
+    }
+    expect(handleChange).not.toHaveBeenCalled();
+
+    // A legal value after a rejected one commits and clears the message.
+    fireEvent.change(timeout(), { target: { value: "0" } });
+    expect(within(inspector()).queryByRole("alert")).toBeNull();
+    expect(lastWorkflow(handleChange).settings).toEqual({ timeout: 0 });
+  });
+
+  it("accepts non-negative integer nanoseconds and a cleared 执行超时", () => {
+    const handleChange = vi.fn();
+    render(<XFlowEditor value={workflow} onChange={handleChange} />);
+    const inspector = () => screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
+    fireEvent.keyDown(window, { key: "Escape" });
+    const timeout = () => within(inspector()).getByLabelText("执行超时");
+
+    // 0 is "no limit" and stays a legal value.
+    fireEvent.change(timeout(), { target: { value: "0" } });
+    expect(within(inspector()).queryByRole("alert")).toBeNull();
+    expect(lastWorkflow(handleChange).settings).toEqual({ timeout: 0 });
+
+    // Beyond 2^31 still lies in the int64 nanosecond range.
+    fireEvent.change(timeout(), { target: { value: "3000000000" } });
+    expect(within(inspector()).queryByRole("alert")).toBeNull();
+    expect(lastWorkflow(handleChange).settings).toEqual({ timeout: 3000000000 });
+
+    // An emptied row leaves the DSL rather than writing an empty value.
+    fireEvent.change(timeout(), { target: { value: "" } });
+    expect(handleChange).toHaveBeenCalledTimes(3);
+    expect(lastWorkflow(handleChange).settings?.timeout).toBeUndefined();
+  });
+
+  it("keeps the other 执行设置 rows on their existing permissive literals", () => {
+    const handleChange = vi.fn();
+    render(<XFlowEditor value={workflow} onChange={handleChange} />);
+    const inspector = () => screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    // Only 超时 is a Go duration; the integer check must not leak into the other rows,
+    // which keep accepting whatever their literal parses to (a fraction included).
+    fireEvent.click(within(inspector()).getByLabelText("自动重试"));
+    fireEvent.change(within(inspector()).getByLabelText("重试最大尝试次数"), { target: { value: "1.5" } });
+    expect(within(inspector()).queryByRole("alert")).toBeNull();
+    expect(lastWorkflow(handleChange).settings).toEqual({ retry: { enabled: true, max_attempts: 1.5 } });
+
+    fireEvent.change(within(inspector()).getByLabelText("执行时区"), { target: { value: "Asia/Shanghai" } });
+    expect(lastWorkflow(handleChange).settings).toEqual({
+      retry: { enabled: true, max_attempts: 1.5 },
+      timezone: "Asia/Shanghai"
+    });
+  });
+
   it("round-trips the settings source view and blocks save on a broken draft", () => {
     const handleChange = vi.fn();
     const onSave = vi.fn();

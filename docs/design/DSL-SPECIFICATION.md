@@ -158,7 +158,8 @@ settings:
 # settings.timeout 语义（工作流级执行时限，区别于节点级 nodes[].timeout）
 # 整个执行的时间预算，从提交（admission）时刻起算：排队等待（settings.concurrency 的
 # queue 模式）与挂起等待（suspend/wait/approval）都计入预算。到期时执行以 timeout 终态
-# 结束；与 cancel 一样不参与 on_error，始终 fatal（见下方 on_error 段落末尾）。
+# 结束；与 cancel 一样不参与 on_error，始终 fatal（见下方 on_error 段落末尾；时钟偏差超出
+# 容差时普通节点可能先按失败处理，见下方「时钟」条）。
 #   0 / 缺省：不设预算（"未设置"与"无限"是同一个写法）。
 #   <0：编译期报错（settings.timeout must be >= 0）。
 #   FAF 工作流（options.faf）声明非零值：编译期报错，FAF 不持久化执行，没有可到期的记录。
@@ -170,12 +171,26 @@ settings:
 #   起算：预算的截止时刻 = 提交（admission，即执行创建）时刻 + settings.timeout，排队与
 #         挂起等待都在其内；rerun 是新执行，重新计时，不沿用原执行的截止时刻。
 #   到期：执行以终态 timeout 结束，错误文案为 "execution deadline exceeded"；始终 fatal，
-#         不走 on_error（node 的 continue/error_output 也不能绕过）。正在跑的节点被截止，
+#         不走 on_error（node 的 continue/error_output 也不能绕过；唯一例外是时钟偏差超出
+#         容差时普通节点先按失败处理，见下方「时钟」条）。正在跑的节点被截止，
 #         挂起中的节点被取消，子工作流（sub-workflow）随之级联取消。
 #   触发：节点运行中，其租约被限制在执行截止时刻之内，到期由提交守卫处理；没有任何任务
 #         在跑的执行（挂起、暂停、排队、任务之间）由后台扫描兜底。因此终态落地可能比截止
 #         时刻晚至多一个扫描周期：本地后端约 1s，嵌入式集群后端 5s，控制面默认 10s，
 #         不是毫秒级精确。节点自身 timeout 更短时，先按节点 timeout 处理。
+#   时钟：截止时刻是服务端墙钟上的绝对时刻。运行中节点的租约以该时刻为上限，超时通常由
+#         runner 用自己的计时器触发；runner 迟迟不报时，服务端续租发现租约已过期限也会按
+#         节点超时提交（该路径对执行截止时刻精确比较，无容差）。超时结果回到服务端后，
+#         服务端再以自己的墙钟复核是否真的到期，以区分「执行级超时」与普通节点失败。仅当
+#         租约确实被该截止时刻截断时，复核才给 50ms 容差；偏差更大时（runner 先于服务端
+#         墙钟触发，或复核实例的墙钟落后于写入截止时刻的实例），超时结果可能被判为未到期
+#         而按普通节点失败进入 on_error：stop 使执行以 failed 结束，continue、error_output
+#         与 main_output 则越过预算继续运行，届时仍未结束的由后台扫描以 timeout 收尾（后台
+#         扫描精确比较，不适用该容差）。该回落只适用于普通节点（非 group）：group 的
+#         timeout 一律 fatal，从不参与 on_error，也不接受 main_output。因此集群部署
+#         （runner 与服务端之间、服务端多实例之间）必须用 NTP/chrony 一类服务同步时钟，
+#         偏差应小于 50ms。该容差是引擎内部常量，不可配置、不在线格式里；runner 无法伪造
+#         「租约被截断」，最多让一个已被截断的租约提前 50ms 到期。
 
 # 高级执行选项
 options:
@@ -373,7 +388,8 @@ groups:
 # 有意义的 payload。
 # 取消（cancel）/超时（timeout）结果不受 on_error 影响，始终 fatal，不会路由到
 # error_outputs——这不是 OnError 要容忍或路由的失败类型。workflow 级 settings.timeout
-# 到期同样属于这一类：以 timeout 终态结束整个执行，不参与 on_error。
+# 到期同样属于这一类：以 timeout 终态结束整个执行，不参与 on_error（时钟偏差超出容差时
+# 普通节点可能先按失败处理；见「settings.timeout 语义」的「时钟」条）。
 
 # 依赖边（可选，supply 节点消费声明；详见 §6.3 Supply 节点）
 # 不与 connections 合并：dependency_edges 不携带数据，不参与 unit 层拓扑
