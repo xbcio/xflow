@@ -38,6 +38,15 @@ function cssFiles(dir: string): string[] {
   });
 }
 
+/** The declaration block of the first rule whose selector matches exactly. */
+function ruleBody(file: string, selector: string): string {
+  const source = stripComments(readFileSync(path.join(SRC, file), "utf8"));
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`(?:^|\\n)\\s*${escaped}\\s*\\{([^}]*)\\}`).exec(source);
+  if (!match) throw new Error(`rule not found: ${file} ${selector}`);
+  return match[1];
+}
+
 const allDeclarations = cssFiles(SRC).flatMap((abs) =>
   declarationsOf(path.relative(SRC, abs).split(path.sep).join("/"), readFileSync(abs, "utf8"))
 );
@@ -176,6 +185,32 @@ describe("xflow-admin style sheets", () => {
     const { unexpected, stale } = ratchet(hitsOf(allDeclarations, breaksLayerScale), Z_INDEX_EXCEPTIONS);
     expect(unexpected, report(["z-index outside the local scale and not a --xflow-z-* token:", ...unexpected])).toEqual([]);
     expect(stale, report(["exceptions no longer needed; delete them from Z_INDEX_EXCEPTIONS:", ...stale])).toEqual([]);
+  });
+});
+
+// WCAG 2.5.8: each copy-id button keeps its visual size and carries a
+// transparent 24px-tall target. jsdom has no layout, so the rules are pinned as
+// text; the pixel extents are measured in a real browser.
+describe("copy-id buttons' 24px hit targets (WCAG 2.5.8)", () => {
+  it("grows the workflow short-id button from 16px to 24px without covering the name link", () => {
+    expect(ruleBody("layouts/admin.css", ".xflow-admin-short-id")).toMatch(/position:\s*relative/);
+    const after = ruleBody("layouts/admin.css", ".xflow-admin-short-id::after");
+    expect(after).toMatch(/content:\s*''/);
+    expect(after).toMatch(/position:\s*absolute/);
+    // 16px line + 2px above (exactly the name row's gap) + 6px below = 24px.
+    // The top edge stops at the link, so its target is never covered.
+    expect(after).toMatch(/inset-block:\s*calc\(var\(--xflow-space-0-5\) \* -1\)\s+calc\(var\(--xflow-space-1-5\) \* -1\)/);
+    // 68px wide already; sideways growth could reach a neighbour's target.
+    expect(after).toMatch(/inset-inline:\s*0/);
+  });
+
+  it("grows the execution-id button to 24px by splitting the difference vertically", () => {
+    expect(ruleBody("pages/executions/execution-row.css", ".xflow-exec-id")).toMatch(/position:\s*relative/);
+    const after = ruleBody("pages/executions/execution-row.css", ".xflow-exec-id::after");
+    expect(after).toMatch(/content:\s*''/);
+    // (24px - the button's own height) / 2, negated: 18.5px becomes 24px.
+    expect(after).toMatch(/inset-block:\s*calc\(\(var\(--xflow-space-6\) - 100%\) \/ -2\)/);
+    expect(after).toMatch(/inset-inline:\s*0/);
   });
 });
 

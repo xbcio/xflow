@@ -22,6 +22,7 @@
 /* ---------- Copyable execution id ---------- */
 
 .xflow-exec-id {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--xflow-space-1);
@@ -34,6 +35,15 @@
   font: inherit;
   text-align: left;
   cursor: pointer;
+}
+
+/* WCAG 2.5.8: the visible line is 18.5px tall; the transparent target is 24px,
+   split above and below inside the cell's 8px vertical padding. */
+.xflow-exec-id::after {
+  content: '';
+  position: absolute;
+  inset-block: calc((var(--xflow-space-6) - 100%) / -2);
+  inset-inline: 0;
 }
 
 .xflow-exec-id .xflow-admin-ellipsis {

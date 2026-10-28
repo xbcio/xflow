@@ -715,6 +715,7 @@
   /* AL-11: the second line carries only the short id. The full id stays in
      `title`, and the control copies it without opening the row. */
   .xflow-admin-short-id {
+    position: relative;
     display: inline-flex;
     align-items: center;
     gap: var(--xflow-space-1);
@@ -727,6 +728,16 @@
     font: inherit;
     line-height: inherit;
     cursor: pointer;
+  }
+
+  /* The id line is 16px tall; the transparent target reaches 24px without
+     moving a pixel. It fills the 2px gap above — the name link ends there — and
+     takes the rest from the cell's 8px bottom padding. */
+  .xflow-admin-short-id::after {
+    content: '';
+    position: absolute;
+    inset-block: calc(var(--xflow-space-0-5) * -1) calc(var(--xflow-space-1-5) * -1);
+    inset-inline: 0;
   }
 
   .xflow-admin-short-id:hover {
