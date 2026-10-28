@@ -215,7 +215,7 @@ func WithLeaseObserver(obs LeaseObserver) Option {
 // owners would make the source of one transition non-deterministic. The same
 // holds for a NewCluster that shares its Redis with a control plane: the
 // embedded sweeper cannot tell a server is running its own pass, both drive the
-// same deadline index, and one expiry is then counted as embedded and as
+// same deadline index, and one expiry can then be counted as embedded and as
 // sweeper in an order neither side controls.
 //
 // The report is at-least-once, not exactly-once: the timeout write is fenced

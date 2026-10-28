@@ -190,7 +190,7 @@ func WithLogger(l engine.Logger) Option {
 // source of one expiry depend on which sweeper won the race. Do not install it
 // on a NewCluster that shares its Redis with a control plane either: the
 // embedded sweeper has no way to know the server is running its own pass, both
-// drive the same deadline index, and one transition is then counted as
+// drive the same deadline index, and one transition can then be counted as
 // embedded and as sweeper in an order neither side controls.
 //
 // The count is at-least-once, not exactly-once. The timeout write is fenced at
