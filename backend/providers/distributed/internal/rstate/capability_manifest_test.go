@@ -50,6 +50,7 @@ var rstateCapabilities = []statestoretest.Capability{
 	statestoretest.CapabilityOutboxFailureRecorder,
 	statestoretest.CapabilityReplayReceiptReader,
 	statestoretest.CapabilitySubWorkflowLinkStore,
+	statestoretest.CapabilityBatchItemsStore,
 }
 
 // rstateCapabilityManifest returns a fresh manifest for one contract run.

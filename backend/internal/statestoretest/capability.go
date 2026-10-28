@@ -81,6 +81,7 @@ const (
 	CapabilityOutboxFailureRecorder Capability = "OutboxFailureRecorder"
 	CapabilityReplayReceiptReader   Capability = "ReplayReceiptReader"
 	CapabilitySubWorkflowLinkStore  Capability = "SubWorkflowLinkStore"
+	CapabilityBatchItemsStore       Capability = "BatchItemsStore"
 )
 
 // capabilitySpec is the machine-checkable half of a capability: the engine
@@ -196,6 +197,14 @@ var capabilitySpecs = map[Capability]capabilitySpec{
 		summary: "reading many node outputs in one round trip (GetOutputs)",
 		implements: func(v any) bool {
 			_, ok := v.(engine.BatchOutputReader)
+			return ok
+		},
+	},
+	CapabilityBatchItemsStore: {
+		iface:   "engine.BatchItemsStore",
+		summary: "storing a map node's items array once and handing batches a reference (ExternalizeItems, ResolveItems)",
+		implements: func(v any) bool {
+			_, ok := v.(engine.BatchItemsStore)
 			return ok
 		},
 	},

@@ -72,8 +72,12 @@ func TestMemoryCapabilityManifest(t *testing.T) {
 	// keyed by execution ID alone, so there is no namespace for discovery to
 	// report. The capability stays undeclared and its contract subtest reports
 	// CAPABILITY-SKIP rather than being given a partition it does not have.
+	//
+	// BatchItemsStore is left out too: there is no queue or outbox byte budget
+	// in one process for a reference to save, so every batch stays inline.
 	expected := slices.DeleteFunc(statestoretest.AllCapabilities(), func(c statestoretest.Capability) bool {
-		return c == statestoretest.CapabilityNamespacedOutboxLister
+		return c == statestoretest.CapabilityNamespacedOutboxLister ||
+			c == statestoretest.CapabilityBatchItemsStore
 	})
 	manifest.CheckSet(t, expected...)
 	t.Logf("%s", manifest.Summary())
