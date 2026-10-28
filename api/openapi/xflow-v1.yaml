@@ -6052,8 +6052,13 @@ components:
             expiry is also driven by a background sweep, so the terminal state
             can land later than the deadline by up to one sweep interval (about
             1s on the local backend, 5s on the embedded cluster backend, 10s by
-            default on the control plane). It is not millisecond-exact. A node
-            whose own `timeout` is shorter ends by that timeout first.
+            default on the control plane). It is not millisecond-exact. The
+            deadline is a server wall-clock instant, and a node cut off exactly
+            at it is re-checked against the server clock with a 50 ms tolerance
+            for clock drift. Keep runners and server instances within 50 ms of
+            each other (for example with NTP or chrony); a larger skew can make
+            that timeout take the ordinary `on_error` path first. A node whose
+            own `timeout` is shorter ends by that timeout first.
         on_error:
           type: string
           enum: ["", stop, error_output, main_output, continue]
