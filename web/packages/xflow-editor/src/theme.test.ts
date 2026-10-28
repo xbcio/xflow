@@ -1,4 +1,10 @@
-import { foundationTokens, paletteTokens } from "@xflow/core";
+import {
+  BG_SUBTLE_PERCENT,
+  FG_MIX_PERCENT,
+  foundationTokens,
+  paletteTokens,
+  semanticColors
+} from "@xflow/core";
 import { theme } from "antd";
 import { describe, expect, it } from "vitest";
 import { createEditorThemeConfig, type ResolvedXFlowEditorAppearance } from "./theme";
@@ -178,9 +184,31 @@ describe("createEditorThemeConfig", () => {
   });
 
   it("writes no colour literal of its own: every colour value traces to the palette", () => {
+    // `color-mix(in srgb, <tone> p%, <other>)` resolved to the opaque value a
+    // browser paints, rounded like the 8-bit result.
+    const mix = (base: string, other: string, percent: number) => {
+      const channels = (hex: string) => [1, 3, 5].map((i) => Number.parseInt(hex.slice(i, i + 2), 16));
+      const mixed = channels(base).map((value, i) =>
+        Math.round((value * percent) / 100 + (channels(other)[i] * (100 - percent)) / 100)
+      );
+      return `#${mixed.map((value) => value.toString(16).padStart(2, "0")).join("")}`;
+    };
     for (const appearance of appearances) {
-      const palette = paletteTokens[appearance];
-      const known = new Set<string>([...Object.values(palette), `${palette.primary}40`]);
+      // A Menu rendered with `theme="dark"` is dark whatever the host is, so
+      // the `dark*` tokens resolve against the dark palette in both passes.
+      const known = new Set<string>();
+      for (const admitted of [paletteTokens[appearance], paletteTokens.dark]) {
+        for (const value of Object.values(admitted)) known.add(value);
+        known.add(`${admitted.primary}40`);
+        // tokens.css derives a `-fg` (70% of the tone over `text`) and a
+        // `-bg-subtle` wash (12% of the tone) for every semantic colour; a
+        // component token may carry one of those resolved values, as the danger
+        // menu rows do for their text and their pressed background.
+        for (const color of semanticColors) {
+          known.add(mix(admitted[color], admitted.text, FG_MIX_PERCENT));
+          known.add(mix(admitted[color], admitted.surfaceOverlay, BG_SUBTLE_PERCENT));
+        }
+      }
       const strays: string[] = [];
       const walk = (path: string, value: unknown) => {
         if (typeof value === "string" && /^(#[0-9a-f]{3,8}|rgba?\()/i.test(value) && !known.has(value)) {
