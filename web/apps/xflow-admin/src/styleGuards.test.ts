@@ -204,6 +204,24 @@ describe("copy-id buttons' 24px hit targets (WCAG 2.5.8)", () => {
     expect(after).toMatch(/inset-inline:\s*0/);
   });
 
+  it("reserves the target's clip box on the meta line without moving it", () => {
+    // `.xflow-admin .xflow-admin-name small` clips the id line, so the button's
+    // ::after was cut back to 16px in the browser. The meta line gains a
+    // padding ring that its equal negative margins take back out of the
+    // layout; the ::after then fills exactly that ring.
+    const meta = ruleBody("pages/workflows/workflow-row.css", ".xflow-admin .xflow-row-name .xflow-row-name__meta");
+    const padding = splitTopLevel(/padding-block:\s*([^;]+);/.exec(meta)?.[1].trim() ?? "");
+    const margin = splitTopLevel(/margin-block:\s*([^;]+);/.exec(meta)?.[1].trim() ?? "");
+    // 2px above (the name row's gap) and 6px below (the cell's bottom padding).
+    expect(padding).toEqual(["var(--xflow-space-0-5)", "var(--xflow-space-1-5)"]);
+    expect(margin).toEqual(padding.map((token) => `calc(${token} * -1)`));
+    const after = ruleBody("layouts/admin.css", ".xflow-admin-short-id::after");
+    const inset = splitTopLevel(/inset-block:\s*([^;]+);/.exec(after)?.[1].trim() ?? "");
+    const tokenOf = (decl: string) => /^calc\((var\(--xflow-[\w-]+\)) \* -1\)$/.exec(decl)?.[1];
+    // The target must not outgrow the box that clips it.
+    expect(inset.map(tokenOf)).toEqual(padding);
+  });
+
   it("grows the execution-id button to 24px by splitting the difference vertically", () => {
     expect(ruleBody("pages/executions/execution-row.css", ".xflow-exec-id")).toMatch(/position:\s*relative/);
     const after = ruleBody("pages/executions/execution-row.css", ".xflow-exec-id::after");

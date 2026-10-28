@@ -46,6 +46,17 @@
   line-height: 16px;
 }
 
+/* The admin sheet clips this line (`overflow: hidden` on the name cell's
+   `small`), which cut the copy-id button's 24px `::after` down to the 16px
+   line. The 2px/6px padding ring gives that target a box to live in and the
+   equal negative margins hand the same 8px back to the layout, so neither the
+   line box nor the row height moves: 2px fits in the name row's gap above,
+   and 6px sits inside the cell's bottom padding. */
+.xflow-admin .xflow-row-name .xflow-row-name__meta {
+  padding-block: var(--xflow-space-0-5) var(--xflow-space-1-5);
+  margin-block: calc(var(--xflow-space-0-5) * -1) calc(var(--xflow-space-1-5) * -1);
+}
+
 .xflow-row-name__desc {
   flex: 1 1 auto;
   min-width: 0;
