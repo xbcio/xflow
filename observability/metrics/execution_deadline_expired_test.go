@@ -48,4 +48,10 @@ func TestExecutionDeadlineExpiredHasHelpText(t *testing.T) {
 		t.Errorf("help text for %s does not name the embedded source, so the series "+
 			"a NewLocal/NewCluster expiry produces cannot be interpreted: %q", name, help)
 	}
+	// Concurrent expirers can each read back the same fenced transition as their
+	// own write, so one expiry can be counted more than once. A reader has to be
+	// told the count is not exact, in the same place it learns the source values.
+	if !strings.Contains(help, "at-least-once") || !strings.Contains(help, "exactly-once") {
+		t.Errorf("help text for %s does not bound its accuracy under concurrent expirers: %q", name, help)
+	}
 }
