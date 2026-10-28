@@ -899,6 +899,19 @@ describe("xflow.editor small-text tones, hit targets and forced colours", () => 
     expect(block(".xflow-editor-node-group__title")).toMatch(/line-height:\s*var\(--xflow-line-height-md\)\s*;/);
   });
 
+  it("grows the overview diagnostics button to a 24px target through an inset-block ::after", () => {
+    // The row's 20px line left 2px of the button unreachable on every side.
+    const link = ".xflow-editor-overview__link";
+    expect(block(link), `${link} anchors its target`).toMatch(/position:\s*relative\s*;/);
+    const after = block(`${link}::after`);
+    expect(after).toMatch(/content:\s*""\s*;/);
+    expect(after).toMatch(/position:\s*absolute\s*;/);
+    expect(after).toMatch(/inset-block:\s*calc\(\(var\(--xflow-space-6\) - 100%\) \/ -2\)\s*;/);
+    expect(after).toMatch(/inset-inline:\s*0\s*;/);
+    // The visible row keeps its 12px line; only the target grows.
+    expect(block(".xflow-editor-overview__row")).toMatch(/font-size:\s*var\(--xflow-font-sm\)\s*;/);
+  });
+
   it("marks the replayed execution row with the primary tint, ahead of the hover wash", () => {
     const button = ".xflow-editor-exec-item__button";
     expect(block(`${button}:hover`)).toMatch(/background:\s*var\(--xflow-hover\)\s*;/);

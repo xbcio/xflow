@@ -1669,7 +1669,27 @@
   border: 0;
   cursor: pointer;
   font: inherit;
+  /* The shared value rule clips its content, which would also clip the taller
+     hit target below; the text span keeps the ellipsis instead. */
+  overflow: visible;
   padding: 0;
+  position: relative;
+}
+
+/* WCAG 2.5.8: the row's 20px line leaves 2px on every side outside the target;
+ * the transparent ::after reaches the 24px floor without moving the text. The
+ * rows sit 8px apart, so the 2px overhang cannot reach a neighbouring row. */
+.xflow-editor-overview__link::after {
+  content: "";
+  inset-block: calc((var(--xflow-space-6) - 100%) / -2);
+  inset-inline: 0;
+  position: absolute;
+}
+
+.xflow-editor-overview__link > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .xflow-editor-overview__link:hover {
