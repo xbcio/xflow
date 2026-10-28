@@ -246,7 +246,9 @@ func TestDeadlineIndexRepairRestoresAnExecutionThatLandsMidRepair(t *testing.T) 
 		}
 	}
 	rdb.AddHook(&landAfterIndexZRem{key: key, land: func() {
-		srv.Set(execKey(namespace.Default, "late", "status"), string(types.ExecutionStatusRunning))
+		if err := srv.Set(execKey(namespace.Default, "late", "status"), string(types.ExecutionStatusRunning)); err != nil {
+			t.Fatalf("land the late execution: %v", err)
+		}
 	}})
 
 	// Both members were missing when List read them, so neither is returned now.
