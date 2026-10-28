@@ -42,6 +42,12 @@ const (
 	CapabilityAtomicArrivalFolding Capability = "AtomicArrivalFolding"
 	CapabilityOutboxLeaser         Capability = "OutboxLeaser"
 	CapabilityOutboxReleaser       Capability = "OutboxReleaser"
+	// CapabilityNamespacedOutboxLister is engine.NamespacedOutboxLister: outbox
+	// discovery that reports each execution together with its namespace. It is
+	// only meaningful for a store whose outbox is partitioned by namespace; a
+	// store keyed by execution ID alone leaves it undeclared and its subtest
+	// reports CAPABILITY-SKIP.
+	CapabilityNamespacedOutboxLister Capability = "NamespacedOutboxLister"
 
 	CapabilityExecutionStatusReader       Capability = "ExecutionStatusReader"
 	CapabilityRouteCheckedLeaseAcquirer   Capability = "RouteCheckedLeaseAcquirer"
@@ -117,6 +123,14 @@ var capabilitySpecs = map[Capability]capabilitySpec{
 		summary: "early release of an outbox delivery lease (ReleaseOutbox)",
 		implements: func(v any) bool {
 			_, ok := v.(engine.OutboxReleaser)
+			return ok
+		},
+	},
+	CapabilityNamespacedOutboxLister: {
+		iface:   "engine.NamespacedOutboxLister",
+		summary: "outbox discovery that reports each execution's namespace (ListOutboxExecutionRefs)",
+		implements: func(v any) bool {
+			_, ok := v.(engine.NamespacedOutboxLister)
 			return ok
 		},
 	},

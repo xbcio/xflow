@@ -123,6 +123,12 @@ type Store struct {
 	// (dead-letter listings are already operator-scoped); it only prevents
 	// accidental cross-execution or stale-cursor replay.
 	cursorKey []byte
+
+	// nsRegisteredAt maps a namespace to the instant this process last SADDed it
+	// into the registry from the entry-seed path (see registerNamespaceThrottled).
+	// nsClock is that throttle's clock; nil means time.Now, tests replace it.
+	nsRegisteredAt sync.Map // namespace.Namespace -> time.Time
+	nsClock        func() time.Time
 }
 
 // Option configures a Store at construction time.

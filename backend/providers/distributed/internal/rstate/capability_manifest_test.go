@@ -21,6 +21,7 @@ var rstateCapabilities = []statestoretest.Capability{
 	statestoretest.CapabilityAtomicArrivalFolding,
 	statestoretest.CapabilityOutboxLeaser,
 	statestoretest.CapabilityOutboxReleaser,
+	statestoretest.CapabilityNamespacedOutboxLister,
 	statestoretest.CapabilityExecutionStatusReader,
 	statestoretest.CapabilityRouteCheckedLeaseAcquirer,
 	statestoretest.CapabilitySuspendedNodeCanceler,

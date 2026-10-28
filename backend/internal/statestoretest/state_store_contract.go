@@ -339,6 +339,11 @@ func RunStateStoreContract(t *testing.T, manifest *Manifest, state engine.StateS
 	runNodeTiming(t, state)
 	runNodeTimingThroughLeases(t, state)
 	runExecutionTimingThroughTerminalCommit(t, state)
+	// A subtest of its own, because an undeclared capability skips the caller:
+	// run on t directly it would end the whole contract at this line.
+	t.Run("NamespacedOutboxLister", func(t *testing.T) {
+		runNamespacedOutboxLister(t, manifest, state)
+	})
 }
 
 // runExecutionStatusAgreesWithSnapshot pins that the narrow status read and the
