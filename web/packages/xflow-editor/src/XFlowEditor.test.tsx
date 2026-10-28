@@ -1636,7 +1636,7 @@ describe("XFlowEditor", () => {
     await waitFor(() => {
       expect(handleSave).toHaveBeenCalledWith(saved);
     });
-    expect(screen.getByText("已保存", { selector: ".xflow-editor-chip span" })).toBeTruthy();
+    expect(await screen.findByText("已保存", { selector: ".xflow-editor-chip span" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "运行工作流" }));
 
