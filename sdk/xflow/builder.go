@@ -25,6 +25,7 @@ type WorkflowBuilder struct {
 	options        *types.WorkflowOptions
 	runnerSelector *types.RunnerSelector
 	onError        types.OnError
+	timeout        time.Duration
 	credentials    map[string]types.CredentialDef
 	groups         []*groupEntry
 	depEdges       []depEdge
@@ -209,6 +210,21 @@ func (w *WorkflowBuilder) RunnerSelector(selector types.RunnerSelector) *Workflo
 // not.
 func (w *WorkflowBuilder) OnError(strategy types.OnError) *WorkflowBuilder {
 	w.onError = strategy
+	return w
+}
+
+// Timeout sets the whole-execution budget (settings.timeout). The clock starts
+// at admission, so time spent queued behind settings.concurrency and time spent
+// suspended both count against it. Zero means no budget, which is also the
+// spelling of "unset". An execution that spends the budget ends in the timeout
+// status; the budget is not routed through on_error. A negative value, or a
+// non-zero budget on a FAF workflow, is rejected at compile time (graph.Compile).
+//
+// A Timeout set on a body builder is ignored: a body is not a deployed
+// workflow, and only its members and wiring are carried into the parent
+// (see subgraphBodyParam).
+func (w *WorkflowBuilder) Timeout(d time.Duration) *WorkflowBuilder {
+	w.timeout = d
 	return w
 }
 
@@ -452,8 +468,11 @@ func (w *WorkflowBuilder) buildInternal(visited map[*WorkflowBuilder]bool) (*typ
 			def.Credentials[k] = v
 		}
 	}
-	if w.onError != "" {
-		def.Settings = &types.WorkflowSettings{OnError: string(w.onError)}
+	if w.onError != "" || w.timeout != 0 {
+		def.Settings = &types.WorkflowSettings{
+			OnError: string(w.onError),
+			Timeout: w.timeout,
+		}
 	}
 	w.assembleNodes(def)
 	w.assembleConnections(def)
