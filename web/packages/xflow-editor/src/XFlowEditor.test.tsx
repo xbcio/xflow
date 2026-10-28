@@ -1643,7 +1643,7 @@ describe("XFlowEditor", () => {
     await waitFor(() => {
       expect(handleRun).toHaveBeenCalledWith(saved);
     });
-    expect(screen.getByText("运行完成")).toBeTruthy();
+    expect(await screen.findByText("运行完成")).toBeTruthy();
     // The status strip names the run by the shared status table, not a raw enum.
     // A run opens the drawer, so the strip now reads as its summary.
     expect(screen.getByRole("button", { name: "诊断台摘要" }).textContent).toContain("最近运行 成功");
