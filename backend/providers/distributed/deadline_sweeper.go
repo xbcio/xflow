@@ -45,12 +45,22 @@ func (b *Backend) runDeadlineSweeper(ctx context.Context, expirer engine.Executi
 	if b.logger != nil {
 		logger = b.logger
 	}
-	sweep := engine.NewDeadlineSweep(engine.DeadlineSweepConfig{
+	sweepCfg := engine.DeadlineSweepConfig{
 		Lister:  b.state,
 		Expirer: expirer,
 		Batch:   deadlineSweepBatch,
 		Logger:  logger,
-	})
+	}
+	if b.deadlineExpiredObserver != nil {
+		observer := b.deadlineExpiredObserver
+		sweepCfg.OnExpired = func(execCtx context.Context, _ engine.DeadlineExpiredExecution) {
+			// The observer is host-supplied: a panic here would otherwise leave
+			// this goroutine and take every later deadline with it.
+			defer func() { _ = recover() }()
+			observer.OnExecutionDeadlineExpired(execCtx, engine.DeadlineExpiredSourceEmbedded)
+		}
+	}
+	sweep := engine.NewDeadlineSweep(sweepCfg)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
