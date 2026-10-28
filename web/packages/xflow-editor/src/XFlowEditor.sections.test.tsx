@@ -190,6 +190,29 @@ describe("visual section delete (§6.2)", () => {
     // Removing a visual box is metadata only, never a workflow edit.
     expect(handleChange).not.toHaveBeenCalled();
   });
+
+  it("keeps Delete on the canvas out while the confirmation is open", async () => {
+    const handleChange = vi.fn();
+    render(<XFlowEditor value={workflow} onChange={handleChange} />);
+    selectPair("alpha", "beta");
+    createSectionFromMenu();
+    expect(sectionBoxes()).toHaveLength(1);
+
+    fireEvent.click(within(sectionBoxes()[0] as HTMLElement).getByRole("button", { name: /删除分区/ }));
+    const dialog = await screen.findByRole("dialog");
+
+    // The preview listens on the window: the selected nodes must survive a press
+    // aimed at the dialog in front of them.
+    fireEvent.keyDown(window, { key: "Delete" });
+    expect(handleChange).not.toHaveBeenCalled();
+    expect(canvasNode("alpha")).toBeTruthy();
+    expect(canvasNode("beta")).toBeTruthy();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    fireEvent.keyDown(window, { key: "Delete" });
+    expect(handleChange).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("visual section state (§6.2 / WB-01)", () => {

@@ -2402,4 +2402,57 @@ describe("XFlowEditor", () => {
     fireEvent.click(screen.getByRole("button", { name: "快捷键与帮助" }));
     expect(screen.getByRole("dialog")).toBeTruthy();
   });
+
+  it("keeps Delete on the canvas out while the keyboard reference is open", () => {
+    const handleChange = vi.fn();
+    render(<XFlowEditor value={workflow} onChange={handleChange} />);
+    // The fixture opens with its switch node selected, so Delete has a subject.
+    fireEvent.keyDown(window, { key: "?" });
+    expect(screen.getByRole("dialog")).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: "Delete" });
+    fireEvent.keyDown(window, { key: "Backspace" });
+    expect(handleChange).not.toHaveBeenCalled();
+
+    // Closing the reference gives the canvas its keyboard back.
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    fireEvent.keyDown(window, { key: "Delete" });
+    expect(handleChange).toHaveBeenCalledTimes(1);
+    const next = handleChange.mock.calls.at(-1)?.[0] as WorkflowDef;
+    expect((next.nodes ?? []).map((node) => node.name)).toEqual(["start", "l1_manager"]);
+  });
+
+  it("keeps Delete on the canvas out while the locate-node dialog is open", async () => {
+    const handleChange = vi.fn();
+    render(<XFlowEditor value={workflow} onChange={handleChange} />);
+    fireEvent.keyDown(window, { key: "k", metaKey: true });
+    const search = await screen.findByRole("combobox", { name: "定位节点" });
+    // rc hands every overlay the same id under NODE_ENV=test, so the dialog's
+    // own accessible name is not stable there; the search field identifies it.
+    const dialog = search.closest('[role="dialog"]') as HTMLElement;
+    expect(dialog).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: "Delete" });
+    expect(handleChange).not.toHaveBeenCalled();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "关闭" }));
+    await waitFor(() => expect(screen.queryByRole("combobox", { name: "定位节点" })).toBeNull());
+    fireEvent.keyDown(window, { key: "Delete" });
+    expect(handleChange).toHaveBeenCalledTimes(1);
+  });
+
+  it("wraps Tab at the end of the keyboard reference instead of leaving the document", () => {
+    render(<XFlowEditor value={workflow} />);
+    fireEvent.keyDown(window, { key: "?" });
+    const dialog = screen.getByRole("dialog");
+    const sentinel = dialog.querySelector<HTMLElement>("[data-xflow-shortcuts-sentinel]");
+    expect(sentinel).toBeTruthy();
+
+    // The browser's own Tab order ends on this sentinel (it follows the panel).
+    // Focus landing there must return to the panel's first stop: Tab past it
+    // otherwise left the document, and <body> received the next Delete.
+    act(() => sentinel?.focus());
+    expect(document.activeElement).toBe(within(dialog).getByRole("button", { name: "关闭" }));
+  });
 });

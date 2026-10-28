@@ -2223,6 +2223,26 @@ function EmptyCanvasCard({ editable, onPickTemplate, onPickTrigger }: {
 }
 
 /**
+ * The panel's tab cycle ends on this sentinel. AntD 6's dialog trap
+ * (`@rc-component/util`'s `useLockFocus`) only recovers on `focusin`, and a Tab
+ * past the last stop of a dialog rendered at the end of the document moves
+ * focus to the browser chrome, which fires none — `document.activeElement`
+ * became `<body>`, where Delete reached the canvas behind the open panel. The
+ * sentinel is focusable but invisible: reaching it wraps to the first stop.
+ */
+const SHORTCUTS_STOP_SELECTOR =
+  'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+function wrapShortcutsFocus(event: React.FocusEvent<HTMLDivElement>): void {
+  const dialog = event.currentTarget.closest<HTMLElement>(".xflow-editor-shortcuts-modal");
+  const stops = dialog?.querySelectorAll<HTMLElement>(SHORTCUTS_STOP_SELECTOR);
+  const first = stops
+    ? [...stops].find((stop) => !stop.hasAttribute("data-xflow-shortcuts-sentinel"))
+    : undefined;
+  first?.focus({ preventScroll: true });
+}
+
+/**
  * Renders the same `editorShortcuts` list the window handler dispatches from,
  * so this reference cannot advertise a key the editor does not honor.
  */
@@ -2245,6 +2265,19 @@ function ShortcutsHelp({ open, onClose }: { open: boolean; onClose: () => void }
       open={open}
       title="快捷键"
       onCancel={onClose}
+      // The sentinel sits after the panel, so the browser's own Tab order ends
+      // on it before it can leave the document; rc's focus ring needs it last.
+      modalRender={(node) => (
+        <>
+          {node}
+          <div
+            className="xflow-editor-sr-only"
+            data-xflow-shortcuts-sentinel=""
+            tabIndex={0}
+            onFocus={wrapShortcutsFocus}
+          />
+        </>
+      )}
     >
       {groups.map((group) => (
         <section className="xflow-editor-shortcuts__group" key={group.scope} aria-label={group.title}>
@@ -4991,6 +5024,9 @@ export function XFlowEditor({
   const approvalExecutionNode = approvalTarget && trackedExecution?.executionId === approvalTarget.executionId
     ? trackedExecution.nodes?.find((candidate) => candidate.name === approvalTarget.nodeName)
     : undefined;
+  const approvalOpen = Boolean(
+    approvalTarget && trackedExecution && approvalTarget.executionId === trackedExecution.executionId
+  );
 
   const moreMenuButton = (
     <Dropdown
@@ -5145,6 +5181,21 @@ export function XFlowEditor({
   );
 
   const sectionPendingDeleteTitle = editorSections.find((section) => section.id === sectionPendingDelete)?.title;
+
+  // The preview's Delete / Backspace listener is on the window, so anything that
+  // floats over the workbench must withdraw its callback: a control focused
+  // inside a dialog is not a text field and the press would delete the node
+  // behind it. One flag for every modal (and the canvas menu, which already
+  // owns the keyboard), so a new surface only has to join it.
+  const canvasDialogOpen = Boolean(
+    shortcutsOpen
+      || nodeSearchOpen
+      || sectionPendingDelete !== undefined
+      || publishOpen
+      || rerunTarget !== undefined
+      || approvalOpen
+      || contextMenu
+  );
 
   return (
     <ConfigProvider
@@ -5664,9 +5715,10 @@ export function XFlowEditor({
               onConnect={runsMode ? undefined : addCanvasConnection}
               onDeleteConnection={runsMode ? undefined : removeCanvasConnection}
               // The preview's Delete / Backspace listener is on the window: with the
-              // workbench inert behind an expanded drawer it must not delete a node.
-              // One call for the whole selection, so it lands as one undo step.
-              onDeleteNodes={runsMode || dock === "expanded" ? undefined : deleteNodesByKeys}
+              // workbench inert behind an expanded drawer, or covered by a dialog or
+              // the canvas menu, it must not delete a node. One call for the whole
+              // selection, so it lands as one undo step.
+              onDeleteNodes={runsMode || dock === "expanded" || canvasDialogOpen ? undefined : deleteNodesByKeys}
               onDropNode={runsMode ? undefined : dropNode}
               danglingPorts={runsMode ? undefined : canvasDanglingPorts}
               // A remount takes `defaultViewport`; the way back reuses the
@@ -5986,7 +6038,7 @@ export function XFlowEditor({
         getContainer={() => editorRootRef.current ?? document.body}
         key={`${approvalTarget?.executionId ?? ""}:${approvalTarget?.nodeName ?? ""}`}
         node={approvalDefinitionNode}
-        open={Boolean(approvalTarget && trackedExecution && approvalTarget.executionId === trackedExecution.executionId)}
+        open={approvalOpen}
         onClose={() => setApprovalTarget(undefined)}
         onRevokeSignal={onRevokeSignal}
         onSignal={onSignal}
