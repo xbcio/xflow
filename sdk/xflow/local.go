@@ -74,6 +74,9 @@ func NewLocal(opts ...Option) (*Engine, error) {
 	if cfg.tracer != nil {
 		memOpts = append(memOpts, backendlocal.WithTracer(cfg.tracer))
 	}
+	if cfg.deadlineExpiredObserver != nil {
+		memOpts = append(memOpts, backendlocal.WithDeadlineExpiredObserver(cfg.deadlineExpiredObserver))
+	}
 	provider := backendlocal.New(memOpts...)
 	return newFromConfig(cfg, provider)
 }
