@@ -130,6 +130,9 @@ func NewCluster(clusterCfg ClusterConfig, opts ...Option) (*Engine, error) {
 	if fn := artifactCodeResolverFor(cfg.artifactStore); fn != nil && !clusterCfg.DisableConsumer {
 		asynqOpts = append(asynqOpts, distributed.WithArtifactCodeResolver(fn))
 	}
+	if cfg.deadlineExpiredObserver != nil {
+		asynqOpts = append(asynqOpts, distributed.WithDeadlineExpiredObserver(cfg.deadlineExpiredObserver))
+	}
 	db := clusterCfg.Store
 	if db == nil {
 		// The common option set is honoured here so a caller can configure the

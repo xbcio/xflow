@@ -90,6 +90,29 @@ type DeadlineSweepLogger interface {
 	Warn(msg string, args ...any)
 }
 
+// DeadlineExpiredSourceEmbedded is the source an embedded backend reports when
+// its own deadline sweep drives an execution into timeout: a deployment with no
+// control plane (NewLocal, or NewCluster embedded without a server). It is a
+// metric label value, so it is part of the observable surface.
+const DeadlineExpiredSourceEmbedded = "embedded"
+
+// DeadlineExpiredObserver counts the executions an execution-deadline sweep
+// drove into the timeout terminal state, partitioned by the source that made
+// the transition.
+//
+// It is the narrow contract the backends with an embedded sweeper accept, and
+// it exists so they can publish that transition without importing a metrics
+// exporter: observability/metrics.SweepMetrics satisfies it, and
+// service/control.ExecutionDeadlineObserver names the same method, so one
+// adapter serves both the control plane's pass and an embedded sweep.
+//
+// Implementations must be non-blocking.
+type DeadlineExpiredObserver interface {
+	// OnExecutionDeadlineExpired reports one execution this observer drove into
+	// timeout. ctx carries the execution's own namespace.
+	OnExecutionDeadlineExpired(ctx context.Context, source string)
+}
+
 // DeadlineSweepConfig configures a DeadlineSweep.
 type DeadlineSweepConfig struct {
 	// Lister finds the executions past their deadline. Required.

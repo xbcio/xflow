@@ -39,6 +39,11 @@ type engineConfig struct {
 	// apart from hooks so the two populations stay in separate series: a map
 	// over N items is N inner executions beneath one outer one.
 	subgraphHooks engine.Hooks
+	// deadlineExpiredObserver receives each execution the embedded deadline
+	// sweeper drives into timeout. Shared: NewLocal and NewCluster both run that
+	// sweeper, while a NewServer control plane reports through its own observer
+	// and never through this one. Nil reports nothing.
+	deadlineExpiredObserver engine.DeadlineExpiredObserver
 
 	versionPolicy    execution.VersionPolicy
 	versionPolicySet bool
@@ -167,6 +172,39 @@ func WithSubgraphHooks(h engine.Hooks) Option {
 // engine-level diagnostics such as recovered hook panics.
 func WithLogger(l engine.Logger) Option {
 	return func(c *engineConfig) { c.logger = l }
+}
+
+// WithDeadlineExpiredObserver installs the observer an embedded engine reports
+// each execution-timeout transition to.
+//
+// Both NewLocal and NewCluster own a deadline sweeper, because an execution
+// parked past its settings.timeout holds no lease and nothing else fires for
+// it. Those deployments have no control plane to publish the transition, so
+// without this option xflow_execution_deadline_expired_total{source="embedded"}
+// stays at zero no matter how many deadlines pass. Pass
+// observability/metrics.NewSweepMetrics(m) to publish it.
+//
+// It is not part of the NewServer path: a server's control plane runs a
+// leader-gated deadline pass that reports the same transition as
+// source="sweeper", and wiring this observer there as well would make the
+// source of one expiry depend on which sweeper won the race. Do not install it
+// on a NewCluster that shares its Redis with a control plane either: the
+// embedded sweeper has no way to know the server is running its own pass, both
+// drive the same deadline index, and one transition can then be counted as
+// embedded and as sweeper in an order neither side controls.
+//
+// The count is at-least-once, not exactly-once. The timeout write is fenced at
+// the store and read back, so concurrent expirers (several NewCluster replicas
+// over one Redis) can each observe the same transition and each report it;
+// treat the series as an upper bound on the expirations behind it.
+//
+// Nil (the default) records nothing.
+func WithDeadlineExpiredObserver(obs engine.DeadlineExpiredObserver) Option {
+	return func(c *engineConfig) {
+		if obs != nil {
+			c.deadlineExpiredObserver = obs
+		}
+	}
 }
 
 // WithNodes declares custom node definitions this process can execute.

@@ -95,31 +95,32 @@ type ShutdownObserver interface {
 type Option func(*config)
 
 type config struct {
-	concurrency            int
-	execTTL                time.Duration
-	consumer               bool
-	resourcePool           types.ResourcePool
-	artifactCode           func(ctx context.Context, digest string) ([]byte, error)
-	auditObserver          AuditObserver
-	leaseObserver          LeaseObserver
-	shutdownObserver       ShutdownObserver
-	logger                 engine.Logger
-	transient              bool
-	transientTTL           time.Duration
-	transientCompletionTTL time.Duration
-	transport              queue.Transport
-	kafkaQueue             *KafkaConfig
-	blob                   *BlobConfig
-	queueObserver          queue.Observer
-	queueStatsObserver     queue.StatsObserver
-	queueStatsInterval     time.Duration
-	queueMaxDepth          int
-	queueDepthInterval     time.Duration
-	redisConfig            *RedisConfig
-	outboxDiscoveryPage    int
-	outboxReadyIndex       bool
-	outputCompression      bool
-	ownedNamespaces        []namespace.Namespace
+	concurrency             int
+	execTTL                 time.Duration
+	consumer                bool
+	resourcePool            types.ResourcePool
+	artifactCode            func(ctx context.Context, digest string) ([]byte, error)
+	auditObserver           AuditObserver
+	leaseObserver           LeaseObserver
+	shutdownObserver        ShutdownObserver
+	logger                  engine.Logger
+	transient               bool
+	transientTTL            time.Duration
+	transientCompletionTTL  time.Duration
+	transport               queue.Transport
+	kafkaQueue              *KafkaConfig
+	blob                    *BlobConfig
+	queueObserver           queue.Observer
+	queueStatsObserver      queue.StatsObserver
+	queueStatsInterval      time.Duration
+	queueMaxDepth           int
+	queueDepthInterval      time.Duration
+	redisConfig             *RedisConfig
+	outboxDiscoveryPage     int
+	outboxReadyIndex        bool
+	outputCompression       bool
+	ownedNamespaces         []namespace.Namespace
+	deadlineExpiredObserver engine.DeadlineExpiredObserver
 }
 
 // WithConcurrency sets the number of task consumer goroutines. Default is 10.
@@ -198,6 +199,33 @@ func WithLeaseObserver(obs LeaseObserver) Option {
 	return func(c *config) {
 		if obs != nil {
 			c.leaseObserver = obs
+		}
+	}
+}
+
+// WithDeadlineExpiredObserver installs an external observer for the executions
+// the embedded deadline sweeper drives into timeout. It is optional and must
+// not block the sweep.
+//
+// Without one the sweeper still expires overdue executions; it just reports
+// nothing, which leaves xflow_execution_deadline_expired_total{source="embedded"}
+// at zero for a NewCluster deployment that has no control plane to report the
+// transition. Never install it on the control-plane path: there the sweeper's
+// own leader-gated pass reports the same expiry as source=sweeper, and two
+// owners would make the source of one transition non-deterministic. The same
+// holds for a NewCluster that shares its Redis with a control plane: the
+// embedded sweeper cannot tell a server is running its own pass, both drive the
+// same deadline index, and one expiry can then be counted as embedded and as
+// sweeper in an order neither side controls.
+//
+// The report is at-least-once, not exactly-once: the timeout write is fenced
+// and read back, so several embedded sweepers over one Redis can each observe
+// the same transition and each report it. Treat the count as an upper bound on
+// the expirations behind it, never as one report per expiry.
+func WithDeadlineExpiredObserver(obs engine.DeadlineExpiredObserver) Option {
+	return func(c *config) {
+		if obs != nil {
+			c.deadlineExpiredObserver = obs
 		}
 	}
 }
@@ -439,6 +467,10 @@ type Backend struct {
 	// blob is the validated, defaulted blob configuration, or nil when the blob
 	// layer is off. The collection loop is built from it in bindHandler.
 	blob *BlobConfig
+
+	// deadlineExpiredObserver reports the executions the embedded deadline
+	// sweeper drives into timeout. Nil reports nothing.
+	deadlineExpiredObserver engine.DeadlineExpiredObserver
 }
 
 // State returns the StateStore implementation.
@@ -682,7 +714,8 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 		queueStatsObserver:  cfg.queueStatsObserver,
 		queueStatsInterval:  cfg.queueStatsInterval,
 
-		blob: cfg.blob,
+		blob:                    cfg.blob,
+		deadlineExpiredObserver: cfg.deadlineExpiredObserver,
 	}, nil
 }
 

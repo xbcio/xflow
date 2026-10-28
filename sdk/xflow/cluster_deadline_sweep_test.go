@@ -31,7 +31,8 @@ func TestClusterTimesOutAParkedExecutionWithoutAControlPlane(t *testing.T) {
 	t.Cleanup(mr.Close)
 
 	hooks := &transientHookRecorder{}
-	eng, err := NewCluster(ClusterConfig{RedisAddr: mr.Addr()}, WithHooks(hooks), WithConcurrency(2))
+	recorder := &deadlineExpiredObserverRecorder{}
+	eng, err := NewCluster(ClusterConfig{RedisAddr: mr.Addr()}, WithHooks(hooks), WithConcurrency(2), WithDeadlineExpiredObserver(recorder))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,5 +81,15 @@ func TestClusterTimesOutAParkedExecutionWithoutAControlPlane(t *testing.T) {
 	}
 	if got := hooks.executionCompleteStatus(id); got != types.ExecutionStatusTimeout {
 		t.Fatalf("completion hook status = %q, want timeout", got)
+	}
+	// The observer is called after the timeout write, so wait for it rather
+	// than reading a count that may not have landed yet.
+	waitForTransientCondition(t, 5*time.Second, func() bool { return len(recorder.snapshot()) > 0 })
+	calls := recorder.snapshot()
+	if len(calls) != 1 {
+		t.Fatalf("observer called %d times, want exactly 1: %+v", len(calls), calls)
+	}
+	if calls[0].source != engine.DeadlineExpiredSourceEmbedded {
+		t.Fatalf("observer source = %q, want %q", calls[0].source, engine.DeadlineExpiredSourceEmbedded)
 	}
 }

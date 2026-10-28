@@ -815,3 +815,14 @@ func TestDeadlineSweepIsSafeForConcurrentUse(t *testing.T) {
 		}
 	}
 }
+
+// TestDeadlineExpiredSourceEmbeddedIsPinned pins the label value itself. Every
+// other assertion compares against the constant, which would follow the
+// constant wherever it drifted; the value is part of the observable surface,
+// because dashboards and alerts select on source="embedded".
+func TestDeadlineExpiredSourceEmbeddedIsPinned(t *testing.T) {
+	if DeadlineExpiredSourceEmbedded != "embedded" {
+		t.Fatalf("DeadlineExpiredSourceEmbedded = %q, want %q: the label value is a published contract",
+			DeadlineExpiredSourceEmbedded, "embedded")
+	}
+}
