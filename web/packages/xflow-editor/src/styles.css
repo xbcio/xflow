@@ -1862,6 +1862,22 @@ button.xflow-editor-overview__run:hover {
   min-width: 0;
 }
 
+/* The ⋯ menu's danger row. AntD's Dropdown status style paints it with the
+ * global `colorError` and, on hover, a solid error fill with `colorTextLightSolid`
+ * (3.66:1 on the dark overlay); Dropdown exposes no danger-item token, so the
+ * row keeps the Menu rows' `-fg` tone and 12% wash through its own hook. The
+ * rule sits in `@layer xflow.editor`, which the host declares after `antd`, so
+ * it wins over the generated `.ant-dropdown-menu-item-danger` rules. */
+.xflow-editor .xflow-editor-inspector-menu__danger {
+  color: var(--xflow-danger-fg);
+}
+
+.xflow-editor .xflow-editor-inspector-menu__danger:not([aria-disabled="true"]):hover,
+.xflow-editor .xflow-editor-inspector-menu__danger:not([aria-disabled="true"]):active {
+  background: var(--xflow-danger-bg-subtle);
+  color: var(--xflow-danger-fg);
+}
+
 /* Node identity (§6.4): 28px category tile (`.xflow-editor-category-icon`, the
    same block as the canvas card and the library row), a stacked name / type
    cell, status chip and header actions, all on one 60px row (12px padding,

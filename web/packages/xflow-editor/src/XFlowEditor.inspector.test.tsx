@@ -170,7 +170,11 @@ describe("inspector header (§6.4)", () => {
     expect(lastWorkflow(handleChange).nodes?.[1]?.disabled).toBeFalsy();
 
     fireEvent.click(within(inspector()).getByRole("button", { name: "更多操作" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: /删除/ }));
+    const deleteItem = screen.getByRole("menuitem", { name: /删除/ });
+    // The Dropdown's own status style paints danger rows with the derived global
+    // colorError; this hook is what re-tints it to the editor's -fg tone.
+    expect(deleteItem.classList.contains("xflow-editor-inspector-menu__danger")).toBe(true);
+    fireEvent.click(deleteItem);
     expect(lastWorkflow(handleChange).nodes).toHaveLength(3);
   });
   it("duplicates from the ⋯ menu's 复制 item too", () => {

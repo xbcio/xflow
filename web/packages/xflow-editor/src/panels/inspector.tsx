@@ -695,7 +695,7 @@ function HeaderActions({
     { key: "duplicate", icon: <CopyIcon />, label: "复制" },
     { key: "toggle-disabled", label: disabled ? "启用" : "禁用" },
     { key: "divider", type: "divider" },
-    { key: "delete", danger: true, icon: <TrashIcon />, label: "删除" }
+    { key: "delete", danger: true, icon: <TrashIcon />, label: "删除", className: "xflow-editor-inspector-menu__danger" }
   ];
   const handleMenu: MenuProps["onClick"] = ({ key }) => {
     if (key === "duplicate") onDuplicate?.();

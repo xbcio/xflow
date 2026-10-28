@@ -988,6 +988,30 @@ describe("xflow.editor shortcuts dialog viewport fit", () => {
   });
 });
 
+describe("xflow.editor inspector ⋯ danger row", () => {
+  const rule = (selector: string): string => {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = css.match(new RegExp(`(?:^|\\})\\s*${escaped}\\s*\\{([^}]*)\\}`));
+    expect(match, `${selector} has a rule`).not.toBeNull();
+    return match?.[1] ?? "";
+  };
+
+  it("paints the Dropdown's danger row with the Menu rows' -fg tone and 12% wash", () => {
+    // AntD's Dropdown status style reads the global colorError / colorTextLightSolid
+    // (3.78:1 and 3.66:1 on the dark overlay) and offers no danger-item token; the
+    // row's own hook re-tints it in the later `xflow.editor` layer instead.
+    const row = rule(".xflow-editor .xflow-editor-inspector-menu__danger");
+    expect(row).toMatch(/color:\s*var\(--xflow-danger-fg\)\s*;/);
+
+    const hover = css.match(
+      /\.xflow-editor \.xflow-editor-inspector-menu__danger:not\(\[aria-disabled="true"\]\):(?:hover|active)[^{]*\{([^}]*)\}/
+    );
+    expect(hover, "hover and pressed states have a rule").not.toBeNull();
+    expect(hover?.[1]).toMatch(/background:\s*var\(--xflow-danger-bg-subtle\)\s*;/);
+    expect(hover?.[1]).toMatch(/color:\s*var\(--xflow-danger-fg\)\s*;/);
+  });
+});
+
 // E-C: once the wildcard `!important` reduced-motion fallback is gone, every
 // duration must come from tokens.css. This is the grep guard over the three
 // sheets that paint inside the xflow roots; token definitions and comments are
