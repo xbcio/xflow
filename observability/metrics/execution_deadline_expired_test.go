@@ -62,4 +62,11 @@ func TestExecutionDeadlineExpiredHasHelpText(t *testing.T) {
 			t.Errorf("help text for %s does not scope itself to the deadline pass (missing %q): %q", name, want, help)
 		}
 	}
+	// xflow_execution_completed_total does not see the store's own queue timeout,
+	// which writes the timeout status without going through the engine, so the
+	// help must not claim it spans every timeout mechanism without that limit.
+	if !strings.Contains(help, "spans every mechanism that expires an engine-driven execution") {
+		t.Errorf("help text for %s calls the completion metric universal without excluding the "+
+			"store-driven queue timeout: %q", name, help)
+	}
 }
