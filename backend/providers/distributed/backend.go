@@ -212,7 +212,16 @@ func WithLeaseObserver(obs LeaseObserver) Option {
 // at zero for a NewCluster deployment that has no control plane to report the
 // transition. Never install it on the control-plane path: there the sweeper's
 // own leader-gated pass reports the same expiry as source=sweeper, and two
-// owners would make the source of one transition non-deterministic.
+// owners would make the source of one transition non-deterministic. The same
+// holds for a NewCluster that shares its Redis with a control plane: the
+// embedded sweeper cannot tell a server is running its own pass, both drive the
+// same deadline index, and one expiry is then counted as embedded and as
+// sweeper in an order neither side controls.
+//
+// The report is at-least-once, not exactly-once: the timeout write is fenced
+// and read back, so several embedded sweepers over one Redis can each observe
+// the same transition and each report it. Treat the count as an upper bound on
+// the expirations behind it, never as one report per expiry.
 func WithDeadlineExpiredObserver(obs engine.DeadlineExpiredObserver) Option {
 	return func(c *config) {
 		if obs != nil {
