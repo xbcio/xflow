@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildAntdTheme } from "./antdTheme";
-import { foundationTokens, paletteTokens, type Appearance } from "./tokens";
+import { FG_MIX_PERCENT, foundationTokens, paletteTokens, type Appearance } from "./tokens";
 
 /**
  * The shared map is the single source both ConfigProviders spread, so these
@@ -20,6 +20,18 @@ function contrastRatio(a: string, b: string): number {
   };
   const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
   return (hi + 0.05) / (lo + 0.05);
+}
+
+/**
+ * `color-mix(in srgb, <base> p%, <other>)` with opaque inputs, rounded the way
+ * a browser rounds the 8-bit result. Mirrors `renderTokensCss`'s `-fg` mix.
+ */
+function mixHex(base: string, other: string, percent: number): string {
+  const channels = (hex: string) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  const mixed = channels(base).map((value, i) =>
+    Math.round((value * percent) / 100 + (channels(other)[i] * (100 - percent)) / 100)
+  );
+  return `#${mixed.map((value) => value.toString(16).padStart(2, "0")).join("")}`;
 }
 
 describe("buildAntdTheme", () => {
@@ -71,6 +83,44 @@ describe("buildAntdTheme", () => {
         expect(token.colorErrorHover).not.toBe(token.colorError);
         expect(token.colorErrorActive).not.toBe(token.colorError);
         expect(token.colorErrorActive).not.toBe(token.colorErrorHover);
+      });
+
+      it("paints the dangerous menu items with the -fg tone, readable in every state", () => {
+        // AntD derives these from colorError, which the dark algorithm renders
+        // as #dc5d56 (3.78:1 on the popup) and the light hover wash drops to
+        // 4.38:1. The menu text takes the same 70/30 mix as
+        // `--xflow-danger-fg`.
+        const menu = components.Menu;
+        const fg = mixHex(palette.danger, palette.text, FG_MIX_PERCENT);
+        expect(menu.dangerItemColor).toBe(fg);
+        expect(menu.dangerItemHoverColor).toBe(fg);
+        // Popups render on the elevated surface; hover washes it with 6% text.
+        const overlay = palette.surfaceOverlay;
+        expect(contrastRatio(fg, overlay)).toBeGreaterThanOrEqual(4.5);
+        expect(contrastRatio(fg, mixHex(palette.text, overlay, 6))).toBeGreaterThanOrEqual(4.5);
+        // The pressed row fills with the 12% danger wash and keeps the -fg
+        // label: AntD has no active text token, `:active` keeps the hover colour.
+        expect(menu.dangerItemActiveBg).toBe(mixHex(palette.danger, overlay, 12));
+        expect(contrastRatio(fg, menu.dangerItemActiveBg)).toBeGreaterThanOrEqual(4.5);
+        // The selected row fills solid danger and takes the onDanger ink.
+        expect(menu.dangerItemSelectedBg).toBe(palette.danger);
+        expect(menu.dangerItemSelectedColor).toBe(palette.onDanger);
+        expect(contrastRatio(menu.dangerItemSelectedColor, menu.dangerItemSelectedBg)).toBeGreaterThanOrEqual(4.5);
+      });
+
+      it("paints a nested dark menu from the dark appearance, whatever the host theme", () => {
+        const dark = paletteTokens.dark;
+        const menu = components.Menu;
+        const fg = mixHex(dark.danger, dark.text, FG_MIX_PERCENT);
+        expect(menu.darkDangerItemColor).toBe(fg);
+        expect(menu.darkDangerItemHoverColor).toBe(fg);
+        expect(menu.darkDangerItemActiveBg).toBe(mixHex(dark.danger, dark.surfaceOverlay, 12));
+        expect(menu.darkDangerItemSelectedBg).toBe(dark.danger);
+        expect(menu.darkDangerItemSelectedColor).toBe(dark.onDanger);
+        expect(contrastRatio(fg, dark.surfaceOverlay)).toBeGreaterThanOrEqual(4.5);
+        expect(contrastRatio(fg, mixHex(dark.text, dark.surfaceOverlay, 6))).toBeGreaterThanOrEqual(4.5);
+        expect(contrastRatio(fg, menu.darkDangerItemActiveBg)).toBeGreaterThanOrEqual(4.5);
+        expect(contrastRatio(menu.darkDangerItemSelectedColor, menu.darkDangerItemSelectedBg)).toBeGreaterThanOrEqual(4.5);
       });
 
       it("parses focus, radius, type and elevation from the foundation scale", () => {

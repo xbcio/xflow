@@ -1,4 +1,11 @@
-import { foundationTokens, paletteTokens, type Appearance, type Palette } from "./tokens";
+import {
+  BG_SUBTLE_PERCENT,
+  FG_MIX_PERCENT,
+  foundationTokens,
+  paletteTokens,
+  type Appearance,
+  type Palette
+} from "./tokens";
 
 /**
  * The AntD token map both ConfigProviders share. `@xflow/core` must not depend
@@ -109,6 +116,18 @@ export interface SharedAntdComponents {
     hoverBg: string;
     hoverBorderColor: string;
   };
+  Menu: {
+    dangerItemColor: string;
+    dangerItemHoverColor: string;
+    dangerItemSelectedColor: string;
+    dangerItemActiveBg: string;
+    dangerItemSelectedBg: string;
+    darkDangerItemColor: string;
+    darkDangerItemHoverColor: string;
+    darkDangerItemSelectedColor: string;
+    darkDangerItemActiveBg: string;
+    darkDangerItemSelectedBg: string;
+  };
   Modal: {
     borderRadiusLG: number;
     contentBg: string;
@@ -173,6 +192,51 @@ const px = (token: string) => Number.parseInt(token, 10);
 
 /** A unitless AntD line-height ratio that renders `fontSize` at exactly `lineHeight`. */
 const lineHeightOf = (lineHeight: string, fontSize: string) => px(lineHeight) / px(fontSize);
+
+/**
+ * `color-mix(in srgb, base p%, other)` resolved to `#rrggbb`. AntD prints a
+ * component token straight into CSS and derives other values from it, so the
+ * `-fg`/`-bg-subtle` expressions the editor's sheet uses cannot be passed
+ * through; this resolves the same mix to the opaque colour they render.
+ */
+function mixHex(base: string, other: string, percent: number): string {
+  const channels = (hex: string) => [1, 3, 5].map((i) => Number.parseInt(hex.slice(i, i + 2), 16));
+  const mixed = channels(base).map((value, i) =>
+    Math.round((value * percent) / 100 + (channels(other)[i] * (100 - percent)) / 100)
+  );
+  return `#${mixed.map((value) => value.toString(16).padStart(2, "0")).join("")}`;
+}
+
+/**
+ * The menu's danger tokens. `palette` is the host appearance; the `dark*`
+ * variants are for a Menu rendered with `theme="dark"`, which is dark whatever
+ * the host is, so they always resolve against the dark palette.
+ */
+function menuDangerTokens(palette: Palette): SharedAntdComponents["Menu"] {
+  const set = (colours: Palette) => ({
+    color: mixHex(colours.danger, colours.text, FG_MIX_PERCENT),
+    // AntD has no active text token: `:active` keeps the hover colour, so the
+    // pressed row takes the danger wash under that `-fg` label rather than a
+    // solid fill where it would fall to ~1.7:1.
+    activeBg: mixHex(colours.danger, colours.surfaceOverlay, BG_SUBTLE_PERCENT),
+    selectedBg: colours.danger,
+    selectedColor: colours.onDanger
+  });
+  const main = set(palette);
+  const dark = set(paletteTokens.dark);
+  return {
+    dangerItemColor: main.color,
+    dangerItemHoverColor: main.color,
+    dangerItemSelectedColor: main.selectedColor,
+    dangerItemActiveBg: main.activeBg,
+    dangerItemSelectedBg: main.selectedBg,
+    darkDangerItemColor: dark.color,
+    darkDangerItemHoverColor: dark.color,
+    darkDangerItemSelectedColor: dark.selectedColor,
+    darkDangerItemActiveBg: dark.activeBg,
+    darkDangerItemSelectedBg: dark.selectedBg
+  };
+}
 
 /**
  * AntD runs its seed through the palette generator, and the dark generator
@@ -306,6 +370,7 @@ export function buildAntdTheme(mode: Appearance, options: AntdThemeOptions = {})
         hoverBg: palette.field,
         hoverBorderColor: palette.primary,
       },
+      Menu: menuDangerTokens(palette),
       Modal: {
         borderRadiusLG: px(foundationTokens.radiusLg),
         contentBg: palette.surfaceOverlay,

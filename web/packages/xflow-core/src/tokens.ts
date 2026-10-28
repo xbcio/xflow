@@ -374,7 +374,7 @@ export type SemanticColor = (typeof semanticColors)[number];
  * own surface, and their foreground is the raw semantic colour.
  */
 export const FG_MIX_PERCENT = 70;
-const BG_SUBTLE_PERCENT = 12;
+export const BG_SUBTLE_PERCENT = 12;
 const BORDER_PERCENT = 40;
 
 const kebab = (key: string) =>
