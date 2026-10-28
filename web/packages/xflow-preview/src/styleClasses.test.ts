@@ -191,12 +191,12 @@ describe("xflow-preview shapes against the baseline", () => {
     expect(source).toContain("labelBgBorderRadius: 6");
   });
 
-  it("reads the tone foreground from the raw semantic colour, one tone at a time", () => {
+  it("reads the tone foreground from the -fg mix, one tone at a time", () => {
     for (const tone of ["info", "success", "warning", "danger", "suspend", "neutral"]) {
       const rule = declarationsOf(
         `:is(.xflow-preview-node, .xflow-preview-node__status, .xflow-preview-status)[data-tone="${tone}"]`
       );
-      expect(rule["--xflow-preview-t-fg"], tone).toBe(`var(--xflow-${tone})`);
+      expect(rule["--xflow-preview-t-fg"], tone).toBe(`var(--xflow-${tone}-fg)`);
     }
   });
 

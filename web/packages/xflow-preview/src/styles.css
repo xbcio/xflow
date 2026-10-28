@@ -963,36 +963,37 @@
     --xflow-preview-t-border: color-mix(in srgb, var(--xflow-preview-t) 55%, transparent);
   }
 
-  /* Text foreground is the semantic colour itself, as in the design's --t-fg
-     (`color: var(--t)`): the chip text is the raw tone, not core's darkened -fg. */
+  /* Text foreground is core's -fg mix, not the raw tone: at the chip's 11-12px
+     text the raw colours measure 3.97-4.17:1 on the 12% tint and miss AA, while
+     every -fg clears 6:1. Fill and border keep the raw colour. */
   :is(.xflow-preview-node, .xflow-preview-node__status, .xflow-preview-status)[data-tone="info"] {
     --xflow-preview-t: var(--xflow-info);
-    --xflow-preview-t-fg: var(--xflow-info);
+    --xflow-preview-t-fg: var(--xflow-info-fg);
   }
 
   :is(.xflow-preview-node, .xflow-preview-node__status, .xflow-preview-status)[data-tone="success"] {
     --xflow-preview-t: var(--xflow-success);
-    --xflow-preview-t-fg: var(--xflow-success);
+    --xflow-preview-t-fg: var(--xflow-success-fg);
   }
 
   :is(.xflow-preview-node, .xflow-preview-node__status, .xflow-preview-status)[data-tone="warning"] {
     --xflow-preview-t: var(--xflow-warning);
-    --xflow-preview-t-fg: var(--xflow-warning);
+    --xflow-preview-t-fg: var(--xflow-warning-fg);
   }
 
   :is(.xflow-preview-node, .xflow-preview-node__status, .xflow-preview-status)[data-tone="danger"] {
     --xflow-preview-t: var(--xflow-danger);
-    --xflow-preview-t-fg: var(--xflow-danger);
+    --xflow-preview-t-fg: var(--xflow-danger-fg);
   }
 
   :is(.xflow-preview-node, .xflow-preview-node__status, .xflow-preview-status)[data-tone="suspend"] {
     --xflow-preview-t: var(--xflow-suspend);
-    --xflow-preview-t-fg: var(--xflow-suspend);
+    --xflow-preview-t-fg: var(--xflow-suspend-fg);
   }
 
   :is(.xflow-preview-node, .xflow-preview-node__status, .xflow-preview-status)[data-tone="neutral"] {
     --xflow-preview-t: var(--xflow-neutral);
-    --xflow-preview-t-fg: var(--xflow-neutral);
+    --xflow-preview-t-fg: var(--xflow-neutral-fg);
   }
 
   .xflow-preview-node__status {
