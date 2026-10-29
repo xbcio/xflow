@@ -25,6 +25,7 @@ type WorkflowBuilder struct {
 	options        *types.WorkflowOptions
 	runnerSelector *types.RunnerSelector
 	onError        types.OnError
+	concurrency    *types.ConcurrencySettings
 	credentials    map[string]types.CredentialDef
 	groups         []*groupEntry
 	depEdges       []depEdge
@@ -209,6 +210,25 @@ func (w *WorkflowBuilder) RunnerSelector(selector types.RunnerSelector) *Workflo
 // not.
 func (w *WorkflowBuilder) OnError(strategy types.OnError) *WorkflowBuilder {
 	w.onError = strategy
+	return w
+}
+
+// Concurrency limits how many executions of this workflow may be in flight at
+// once (settings.concurrency). A Limit of 0 or less leaves the workflow
+// unlimited and clears any earlier call, so a caller can pass a configured value
+// through without branching.
+//
+// REJECT mode answers a submission over the limit with 429 and persists
+// nothing, which is what lets an entry-seeded trigger (Kafka) hold its offset
+// and retry: the limit then throttles consumption to the rate at which
+// executions finish. QUEUE mode admits the overflow instead. Faf workflows
+// cannot declare a limit; Compile rejects the combination.
+func (w *WorkflowBuilder) Concurrency(c types.ConcurrencySettings) *WorkflowBuilder {
+	if c.Limit <= 0 {
+		w.concurrency = nil
+		return w
+	}
+	w.concurrency = &c
 	return w
 }
 
@@ -452,8 +472,12 @@ func (w *WorkflowBuilder) buildInternal(visited map[*WorkflowBuilder]bool) (*typ
 			def.Credentials[k] = v
 		}
 	}
-	if w.onError != "" {
+	if w.onError != "" || w.concurrency != nil {
 		def.Settings = &types.WorkflowSettings{OnError: string(w.onError)}
+		if w.concurrency != nil {
+			c := *w.concurrency
+			def.Settings.Concurrency = &c
+		}
 	}
 	w.assembleNodes(def)
 	w.assembleConnections(def)
