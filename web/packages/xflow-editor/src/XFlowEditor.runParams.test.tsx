@@ -231,4 +231,17 @@ describe("run parameters dialog", () => {
 
     await waitFor(() => expect(onRun).toHaveBeenCalledTimes(1));
   });
+
+  it("keeps the field focused while a dialog button is pressed, so its error does not appear under the pointer", async () => {
+    render(<XFlowEditor value={withParams} onRun={vi.fn(async () => success)} />);
+    clickRun();
+    await openedDialog();
+
+    // A prevented mousedown is what stops the browser from moving focus (and
+    // so from blurring the field and shifting the layout before the click).
+    for (const name of ["取消", "运行"]) {
+      const notPrevented = fireEvent.mouseDown(within(dialog()).getByRole("button", { name }));
+      expect(notPrevented).toBe(false);
+    }
+  });
 });

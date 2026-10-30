@@ -59,6 +59,11 @@ const KIND_HINT: Record<RunParamField["kind"], string | undefined> = {
   json: "JSON"
 };
 
+/** onMouseDown handler that leaves focus where it is; the click still fires. */
+function keepFieldFocus(event: React.MouseEvent): void {
+  event.preventDefault();
+}
+
 function RunParamsForm({
   fields,
   error: submitError,
@@ -220,10 +225,14 @@ function RunParamsForm({
         </p>
       ) : null}
       <div className="xflow-editor-run-params__actions">
-        <Button disabled={submitting} onClick={onCancel}>
+        {/* Pressing a button must not blur the focused field: the blur reveals
+            that field's error, the layout shifts under the pointer and the
+            click is lost (only a real mouse shows this). Keyboard focus moves
+            as usual. */}
+        <Button disabled={submitting} onClick={onCancel} onMouseDown={keepFieldFocus}>
           取消
         </Button>
-        <Button htmlType="submit" loading={submitting} type="primary">
+        <Button htmlType="submit" loading={submitting} type="primary" onMouseDown={keepFieldFocus}>
           运行
         </Button>
       </div>
