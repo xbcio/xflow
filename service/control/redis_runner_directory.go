@@ -1635,12 +1635,14 @@ func (d *RedisRunnerDirectory) replayLeaseFromIndex(ctx context.Context, runnerI
 	sessions := make([]*redis.StringCmd, len(candidates))
 	payloads := make([]*redis.StringCmd, len(candidates))
 	metas := make([]*redis.StringCmd, len(candidates))
+	leaseIDs := make([]*redis.StringCmd, len(candidates))
 	for i, assignmentID := range candidates {
 		states[i] = pipe.HGet(ctx, d.keys.assignmentState, assignmentID)
 		owners[i] = pipe.HGet(ctx, d.keys.assignmentRunner, assignmentID)
 		sessions[i] = pipe.HGet(ctx, d.keys.assignmentSession, assignmentID)
 		payloads[i] = pipe.HGet(ctx, d.keys.assignmentData, assignmentID)
 		metas[i] = pipe.Get(ctx, d.keys.assignmentLeaseMetaKey(assignmentID))
+		leaseIDs[i] = pipe.HGet(ctx, d.keys.assignmentLeaseID, assignmentID)
 	}
 	countCmd := pipe.HGet(ctx, d.keys.runnerLeaseCount, runnerID)
 	cmds, execErr := pipe.Exec(ctx)
@@ -1674,6 +1676,10 @@ func (d *RedisRunnerDirectory) replayLeaseFromIndex(ctx context.Context, runnerI
 		if metaErr != nil && !errors.Is(metaErr, redis.Nil) {
 			return replayLeasePass{}, fmt.Errorf("read persisted lease %q: %w", assignmentID, metaErr)
 		}
+		leaseID, leaseIDErr := replayPipelineValue(leaseIDs[i], fallback)
+		if leaseIDErr != nil && !errors.Is(leaseIDErr, redis.Nil) {
+			return replayLeasePass{}, fmt.Errorf("read lease id %q: %w", assignmentID, leaseIDErr)
+		}
 		if state != redisAssignmentLeased {
 			index.prune(assignmentID)
 			continue
@@ -1697,6 +1703,9 @@ func (d *RedisRunnerDirectory) replayLeaseFromIndex(ctx context.Context, runnerI
 			// error, so the runner stops claiming work altogether and a queue
 			// with waiting tasks goes unserved.
 			index.prune(assignmentID)
+			continue
+		}
+		if replayLeaseExecuting(active, leaseID, metaErr) {
 			continue
 		}
 		assignment, err := unmarshalRedisAssignment(rawAssignment)
@@ -1791,9 +1800,11 @@ func (d *RedisRunnerDirectory) replayLeaseFromScan(ctx context.Context, runnerID
 	pipe = d.rdb.Pipeline()
 	payloads := make([]*redis.StringCmd, len(survivors))
 	metas := make([]*redis.StringCmd, len(survivors))
+	leaseIDs := make([]*redis.StringCmd, len(survivors))
 	for j, i := range survivors {
 		payloads[j] = pipe.HGet(ctx, d.keys.assignmentData, candidates[i])
 		metas[j] = pipe.Get(ctx, d.keys.assignmentLeaseMetaKey(candidates[i]))
+		leaseIDs[j] = pipe.HGet(ctx, d.keys.assignmentLeaseID, candidates[i])
 	}
 	countCmd := pipe.HGet(ctx, d.keys.runnerLeaseCount, runnerID)
 	cmds, execErr = pipe.Exec(ctx)
@@ -1810,8 +1821,15 @@ func (d *RedisRunnerDirectory) replayLeaseFromScan(ctx context.Context, runnerID
 		if metaErr != nil && !errors.Is(metaErr, redis.Nil) {
 			return replayLeasePass{}, fmt.Errorf("read persisted lease %q: %w", assignmentID, metaErr)
 		}
+		leaseID, leaseIDErr := replayPipelineValue(leaseIDs[j], fallback)
+		if leaseIDErr != nil && !errors.Is(leaseIDErr, redis.Nil) {
+			return replayLeasePass{}, fmt.Errorf("read lease id %q: %w", assignmentID, leaseIDErr)
+		}
 		if errors.Is(payloadErr, redis.Nil) {
 			index.prune(assignmentID)
+			continue
+		}
+		if replayLeaseExecuting(active, leaseID, metaErr) {
 			continue
 		}
 		assignment, err := unmarshalRedisAssignment(rawAssignment)
@@ -1843,6 +1861,23 @@ func (d *RedisRunnerDirectory) replayLeaseFromScan(ctx context.Context, runnerID
 	}
 	out.count = count
 	return out, nil
+}
+
+// replayLeaseExecuting reports whether the lease a candidate carries is one the
+// runner is already running, judged from the lease ID the directory stores next
+// to the metadata, so the poll can skip decoding both records. The decode is
+// the dominant cost of a poll when a runner holds many leases. The stored ID is
+// written with the metadata in one script and removed with it; when it is
+// absent or empty — a lease finalized without identity, or a record the hash
+// never carried — the answer is false and the caller decodes as before. A
+// missing metadata key also answers false, so the stranded-lease release below
+// still sees every such lease, executing or not.
+func replayLeaseExecuting(active map[string]struct{}, leaseID string, metaErr error) bool {
+	if leaseID == "" || metaErr != nil {
+		return false
+	}
+	_, executing := active[leaseID]
+	return executing
 }
 
 // replayLeaseIndex batches the prunes and backfills one replay decides on into

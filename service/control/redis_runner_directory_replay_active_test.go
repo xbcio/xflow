@@ -2,8 +2,11 @@ package control
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/types"
@@ -98,5 +101,110 @@ func TestRedisRunnerDirectoryStillReplaysALeaseTheRunnerIsNotExecuting(t *testin
 	}
 	if replay.Lease.LeaseToken != lease.LeaseToken {
 		t.Fatalf("replayed lease token = %q, want %q", replay.Lease.LeaseToken, lease.LeaseToken)
+	}
+}
+
+// finalizeReplayTestLease leaves one finalized lease for runner-1 and returns
+// its assignment ID and the key its metadata lives under, so a test can damage
+// the stored record.
+func finalizeReplayTestLease(t *testing.T, ctx context.Context, directory *RedisRunnerDirectory, session RunnerSession, leaseID engine.LeaseID) (AssignmentID, string) {
+	t.Helper()
+
+	assignment := redisDirectoryTestAssignment(AssignmentID("exec-1/node-" + string(leaseID) + "/activation-1"))
+	mustEnqueueRedisDirectoryAssignment(t, ctx, directory, assignment)
+	claim := claimRedisDirectoryAssignment(t, ctx, directory, session, 2)
+	lease := &engine.TaskLease{
+		LeaseID: leaseID, LeaseToken: engine.LeaseToken("token-" + string(leaseID)), Attempt: 1,
+		Task: assignment.Task, NodeType: assignment.Routing.NodeType,
+		IssuedAt: time.Now().UTC(), TTL: time.Minute,
+	}
+	if err := directory.FinalizeClaim(ctx, claim.ClaimID, lease); err != nil {
+		t.Fatalf("FinalizeClaim() error = %v", err)
+	}
+	return assignment.AssignmentID, directory.keys.assignmentLeaseMetaKey(string(assignment.AssignmentID))
+}
+
+// The runner's own in-flight leases are the common case of a replay poll: every
+// idle worker polls while the others execute. The stored lease ID answers that
+// without decoding the assignment payload or the metadata, so a record the
+// decode would reject must not surface as a poll error for a lease the runner
+// is running. If the decode still ran, the poll error would stop the runner
+// from claiming work at all.
+func TestRedisRunnerDirectoryReplaySkipsDecodingALeaseTheRunnerIsExecuting(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	directory := NewRedisRunnerDirectory(rdb)
+	session := registerRedisDirectoryRunner(t, ctx, directory, "runner-1", 2)
+	_, metaKey := finalizeReplayTestLease(t, ctx, directory, session, "lease-busy")
+	if err := rdb.Set(ctx, metaKey, "{not json", redis.KeepTTL).Err(); err != nil {
+		t.Fatalf("corrupt lease metadata: %v", err)
+	}
+
+	req := redisDirectoryClaimRequest(session, 2)
+	req.ActiveLeaseIDs = []string{"lease-busy"}
+	if _, ok, err := directory.ClaimForRunner(ctx, req); err != nil || ok {
+		t.Fatalf("ClaimForRunner() = ok %v, err %v; want no claim and no error for a lease the runner is executing", ok, err)
+	}
+
+	// Not reported in flight, the same record has to be decoded, which proves
+	// the poll above passed because it skipped the decode rather than because
+	// the record was readable.
+	req.ActiveLeaseIDs = nil
+	_, _, err := directory.ClaimForRunner(ctx, req)
+	if err == nil || !strings.Contains(err.Error(), "decode persisted lease") {
+		t.Fatalf("ClaimForRunner() error = %v, want a decode error for a lease the runner is not executing", err)
+	}
+}
+
+// A lease whose ID the directory does not hold next to its metadata cannot be
+// recognised without decoding. It still has to be recognised: the decode path
+// is what keeps an in-flight lease from being handed out twice.
+func TestRedisRunnerDirectoryReplayFallsBackToDecodingWhenTheStoredLeaseIDIsMissing(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	directory := NewRedisRunnerDirectory(rdb)
+	session := registerRedisDirectoryRunner(t, ctx, directory, "runner-1", 2)
+	finalizeReplayTestLease(t, ctx, directory, session, "lease-nohash")
+	if err := rdb.Del(ctx, directory.keys.assignmentLeaseID).Err(); err != nil {
+		t.Fatalf("drop stored lease ids: %v", err)
+	}
+
+	req := redisDirectoryClaimRequest(session, 2)
+	req.ActiveLeaseIDs = []string{"lease-nohash"}
+	if got, ok, err := directory.ClaimForRunner(ctx, req); err != nil || ok {
+		t.Fatalf("ClaimForRunner() = %+v, ok %v, err %v; want no claim for a lease the runner is executing", got, ok, err)
+	}
+
+	req.ActiveLeaseIDs = nil
+	got, ok, err := directory.ClaimForRunner(ctx, req)
+	if err != nil || !ok || got.Lease == nil || got.Lease.LeaseID != "lease-nohash" {
+		t.Fatalf("ClaimForRunner() = %+v, ok %v, err %v; want the lease replayed", got, ok, err)
+	}
+}
+
+// An in-flight lease whose metadata has expired is still stranded: nothing can
+// renew or report it, and it holds the runner's capacity. The skip must not
+// hide it from the release that frees that capacity.
+func TestRedisRunnerDirectoryReplayStillReleasesAStrandedLeaseTheRunnerReportsActive(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	directory := NewRedisRunnerDirectory(rdb)
+	session := registerRedisDirectoryRunner(t, ctx, directory, "runner-1", 2)
+	assignmentID, metaKey := finalizeReplayTestLease(t, ctx, directory, session, "lease-stranded")
+	if err := rdb.Del(ctx, metaKey).Err(); err != nil {
+		t.Fatalf("expire lease metadata: %v", err)
+	}
+
+	req := redisDirectoryClaimRequest(session, 2)
+	req.ActiveLeaseIDs = []string{"lease-stranded"}
+	if _, _, err := directory.ClaimForRunner(ctx, req); err != nil {
+		t.Fatalf("ClaimForRunner() error = %v", err)
+	}
+	state, err := rdb.HGet(ctx, directory.keys.assignmentState, string(assignmentID)).Result()
+	if err != nil && err != redis.Nil {
+		t.Fatalf("read assignment state: %v", err)
+	}
+	if state == redisAssignmentLeased {
+		t.Fatalf("assignment state = %q, want the stranded lease released", state)
 	}
 }
