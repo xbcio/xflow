@@ -737,8 +737,10 @@ export interface XFlowEditorProps {
    */
   executionSnapshotWorkflow?: WorkflowDef;
   /**
-   * The requested version could not be resolved, so the canvas is replaying
-   * the current definition: the status bar says 定义已变化，仅供参考.
+   * The run's definition version is unknown (the execution recorded none, or
+   * the server could not resolve it), so the canvas is replaying the current
+   * definition. The status bar says so; it does not claim the definition
+   * changed, because nothing here proves that.
    */
   executionDefinitionStale?: boolean;
   /**
@@ -5935,7 +5937,7 @@ export function XFlowEditor({
             </span>
           ) : null}
           <span className="xflow-editor-runs-statusbar__item" data-tone="faint">
-            {executionDefinitionStale ? "定义已变化，仅供参考" : "只读回放 · 定义为当次运行版本"}
+            {executionDefinitionStale ? "未取得该次运行的定义版本，回放使用当前定义" : "只读回放 · 定义为当次运行版本"}
           </span>
         </div>
       ) : (

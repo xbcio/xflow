@@ -756,7 +756,8 @@ export default function WorkflowDetailPage() {
   // §6.8 snapshot definition: replay the run's captured workflow_version. An
   // execution recorded before versions were stamped (or one whose version the
   // server cannot resolve) falls back to the current definition, and the status
-  // bar says 定义已变化，仅供参考 instead of claiming it is the run's version.
+  // bar says the run's version was not obtained instead of claiming it is the
+  // run's version.
   const selectedDetailReady = selectedExecution?.executionId === selectedExecutionId;
   const snapshotVersion = selectedDetailReady ? selectedExecution?.workflowVersion : undefined;
   const snapshotWorkflowId = selectedDetailReady ? selectedExecution?.workflowId : undefined;

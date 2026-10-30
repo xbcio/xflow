@@ -518,7 +518,7 @@ describe("运行记录 mode (§6.8)", () => {
     expect(onModeChange).toHaveBeenCalledWith("edit");
   });
 
-  it("falls back to the current definition and marks it 定义已变化", () => {
+  it("falls back to the current definition and says the run's version was not obtained", () => {
     render(
       <XFlowEditor
         {...runsProps}
@@ -528,7 +528,10 @@ describe("运行记录 mode (§6.8)", () => {
       />
     );
 
-    expect(screen.getByLabelText("执行状态栏").textContent).toContain("定义已变化，仅供参考");
+    const statusbarText = screen.getByLabelText("执行状态栏").textContent;
+    expect(statusbarText).toContain("未取得该次运行的定义版本，回放使用当前定义");
+    expect(statusbarText).not.toContain("定义已变化");
+    expect(statusbarText).not.toContain("定义为当次运行版本");
   });
 
   it("offers the top-bar 重跑… entry only for a failed terminal execution", async () => {
