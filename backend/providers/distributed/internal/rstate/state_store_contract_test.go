@@ -113,6 +113,29 @@ func TestRedisNodeLeaseRenewContract(t *testing.T) {
 	})
 }
 
+// A suspension must take only the stored signals the wait needs. The Lua
+// script once consumed all of them and delivered the first, so the others
+// disappeared; the shared contract pins the memory backend's behaviour.
+func TestMiniredisSuspendSignalBufferContract(t *testing.T) {
+	statestoretest.RunSuspendSignalBufferContract(t, rstateCapabilityManifest(), func(t *testing.T) statestoretest.SuspendSignalStore {
+		srv, err := miniredis.Run()
+		if err != nil {
+			t.Fatalf("miniredis.Run() error = %v", err)
+		}
+		t.Cleanup(srv.Close)
+		rdb := redis.NewClient(&redis.Options{Addr: srv.Addr()})
+		t.Cleanup(func() { _ = rdb.Close() })
+		return New(rdb, nil, time.Minute)
+	})
+}
+
+func TestRedisSuspendSignalBufferContract(t *testing.T) {
+	addr := realRedisAddr(t)
+	statestoretest.RunSuspendSignalBufferContract(t, rstateCapabilityManifest(), func(t *testing.T) statestoretest.SuspendSignalStore {
+		return New(freshRealRedis(t, addr), nil, time.Minute)
+	})
+}
+
 // Route-checked acquires decide execution liveness and node routing inside the
 // acquire script; the shared contract pins that the in-memory backend reaches
 // the same verdicts.

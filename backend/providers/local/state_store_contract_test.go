@@ -40,6 +40,15 @@ func TestMemoryNodeLeaseRenewContract(t *testing.T) {
 	})
 }
 
+// TestMemorySuspendSignalBufferContract runs the shared pre-delivered signal
+// contract against the in-memory backend, the reference the Redis script has to
+// agree with: a suspension takes only the stored signals the wait needs.
+func TestMemorySuspendSignalBufferContract(t *testing.T) {
+	statestoretest.RunSuspendSignalBufferContract(t, memoryCapabilityManifest(), func(t *testing.T) statestoretest.SuspendSignalStore {
+		return New().State().(statestoretest.SuspendSignalStore)
+	})
+}
+
 // TestMemoryRouteCheckedLeaseContract runs the shared route-checked acquire
 // contract against the in-memory backend, so its verdicts stay identical to the
 // Redis/Lua script's.
