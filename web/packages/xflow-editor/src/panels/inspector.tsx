@@ -13,7 +13,7 @@ import {
   WarnIcon
 } from "@xflow/icons";
 import { Button, Dropdown, Input, Select, Tabs, Tooltip } from "antd";
-import type { MenuProps, TabsProps } from "antd";
+import type { InputRef, MenuProps, TabsProps } from "antd";
 import { APPROVAL_NODE_TYPE, formatNodeTimeout, isSupplyNode, nodeStatusMeta, runtimeForNode } from "@xflow/core";
 import type { NodeTypesResponse, RuntimeSnapshot, WorkflowDef, WorkflowNode } from "@xflow/core";
 import type { ComposerSpec, Issue, Patch } from "@xflow/composer/core";
@@ -36,6 +36,7 @@ import {
 import { statusGlyph } from "./statusGlyph";
 import {
   addConnection,
+  canLabelInputs,
   connectionsOfNode,
   countNodeConnections,
   formSchemaForNode,
@@ -43,12 +44,14 @@ import {
   nodeKey,
   nodeName,
   parseParametersText,
+  relabelConnectionInput,
   removeConnectionFromWorkflow,
   renameNodeInWorkflow,
   selectedPorts,
   supportedInputPorts,
   supportedOutputPorts,
   updateNodeByKey,
+  workflowNodeByName,
   type ConnectionReference,
   type ParameterDraft,
   type ParameterTab,
@@ -336,18 +339,120 @@ function ConnectionEndpoint({ workflow, name }: { workflow: WorkflowDef; name: s
   );
 }
 
+/**
+ * How the 输入端口 list renames edge labels. `relabel` returns the refusal
+ * message, or undefined when the label was written. `focusKey` names the field
+ * to focus once its row has re-mounted under the new label: the row moves to
+ * another port group, which would otherwise drop keyboard focus to the body.
+ */
+interface ConnectionLabeling {
+  relabel: (connection: ConnectionReference, label: string) => string | undefined;
+  focusKey: React.MutableRefObject<string | undefined>;
+}
+
+function labelFieldKey(connection: ConnectionReference, label: string = connection.targetPort): string {
+  return JSON.stringify([connection.sourceName, connection.sourcePort, connection.targetName, label]);
+}
+
+/**
+ * The label of one edge arriving at a merge node, edited in place. The draft is
+ * local text: only a label that passes validation reaches `relabel`, on Enter
+ * or blur, so a half-typed value never enters the workflow or the undo history.
+ */
+function InputLabelField({
+  connection,
+  labeling,
+  errorId,
+  invalid,
+  onInvalid
+}: {
+  connection: ConnectionReference;
+  labeling: ConnectionLabeling;
+  errorId: string;
+  invalid: boolean;
+  onInvalid: (message: string | undefined) => void;
+}): React.ReactElement {
+  const [draft, setDraft] = React.useState(connection.targetPort);
+  const inputRef = React.useRef<InputRef>(null);
+  const fieldKey = labelFieldKey(connection);
+  const { focusKey } = labeling;
+  React.useLayoutEffect(() => {
+    if (focusKey.current !== fieldKey) return;
+    focusKey.current = undefined;
+    inputRef.current?.focus();
+  }, [fieldKey, focusKey]);
+
+  const commit = () => {
+    const next = draft.trim();
+    if (next === connection.targetPort) {
+      setDraft(connection.targetPort);
+      onInvalid(undefined);
+      return;
+    }
+    onInvalid(labeling.relabel(connection, next));
+  };
+
+  return (
+    <Input
+      aria-describedby={invalid ? errorId : undefined}
+      aria-invalid={invalid || undefined}
+      aria-label={`输入标签 ${connection.sourceName} ${connection.sourcePort} 到 ${connection.targetName}`}
+      autoComplete="off"
+      className="xflow-editor-connection-label"
+      classNames={editorInputClassNames}
+      ref={inputRef}
+      size="small"
+      spellCheck={false}
+      status={invalid ? "error" : undefined}
+      value={draft}
+      onBlur={commit}
+      onChange={(event) => {
+        setDraft(event.target.value);
+        // Editing drops the refusal of the previous attempt; it described other text.
+        if (invalid) onInvalid(undefined);
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          commit();
+        } else if (event.key === "Escape") {
+          // Esc undoes the edit and stays inside the field.
+          event.preventDefault();
+          event.stopPropagation();
+          setDraft(connection.targetPort);
+          onInvalid(undefined);
+        } else if (event.key.length === 1 && !event.metaKey && !event.ctrlKey && !event.altKey) {
+          // A printable key belongs to the field; the editor's window bindings
+          // (`?` opens the shortcut sheet) must not swallow it.
+          event.stopPropagation();
+        }
+      }}
+    />
+  );
+}
+
 /** One source → target edge, grouped under its port by the caller. */
 function ConnectionRow({
   connection,
   workflow,
   readOnly,
+  labeling,
   onRemove
 }: {
   connection: ConnectionReference;
   workflow: WorkflowDef;
   readOnly: boolean;
+  /** Set on the 输入端口 list: a merge target lets its edge labels be renamed. */
+  labeling?: ConnectionLabeling;
   onRemove: (connection: ConnectionReference) => void;
 }): React.ReactElement {
+  const errorId = React.useId();
+  const [labelError, setLabelError] = React.useState<string>();
+  const labelable =
+    labeling !== undefined &&
+    !readOnly &&
+    connection.type === "data" &&
+    canLabelInputs(workflowNodeByName(workflow, connection.targetName));
   return (
     <div className="xflow-editor-connection-row">
       <ConnectionEndpoint workflow={workflow} name={connection.sourceName} />
@@ -355,7 +460,17 @@ function ConnectionRow({
       <span>{connection.legacyDependency ? "dependency (legacy)" : connection.type}</span>
       <span>→</span>
       <ConnectionEndpoint workflow={workflow} name={connection.targetName} />
-      <span>{connection.type === "dependency" ? "—" : connection.targetPort}</span>
+      {labelable ? (
+        <InputLabelField
+          connection={connection}
+          errorId={errorId}
+          invalid={labelError !== undefined}
+          labeling={labeling}
+          onInvalid={setLabelError}
+        />
+      ) : (
+        <span>{connection.type === "dependency" ? "—" : connection.targetPort}</span>
+      )}
       <Tooltip classNames={editorTooltipClassNames} title="删除连接">
         <button
           aria-label={`删除连接 ${connection.sourceName} ${connection.sourcePort} 到 ${connection.targetName} ${connection.targetPort}`}
@@ -367,6 +482,11 @@ function ConnectionRow({
           <TrashIcon />
         </button>
       </Tooltip>
+      {labelError ? (
+        <p className="xflow-editor-connection-row__error" id={errorId} role="alert">
+          {labelError}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -377,12 +497,14 @@ function ConnectionPortGroupView({
   group,
   workflow,
   readOnly,
+  labeling,
   onRemove
 }: {
   label: string;
   group: ConnectionPortGroup;
   workflow: WorkflowDef;
   readOnly: boolean;
+  labeling?: ConnectionLabeling;
   onRemove: (connection: ConnectionReference) => void;
 }): React.ReactElement {
   return (
@@ -394,6 +516,7 @@ function ConnectionPortGroupView({
         <ConnectionRow
           connection={connection}
           key={`${connection.sourceName}:${connection.sourcePort}:${connection.targetName}:${connection.targetPort}:${connection.type}:${index}`}
+          labeling={labeling}
           readOnly={readOnly}
           workflow={workflow}
           onRemove={onRemove}
@@ -408,7 +531,8 @@ function ConnectionsPanel({
   selectedNode,
   readOnly,
   onAddConnection,
-  onRemoveConnection
+  onRemoveConnection,
+  onRelabelConnection
 }: {
   workflow: WorkflowDef;
   selectedNode?: WorkflowNode;
@@ -416,9 +540,24 @@ function ConnectionsPanel({
   readOnly: boolean;
   onAddConnection: (targetName: string, sourcePort: string, targetInput: string) => void;
   onRemoveConnection: (connection: ConnectionReference) => void;
+  /** Renames the `input:` label of an edge into a merge node; returns the refusal message, if any. */
+  onRelabelConnection: (connection: ConnectionReference, label: string) => string | undefined;
 }): React.ReactElement {
   const [sourcePort, setSourcePort] = React.useState("main");
   const [targetInput, setTargetInput] = React.useState("main");
+  const labelFocusKey = React.useRef<string | undefined>(undefined);
+  const labeling = React.useMemo<ConnectionLabeling>(
+    () => ({
+      focusKey: labelFocusKey,
+      relabel: (connection, label) => {
+        const error = onRelabelConnection(connection, label);
+        // The renamed row re-mounts in another port group: ask its field to take focus.
+        if (!error) labelFocusKey.current = labelFieldKey(connection, label);
+        return error;
+      }
+    }),
+    [onRelabelConnection]
+  );
   const selectedName = selectedNode?.name ?? selectedNode?.id;
   const connections = React.useMemo(() => listConnectionReferences(workflow), [workflow]);
   const visibleConnections = connectionsOfNode(connections, selectedName);
@@ -457,6 +596,7 @@ function ConnectionsPanel({
               group={group}
               key={group.port}
               label="输入端口"
+              labeling={labeling}
               readOnly={readOnly}
               workflow={workflow}
               onRemove={onRemoveConnection}
@@ -1245,6 +1385,20 @@ export function Inspector({
     },
     [onChangeWith]
   );
+  const relabelSelectedConnection = React.useCallback(
+    (connection: ConnectionReference, label: string): string | undefined => {
+      let refusal: string | undefined;
+      // The updater runs against the latest committed draft and, in the editor,
+      // synchronously, so the refusal is known when this returns.
+      onChangeWith?.((latest) => {
+        const result = relabelConnectionInput(latest, connection, label);
+        refusal = result.error;
+        return result.workflow;
+      });
+      return refusal;
+    },
+    [onChangeWith]
+  );
   const updateParameters = React.useCallback(
     (nextText: string) => {
       setParametersText(nextText);
@@ -1511,6 +1665,7 @@ export function Inspector({
           selectedNode={selectedNode}
           onAddConnection={addSelectedConnection}
           onRemoveConnection={removeSelectedConnection}
+          onRelabelConnection={relabelSelectedConnection}
         />
       )
     },

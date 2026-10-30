@@ -355,7 +355,10 @@ export function addConnection(
   if (!selectedName || selectedName === targetName || !targetNode) return workflow;
   if (isSupplyNode(selectedNode) || isSupplyNode(targetNode)) return workflow;
   if (!supportedOutputPorts(selectedNode, workflow).includes(sourcePort)) return workflow;
-  if (!supportedInputPorts(targetNode).includes(targetInput)) return workflow;
+  // A merge that declares no ports takes any well-formed label: the canvas draws
+  // one handle per label already in use, and a drop on it must connect.
+  const freeLabel = canLabelInputs(targetNode) && validateInputLabel(targetInput) === undefined;
+  if (!freeLabel && !supportedInputPorts(targetNode).includes(targetInput)) return workflow;
 
   const connections = workflow.connections ?? {};
   const sourcePorts = connections[selectedName] ?? {};
@@ -425,6 +428,90 @@ export function removeConnectionFromWorkflow(
     ...workflow,
     ...(removedConnection ? { connections: nextConnections } : {}),
     ...(removedLegacyDependency ? { dependency_edges: nextDependencyEdges } : {})
+  };
+}
+
+/** The builtin fan-in node: every inbound edge label becomes a key of its output. */
+const MERGE_NODE_TYPE = "xflow.merge";
+
+/**
+ * Whether the author may name the input label of each edge arriving at `node`.
+ * Only a merge that declares no `inputs` qualifies. The engine accepts any
+ * label on an undeclared node (`declaredInputPorts` returns nil there) and
+ * `xflow.merge` publishes each label as a key of its output
+ * (`$nodes['merge'].<label>`). A node that declares its ports is held to them,
+ * and every other node keeps the implicit `main` port in the editor.
+ */
+export function canLabelInputs(node: WorkflowNode | undefined): boolean {
+  return node?.type === MERGE_NODE_TYPE && (node.inputs ?? []).length === 0;
+}
+
+/** Letter first: the label is read back as `$inputs.<label>`, and `_`-prefixed keys belong to the engine. */
+const INPUT_LABEL = /^[A-Za-z][A-Za-z0-9_]*$/;
+
+export function validateInputLabel(label: string): string | undefined {
+  if (label === "") return "请输入标签";
+  if (!INPUT_LABEL.test(label)) return "以字母开头，只含字母、数字和下划线";
+  return undefined;
+}
+
+export interface RelabelResult {
+  workflow: WorkflowDef;
+  /** Set when nothing was written; the message is for the author. */
+  error?: string;
+}
+
+/**
+ * Renames the `input:` label of one edge into a label-free node. `main` is the
+ * implicit port, so it is written by omitting `input` (as {@link addConnection}
+ * does). The edge is located the way {@link removeConnectionFromWorkflow}
+ * locates it: first target of that source port with the same node and label.
+ */
+export function relabelConnectionInput(
+  workflow: WorkflowDef,
+  connection: Pick<ConnectionReference, "sourceName" | "sourcePort" | "targetName" | "targetPort">,
+  label: string
+): RelabelResult {
+  const next = label.trim();
+  const invalid = validateInputLabel(next);
+  if (invalid) return { workflow, error: invalid };
+  if (!canLabelInputs(workflowNodeByName(workflow, connection.targetName))) {
+    return { workflow, error: "该节点的输入端口由节点自己声明，不能改名" };
+  }
+  const connections = workflow.connections ?? {};
+  const sourcePorts = connections[connection.sourceName];
+  const portConnections = sourcePorts?.[connection.sourcePort];
+  if (!sourcePorts || portConnections === undefined || connectionTypeFor(portConnections) !== "data") {
+    return { workflow, error: "连接已不存在" };
+  }
+  const targets = targetsFor(portConnections);
+  const labelOf = (target: Connection): string => target.input ?? "main";
+  const at = targets.findIndex(
+    (target) => target.node === connection.targetName && labelOf(target) === connection.targetPort
+  );
+  if (at < 0) return { workflow, error: "连接已不存在" };
+  if (next === connection.targetPort) return { workflow };
+  if (targets.some((target, index) => index !== at && target.node === connection.targetName && labelOf(target) === next)) {
+    return { workflow, error: "同一来源端口已用该标签连到此节点" };
+  }
+
+  const relabeled = targets.map((target, index) => {
+    if (index !== at) return target;
+    const copy: Connection = { ...target, input: next };
+    if (next === "main") delete copy.input;
+    return copy;
+  });
+  return {
+    workflow: {
+      ...workflow,
+      connections: {
+        ...connections,
+        [connection.sourceName]: {
+          ...sourcePorts,
+          [connection.sourcePort]: withTargets(portConnections, relabeled)
+        }
+      }
+    }
   };
 }
 

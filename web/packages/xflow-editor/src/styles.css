@@ -2365,6 +2365,23 @@ button.xflow-editor-overview__run:hover {
   color: var(--xflow-danger-fg);
 }
 
+/* Merge input label: a compact field in the row's target-port track. The row
+ * stays six tracks wide, so the field has a bounded width instead of growing
+ * the grid, and the refusal message spans the whole row beneath it. */
+.xflow-editor .xflow-editor-connection-label {
+  font-family: SFMono-Regular, Consolas, monospace;
+  max-width: 100%;
+  min-width: 0;
+  width: 7rem;
+}
+
+.xflow-editor-connection-row__error {
+  color: var(--xflow-danger-fg);
+  font-size: var(--xflow-font-xs);
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
 /* Run tab (§6.4): the design's kvlist, then collapsible 错误 / 输出 cards built
  * on composer's Section (header toggle + right-aligned summary). */
 .xflow-editor-run-panel {
