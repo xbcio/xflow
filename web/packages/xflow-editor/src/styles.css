@@ -5582,6 +5582,98 @@ button.xflow-editor-overview__run:hover {
   justify-content: flex-end;
 }
 
+/* Run-parameters dialog: one labelled field per declared workflow param. */
+.xflow-editor-run-params__header {
+  border-bottom: 1px solid var(--xflow-border-subtle);
+  margin-bottom: 0;
+  padding-bottom: var(--xflow-space-3);
+}
+
+.xflow-editor-run-params__title {
+  align-items: baseline;
+  display: flex;
+  gap: var(--xflow-space-2);
+  min-width: 0;
+}
+
+.xflow-editor-run-params__sub {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-sm);
+  font-weight: var(--xflow-font-weight-regular);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xflow-editor-run-params__form {
+  display: grid;
+  gap: var(--xflow-space-4);
+  padding-top: var(--xflow-space-3);
+}
+
+.xflow-editor-run-params__field {
+  display: grid;
+  gap: var(--xflow-space-1-5);
+  min-width: 0;
+}
+
+.xflow-editor-run-params__label {
+  align-items: baseline;
+  color: var(--xflow-text-secondary);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: var(--xflow-font-sm);
+  font-weight: var(--xflow-font-weight-medium);
+  gap: var(--xflow-space-1-5);
+}
+
+.xflow-editor-run-params__name {
+  color: var(--xflow-text-tertiary);
+  font-family: var(--xflow-font-mono);
+  font-size: var(--xflow-font-xs);
+  font-weight: var(--xflow-font-weight-regular);
+}
+
+.xflow-editor-run-params__required {
+  color: var(--xflow-danger-fg);
+}
+
+.xflow-editor-run-params__kind {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-xs);
+  font-weight: var(--xflow-font-weight-regular);
+  margin-inline-start: auto;
+}
+
+.xflow-editor-run-params__select {
+  width: 100%;
+}
+
+.xflow-editor-run-params__json {
+  font-family: var(--xflow-font-mono);
+  font-size: var(--xflow-font-sm);
+}
+
+.xflow-editor-run-params__error {
+  color: var(--xflow-danger-fg);
+  font-size: var(--xflow-font-xs);
+  margin: 0;
+}
+
+.xflow-editor-run-params__error--submit {
+  background: var(--xflow-danger-bg-subtle);
+  border: 1px solid var(--xflow-danger-border);
+  border-radius: var(--xflow-radius-sm);
+  padding: var(--xflow-space-2) var(--xflow-space-2-5);
+}
+
+.xflow-editor-run-params__actions {
+  display: flex;
+  gap: var(--xflow-space-2);
+  justify-content: flex-end;
+}
+
 /* --------------------------------------------------------------------------
  * ED-10: panel hit targets (WCAG 2.5.8). These controls keep their visual size;
  * padding or a transparent pseudo-element widens the interactive area to 24px.

@@ -120,6 +120,8 @@ import {
 import { STARTER_TEMPLATES, applyStarterTemplate, type StarterTemplate } from "./panels/emptyTemplates";
 import type { WorkflowOverviewData } from "./panels/workflowOverview";
 import { RerunDialog, type XFlowRerunRequest, type XFlowRerunResult } from "./panels/rerunDialog";
+import { RunParamsDialog, type RunParamsRequest, type XFlowRunOptions } from "./panels/runParamsDialog";
+import { declaredRunParams } from "./panels/runParams";
 import { PublishDialog } from "./panels/publishDialog";
 import { ApprovalDialog, type XFlowApprovalSignal } from "./panels/approvalDialog";
 import { VersionHistory, type XFlowWorkflowVersions } from "./panels/versionHistory";
@@ -194,6 +196,7 @@ export type {
   XFlowExecutionListItem
 } from "./panels/executionList";
 export type { XFlowRerunRequest, XFlowRerunResult } from "./panels/rerunDialog";
+export type { XFlowRunOptions } from "./panels/runParamsDialog";
 export type { XFlowApprovalSignal } from "./panels/approvalDialog";
 export type { XFlowWorkflowVersion, XFlowWorkflowVersions } from "./panels/versionHistory";
 type LayoutPolicy = "auto" | "compact";
@@ -527,7 +530,15 @@ export interface XFlowEditorProps {
     value: WorkflowDef,
     context?: XFlowEditorSaveContext
   ) => Promise<WorkflowDef | XFlowEditorSaveResult> | WorkflowDef | XFlowEditorSaveResult;
-  onRun?: (value: WorkflowDef) => Promise<RuntimeSnapshot> | RuntimeSnapshot;
+  /**
+   * Starts a run of the draft. A workflow that declares top-level `params`
+   * opens the run dialog first; `options.params` then carries the values the
+   * user confirmed, for the host to send as the execute request's `params`.
+   * A workflow without declared params runs at once and `options` is
+   * `undefined`. A rejection from a dialog-initiated run is shown in the
+   * dialog (which stays open), not only in the dock.
+   */
+  onRun?: (value: WorkflowDef, options?: XFlowRunOptions) => Promise<RuntimeSnapshot> | RuntimeSnapshot;
   /**
    * Runs one node's slice of the workflow (the canvas context menu's 从此节点
    * 运行 / 运行到此节点) and resolves to the resulting snapshot. Optional:
@@ -2590,6 +2601,10 @@ export function XFlowEditor({
   // is the in-flight guard, `saving` only drives the button's loading state.
   const savingRef = React.useRef(false);
   const [running, setRunning] = React.useState(false);
+  // The run-parameters dialog: set while it is open. A workflow that declares
+  // `params` cannot start without them (the server answers 400), so Run opens
+  // this instead of calling `onRun` at once.
+  const [runParamsRequest, setRunParamsRequest] = React.useState<RunParamsRequest>();
   // §6.10 publish / version history. The editor never requests: the host owns
   // `onLoadVersions` / `onPublish` / `onRollback`, these states only hold what
   // came back and which surface is open.
@@ -3785,6 +3800,42 @@ export function XFlowEditor({
     onViewVersion?.(version);
   }, [onViewVersion]);
 
+  /**
+   * Starts a run of the current draft and reports whether `onRun` resolved with
+   * a snapshot. A failure always lands in the dock; a dialog-initiated run also
+   * gets the message back through `reportError`.
+   */
+  const startRun = React.useCallback(async (
+    options: XFlowRunOptions | undefined,
+    reportError?: (message: string) => void
+  ): Promise<boolean> => {
+    if (!onRun) return false;
+    setRunning(true);
+    setOperationError(undefined);
+    try {
+      // A one-click run keeps the original single-argument call, so a host
+      // written before run parameters existed sees nothing new.
+      const nextRuntime = options
+        ? await onRun(latestDraftRef.current, options)
+        : await onRun(latestDraftRef.current);
+      if (!nextRuntime) throw new Error("运行处理器未返回运行状态快照");
+      setLocalRuntime(nextRuntime);
+      setOperationStatus(operationStatusFromRuntime(nextRuntime));
+      revealDock();
+      return true;
+    } catch (error) {
+      const message = errorMessage(error, "运行失败");
+      setOperationError(message);
+      setOperationStatus("运行失败");
+      revealDock();
+      reportError?.(message);
+      // The host application owns error presentation.
+      return false;
+    } finally {
+      setRunning(false);
+    }
+  }, [onRun]);
+
   const runWorkflow = React.useCallback(async () => {
     if (readOnly) return;
     if (!onRun) {
@@ -3793,24 +3844,27 @@ export function XFlowEditor({
       revealDock();
       return;
     }
+    // The dialog owns Run while it is open (⌘Enter reaches here too).
+    if (runParamsRequest) return;
     if (blockedByParameterDraft("运行")) return;
-    setRunning(true);
-    setOperationError(undefined);
-    try {
-      const nextRuntime = await onRun(latestDraftRef.current);
-      if (!nextRuntime) throw new Error("运行处理器未返回运行状态快照");
-      setLocalRuntime(nextRuntime);
-      setOperationStatus(operationStatusFromRuntime(nextRuntime));
-      revealDock();
-    } catch (error) {
-      setOperationError(errorMessage(error, "运行失败"));
-      setOperationStatus("运行失败");
-      revealDock();
-      // The host application owns error presentation.
-    } finally {
-      setRunning(false);
+    // blockedByParameterDraft flushed the drafts, so this is the definition the
+    // run will use; the params it declares decide whether the dialog opens.
+    const declared = latestDraftRef.current.params;
+    if (declared && declaredRunParams(declared).length > 0) {
+      setOperationError(undefined);
+      setRunParamsRequest({ params: declared });
+      return;
     }
-  }, [blockedByParameterDraft, onRun, readOnly]);
+    await startRun(undefined);
+  }, [blockedByParameterDraft, onRun, readOnly, runParamsRequest, startRun]);
+
+  const submitRunParams = React.useCallback(async (options: XFlowRunOptions) => {
+    setRunParamsRequest((current) => (current ? { ...current, error: undefined } : current));
+    const started = await startRun(options, (message) =>
+      setRunParamsRequest((current) => (current ? { ...current, error: message } : current))
+    );
+    if (started) setRunParamsRequest(undefined);
+  }, [startRun]);
 
   /**
    * §6.3 run-bar actions. The host owns the request; the editor only reports a
@@ -6044,6 +6098,17 @@ export function XFlowEditor({
         onClose={() => setApprovalTarget(undefined)}
         onRevokeSignal={onRevokeSignal}
         onSignal={onSignal}
+      />
+      {/* Run parameters: a workflow that declares `params` is started from here.
+          The values stay in the dialog until the host's run resolves. */}
+      <RunParamsDialog
+        getContainer={() => editorRootRef.current ?? document.body}
+        request={runParamsRequest}
+        submitting={running && runParamsRequest !== undefined}
+        workflowName={draftWorkflow.name}
+        onCancel={() => setRunParamsRequest(undefined)}
+        onEdit={() => setRunParamsRequest((current) => (current?.error ? { ...current, error: undefined } : current))}
+        onSubmit={(options) => void submitRunParams(options)}
       />
       {/* §6.9 rerun dialog, opened from the run bar, the 运行 tab footer and the
           run-record top bar. The host owns the API call and the new execution. */}
