@@ -3,6 +3,7 @@ package group
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/xbcio/xflow/types"
@@ -63,6 +64,38 @@ const (
 	// The limit is far past any chain a group could actually operate.
 	maxApproverChain = 32
 )
+
+// ownedOutputKeys are the keys the gate publishes as its own verdict or record.
+//
+// A value an upstream node left under one of these names is not the gate's: read
+// by whoever follows the gate it would pass for a decision the gate made. The
+// list is the single definition of that set. The first suspension declares it
+// through SuspendSpec.StripFromOutput, so the output stored while the gate waits
+// does not carry the upstream values, and publicApprovalData drops the same keys
+// from the data it republishes. "reason" is deliberately absent: the request's
+// reason is a business field that passes through.
+var ownedOutputKeys = [...]string{
+	"approved", "approver", "comment", "returned", "forced", "bypassed",
+	decisionsKey, ignoredKey, ignoredCountKey,
+}
+
+// ownedKeys returns the owned keys as a fresh slice, so a caller that keeps or
+// edits it cannot alter the shared list.
+func ownedKeys() []string {
+	return slices.Clone(ownedOutputKeys[:])
+}
+
+// withoutOwnedKeys copies data without the keys the gate publishes itself.
+func withoutOwnedKeys(data map[string]any) map[string]any {
+	out := make(map[string]any, len(data))
+	for k, v := range data {
+		out[k] = v
+	}
+	for _, key := range ownedOutputKeys {
+		delete(out, key)
+	}
+	return out
+}
 
 // ApprovalMode represents the approval strategy.
 type ApprovalMode string
@@ -229,14 +262,18 @@ func (n *ApprovalNode) PrepareSuspend(_ context.Context, input *types.Input) (*t
 			Mode:    types.ModeSignal,
 			Signals: append([]string{approvalSignal(input.NodeName)}, force...),
 			Timeout: params.Timeout,
+			// The gate's own verdict and record are not an upstream node's to
+			// supply, so they are not stored with the data that arrived.
+			StripFromOutput: ownedKeys(),
 		}, nil
 
 	case ApprovalAll:
 		return &types.SuspendSpec{
-			Mode:    types.ModeMultiSignal,
-			Signals: append(approverSignals(input.NodeName, chain), force...),
-			Quorum:  1,
-			Timeout: params.Timeout,
+			Mode:            types.ModeMultiSignal,
+			Signals:         append(approverSignals(input.NodeName, chain), force...),
+			Quorum:          1,
+			Timeout:         params.Timeout,
+			StripFromOutput: ownedKeys(),
 		}, nil
 
 	case ApprovalSequential:
@@ -247,10 +284,11 @@ func (n *ApprovalNode) PrepareSuspend(_ context.Context, input *types.Input) (*t
 		// the backend and be consumed later, counting a vote cast before its
 		// approver could see the earlier decisions.
 		return &types.SuspendSpec{
-			Mode:    types.ModeMultiSignal,
-			Signals: append(approverSignals(input.NodeName, chain), force...),
-			Quorum:  1,
-			Timeout: params.Timeout,
+			Mode:            types.ModeMultiSignal,
+			Signals:         append(approverSignals(input.NodeName, chain), force...),
+			Quorum:          1,
+			Timeout:         params.Timeout,
+			StripFromOutput: ownedKeys(),
 		}, nil
 	}
 
@@ -537,11 +575,12 @@ func decide(input *types.Input, record approvalRecord, port string, extra map[st
 }
 
 // publicApprovalData is what downstream sees: the data that arrived at the gate,
-// with the record republished. The record is rebuilt from the node's own state
-// on every write, so a value an upstream node published under one of these names
-// is replaced rather than passed on.
+// with the record republished. The keys the gate publishes itself are dropped
+// from that data first and rebuilt from the node's own state and the decision,
+// so a value an upstream node published under one of those names is replaced
+// rather than passed on, whether or not this write sets it.
 func publicApprovalData(input *types.Input, record approvalRecord, extra map[string]any) map[string]any {
-	return approvalOutput(input.Data, record.state(), extra)
+	return approvalOutput(withoutOwnedKeys(input.Data), record.state(), extra)
 }
 
 // ignoreApprovalSignal re-suspends the node with its outcome unchanged,
