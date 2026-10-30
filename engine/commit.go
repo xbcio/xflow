@@ -458,6 +458,15 @@ func (e *Engine) commitSuspendedTaskResult(ctx context.Context, lease *TaskLease
 		// is written by a resumption (Output.State), and this is the commit that
 		// creates the wait a resumption resumes from.
 		output = cloneMap(lease.Input.Data)
+		// The node may name keys it publishes itself. Dropping them from the
+		// stored copy keeps a same-named upstream value from reading as the
+		// node's own while it waits. The clone above is what is trimmed, so
+		// lease.Input is left as it arrived.
+		if result.Suspend != nil {
+			for _, key := range result.Suspend.StripFromOutput {
+				delete(output, key)
+			}
+		}
 	}
 
 	suspender, ok := e.state.(DurableLeaseSuspender)
