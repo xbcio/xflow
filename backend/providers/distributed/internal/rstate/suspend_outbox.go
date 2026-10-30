@@ -67,6 +67,18 @@ local namesStart = 18 + delayedCount * 3
 local selectedName = ''
 local selectedPayload = ''
 for i = 1, count do
+    -- Take pre-delivered signals only until the wait is satisfied. A signal that
+    -- is consumed here but not delivered in the resume payload is lost without a
+    -- trace, so the ones past the quorum stay stored for the next suspension
+    -- (the local backend does the same: it stops at the first ready quorum).
+    if selectedName ~= '' then
+        if not multi then
+            break
+        end
+        if redis.call('HLEN', KEYS[9]) >= quorum then
+            break
+        end
+    end
     local signalKey = KEYS[11 + i]
     local waiterKey = KEYS[11 + count + i]
     local signalName = ARGV[namesStart + i - 1]
