@@ -162,6 +162,12 @@ func ExampleSignalRequest(name string, data map[string]any) any {
 	return signalRequest{Name: name, Data: data}
 }
 
+// ExampleSignalResponse builds the signalResponse (POST
+// /v1/executions/{id}/signals) the handler writes for outcome.
+func ExampleSignalResponse(outcome engine.SignalOutcome) any {
+	return newSignalResponse(engine.SignalDelivery{Outcome: outcome})
+}
+
 // ExampleExecuteWorkflowRequest builds an executeWorkflowRequest (POST
 // /v1/workflows/execute) with a minimal inline definition so every required
 // field of the request body is non-zero.

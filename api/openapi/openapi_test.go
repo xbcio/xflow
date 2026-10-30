@@ -178,6 +178,21 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 			value:  apiserver.ExampleSignalRequest("approve", map[string]any{"ok": true}),
 		},
 		{
+			name:   "signal response (resumed)",
+			schema: "SignalResponse",
+			value:  apiserver.ExampleSignalResponse(engine.SignalOutcomeResumed),
+		},
+		{
+			name:   "signal response (buffered)",
+			schema: "SignalResponse",
+			value:  apiserver.ExampleSignalResponse(engine.SignalOutcomeBuffered),
+		},
+		{
+			name:   "signal response (inactive)",
+			schema: "SignalResponse",
+			value:  apiserver.ExampleSignalResponse(engine.SignalOutcomeInactive),
+		},
+		{
 			name:   "rerun execution request",
 			schema: "RerunExecutionRequest",
 			value:  apiserver.ExampleRerunExecutionRequest(),

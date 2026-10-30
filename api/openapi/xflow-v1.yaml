@@ -3171,7 +3171,18 @@ paths:
     post:
       operationId: deliverSignal
       summary: Deliver a signal to an execution
-      description: Delivers a named signal with an optional data payload.
+      description: |
+        Delivers a named signal with an optional data payload.
+
+        A 200 means the server took the signal, not that it did anything. A
+        signal that matches no waiting node is stored for a node that may
+        suspend on that name later, so a mistyped signal name, or an approver
+        the receiving node does not recognise, still answers 200. The
+        `outcome` in the response says whether the signal woke a node
+        (`resumed`), was stored (`buffered`), or reached a finished execution
+        (`inactive`). Storing a signal is deliberate: an execution still
+        queued for a concurrency slot, and a node that has not suspended yet,
+        both consume it later.
       tags: [Executions]
       parameters:
         - $ref: "#/components/parameters/ExecutionId"
@@ -3184,7 +3195,7 @@ paths:
               $ref: "#/components/schemas/SignalRequest"
       responses:
         "200":
-          description: Signal accepted.
+          description: Signal accepted. See `outcome` for what happened to it.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
@@ -3196,7 +3207,7 @@ paths:
                   - type: object
                     properties:
                       data:
-                        $ref: "#/components/schemas/AcceptedResponse"
+                        $ref: "#/components/schemas/SignalResponse"
         "413":
           $ref: "#/components/responses/RequestTooLarge"
         "429":
@@ -5018,6 +5029,48 @@ components:
         data:
           type: object
           additionalProperties: true
+
+    SignalResponse:
+      type: object
+      required: [accepted]
+      description: |
+        What became of a delivered signal. `accepted` is true whenever the
+        request was taken without error and says nothing about whether the
+        signal did anything: a signal that matches no waiting node is stored,
+        not rejected, so a name or approver that no node recognises still
+        answers 200 with `accepted` true. `outcome`, `resumed` and `buffered`
+        carry the part `accepted` does not.
+
+        A server that cannot report the outcome answers `{"accepted": true}`
+        alone, so a client must treat the three outcome fields as optional.
+      properties:
+        accepted:
+          type: boolean
+          example: true
+        outcome:
+          type: string
+          enum: [resumed, buffered, inactive]
+          description: |
+            `resumed`: the signal woke a node that was suspended on it.
+            `buffered`: the signal was stored and nothing was woken. The cause
+            is not distinguished: the target node is not suspended on that name
+            yet (or never will be), a multi-signal quorum is not complete, or
+            the execution is still queued for a concurrency slot. A node that
+            later suspends on the name consumes it; a name no node waits for is
+            never consumed.
+            `inactive`: the execution had already finished or no longer
+            exists, so the signal reached no node.
+          example: buffered
+        resumed:
+          type: boolean
+          description: True only for outcome `resumed`.
+          example: false
+        buffered:
+          type: boolean
+          description: |
+            True only for outcome `buffered`. Both `resumed` and `buffered`
+            false means outcome `inactive`.
+          example: true
 
     RerunExecutionRequest:
       type: object
