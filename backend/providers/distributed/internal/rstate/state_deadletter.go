@@ -243,7 +243,7 @@ func replayOutcomeFromInt(n int64) engine.DeadLetterReplayOutcome {
 }
 
 // deadLetterIntent extracts the intent prefix from an outbox entry ID
-// (root/retry/requeue/resume/advance/execute/skip). It is written into the
+// (root/retry/requeue/resume/advance/mergecancel/execute/skip). It is written into the
 // dead-letter meta hash at dead-letter time so replayDeadLetterLua can branch
 // its guard rules by intent source instead of applying a single
 // running/committing/waiting allowlist that wrongly rejects the typical

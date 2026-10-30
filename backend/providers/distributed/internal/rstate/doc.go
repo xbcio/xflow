@@ -89,7 +89,7 @@
 //     an immutable receipt keyed by RequestID so a lost response is recovered by
 //     retrying the same RequestID. Intent-branched node guards distinguish the
 //     "safe to replay" precondition per intent source (root/retry/requeue/resume/
-//     advance/execute/skip). Fail-closed: any missing guard state → outcome 7
+//     advance/mergecancel/execute/skip). Fail-closed: any missing guard state → outcome 7
 //     (rejected_metadata_missing) without moving the entry.
 //
 // # Durable outbox (at-least-once delivery)

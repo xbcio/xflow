@@ -858,6 +858,14 @@ func unmarshalRedisOutboxEntry(raw string) (engine.OutboxEntry, error) {
 func redisAdvanceOutboxID(id types.ExecutionID, name string, activationID int) string {
 	return fmt.Sprintf("advance/%s/%s/%d", id, name, activationID)
 }
+
+// redisMergeCancelOutboxID names the intent a merge commit writes to retire its
+// losing branches. It sits beside redisAdvanceOutboxID because the intent takes
+// the advance slot's place in commitNodeLua, and the prefix is what the
+// dead-letter replay gate keys on.
+func redisMergeCancelOutboxID(id types.ExecutionID, name string, activationID int) string {
+	return fmt.Sprintf("mergecancel/%s/%s/%d", id, name, activationID)
+}
 func redisExecuteOutboxID(id types.ExecutionID, name string, activationID int) string {
 	return fmt.Sprintf("execute/%s/%s/%d", id, name, activationID)
 }

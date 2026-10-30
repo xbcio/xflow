@@ -89,11 +89,26 @@ if isSystem == 1 then
     -- skipped with the marker (a skip-cascade resolution). A pinned commit
     -- on a skip-marked unit, and any other status without the marker, are
     -- stale or rogue. Same fence as the memory backend's CommitNode.
+    --
+    -- A fourth shape, canceled, is decided on its own: a merge retires a
+    -- losing branch's unit from outside its lease. It is legal from any
+    -- live state (suspended, running, committing) unless a skip cascade
+    -- owns the unit, and from a scheduled unit that has no live row yet
+    -- (absent or pending) only when the marker says it was to execute.
+    -- Same fence as the memory backend's cancelFenceAdmitsLocked.
     local action = redis.call('HGET', KEYS[11], 'action') or ''
-    local pinned = ARGV[1] == 'pinned'
-    local skipped = ARGV[1] == 'skipped'
-    if (pinned and action == 'skip') or (not pinned and not skipped and action ~= 'skip') or (status and status ~= 'pending') then
-        return {0, 0, '', effectivePrivate}
+    if ARGV[1] == 'canceled' then
+        local live = status == 'suspended' or status == 'running' or status == 'committing'
+        local scheduled = (status == false or status == 'pending') and action == 'execute'
+        if not ((live and action ~= 'skip') or scheduled) then
+            return {0, 0, '', effectivePrivate}
+        end
+    else
+        local pinned = ARGV[1] == 'pinned'
+        local skipped = ARGV[1] == 'skipped'
+        if (pinned and action == 'skip') or (not pinned and not skipped and action ~= 'skip') or (status and status ~= 'pending') then
+            return {0, 0, '', effectivePrivate}
+        end
     end
 else
     if status ~= 'running' and status ~= 'committing' and status ~= 'waiting' then
@@ -455,7 +470,7 @@ return 1
 // its immutable body to an independent dead-letter index for operator review,
 // alongside compact node/activation/intent metadata so later replay can guard
 // against stale activations without parsing the JSON body, and can branch its
-// guard rules by intent source (root/retry/requeue/resume/advance/execute/skip).
+// guard rules by intent source (root/retry/requeue/resume/advance/mergecancel/execute/skip).
 //
 // When an entry is moved to dead-letter storage, any prior replay:entryidx
 // mapping for this entryID is cleared (KEYS[7]). This allows a subsequent
@@ -468,7 +483,7 @@ return 1
 // ready ZSET (KEYS[1]) until AckOutbox; ack is the *only* removal path outside
 // this script, and ackOutboxLua removes the ready-ZSET member and the body hash
 // field TOGETHER in one atomic Lua (ZREM ready + HDEL body). Every producer
-// (create/commit/advance/retry/requeue/resume) likewise writes the body and the
+// (create/commit/advance/mergecancel/retry/requeue/resume) likewise writes the body and the
 // ready member together. So body-presence and ready-membership are always
 // observably equivalent: there is no state where the body is gone but the entry
 // is still in ready, or vice versa. Because Redis runs each Lua script to
@@ -486,7 +501,7 @@ return 1
 // KEYS: 1=outbox:ready 2=outbox:body 3=outbox:attempts 4=outbox:dead 5=outbox:dead:body 6=outbox:dead:meta 7=replay:entryidx
 // ARGV: 1=entryID 2=maxAttempts 3=now_ms 4=ttl_seconds 5=node_name 6=activation_id
 //
-//	7=intent (entry ID prefix: root/retry/requeue/resume/advance/execute/skip)
+//	7=intent (entry ID prefix: root/retry/requeue/resume/advance/mergecancel/execute/skip)
 //	8=task_type (engine.TaskType int; the kind of queued task)
 var recordOutboxFailureLua = redis.NewScript(`
 local body = redis.call('HGET', KEYS[2], ARGV[1])
@@ -558,7 +573,7 @@ return {attempts, 0}
 // receipts recover as the same rejection.
 //
 // Eligible non-terminal node statuses are branched by intent (step 5): each
-// intent source (root/retry/requeue/resume/advance/execute/skip) has a
+// intent source (root/retry/requeue/resume/advance/mergecancel/execute/skip) has a
 // different "safe to replay" precondition, because the lifecycle leaves node
 // status in different states when each intent is dead-lettered. A single
 // running/committing/waiting allowlist would wrongly reject the typical
@@ -716,18 +731,21 @@ local isTerminal = nstatus == 'success' or nstatus == 'failed' or nstatus == 'sk
 
 -- Intent-branched terminal/non-terminal guard.
 --
--- advance is the exception to the terminal-node rule. An advance entry's
+-- advance and mergecancel are the exceptions to the terminal-node rule. Their
 -- source node is ALWAYS terminal: commitNodeLua writes the source terminal
--- and the advance outbox in one atomic script (the entry cannot exist
--- otherwise). A terminal source is therefore the REQUIRED precondition for
--- replaying an advance — the old "terminal rejects regardless of intent"
+-- and the intent in one atomic script (the entry cannot exist otherwise; a
+-- merge-cancel intent takes the advance intent's slot, so the merge node it
+-- names is terminal for the same reason). A terminal source is therefore the
+-- REQUIRED precondition for replaying either one. For advance — the old "terminal rejects regardless of intent"
 -- branch made every real advance dead-letter return
 -- rejected_node_terminal and left downstream nodes un-advanced. Idempotency
 -- on redelivery is guaranteed by the advance marker (advanceNodeLua SET NX
--- on advanceMarkerKey), NOT by the node status. A non-terminal or absent
--- source for an advance entry means the guard state is inconsistent with the
--- advance lifecycle → fail-closed (7).
-if intent == 'advance' then
+-- on advanceMarkerKey), NOT by the node status. A merge-cancel replay is
+-- idempotent on its own: the fence in commitNodeLua refuses a canceled commit
+-- for a unit that is already terminal. A non-terminal or absent source for
+-- either entry means the guard state is inconsistent with its lifecycle →
+-- fail-closed (7).
+if intent == 'advance' or intent == 'mergecancel' then
     if not isTerminal then
         writeReceipt(receiptKey, 'rejected_metadata_missing', nodeName, entryActivation, auditID)
         return {7, auditID, nodeName, entryActivation}
@@ -742,8 +760,8 @@ else
     end
     -- nodeAllows reports whether nstatus is an eligible non-terminal value
     -- for the given intent. nstatus may be false (key absent) for root/execute/
-    -- skip, which is normal at scheduling time. advance is handled above and
-    -- is intentionally absent here.
+    -- skip, which is normal at scheduling time. advance and mergecancel are
+    -- handled above and are intentionally absent here.
     local nodeAllows = function(value)
         if intent == 'root' then
             -- initial root intent: node has not started executing; no node:status is
@@ -780,8 +798,8 @@ end
 --    rejected. root/execute/skip skip this when node:status is absent (the node
 --    has not started, so there is no current activation to compare and no
 --    staleness risk); when node:status IS present they still require the
---    current activation to match. advance always reaches here with a terminal
---    nstatus (handled above), so its activation guard always runs (cyclic
+--    current activation to match. advance and mergecancel always reach here with a
+--    terminal nstatus (handled above), so its activation guard always runs (cyclic
 --    re-entry check against the source node's current activation).
 local skipActivation = (intent == 'root' or intent == 'execute'
     or intent == 'skip') and nstatus == false

@@ -350,6 +350,7 @@ var exemptStoreMethods = map[string]string{
 	"ScanReplayReceipts":             "scan; reads receipts",
 	"AuditStats":                     "in-process counters",
 	"FoldsArrivalsIntoCommit":        "capability flag",
+	"CommitsMergeCancel":             "capability flag",
 
 	// Wiring. Called before the store serves anything; no Redis write.
 	"ConfigureBlob":              "wiring",

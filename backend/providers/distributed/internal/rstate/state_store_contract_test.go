@@ -191,5 +191,6 @@ func deadLetterReplayBackend(state *Store) statestoretest.DeadLetterReplayBacken
 				t.Fatalf("delete execution status: %v", err)
 			}
 		},
+		ReplaysMergeCancel: true,
 	}
 }

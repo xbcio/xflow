@@ -1,7 +1,6 @@
 package rstate
 
 import (
-	"slices"
 	"testing"
 	"time"
 
@@ -20,6 +19,7 @@ import (
 var rstateCapabilities = []statestoretest.Capability{
 	statestoretest.CapabilityAtomicStateStore,
 	statestoretest.CapabilityAtomicArrivalFolding,
+	statestoretest.CapabilityMergeCancel,
 	statestoretest.CapabilityOutboxLeaser,
 	statestoretest.CapabilityOutboxReleaser,
 	statestoretest.CapabilityNamespacedOutboxLister,
@@ -66,10 +66,6 @@ func rstateCapabilityManifest() *statestoretest.Manifest {
 func TestRstateCapabilityManifest(t *testing.T) {
 	manifest := rstateCapabilityManifest()
 	manifest.Verify(t, New(nil, nil, time.Minute))
-	// MergeCancel is not declared yet: remove this exclusion once it is declared in step 4.
-	expected := slices.DeleteFunc(statestoretest.AllCapabilities(), func(c statestoretest.Capability) bool {
-		return c == statestoretest.CapabilityMergeCancel
-	})
-	manifest.CheckSet(t, expected...)
+	manifest.CheckSet(t, statestoretest.AllCapabilities()...)
 	t.Logf("%s", manifest.Summary())
 }

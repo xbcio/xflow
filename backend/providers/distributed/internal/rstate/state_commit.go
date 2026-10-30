@@ -17,6 +17,7 @@ import (
 var _ engine.AtomicStateStore = (*Store)(nil)
 var _ engine.LegacyNodeCommitter = (*Store)(nil)
 var _ engine.ArrivalFoldingCommitter = (*Store)(nil)
+var _ engine.MergeCancelCommitter = (*Store)(nil)
 
 // FoldsArrivalsIntoCommit declares the arrival-folding capability: CommitNode
 // applies CommitNodeRequest.Arrivals inside commitNodeLua, in the same fenced
@@ -25,6 +26,14 @@ var _ engine.ArrivalFoldingCommitter = (*Store)(nil)
 // not a capability signal — and keeps emitting AdvanceTask, so the declaration
 // has to stay here for as long as the Lua transition honours the field.
 func (s *Store) FoldsArrivalsIntoCommit() bool { return true }
+
+// CommitsMergeCancel declares the merge-cancel capability: CommitNode persists
+// CommitNodeRequest.MergeCancel as an outbox intent inside commitNodeLua, in
+// the same fenced transition as the merge node's terminal write, and
+// commitNodeLua accepts the canceled System commit shape that the intent's
+// handler uses to retire losing branches. Like the marker above it is a
+// declaration the shared merge-cancel contract has to keep honest.
+func (s *Store) CommitsMergeCancel() bool { return true }
 
 // CommitLeasedNode reuses the fenced Redis node transition for legacy cycle
 // paths, whose follow-up scheduling remains outside CommitNode's DAG counter.
@@ -140,6 +149,19 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 	if req.AdvanceTask != nil {
 		advanceID = redisAdvanceOutboxID(req.ExecutionID, req.NodeName, req.ActivationID)
 		encoded, err := marshalRedisOutboxEntry(advanceID, *req.AdvanceTask, time.Time{})
+		if err != nil {
+			return engine.CommitNodeResult{}, err
+		}
+		advanceJSON = encoded
+	}
+	// The merge-cancel intent rides the advance intent's ARGV slot: Validate
+	// makes the two mutually exclusive, and the script's guard for that slot
+	// (acyclic, not fatal, the execution not finalized by this commit, not
+	// canceling) is the one the merge-cancel intent needs. So no new argument
+	// is added and the positional layout above stays as it was.
+	if req.MergeCancel != nil {
+		advanceID = redisMergeCancelOutboxID(req.ExecutionID, req.NodeName, req.ActivationID)
+		encoded, err := marshalRedisOutboxEntry(advanceID, *req.MergeCancel, time.Time{})
 		if err != nil {
 			return engine.CommitNodeResult{}, err
 		}
@@ -339,6 +361,14 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 		// OutboxDispatcher's keyspace sweep, the documented fallback in
 		// state_outbox_index.go.
 		s.markOutboxReadyIndex(ctx, t, req.ExecutionID)
+	}
+	if out.Applied && req.System && req.Status == types.NodeStatusCanceled {
+		// A merge canceled this node from outside its lease. If it was parked on
+		// a signal, the waiter state is still in Redis: retire it so a late
+		// signal cannot write a resume for a terminal node. See
+		// retireCanceledWaiter for the window this leaves and why a failure
+		// is only logged.
+		s.retireCanceledWaiter(ctx, req.ExecutionID, req.NodeName)
 	}
 	if out.ExecutionDone {
 		// commitNodeLua finalizes the status inside the script, so this is the
