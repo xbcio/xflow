@@ -97,6 +97,7 @@ func TestMemoryDeadLetterReplayContract(t *testing.T) {
 				delete(state.executions, id)
 				state.mu.Unlock()
 			},
+			ReplaysMergeCancel: true,
 		}
 	})
 }

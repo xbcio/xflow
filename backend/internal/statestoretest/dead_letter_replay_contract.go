@@ -25,6 +25,11 @@ type DeadLetterReplayStore interface {
 type DeadLetterReplayBackend struct {
 	Store           DeadLetterReplayStore
 	ExpireExecution func(t *testing.T, id types.ExecutionID)
+	// ReplaysMergeCancel is set by a backend whose replay gate treats a
+	// "mergecancel" intent like "advance": replayable once its source node is
+	// terminal. A backend that has not taught its gate yet leaves it false, and
+	// the merge-cancel cases report an explicit skip instead of a failure.
+	ReplaysMergeCancel bool
 }
 
 // RunDeadLetterReplayContract pins the engine.DeadLetterStore replay contract
@@ -205,6 +210,45 @@ func RunDeadLetterReplayContract(t *testing.T, newBackend func(*testing.T) DeadL
 		b := newBackend(t)
 		id, entry := seed(t, b.Store, "execute/%s/finish/1", execTask(1), runningNode(2))
 		requireRejected(t, b.Store, id, replay(t, b.Store, id, entry.ID, "req-1"), engine.ReplayRejectedActivationMismatch, "finish", "1")
+	})
+
+	// A merge-cancel intent names the merge node that already committed, so its
+	// source is terminal by construction. The replay gate must therefore treat it
+	// like an advance (terminal required) and not like an execute (terminal
+	// rejected); otherwise an operator replay of a dead-lettered cancel is refused
+	// as "already complete" and the losing branches are never retired.
+	mergeCancelTask := func(activation int) engine.Task {
+		return engine.Task{NodeName: "finish", NodeIdx: 1, Type: engine.TaskTypeMergeCancel, ActivationID: activation}
+	}
+	t.Run("MergeCancelReplaysWhenTheMergeNodeIsTerminal", func(t *testing.T) {
+		b := newBackend(t)
+		if !b.ReplaysMergeCancel {
+			t.Skip("backend has not declared merge-cancel replay (DeadLetterReplayBackend.ReplaysMergeCancel)")
+		}
+		node := runningNode(1)
+		node.Status = types.NodeStatusSuccess
+		id, entry := seed(t, b.Store, "mergecancel/%s/finish/1", mergeCancelTask(1), node)
+		res := replay(t, b.Store, id, entry.ID, "req-1")
+		if res.Outcome != engine.ReplayReplayed || res.AuditID == "" {
+			t.Fatalf("result = %+v, want replayed with an AuditID", res)
+		}
+		if res.ExecutionID != id || res.NodeID != "finish" || res.ActivationID != "1" {
+			t.Fatalf("result = %+v, want node finish activation 1", res)
+		}
+		requireDeadLetters(t, b.Store, id, 0)
+		ready := requireReady(t, b.Store, id, 1)
+		if ready[0].ID != entry.ID || ready[0].Task.Type != engine.TaskTypeMergeCancel {
+			t.Fatalf("ready = %+v, want the merge-cancel entry %q", ready, entry.ID)
+		}
+	})
+
+	t.Run("MergeCancelRejectedWhenTheMergeNodeIsNotTerminal", func(t *testing.T) {
+		b := newBackend(t)
+		if !b.ReplaysMergeCancel {
+			t.Skip("backend has not declared merge-cancel replay (DeadLetterReplayBackend.ReplaysMergeCancel)")
+		}
+		id, entry := seed(t, b.Store, "mergecancel/%s/finish/1", mergeCancelTask(1), runningNode(1))
+		requireRejected(t, b.Store, id, replay(t, b.Store, id, entry.ID, "req-1"), engine.ReplayRejectedMetadataMissing, "finish", "1")
 	})
 
 	// A retry under the same RequestID recovers the stored rejection even once

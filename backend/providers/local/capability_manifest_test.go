@@ -20,6 +20,7 @@ import (
 var memoryCapabilities = []statestoretest.Capability{
 	statestoretest.CapabilityAtomicStateStore,
 	statestoretest.CapabilityAtomicArrivalFolding,
+	statestoretest.CapabilityMergeCancel,
 	statestoretest.CapabilityOutboxLeaser,
 	statestoretest.CapabilityOutboxReleaser,
 	statestoretest.CapabilityExecutionStatusReader,

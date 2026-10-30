@@ -40,8 +40,17 @@ const (
 	// rejects a backend that merely implements CommitNode; the declaration also
 	// promises the shared arrival-folding contract, which proves the mark true.
 	CapabilityAtomicArrivalFolding Capability = "AtomicArrivalFolding"
-	CapabilityOutboxLeaser         Capability = "OutboxLeaser"
-	CapabilityOutboxReleaser       Capability = "OutboxReleaser"
+	// CapabilityMergeCancel is the semantic capability behind
+	// engine.MergeCancelCommitter: CommitNode persists CommitNodeRequest.MergeCancel
+	// as a durable outbox intent in the merge node's own fenced transition, and
+	// accepts a System commit of status canceled that retires a scheduled but
+	// unfinished node (the cancel fence shape). The interface carries an explicit
+	// CommitsMergeCancel marker, so the assertion rejects a backend that merely
+	// implements CommitNode; the declaration also promises the shared merge-cancel
+	// contract, which proves the mark true.
+	CapabilityMergeCancel    Capability = "MergeCancel"
+	CapabilityOutboxLeaser   Capability = "OutboxLeaser"
+	CapabilityOutboxReleaser Capability = "OutboxReleaser"
 	// CapabilityNamespacedOutboxLister is engine.NamespacedOutboxLister: outbox
 	// discovery that reports each execution together with its namespace. It is
 	// only meaningful for a store whose outbox is partitioned by namespace; a
@@ -110,6 +119,14 @@ var capabilitySpecs = map[Capability]capabilitySpec{
 		implements: func(v any) bool {
 			committer, ok := v.(engine.ArrivalFoldingCommitter)
 			return ok && committer.FoldsArrivalsIntoCommit()
+		},
+	},
+	CapabilityMergeCancel: {
+		iface:   "engine.MergeCancelCommitter",
+		summary: "merge-cancel intent written with the merge commit, and the fenced canceled system commit that retires the losing branches",
+		implements: func(v any) bool {
+			committer, ok := v.(engine.MergeCancelCommitter)
+			return ok && committer.CommitsMergeCancel()
 		},
 	},
 	CapabilityOutboxLeaser: {

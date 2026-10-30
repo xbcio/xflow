@@ -69,6 +69,16 @@ var _ engine.ReplayReceiptReader = (*memoryState)(nil)
 // for as long as CommitNode honours the field.
 func (s *memoryState) FoldsArrivalsIntoCommit() bool { return true }
 
+var _ engine.MergeCancelCommitter = (*memoryState)(nil)
+
+// CommitsMergeCancel declares the merge-cancel capability: CommitNode writes
+// CommitNodeRequest.MergeCancel as an outbox intent in the same mutex-guarded
+// transition as the merge node's terminal write, and accepts the canceled
+// System commit shape that the intent's handler uses to retire losing
+// branches. Like the marker above it is a declaration the shared merge-cancel
+// contract has to keep honest.
+func (s *memoryState) CommitsMergeCancel() bool { return true }
+
 // CommitLeasedNode shares the storage fence used by CommitNode while callers
 // retain legacy cycle/expansion scheduling outside the static-DAG counter.
 func (s *memoryState) CommitLeasedNode(ctx context.Context, req engine.CommitNodeRequest) (engine.CommitNodeResult, error) {
@@ -123,7 +133,15 @@ func (s *memoryState) commitNodeLocked(req engine.CommitNodeRequest) engine.Comm
 		return engine.CommitNodeResult{Outcome: engine.CommitOutcomeExecutionInactive}
 	}
 
-	if req.System {
+	if req.System && req.Status == types.NodeStatusCanceled {
+		// The fourth system-commit shape: a node retired by a merge's
+		// on_others: cancel. It is decided here, ahead of the three shapes below,
+		// because those refuse Canceled by construction and must keep doing so
+		// for every other caller; only this shape relaxes the Pending-row rule.
+		if !s.cancelFenceAdmitsLocked(req, current) {
+			return engine.CommitNodeResult{Outcome: engine.CommitOutcomeStaleToken}
+		}
+	} else if req.System {
 		// UnitIdx, not NodeIdx: the scheduling marker lives in the unit-indexed
 		// counter space, which is what AdvanceNode writes and what a supply node
 		// shifts NodeIdx away from. The two coincided for every definition without
@@ -203,6 +221,16 @@ func (s *memoryState) commitNodeLocked(req engine.CommitNodeRequest) engine.Comm
 	if req.StoreOutput {
 		s.outputs[key] = cloneData(req.Output)
 	}
+	if req.System && req.Status == types.NodeStatusCanceled {
+		// A canceled node can have been parked. Its waiter spec and any partial
+		// multi-signal set are retired in the same critical section, exactly as
+		// CancelSuspendedNode does, so a signal that arrives later finds no
+		// waiter and cannot write a resume for a terminal node. Leases need no
+		// separate cleanup: they are fields of the node row rebuilt above, and
+		// the rebuild does not copy them.
+		delete(s.suspended, key)
+		delete(s.signalSets, key)
+	}
 
 	result := engine.CommitNodeResult{Outcome: engine.CommitOutcomeAccepted, Applied: true}
 	terminalErr := ""
@@ -229,6 +257,19 @@ func (s *memoryState) commitNodeLocked(req engine.CommitNodeRequest) engine.Comm
 	if req.AdvanceTask != nil && !req.Fatal && !result.ExecutionDone {
 		outboxID := advanceOutboxID(req.ExecutionID, req.NodeName, req.ActivationID)
 		if s.putOutboxLocked(req.ExecutionID, outboxID, *req.AdvanceTask, time.Time{}) {
+			result.OutboxIDs = append(result.OutboxIDs, outboxID)
+		}
+	}
+
+	// The merge-cancel intent takes the advance intent's place in the commit: the
+	// two are mutually exclusive (Validate), and a merge that finalizes the
+	// execution has no branch left to cancel. Unlike the advance block above it
+	// is also withheld while the execution is canceling, because the
+	// execution-wide cancel retires the suspended branches itself and a
+	// merge-cancel scan racing that teardown would only add a second writer.
+	if req.MergeCancel != nil && !req.Fatal && !result.ExecutionDone && entry.snap.Status != types.ExecutionStatusCanceling {
+		outboxID := mergeCancelOutboxID(req.ExecutionID, req.NodeName, req.ActivationID)
+		if s.putOutboxLocked(req.ExecutionID, outboxID, *req.MergeCancel, time.Time{}) {
 			result.OutboxIDs = append(result.OutboxIDs, outboxID)
 		}
 	}
@@ -275,6 +316,34 @@ func (s *memoryState) commitNodeLocked(req engine.CommitNodeRequest) engine.Comm
 		}
 	}
 	return result
+}
+
+// cancelFenceAdmitsLocked decides the canceled system-commit shape from the two
+// facts it can see: the node row's status and the unit's scheduling marker
+// ("execute", "skip", "seed", or empty). Callers must hold s.mu, and a terminal
+// row has already been answered (duplicate or stale) before this runs.
+//
+//	row                              marker        verdict
+//	Suspended / Running / Committing not "skip"    admit
+//	none or Pending                  "execute"     admit (scheduled, never leased)
+//	none or Pending                  none/skip/seed refuse
+//	Waiting (or any other status)    any           refuse
+//
+// The refusals are what keep the shape from stealing a unit another path owns:
+// an unscheduled unit is resolved by the skip cascade, a skip-marked unit has
+// that cascade in flight, and a seeded unit is a rerun's preset.
+func (s *memoryState) cancelFenceAdmitsLocked(req engine.CommitNodeRequest, current *engine.NodeSnapshot) bool {
+	marker := s.scheduled[memoryCounterKey(req.ExecutionID, req.UnitIdx)]
+	if current != nil {
+		switch current.Status {
+		case types.NodeStatusSuspended, types.NodeStatusRunning, types.NodeStatusCommitting:
+			return marker != "skip"
+		case types.NodeStatusPending:
+		default:
+			return false
+		}
+	}
+	return marker == "execute"
 }
 
 // AdvanceNode atomically converts the committed source's outbound edge
@@ -717,12 +786,13 @@ func (s *memoryState) ReplayDeadLetter(_ context.Context, req engine.ReplayDeadL
 		return reject(engine.ReplayRejectedTerminal)
 	}
 
-	// 5. Intent-branched node guard. advance requires a terminal source; every
-	//    other intent rejects a terminal node and must find a node status its
-	//    intent allows, otherwise the guard state is unrecognised.
+	// 5. Intent-branched node guard. advance and mergecancel require a terminal
+	//    source (the committed merge node); every other intent rejects a
+	//    terminal node and must find a node status its intent allows, otherwise
+	//    the guard state is unrecognised.
 	node := s.nodes[memoryNodeKey(req.ExecutionID, meta.node)]
 	nodeTerminal := node != nil && isTerminalNode(node.Status)
-	if meta.intent == "advance" {
+	if meta.intent == "advance" || meta.intent == "mergecancel" {
 		if !nodeTerminal {
 			return reject(engine.ReplayRejectedMetadataMissing)
 		}
@@ -812,7 +882,7 @@ func (r *memoryReplayReceipt) result(id types.ExecutionID) engine.ReplayDeadLett
 }
 
 // deadLetterIntent extracts the intent prefix (root/retry/requeue/resume/
-// advance/execute/skip) from an outbox entry ID, as the Redis backend records
+// advance/mergecancel/execute/skip) from an outbox entry ID, as the Redis backend records
 // it in the dead-letter meta. An ID without a prefix yields "".
 func deadLetterIntent(entryID string) string {
 	if i := strings.IndexByte(entryID, '/'); i >= 0 {
@@ -1005,6 +1075,14 @@ func memoryAdvanceKey(id types.ExecutionID, name string, activationID int) strin
 
 func advanceOutboxID(id types.ExecutionID, name string, activationID int) string {
 	return fmt.Sprintf("advance/%s/%s/%d", id, name, activationID)
+}
+
+// mergeCancelOutboxID names the cancel-the-other-branches intent a successful
+// merge commit writes. It sits beside advanceOutboxID because the intent takes
+// the advance slot's place in the commit, and the prefix is what the
+// dead-letter replay gate keys on.
+func mergeCancelOutboxID(id types.ExecutionID, name string, activationID int) string {
+	return fmt.Sprintf("mergecancel/%s/%s/%d", id, name, activationID)
 }
 
 func executeOutboxID(id types.ExecutionID, name string, activationID int) string {
