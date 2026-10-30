@@ -34,6 +34,24 @@ type SuspendSpec struct {
 	Quorum  int           // number of signals required; 0 means all
 	Timer   time.Duration // fixed wait duration (ModeTimer)
 	Timeout time.Duration // maximum wait before routing to timeout port; 0 = no timeout
+
+	// StripFromOutput names keys the engine removes from the output it stores
+	// when the node first suspends.
+	//
+	// A first suspension stores the node's input data as its output, so the
+	// resumption re-enters with the same data. A node that publishes keys of
+	// its own (a verdict, a ledger) lists them here so a value an upstream node
+	// left under the same name is not read as the node's own while it waits.
+	// Only the names travel; the engine never inspects what they mean.
+	//
+	// It applies to the first suspension only. A re-suspension stores the data
+	// the node returned, which the node already controls. The input the node
+	// received is never modified. Empty means the input is stored as it arrived.
+	//
+	// The field is tagged with its Go name like the fields above, so the wire
+	// form stays uniform. A peer that predates it ignores the key and stores the
+	// input unchanged.
+	StripFromOutput []string `json:"StripFromOutput,omitempty"`
 }
 
 // SignalTrigger identifies what caused a suspended node to resume.
