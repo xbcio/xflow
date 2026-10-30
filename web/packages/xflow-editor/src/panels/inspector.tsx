@@ -454,7 +454,13 @@ function ConnectionRow({
     connection.type === "data" &&
     canLabelInputs(workflowNodeByName(workflow, connection.targetName));
   return (
-    <div className="xflow-editor-connection-row">
+    <div
+      className={
+        labelable
+          ? "xflow-editor-connection-row xflow-editor-connection-row--labelable"
+          : "xflow-editor-connection-row"
+      }
+    >
       <ConnectionEndpoint workflow={workflow} name={connection.sourceName} />
       <span>{connection.sourcePort}</span>
       <span>{connection.legacyDependency ? "dependency (legacy)" : connection.type}</span>

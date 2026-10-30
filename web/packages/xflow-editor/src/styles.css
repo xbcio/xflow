@@ -2365,14 +2365,25 @@ button.xflow-editor-overview__run:hover {
   color: var(--xflow-danger-fg);
 }
 
-/* Merge input label: a compact field in the row's target-port track. The row
- * stays six tracks wide, so the field has a bounded width instead of growing
- * the grid, and the refusal message spans the whole row beneath it. */
+/* Merge input label: a compact field on the row's second line. The row's six
+ * tracks hold source, port, kind, arrow and target on the first line; the
+ * field takes the first five tracks beneath them and the delete button the
+ * sixth, so a label has the row's width instead of the 20px target-port track.
+ * The refusal message spans the whole row below. */
 .xflow-editor .xflow-editor-connection-label {
   font-family: SFMono-Regular, Consolas, monospace;
   max-width: 100%;
   min-width: 0;
   width: 7rem;
+}
+
+.xflow-editor .xflow-editor-connection-row--labelable .xflow-editor-connection-label {
+  grid-column: 1 / 6;
+  width: 100%;
+}
+
+.xflow-editor .xflow-editor-connection-row--labelable .xflow-editor-connection-delete {
+  grid-column: 6;
 }
 
 .xflow-editor-connection-row__error {

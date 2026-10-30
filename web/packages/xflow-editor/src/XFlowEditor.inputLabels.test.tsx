@@ -59,6 +59,20 @@ describe("merge input labels in the 连接 tab", () => {
     expect(price.value).toBe("total");
   });
 
+  it("marks only the label-bearing rows, so the field gets its own line instead of the 20px port track", () => {
+    render(<XFlowEditor value={workflow} />);
+    openConnections("join");
+
+    // The labelable modifier moves the field onto a second grid line (see
+    // styles.css); a row with no field keeps the plain six-track layout.
+    const row = (name: string) => labelField(name).closest(".xflow-editor-connection-row");
+    expect(row("stock")?.classList.contains("xflow-editor-connection-row--labelable")).toBe(true);
+    const outgoing = within(inspector()).getByRole("group", { name: "输出端口" });
+    const plain = outgoing.querySelector(".xflow-editor-connection-row");
+    expect(plain).not.toBeNull();
+    expect(plain?.classList.contains("xflow-editor-connection-row--labelable")).toBe(false);
+  });
+
   it("gives no label field to an ordinary node", () => {
     render(<XFlowEditor value={workflow} />);
     openConnections("after");
