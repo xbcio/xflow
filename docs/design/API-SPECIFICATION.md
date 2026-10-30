@@ -560,6 +560,41 @@ REST。但该路径已被 entry-seed 占用，而 entry-seed 迁移的代价不�
 **合并为一个 handler，保留两个 Op。** 两个 Op 是有意义的——运维 token 与业务
 token 应当可以分别授予；两份实现则纯属 drift 风险。
 
+### 7.3 `POST /v1/executions/{id}/signals` 的响应语义
+
+200 的 `data` 是 `{"accepted":true,"outcome":"buffered","resumed":false,"buffered":true}`
+这一形状（OpenAPI `SignalResponse`）。`accepted` 的含义没变：请求被无错误地接收。
+它**不**表示信号起了作用，因为信号没有匹配的等待节点时会被暂存而不是拒收。
+`outcome` 才说明信号的去向：
+
+| `outcome` | `resumed` | `buffered` | 含义 |
+| --- | --- | --- | --- |
+| `resumed` | true | false | 唤醒了正在等这个信号名的节点 |
+| `buffered` | false | true | 信号被暂存，没有唤醒任何节点；执行仍在运行或排队 |
+| `inactive` | false | false | 执行已结束（或不存在），信号没有去处 |
+
+`buffered` 不区分原因：目标节点此刻未挂起、多信号 quorum 未到、执行仍在排队
+等并发槽位，或者信号名根本没有节点在等。前三种之后会被消费；最后一种永远不会。
+调用方若向审批节点发了链外成员或名字形态不对的信号，会得到 200 加
+`buffered`，而不是 `resumed`。节点输出里也不会有 `ignored[]` 痕迹，因为信号根本
+没进入节点处理。
+
+暂存是有意设计，不能改成拒收：排队中的执行要等晋升后才消费信号，且已挂起之前
+到达的信号必须能被之后挂起的节点取走。因此 `buffered` 仍是 200。
+
+判定方式：引擎 `Engine.DeliverSignalResult` 先看这次投递有没有唤醒节点（`resumed`）；
+没有唤醒时再读一次执行状态，非终态为 `buffered`，终态或不存在为 `inactive`。
+这次读取是投递之后的快照，之后才结束的执行仍报 `buffered`。读取失败时报
+`buffered` 并记日志，因为后端确实已存储该信号。两个后端（local、distributed）
+走同一条判定，不依赖各自的返回值。
+
+兼容性：新增的三个字段对旧客户端是多余键。服务端的 facade 若不具备
+`DeliverSignalResult`（只有测试替身会这样），仍按旧形状只回 `{"accepted":true}`，
+客户端应把三个结果字段当作可选。
+
+SDK 的 `Engine.Signal` 与 `Remote.Signal` 仍只返回 `error`，不暴露结果；
+HTTP 调用方直接读响应。需要时再给 SDK 加返回值，现在没有调用方要求。
+
 ---
 
 ## 8. runner 协议面规则
