@@ -729,6 +729,48 @@ type signalRequest struct {
 	Data map[string]any `json:"data,omitempty"`
 }
 
+// signalResponse is the data of a successful POST /v1/executions/{id}/signals.
+//
+// Accepted keeps its original meaning: the server took the signal without
+// error. It says nothing about whether the signal did anything, which is what
+// the other fields are for. Outcome is the authoritative value; Resumed and
+// Buffered restate it as booleans for callers that only branch on one of them.
+// Both false means the execution had already finished.
+type signalResponse struct {
+	Accepted bool   `json:"accepted"`
+	Outcome  string `json:"outcome"`
+	Resumed  bool   `json:"resumed"`
+	Buffered bool   `json:"buffered"`
+}
+
+// signalResultDeliverer is the optional engine capability behind the delivery
+// outcome of POST /v1/executions/{id}/signals.
+//
+// It is separate from control.EngineFacade for the same reason executionController
+// is: the facade is shared with the runner-protocol server and its test doubles
+// implement it method by method, so widening it would break every double. A
+// facade without the capability still delivers the signal and answers with the
+// original accepted-only body. *engine.Engine, the only facade a running server
+// has, carries it.
+type signalResultDeliverer interface {
+	DeliverSignalResult(ctx context.Context, id types.ExecutionID, name string, data map[string]any) (engine.SignalDelivery, error)
+}
+
+// The assertion is what keeps the capability from going dark: if the engine's
+// method drifted, the type assertion in handleSignal would quietly fall back to
+// the accepted-only body and nothing else would notice.
+var _ signalResultDeliverer = (*engine.Engine)(nil)
+
+// newSignalResponse maps an engine outcome onto the wire shape.
+func newSignalResponse(d engine.SignalDelivery) signalResponse {
+	return signalResponse{
+		Accepted: true,
+		Outcome:  string(d.Outcome),
+		Resumed:  d.Outcome == engine.SignalOutcomeResumed,
+		Buffered: d.Outcome == engine.SignalOutcomeBuffered,
+	}
+}
+
 type waitTimeoutResponse struct {
 	ExecutionID types.ExecutionID     `json:"execution_id"`
 	Status      types.ExecutionStatus `json:"status"`
@@ -3487,6 +3529,11 @@ func inspectExecution(w http.ResponseWriter, r *http.Request, eng control.Engine
 // never appears in message/data — message carries only the stable code's text
 // (spec §3.5).
 //
+// The success data says what became of the signal (signalResponse): resumed a
+// waiting node, was buffered (stored, nothing woken), or reached an execution
+// that had already finished. "accepted" is true in all three and means only
+// that the request was taken.
+//
 // The delivered payload records the authenticated caller's subject under
 // types.VerifiedActorKey so a handler that acts on a person's behalf — an
 // approval deciding who voted — can read a server-verified identity instead of
@@ -3515,6 +3562,15 @@ func (m *workflowControlModule) handleSignal(w http.ResponseWriter, r *http.Requ
 	data := req.Data
 	if p, ok := principalFromRequest(r); ok && p.Subject != "" {
 		data = withVerifiedActor(data, p.Subject)
+	}
+	if deliverer, ok := m.eng.(signalResultDeliverer); ok {
+		delivery, err := deliverer.DeliverSignalResult(r.Context(), id, req.Name, data)
+		if err != nil {
+			writeExecEngineFail(w, r, err)
+			return
+		}
+		writeData(w, r, http.StatusOK, newSignalResponse(delivery))
+		return
 	}
 	if err := m.eng.DeliverSignal(r.Context(), id, req.Name, data); err != nil {
 		writeExecEngineFail(w, r, err)
