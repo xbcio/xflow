@@ -752,6 +752,37 @@ describe("createXFlowApiClient", () => {
     expect(result).toEqual({ executionId: "exec-1" } satisfies ExecuteWorkflowResult);
   });
 
+  it("sends run params as the execute body, and no body without them", async () => {
+    const requests: Array<{ url: string; method?: string; body?: unknown; contentType?: string }> = [];
+    const client = createXFlowApiClient({
+      baseUrl: "/api",
+      fetcher: async (input, init) => {
+        requests.push({
+          url: String(input),
+          method: init?.method,
+          body: init?.body,
+          contentType: new Headers(init?.headers).get("content-type") ?? undefined
+        });
+        return success({ execution_id: "exec-2" });
+      }
+    });
+
+    await client.runWorkflow("wf-1", { params: { amount: 12.5, applicant: "alice", tags: ["a"] } });
+    await client.runWorkflow("wf-1", { params: {} });
+    await client.runWorkflow("wf-1", {});
+
+    expect(requests[0]).toEqual({
+      url: "/api/workflows/wf-1/execute",
+      method: "POST",
+      body: JSON.stringify({ params: { amount: 12.5, applicant: "alice", tags: ["a"] } }),
+      contentType: "application/json"
+    });
+    expect(requests.slice(1)).toEqual([
+      { url: "/api/workflows/wf-1/execute", method: "POST", body: undefined, contentType: undefined },
+      { url: "/api/workflows/wf-1/execute", method: "POST", body: undefined, contentType: undefined }
+    ]);
+  });
+
   it("fetches typed execution details, preserving current service detail fields", async () => {
     const requests: string[] = [];
     const client = createXFlowApiClient({

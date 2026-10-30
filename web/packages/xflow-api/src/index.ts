@@ -768,6 +768,16 @@ export interface ExecuteWorkflowResult {
   executionId: string;
 }
 
+/**
+ * Optional body of POST /v1/workflows/{id}/execute. `params` are checked on the
+ * server against the workflow's top-level `params` schema: a missing required
+ * param, a type mismatch or a numeric min/max miss is 400
+ * `workflow_params_invalid`.
+ */
+export interface RunWorkflowOptions {
+  params?: Record<string, unknown>;
+}
+
 export interface XFlowApiClientOptions {
   baseUrl: string;
   fetcher?: typeof fetch;
@@ -819,7 +829,7 @@ export interface XFlowApiClient {
    * `workflow_version_unavailable`; the live record is left untouched.
    */
   rollbackWorkflow(id: string, version: string): Promise<RollbackWorkflowResult>;
-  runWorkflow(workflowId: string): Promise<ExecuteWorkflowResult>;
+  runWorkflow(workflowId: string, options?: RunWorkflowOptions): Promise<ExecuteWorkflowResult>;
   getExecution(id: string): Promise<ExecutionDetail>;
   /**
    * GET /v1/executions/stats: status counts for one bounded window in the
@@ -2305,11 +2315,20 @@ export function createXFlowApiClient(options: XFlowApiClientOptions): XFlowApiCl
         body: JSON.stringify({ version })
       }).then(mapRollbackWorkflow);
     },
-    runWorkflow(workflowId) {
+    runWorkflow(workflowId, runOptions) {
+      // No params, no body: the request stays byte-identical to the one-click run.
+      const params = runOptions?.params;
+      const hasParams = params !== undefined && Object.keys(params).length > 0;
       return request<ExecuteWorkflowWire>(
         fetcher,
         joinUrl(options.baseUrl, `${workflowPath(workflowId)}/execute`),
-        { method: "POST" }
+        hasParams
+          ? {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ params })
+            }
+          : { method: "POST" }
       ).then(mapExecuteWorkflow);
     },
     getExecution(id) {
