@@ -52,7 +52,6 @@ func parkedApprovalOutput(t *testing.T, decideFirst bool) map[string]any {
 	waitCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	hooks.waitForSuspensions(t, waitCtx, "gate", 1)
-	armed := 1
 	if decideFirst {
 		err := eng.Signal(ctx, id, "gate/approval/alice", map[string]any{
 			types.VerifiedActorKey: "alice", "action": "approve",
@@ -60,8 +59,7 @@ func parkedApprovalOutput(t *testing.T, decideFirst bool) map[string]any {
 		if err != nil {
 			t.Fatalf("Signal(alice) error = %v", err)
 		}
-		armed = 2
-		hooks.waitForSuspensions(t, waitCtx, "gate", armed)
+		hooks.waitForSuspensions(t, waitCtx, "gate", 2)
 	}
 
 	detail, err := eng.Inspect(ctx, id, "gate")
