@@ -1,4 +1,4 @@
-import type { WaitExecutionResult } from '@xflow/api';
+import type { RunWorkflowOptions, WaitExecutionResult } from '@xflow/api';
 import type { ParamIssue, RuntimeSnapshot, WorkflowDef } from '@xflow/core';
 
 /**
@@ -17,8 +17,11 @@ export interface SavedWorkflowResult {
 export interface SaveThenRunDeps {
   /** The host's save callback (creates or updates, and moves the route on create). */
   save: (workflow: WorkflowDef) => Promise<SavedWorkflowResult>;
-  /** POST /v1/workflows/{id}/execute. */
-  run: (workflowId: string) => Promise<{ executionId: string }>;
+  /**
+   * POST /v1/workflows/{id}/execute. `options.params` is the run dialog's
+   * confirmed values; it is `undefined` for a workflow with no declared params.
+   */
+  run: (workflowId: string, options?: RunWorkflowOptions) => Promise<{ executionId: string }>;
   /** GET /v1/executions/{id}/wait; a 202 resolves to the timeout shape. */
   wait: (executionId: string) => Promise<WaitExecutionResult>;
   /**
@@ -42,8 +45,11 @@ export interface SaveThenRunDeps {
 export async function saveThenRun(
   draft: WorkflowDef,
   { save, run, wait, toSnapshot }: SaveThenRunDeps,
+  options?: RunWorkflowOptions,
 ): Promise<RuntimeSnapshot> {
   const saved = await save(draft);
-  const execution = await run(saved.workflow.id);
+  // Only pass the options when there are any, so a one-click run calls `run`
+  // with the id alone, exactly as before run parameters existed.
+  const execution = options ? await run(saved.workflow.id, options) : await run(saved.workflow.id);
   return toSnapshot(await wait(execution.executionId));
 }

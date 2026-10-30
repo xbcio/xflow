@@ -61,6 +61,46 @@ describe('saveThenRun', () => {
     expect(deps.wait).toHaveBeenCalledTimes(1);
   });
 
+  it('带运行参数：保存之后把 params 原样交给运行，运行结果照常等待', async () => {
+    const deps = createDeps();
+    deps.save.mockResolvedValue({ workflow: { ...draft, id: 'wf-params' } });
+    deps.run.mockResolvedValue({ executionId: 'exec-3' });
+    deps.wait.mockResolvedValue({ executionId: 'exec-3', status: 'success' });
+    deps.toSnapshot.mockReturnValue({ status: 'success' });
+    const options = { params: { amount: 12.5, applicant: 'alice', extra: { a: [1, 2] } } };
+
+    await saveThenRun(draft, deps, options);
+
+    expect(deps.run).toHaveBeenCalledTimes(1);
+    expect(deps.run).toHaveBeenCalledWith('wf-params', options);
+    expect(deps.run.mock.calls[0][1]).toBe(options);
+    expect(deps.save.mock.invocationCallOrder[0]).toBeLessThan(deps.run.mock.invocationCallOrder[0]);
+    expect(deps.wait).toHaveBeenCalledWith('exec-3');
+  });
+
+  it('无运行参数：run 只收到 id，不带第二个参数（一键运行的请求体保持为空）', async () => {
+    const deps = createDeps();
+    deps.save.mockResolvedValue({ workflow: { ...draft, id: 'wf-plain' } });
+    deps.run.mockResolvedValue({ executionId: 'exec-4' });
+    deps.wait.mockResolvedValue({ executionId: 'exec-4', status: 'success' });
+    deps.toSnapshot.mockReturnValue({ status: 'success' });
+
+    await saveThenRun(draft, deps);
+
+    expect(deps.run.mock.calls[0]).toEqual(['wf-plain']);
+  });
+
+  it('参数被服务端拒绝：错误原样抛出，不发起等待', async () => {
+    const deps = createDeps();
+    const error = new Error('workflow_params_invalid');
+    deps.save.mockResolvedValue({ workflow: { ...draft, id: 'wf-params' } });
+    deps.run.mockRejectedValue(error);
+
+    await expect(saveThenRun(draft, deps, { params: { amount: -1 } })).rejects.toBe(error);
+
+    expect(deps.wait).not.toHaveBeenCalled();
+  });
+
   it('warn 模式 param_issues 随保存结果返回，但不阻断运行', async () => {
     const deps = createDeps();
     deps.save.mockResolvedValue({

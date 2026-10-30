@@ -18,6 +18,7 @@ import {
   type XFlowRerunRequest,
   type XFlowRerunResult,
   type XFlowRollbackResult,
+  type XFlowRunOptions,
 } from '@xflow/editor';
 import { capabilitiesFromScopes, workflowStatusMeta } from '@xflow/core';
 import type {
@@ -842,11 +843,17 @@ export default function WorkflowDetailPage() {
   // runs the server copy. `saveThenRun` documents the trade-off (one idempotent
   // PUT per Run in exchange for running exactly what is on screen); a save
   // failure aborts the run, and warn-mode param_issues do not.
-  const runWorkflow = useCallback(async (nextWorkflow: WorkflowDef): Promise<RuntimeSnapshot> => {
+  const runWorkflow = useCallback(async (
+    nextWorkflow: WorkflowDef,
+    runOptions?: XFlowRunOptions,
+  ): Promise<RuntimeSnapshot> => {
     try {
       return await saveThenRun(nextWorkflow, {
         save: saveWorkflow,
-        run: (workflowIdToRun) => api.runWorkflow(workflowIdToRun),
+        run: (workflowIdToRun, options) => (
+          // A workflow without declared params keeps the bare, body-less POST.
+          options ? api.runWorkflow(workflowIdToRun, options) : api.runWorkflow(workflowIdToRun)
+        ),
         wait: async (executionId) => {
           // A new run replaces the previous bar and snapshot before the first read.
           setExecution(undefined);
@@ -869,7 +876,7 @@ export default function WorkflowDetailPage() {
             ? { status: executionStatusToRuntimeStatus(result.status) }
             : executionDetailToRuntimeSnapshot(result)
         ),
-      });
+      }, runOptions);
     } catch (error) {
       // The editor surfaces the failure itself; the host only adds the 403
       // capability refresh and rethrows so the editor's message is unchanged.

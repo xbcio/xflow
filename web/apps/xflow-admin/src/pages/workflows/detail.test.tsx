@@ -26,7 +26,7 @@ interface EditorProps {
     value: WorkflowDef,
     context?: { sections: WorkflowEditorSection[] },
   ) => Promise<unknown>;
-  onRun: (value: WorkflowDef) => Promise<unknown>;
+  onRun: (value: WorkflowDef, options?: { params?: Record<string, unknown> }) => Promise<unknown>;
   onPublish?: (
     value: WorkflowDef,
     context?: { sections: WorkflowEditorSection[] },
@@ -542,6 +542,25 @@ describe('save before run (0.17)', () => {
     expect(host.api.getWorkflow).not.toHaveBeenCalled();
     expect(screen.queryByTestId('editor')).not.toBeNull();
     expect(editor().value?.id).toBe('wf-new');
+  });
+
+  it('forwards the run dialog params to the execute request, after the save', async () => {
+    vi.mocked(executionDetailToRuntimeSnapshot).mockReturnValue({ status: 'success' } as never);
+    host.api.createWorkflow.mockResolvedValue({ workflowId: 'wf-new' });
+    host.api.runWorkflow.mockResolvedValue({ executionId: 'exec-params' });
+    host.api.waitExecution.mockResolvedValue({ executionId: 'exec-params', status: 'success' });
+    await mountedDraft();
+    const params = { amount: 12.5, applicant: 'alice', extra: { a: [1, 2] } };
+
+    await act(async () => {
+      await editor().onRun!(draft, { params });
+    });
+
+    expect(host.api.runWorkflow).toHaveBeenCalledTimes(1);
+    expect(host.api.runWorkflow).toHaveBeenCalledWith('wf-new', { params });
+    expect(host.api.createWorkflow.mock.invocationCallOrder[0]).toBeLessThan(
+      host.api.runWorkflow.mock.invocationCallOrder[0],
+    );
   });
 
   it('queues a second Run behind the first create so the draft is created only once', async () => {
