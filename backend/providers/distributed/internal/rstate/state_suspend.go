@@ -280,6 +280,12 @@ func (s *Store) DeliverSignal(ctx context.Context, id types.ExecutionID, signalN
 			s.cleanupMultiSignal(ctx, id, waiter, spec)
 			return waiter, payload, nil
 		}
+		// A single-signal wait stores a waiter spec too (the suspend script
+		// writes one so cancel/timeout cleanups can enumerate the signal-named
+		// keys). signalOrStoreLua below consumes the waiter without knowing the
+		// spec, so retire it here, the way cleanupMultiSignal does for the
+		// multi-signal path above.
+		s.rdb.Del(ctx, waiterSpecKey(t, id, waiter))
 	}
 
 	result, err := signalOrStoreLua.Run(ctx, s.rdb,

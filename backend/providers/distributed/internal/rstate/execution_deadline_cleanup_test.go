@@ -13,10 +13,9 @@ import (
 )
 
 // parkWaitingNode creates a running execution with one node suspended on the
-// signal "go", the state an expiring execution is typically found in. Only the
-// multi-signal mode stores a waiter spec, which is what lets a cleanup find the
-// signal-name keyed waiter again; a single-signal park leaves nothing to
-// enumerate it by.
+// signal "go", the state an expiring execution is typically found in. The
+// stored waiter spec is what lets a cleanup find the signal-name keyed waiter
+// again, in either mode.
 func parkWaitingNode(t *testing.T, state *Store, ctx context.Context, id types.ExecutionID, deadline time.Time, mode types.SuspendMode) {
 	t.Helper()
 	g := errorDetailsRedisGraph(t, "wait")
@@ -139,11 +138,12 @@ func TestExpireExecutionCancelsSuspendedNodesOnRedis(t *testing.T) {
 	}
 }
 
-// TestEngineSignalAfterTimeoutResumesNothing covers the single-signal park,
-// whose waiter key the store cleanup cannot enumerate (no waiter spec is stored
-// for it, exactly as after a cancel). The engine refuses to resume into an
-// inactive execution, and a timed-out one is inactive, so the late signal still
-// writes nothing to the outbox.
+// TestEngineSignalAfterTimeoutResumesNothing covers the single-signal park end
+// to end through the engine: after the expiry cascade the late signal writes
+// nothing to the outbox. The store cleanup retires the waiter key itself (the
+// suspend script stores a waiter spec for a single-signal wait, which is how the
+// cleanup finds the signal name), and the engine would refuse to resume into an
+// inactive execution anyway.
 func TestEngineSignalAfterTimeoutResumesNothing(t *testing.T) {
 	ctx := context.Background()
 	_, _, state := newMiniredisStore(t)

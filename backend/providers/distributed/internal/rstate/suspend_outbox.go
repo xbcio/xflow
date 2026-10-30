@@ -163,6 +163,16 @@ elseif selectedName ~= '' then
     scheduleSignal(selectedName, selectedPayload, nil)
     return 1
 end
+-- A single-signal wait records its spec too. The signal-name keyed waiter keys
+-- are only reachable from the spec: a canceled node has to find them to retire
+-- them, and nothing else persists the names a ModeSignal wait registered. The
+-- multi-signal branch above already wrote it. Delivery ignores the stored mode
+-- for a single-signal wait (it keys on spec.Mode == multi_signal) and its
+-- consume path already deletes this key. A wait with no signal names (a timer)
+-- has no waiter keys to find and keeps writing nothing.
+if not multi and count > 0 then
+    redis.call('SET', KEYS[8], ARGV[13], 'EX', ttl)
+end
 for i = 1, count do
     local signalName = ARGV[namesStart + i - 1]
     redis.call('SET', KEYS[11 + count + i], ARGV[9], 'EX', ttl)

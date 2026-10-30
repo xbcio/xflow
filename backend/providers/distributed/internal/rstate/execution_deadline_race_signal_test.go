@@ -252,29 +252,19 @@ func TestExpireRacingASignalNeverResumesATimedOutExecutionOnRedis(t *testing.T) 
 		t.Logf("%d rounds: %d ended success, %d ended timeout", len(rounds), succeeded, timedOut)
 	})
 
-	// waiter_key_leak_as_it_stands pins a KNOWN, UNDECIDED defect so that fixing
-	// it is a visible, deliberate change. A node parked through the durable
-	// suspend path in single-signal mode has no stored waiter spec (the Lua only
-	// writes one in multi-signal mode), so cleanupExecutionIndexes, which finds
-	// the signal-named waiter key by reading that spec, cannot delete it. The key
-	// outlives the timed-out execution until its TTL. A plain Cancel leaves it
-	// too. The engine refuses a late signal for an inactive execution, which is
-	// what the invariants subtest asserts; the store-level DeliverSignalWithOutbox
-	// would still accept it.
-	//
-	// When the defect is fixed, this subtest turns red on purpose: change it to
-	// require that the waiter key is gone (waiterAfter == 0) and move that
-	// assertion into invariants.
-	t.Run("waiter_key_leak_as_it_stands", func(t *testing.T) {
-		// Only the baseline round is deterministic: with a signal racing the
-		// expiry, a signal that wins the waiter consumes the key itself.
-		base := rounds[0]
-		if base.raced || base.status != types.ExecutionStatusTimeout {
-			t.Fatalf("baseline round = (raced %v, %q), want an unraced expiry that timed out", base.raced, base.status)
-		}
-		if base.waiterAfter != 1 {
-			t.Fatalf("waiter:go exists = %d after the timeout; the leak this subtest records is gone, "+
-				"so assert the key is cleaned up instead", base.waiterAfter)
+	// waiter_key_is_gone pins the cleanup of the signal-named waiter key. A node
+	// parked through the durable suspend path in single-signal mode used to leave
+	// no stored waiter spec, so cleanupExecutionIndexes, which finds that key by
+	// reading the spec, could not delete it and it outlived the timed-out
+	// execution until its TTL. The suspend script now stores the spec for a
+	// single-signal wait as well, so the key is gone whichever side won: the
+	// expiry's cleanup deletes it, or the signal that won the waiter consumed it.
+	t.Run("waiter_key_is_gone", func(t *testing.T) {
+		for i, rec := range rounds {
+			if rec.waiterAfter != 0 {
+				t.Fatalf("round %d: waiter:go exists = %d after the execution ended (status %q), "+
+					"want it cleaned up", i, rec.waiterAfter, rec.status)
+			}
 		}
 	})
 }
@@ -354,12 +344,14 @@ func TestSignalThatFinishesFirstKeepsSuccessAgainstALateExpiryOnRedis(t *testing
 // TestSignalInTheWindowAfterTheTimeoutWriteQueuesNothingOnRedis pins the guard
 // the replay above cannot reach. ExpireExecution writes the timeout status first
 // and cancels the suspended nodes after, so for a moment the execution is timed
-// out while its node is still listed as suspended and a waiter key is still
-// there for a signal to consume. Once the cascade has run the node is no longer
-// a resume target, and a late signal is harmless for that reason alone; in this
-// window it is harmless only because the engine refuses to resume a timed-out
-// execution. The window is made deterministic by writing the timeout status
-// without the cascade.
+// out while its node is still listed as suspended. The timeout write itself
+// already retires the signal-named waiter key (the suspend script stores the
+// waiter spec that lets the cleanup find it, for a single-signal wait too), so a
+// signal in this window finds no waiter: it is stored, nothing is queued, and the
+// node is not a resume target. The engine's refusal to resume a timed-out
+// execution is the second line, covered for a waiter that survives by
+// TestSignalAfterTimeoutWritesNoResume. The window is made deterministic by
+// writing the timeout status without the cascade.
 func TestSignalInTheWindowAfterTheTimeoutWriteQueuesNothingOnRedis(t *testing.T) {
 	ctx := context.Background()
 	rig := newDeadlineRaceRig(t)
@@ -374,8 +366,8 @@ func TestSignalInTheWindowAfterTheTimeoutWriteQueuesNothingOnRedis(t *testing.T)
 	if err != nil || len(nodes) != 1 {
 		t.Fatalf("ListSuspendedNodes after the timeout write = (%v, %v), want the parked node still listed", nodes, err)
 	}
-	if n := rig.existsWaiter(ctx, id); n != 1 {
-		t.Fatalf("waiter:go exists = %d after the timeout write, want the parked node still waiting", n)
+	if n := rig.existsWaiter(ctx, id); n != 0 {
+		t.Fatalf("waiter:go exists = %d after the timeout write, want the timeout cleanup to have retired it", n)
 	}
 	outboxBefore := rig.outboxSize(ctx, id)
 
