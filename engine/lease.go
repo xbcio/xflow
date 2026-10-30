@@ -101,6 +101,16 @@ func (e *Engine) BuildTaskLease(ctx context.Context, t *Task) (*TaskLease, error
 	} else if handled {
 		return nil, ErrSystemTaskHandled
 	}
+	// An engine-owned task that no system handler consumed must not fall through
+	// to the node-lease path below: that path would mint a live lease on the
+	// node the task merely names (for a merge-cancel intent, the merge node that
+	// already committed) and run its handler again. HandleSystemTask's default
+	// branch answers "not handled" for any type it has no case for, so this
+	// refusal is what keeps such a task off a runner; it is permanent for the
+	// same reason TaskRouting's is.
+	if !RoutableTaskType(t.Type) {
+		return nil, engineOwnedTaskError(t)
+	}
 	// A batch task names a synthetic node that the compiled graph never
 	// declared, so the node-lease path below would write live state for a node
 	// that does not exist and commit it as an ordinary node result — firing
@@ -297,12 +307,13 @@ func (e *Engine) RecoverTaskLease(ctx context.Context, task *Task) (*TaskLease, 
 	// rebuild it. BuildSubgraphLease mutates nothing — it derives the lease from
 	// the task payload and the graph — so rebuilding is a replay of the same
 	// lease, not the issue of a second one. NodeAdvance and NodeSkip remain
-	// unrecoverable: they are control-plane-internal and never leave the engine.
+	// unrecoverable, and so does TaskTypeMergeCancel: they are control-plane-internal
+	// and never leave the engine.
 	if task.Type == TaskTypeNodeBatch {
 		lease, _, err := e.BuildSubgraphLease(ctx, task)
 		return lease, err
 	}
-	if task.Type == TaskTypeNodeAdvance || task.Type == TaskTypeNodeSkip {
+	if task.Type == TaskTypeNodeAdvance || task.Type == TaskTypeNodeSkip || task.Type == TaskTypeMergeCancel {
 		return nil, ErrLeaseNotRecoverable
 	}
 	g, active, err := e.loadActiveGraph(ctx, task.ExecutionID)
@@ -373,6 +384,14 @@ func (e *Engine) RecoverTaskLease(ctx context.Context, task *Task) (*TaskLease, 
 	return recovered, nil
 }
 
+// engineOwnedTaskError is the refusal for a task type the engine consumes
+// itself. It wraps types.ErrPermanent so a delivery sink dead-letters the task
+// instead of retrying a routing or lease that can never succeed.
+func engineOwnedTaskError(t *Task) error {
+	return fmt.Errorf("task type %d for %q/%q: %w: engine-owned tasks are consumed by the engine, never routed to a runner",
+		t.Type, t.ExecutionID, t.NodeName, types.ErrPermanent)
+}
+
 // TaskRouting returns runner placement metadata for a queued task without
 // issuing a lease or mutating node attempt state.
 func (e *Engine) TaskRouting(ctx context.Context, t *Task) (TaskRouting, error) {
@@ -386,8 +405,7 @@ func (e *Engine) TaskRouting(ctx context.Context, t *Task) (TaskRouting, error) 
 	// that somehow reached the queue dies loudly here instead of hanging a
 	// parent on a child that was never created.
 	if !RoutableTaskType(t.Type) {
-		return TaskRouting{}, fmt.Errorf("task type %d for %q/%q: %w: engine-owned tasks are consumed by the engine, never routed to a runner",
-			t.Type, t.ExecutionID, t.NodeName, types.ErrPermanent)
+		return TaskRouting{}, engineOwnedTaskError(t)
 	}
 	g, active, err := e.loadActiveGraph(ctx, t.ExecutionID)
 	if err != nil {

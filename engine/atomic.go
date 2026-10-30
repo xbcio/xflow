@@ -117,6 +117,20 @@ type CommitNodeRequest struct {
 	// It is the alternative to Arrivals, not a companion: both consume the same
 	// downstream in-degree, so setting both is rejected (see Validate).
 	AdvanceTask *Task
+	// MergeCancel is the durable cancel-the-other-branches intent a successful
+	// wait_any xflow.merge commit writes in the same fenced transition as its
+	// terminal node write (on_others: cancel). Persisting it with the commit is
+	// what keeps a crash between "merge finished" and "losers cancelled" from
+	// losing the cancellation for good.
+	//
+	// Unlike AdvanceTask it does not consume downstream in-degree, so it may ride
+	// alongside Arrivals; it is not an alternative scheduling carrier. It is
+	// mutually exclusive with AdvanceTask only because a backend writes either
+	// intent into the single advance-intent slot of the commit.
+	//
+	// Valid only on a successful, non-fatal, non-system acyclic commit (see
+	// Validate). A backend writes it only when it declares MergeCancelCommitter.
+	MergeCancel *Task
 	// Arrivals folds this node's downstream scheduling into the commit itself:
 	// a capable backend applies the counters and writes the execute/skip intents
 	// in the same fenced transition as the terminal node write, instead of
@@ -193,6 +207,13 @@ func (r CommitNodeRequest) Validate() error {
 	if len(r.Arrivals) > 0 && r.AdvanceTask != nil {
 		return fmt.Errorf("commit %s/%s: Arrivals and AdvanceTask are alternative acyclic "+
 			"scheduling paths; setting both would count the same arrival twice", r.ExecutionID, r.NodeName)
+	}
+	if r.MergeCancel != nil && r.AdvanceTask != nil {
+		return fmt.Errorf("commit %s/%s: MergeCancel and AdvanceTask are alternative uses of the "+
+			"commit's single advance intent slot; setting both would drop one", r.ExecutionID, r.NodeName)
+	}
+	if r.MergeCancel != nil && (r.AllowCycles || r.Fatal || r.System || r.Status != types.NodeStatusSuccess) {
+		return fmt.Errorf("commit %s/%s: MergeCancel is only valid for a non-system, non-fatal successful acyclic commit", r.ExecutionID, r.NodeName)
 	}
 	if len(r.ReclaimOutputNames) > 0 && (r.AllowCycles || r.Fatal || r.System || r.Status != types.NodeStatusSuccess) {
 		return fmt.Errorf("commit %s/%s: ReclaimOutputNames is only valid for a non-system, non-fatal successful acyclic commit", r.ExecutionID, r.NodeName)
@@ -391,6 +412,27 @@ type ArrivalFoldingCommitter interface {
 	FoldsArrivalsIntoCommit() bool
 }
 
+// MergeCancelCommitter marks a store whose CommitNode persists
+// CommitNodeRequest.MergeCancel as a durable outbox intent inside the same
+// fenced transition as the merge node's terminal write.
+//
+// Like ArrivalFoldingCommitter it is an explicit opt-in rather than a signature
+// coincidence: CommitNode belongs to AtomicStateStore, so every atomic backend
+// accepts the field, and one that ignores it would drop the cancellation
+// without any error. CommitsMergeCancel is the declaration that the intent is
+// written; the shared merge-cancel contract (backend/internal/statestoretest)
+// is what proves it. A store without the capability makes the engine fall back
+// to detach semantics instead of setting a field nothing will honour.
+type MergeCancelCommitter interface {
+	AtomicStateStore
+	// CommitsMergeCancel reports that this backend writes
+	// CommitNodeRequest.MergeCancel as an outbox intent inside CommitNode. It is
+	// a static capability marker, not a per-call decision: a backend that cannot
+	// guarantee the write must not implement this method at all, so the type
+	// assertion stays a real gate.
+	CommitsMergeCancel() bool
+}
+
 // OutboxDeliveryLeaseTTL is how long a delivery lease survives without renewal.
 //
 // It is deliberately short. A live deliverer renews its leases every
@@ -486,6 +528,16 @@ func (e *Engine) supportsArrivalFolding() bool {
 	return ok && committer.FoldsArrivalsIntoCommit()
 }
 
+// supportsMergeCancel reports whether this store persists
+// CommitNodeRequest.MergeCancel with the commit. Same shape and same reason as
+// supportsArrivalFolding: the assertion is on the explicit MergeCancelCommitter
+// declaration, never on CommitNode's signature, so a store that would silently
+// ignore the field is never sent it.
+func (e *Engine) supportsMergeCancel() bool {
+	committer, ok := e.state.(MergeCancelCommitter)
+	return ok && committer.CommitsMergeCancel()
+}
+
 func (e *Engine) commitNode(ctx context.Context, req CommitNodeRequest) (CommitNodeResult, error) {
 	state, err := e.atomicState()
 	if err != nil {
@@ -544,7 +596,7 @@ func (e *Engine) FlushOutbox(ctx context.Context, id types.ExecutionID) error {
 		keeper := e.startOutboxLeaseKeeper(ctx, state, id, entries)
 		var firstErr error
 		for i, entry := range entries {
-			if entry.Task.Type == TaskTypeNodeAdvance || entry.Task.Type == TaskTypeNodeSkip {
+			if entry.Task.Type == TaskTypeNodeAdvance || entry.Task.Type == TaskTypeNodeSkip || entry.Task.Type == TaskTypeMergeCancel {
 				handled, err := e.handleSystemTask(ctx, &entry.Task, false)
 				switch {
 				case err != nil:

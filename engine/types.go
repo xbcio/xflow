@@ -33,9 +33,16 @@ const (
 	// permanently — but unlike them it names a real node of the parent graph and
 	// completes through the ordinary commit path.
 	TaskTypeSubWorkflow
-	// 6 曾是 TaskTypeGroupResume（durable group suspend，已随该子系统一并移除）。
-	// TaskType 是落进 outbox 的持久化数值，契约是 append-only：下一个新类型从 7
-	// 起，不要回收 6。生产从未产生过值为 6 的任务，所以存量数据里没有它。
+	// TaskTypeMergeCancel is the engine-internal durable intent a successful
+	// wait_any xflow.merge commit writes in the same fenced transition: cancel
+	// the branches that lost the race (on_others: cancel). It names the merge
+	// node, is consumed only by the engine, and never reaches a handler or a
+	// remote runner — RoutableTaskType refuses it and its lease is never
+	// recoverable.
+	TaskTypeMergeCancel
+	// TaskType 是落进 outbox 的持久化数值，契约是 append-only：已分配的数值不改号、
+	// 不回收。6 现为 TaskTypeSubWorkflow（它之前曾是已移除的 TaskTypeGroupResume，
+	// 该类型生产从未产生过任务），7 已分配给 TaskTypeMergeCancel，下一个新类型从 8 起。
 )
 
 // Task is the unit of work dispatched to the queue.

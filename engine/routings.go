@@ -7,12 +7,12 @@ import (
 
 // RoutableTaskType reports whether a task of this type is dispatched to a
 // runner through the claim path. It is the same partition TaskRouting refuses
-// with types.ErrPermanent: TaskTypeNodeAdvance, TaskTypeNodeSkip and
-// TaskTypeSubWorkflow are consumed by the engine itself and never reach a
-// runner, so no runner-availability question can involve them.
+// with types.ErrPermanent: TaskTypeNodeAdvance, TaskTypeNodeSkip,
+// TaskTypeSubWorkflow and TaskTypeMergeCancel are consumed by the engine itself
+// and never reach a runner, so no runner-availability question can involve them.
 func RoutableTaskType(t TaskType) bool {
 	switch t {
-	case TaskTypeNodeAdvance, TaskTypeNodeSkip, TaskTypeSubWorkflow:
+	case TaskTypeNodeAdvance, TaskTypeNodeSkip, TaskTypeSubWorkflow, TaskTypeMergeCancel:
 		return false
 	}
 	return true

@@ -114,3 +114,42 @@ func TestNonFoldingBackendKeepsAdvanceTask(t *testing.T) {
 			state.advanceCalls, state.advancesWithArrivals)
 	}
 }
+
+// mergeCancelDeclarer is an atomic store that carries the explicit
+// MergeCancelCommitter marker, answering with the configured value.
+type mergeCancelDeclarer struct {
+	StateStore
+	AtomicStateStore
+	commits bool
+}
+
+func (d *mergeCancelDeclarer) CommitsMergeCancel() bool { return d.commits }
+
+// TestSupportsMergeCancelFollowsTheExplicitDeclaration: the engine may set
+// CommitNodeRequest.MergeCancel only for a store that declares it writes the
+// intent. CommitNode already belongs to AtomicStateStore, so a store without the
+// marker (it would accept the field and drop it) must read as unsupported, as
+// must a declaration that answers false and a missing store.
+func TestSupportsMergeCancelFollowsTheExplicitDeclaration(t *testing.T) {
+	inner := newFakeState()
+	for _, tt := range []struct {
+		name  string
+		state StateStore
+		want  bool
+	}{
+		{"declared true", &mergeCancelDeclarer{StateStore: inner, AtomicStateStore: inner, commits: true}, true},
+		{"declared false", &mergeCancelDeclarer{StateStore: inner, AtomicStateStore: inner, commits: false}, false},
+		{"atomic store without the marker", &arrivalIgnoringState{StateStore: inner, AtomicStateStore: inner}, false},
+		{"nil store", nil, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			eng := &Engine{state: tt.state}
+			if got := eng.supportsMergeCancel(); got != tt.want {
+				t.Fatalf("supportsMergeCancel() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+	if _, ok := any(&arrivalIgnoringState{}).(MergeCancelCommitter); ok {
+		t.Fatal("arrivalIgnoringState satisfies MergeCancelCommitter; the explicit marker is not what gates the capability")
+	}
+}
