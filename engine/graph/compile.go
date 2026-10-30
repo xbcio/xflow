@@ -358,6 +358,7 @@ func compile(ctx context.Context, def *types.WorkflowDef, resolver SubWorkflowRe
 			return nil, err
 		}
 	}
+	warnCyclicMergeCancel(g)
 	// buildNodesRefs extracts $nodes references from parameters and validates
 	// them. Placed after detectCycle so the DAG guarantee is already established
 	// in non-cyclic mode. The pass itself carries a visited-set, so cyclic
@@ -547,6 +548,9 @@ func registerNodes(def *types.WorkflowDef, g *Graph) (int, error) {
 		// at the same point as the retry strategy, and with the same policy set
 		// ApplyOnError implements.
 		if err := validateOnError(fmt.Sprintf("node %q: on_error", nd.Name), nd.OnError); err != nil {
+			return 0, err
+		}
+		if err := validateMergeOnOthers(nd); err != nil {
 			return 0, err
 		}
 		g.index[nd.Name] = i
