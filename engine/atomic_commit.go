@@ -298,6 +298,37 @@ func (e *Engine) commitAcyclicNodeWithReclaimEligibility(ctx context.Context, le
 		AdvanceTask:  advanceTask,
 		Arrivals:     arrivals,
 	}
+	// A fired wait_any merge with on_others: cancel retires the branches that
+	// have not reached it. The intent rides this same fenced transition as the
+	// merge's terminal write, so a crash cannot land the merge without the
+	// cancellation: the backend writes both or neither.
+	//
+	// The intent needs the folded-arrivals carrier on this commit as well:
+	// Validate rejects MergeCancel beside AdvanceTask, and the advance task
+	// here would be scheduling the MERGE's own successors, which must not be
+	// dropped in favour of the cancellation. Both production backends declare
+	// both capabilities, so the combination is the normal path; anything less
+	// degrades to detach with one warning, which is the pre-feature behaviour.
+	// MergeCancelsOthers is already false for cyclic graphs and wait_all, so
+	// this gate needs no extra graph checks.
+	if status == types.NodeStatusSuccess && !fatal && g.MergeCancelsOthers(task.NodeIdx) {
+		if foldArrivals && e.supportsMergeCancel() {
+			req.MergeCancel = &Task{
+				ExecutionID:  task.ExecutionID,
+				NodeName:     task.NodeName,
+				NodeIdx:      task.NodeIdx,
+				UnitIdx:      task.UnitIdx,
+				Type:         TaskTypeMergeCancel,
+				ActivationID: task.ActivationID,
+			}
+		} else if e.mergeCancelWarned.CompareAndSwap(false, true) {
+			if e.logger != nil {
+				e.logger.Warn("merge on_others: cancel degrades to detach; the state store does not commit merge-cancel intents on the folded-arrivals carrier",
+					"execution_id", string(task.ExecutionID),
+					"node_name", task.NodeName)
+			}
+		}
+	}
 	// Observed before the fenced transition, not after it. CommitNode makes the
 	// execution's terminal failed status visible to waiters — both backends
 	// close their done channel inside that transition — so a consumer that

@@ -533,6 +533,12 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 			// every skip decision runs on, so wiring it here is what keeps
 			// xflow_node_skipped_total from being a permanently zero series.
 			engine.WithNodeSkipObserver(metrics.NewNodeSkipMetrics(cfg.Metrics)),
+			// The merge-cancel residue counter is wired beside the skip counter
+			// for the same reason: an engine that fires merges exists wherever
+			// this engine does, and the residue is only ever reported by the
+			// scan itself. Without this wiring xflow_merge_cancel_incomplete_
+			// total would be a permanently zero series.
+			engine.WithMergeCancelObserver(metrics.NewMergeCancelMetrics(cfg.Metrics)),
 		)
 	}
 	// Resolved before the engine is built: the engine needs the registry too,

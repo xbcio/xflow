@@ -1047,6 +1047,8 @@ func (e *Engine) handleSystemTask(ctx context.Context, task *Task, flush bool) (
 			return false, nil
 		}
 		return true, e.executeGroup(ctx, task, flush)
+	case TaskTypeMergeCancel:
+		return e.handleMergeCancelTask(ctx, task, flush)
 	default:
 		return false, nil
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -225,16 +226,21 @@ const DefaultNodeTimeout = 30 * time.Minute
 // Engine is the pure-algorithm workflow execution engine.
 // It has zero IO dependencies — all persistence and queuing are injected via interfaces.
 type Engine struct {
-	state                    StateStore
-	queue                    TaskQueue
-	hooks                    Hooks
-	logger                   Logger
-	commitObserver           CommitObserver
-	outboxObserver           OutboxObserver
-	nodeFailureObserver      NodeFailureObserver
-	itemFailureObserver      ItemFailureObserver
-	groupObserver            GroupObserver
-	nodeSkipObserver         NodeSkipObserver
+	state               StateStore
+	queue               TaskQueue
+	hooks               Hooks
+	logger              Logger
+	commitObserver      CommitObserver
+	outboxObserver      OutboxObserver
+	nodeFailureObserver NodeFailureObserver
+	itemFailureObserver ItemFailureObserver
+	groupObserver       GroupObserver
+	nodeSkipObserver    NodeSkipObserver
+	mergeCancelObserver MergeCancelObserver
+	// mergeCancelWarned gates the one-time degrade warning: a workflow asks
+	// for on_others: cancel on a store that will not commit the intent. Swap
+	// reports the previous value, so the first caller logs and the rest skip.
+	mergeCancelWarned        atomic.Bool
 	outboxMaxDeliveryAttempt int
 	defaultLeaseTTL          time.Duration
 	defaultNodeTimeout       time.Duration

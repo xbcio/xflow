@@ -214,7 +214,19 @@ func (f *fakeState) CommitNode(_ context.Context, req CommitNodeRequest) (Commit
 		return CommitNodeResult{Outcome: CommitOutcomeExecutionInactive}, nil
 	}
 
-	if req.System {
+	if req.System && req.Status == types.NodeStatusCanceled {
+		// The fourth system-commit shape, mirroring the real backends' fence:
+		// a node retired by a merge's on_others: cancel. It is decided ahead of
+		// the three shapes below because those refuse Canceled by construction.
+		//
+		// Note the marker is keyed by UnitIdx in the real backends but by
+		// NodeIdx in this fake's counter space (see applyArrivalsLocked); the
+		// two coincide for every ungrouped definition these tests compile.
+		marker := f.atomicSchedule[fakeAtomicCounterKey(req.ExecutionID, req.NodeIdx)]
+		if !f.cancelFenceAdmitsLocked(req, current, marker) {
+			return CommitNodeResult{Outcome: CommitOutcomeStaleToken}, nil
+		}
+	} else if req.System {
 		// Same three legal shapes as the real backends' CommitNode fence:
 		// pinned without a skip marker (pin_data served on an execute-scheduled
 		// unit), skipped without one (a definition-disabled node), and skipped
@@ -265,6 +277,15 @@ func (f *fakeState) CommitNode(_ context.Context, req CommitNodeRequest) (Commit
 		f.outputs[key] = cloneMap(req.Output)
 	}
 
+	// A canceled node can have been parked. Its waiter spec and any partial
+	// multi-signal set are retired in the same critical section, mirroring the
+	// real backends, so a signal that arrives later finds no waiter and cannot
+	// write a resume for a terminal node.
+	if req.System && req.Status == types.NodeStatusCanceled {
+		delete(f.suspended, key)
+		delete(f.signalSets, key)
+	}
+
 	result := CommitNodeResult{Outcome: CommitOutcomeAccepted, Applied: true}
 	if exec.Graph != nil && !exec.Graph.AllowCycles() {
 		remaining := 0
@@ -295,6 +316,18 @@ func (f *fakeState) CommitNode(_ context.Context, req CommitNodeRequest) (Commit
 	if req.AdvanceTask != nil && !req.Fatal && !result.ExecutionDone {
 		entryID := fmt.Sprintf("advance/%s/%s/%d", req.ExecutionID, req.NodeName, req.ActivationID)
 		if f.putAtomicOutboxLocked(req.ExecutionID, entryID, *req.AdvanceTask, time.Time{}) {
+			result.OutboxIDs = append(result.OutboxIDs, entryID)
+		}
+	}
+
+	// The merge-cancel intent takes the advance intent's place in the commit,
+	// under the same guards as the real backends: not fatal, the execution did
+	// not just finalize, and not canceling — the execution-wide cancel retires
+	// the suspended branches itself, and a merge-cancel scan racing that
+	// teardown would only add a second writer.
+	if req.MergeCancel != nil && !req.Fatal && !result.ExecutionDone && exec.Status != types.ExecutionStatusCanceling {
+		entryID := fmt.Sprintf("mergecancel/%s/%s/%d", req.ExecutionID, req.NodeName, req.ActivationID)
+		if f.putAtomicOutboxLocked(req.ExecutionID, entryID, *req.MergeCancel, time.Time{}) {
 			result.OutboxIDs = append(result.OutboxIDs, entryID)
 		}
 	}
@@ -350,6 +383,29 @@ func isCancelOrTerminalExecStatus(s types.ExecutionStatus) bool {
 		return true
 	}
 	return false
+}
+
+// cancelFenceAdmitsLocked decides the canceled system-commit shape from the
+// same two facts the real backends see: the node row's status and the unit's
+// scheduling marker. Callers hold f.mu, and a terminal row has already been
+// answered (duplicate or stale) before this runs.
+//
+//	row                              marker        verdict
+//	Suspended / Running / Committing not "skip"    admit
+//	none or Pending                  "execute"     admit (scheduled, never leased)
+//	none or Pending                  none/skip/seed refuse
+//	Waiting (or any other status)    any           refuse
+func (f *fakeState) cancelFenceAdmitsLocked(req CommitNodeRequest, current *NodeSnapshot, marker string) bool {
+	if current != nil {
+		switch current.Status {
+		case types.NodeStatusSuspended, types.NodeStatusRunning, types.NodeStatusCommitting:
+			return marker != "skip"
+		case types.NodeStatusPending:
+		default:
+			return false
+		}
+	}
+	return marker == "execute"
 }
 
 func (f *fakeState) AdvanceNode(_ context.Context, req AdvanceNodeRequest) (AdvanceNodeResult, error) {
