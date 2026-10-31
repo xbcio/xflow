@@ -2300,9 +2300,18 @@ nodes:
   type: xflow.merge
   parameters:
     mode: wait_all|wait_any  # wait_all：等待所有输入分支；wait_any：取最先到达的分支
-    on_others: cancel        # 仅 wait_any 有效：cancel（尽力取消）| detach（继续运行但忽略输出）
-                             # 默认 cancel；cancel 是 best-effort，已产生的副作用不会回滚
+    on_others: cancel        # 仅 wait_any 有效；缺省/空值 = cancel（默认），可显式写 cancel | detach
 ```
+
+> **`on_others` 语义（当前实现）**：
+>
+> - **`cancel`（默认）**：wait_any 合并节点自身成功提交时，引擎在同一事务里写入一条 merge-cancel 意图，随后把「能沿数据边到达该合并节点」且尚未结束的祖先节点**按拓扑序**逐个写为 `canceled`（节点 `error` 为 `canceled by merge <合并节点名>`），并把这些节点的出边按未激活处理——被取消分支下游尚未调度的节点因此被判为 `skipped`，不会执行。已经处于终态的祖先节点不受影响：fence 拒绝即表示无事可做，不报错、不计数。意图随合并节点的终态提交一起落盘，重放幂等。
+> - **从未被调度过的节点不会被取消**：针对它们的取消提交会被后端的调度标记 fence 拒绝，不会凭空写入状态行。
+> - **`detach`**：合并照常完成，未结束的其他分支继续运行，其输出被忽略。执行不会因为合并完成而收敛；这些分支需自行结束，或等执行超时 / 被取消。
+> - **best-effort**：两种模式都**不提供补偿事务，已经执行的副作用不会回滚**（见下方警告）。
+> - **v1 限制**：分组单元（group unit）内的节点，以及挂在子工作流或展开上的 `waiting` 节点不会被取消——前者与 group 租约竞争，后者的取消会与子执行完成回调竞争。它们会阻止执行收敛，直到超时或被取消；扫描每留下一个这样的节点就计入一次 `xflow_merge_cancel_incomplete_total{node=...}`，应对非零值告警。
+> - **`allow_cycles` 工作流**忽略显式 `on_others: cancel`（编译期给出警告），按 `detach` 处理。
+> - **`wait_all` 不读取该参数**，语义不变。
 
 > ⚠️ **wait_any + cancel 使用限制**：此模式适用于**无副作用的竞速**（如多节点缓存查询取最快响应、超时兜底）。
 > 若并行分支包含有副作用的操作（写库、调用外部 API、扣减库存等），`cancel` 只是尽力取消，
