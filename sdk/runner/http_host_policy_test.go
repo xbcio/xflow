@@ -197,3 +197,47 @@ func TestInstallRunnerHTTPHostPolicyLeavesUnconfiguredStockRunnerUntouched(t *te
 		t.Fatalf("SetHTTPHostPolicy called %d times for an unconfigured stock runner, want 0", calls)
 	}
 }
+
+func TestInstallRunnerHTTPHostPolicyUnrestrictedProfileLeavesBrowserRunnerUntouched(t *testing.T) {
+	originalSetter := setRunnerHTTPHostPolicy
+	defer func() { setRunnerHTTPHostPolicy = originalSetter }()
+
+	calls := 0
+	setRunnerHTTPHostPolicy = func(xnode.HTTPHostPolicy) { calls++ }
+	cfg := defaultRunnerConfigForProfile(Profile{UnrestrictedHTTPHosts: true})
+	cfg.capRaw = "xflow.browser.cdp"
+	cfg.capabilities = parseCapabilities(cfg.capRaw)
+	restore := installRunnerHTTPHostPolicy(cfg)
+	restore()
+	if calls != 0 {
+		t.Fatalf("SetHTTPHostPolicy called %d times for an unrestricted browser profile, want 0", calls)
+	}
+}
+
+func TestInstallRunnerHTTPHostPolicyUnrestrictedProfileStillAppliesConfiguredLists(t *testing.T) {
+	originalSetter := setRunnerHTTPHostPolicy
+	defer func() { setRunnerHTTPHostPolicy = originalSetter }()
+
+	var installed []xnode.HTTPHostPolicy
+	setRunnerHTTPHostPolicy = func(policy xnode.HTTPHostPolicy) {
+		installed = append(installed, policy)
+	}
+	cfg := defaultRunnerConfigForProfile(Profile{UnrestrictedHTTPHosts: true})
+	cfg.capRaw = "xflow.browser.cdp"
+	cfg.capabilities = parseCapabilities(cfg.capRaw)
+	cfg.httpHostPolicyDeny = []string{"169.254.169.254"}
+	restore := installRunnerHTTPHostPolicy(cfg)
+	if len(installed) != 1 || installed[0] == nil {
+		t.Fatalf("installed policies = %v, want the configured deny policy", installed)
+	}
+	if err := installed[0]("169.254.169.254"); err == nil {
+		t.Fatal("configured deny entry was not enforced")
+	}
+	if err := installed[0]("app.test.internal"); err != nil {
+		t.Fatalf("unlisted host denied: %v", err)
+	}
+	restore()
+	if len(installed) != 2 || installed[1] != nil {
+		t.Fatalf("restore policies = %v, want final nil policy", installed)
+	}
+}

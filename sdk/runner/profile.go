@@ -37,7 +37,10 @@ type Defaults struct {
 // <prefix><hostname>-<pid> while preserving an explicit ID. RequiredRunnerIDPrefix
 // validates every static, stored, or enrolled ID before it is used. RequireToken
 // is useful for profiles whose server endpoint always authenticates runner
-// registration.
+// registration. UnrestrictedHTTPHosts opts a browser-capable profile out of the
+// deny-all HTTP host policy it would otherwise get when no allow or deny list
+// is configured (see installRunnerHTTPHostPolicy); lists an operator does
+// configure still apply.
 type Profile struct {
 	CommandName            string
 	Short                  string
@@ -47,6 +50,7 @@ type Profile struct {
 	RequiredLabels         map[string]string
 	FixedCapabilities      []string
 	RequireToken           bool
+	UnrestrictedHTTPHosts  bool
 }
 
 func normalizeProfile(profile Profile) (Profile, error) {

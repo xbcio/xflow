@@ -482,9 +482,13 @@ var setRunnerHTTPHostPolicy = xnode.SetHTTPHostPolicy
 // HTTP nodes and Browser CDP navigation. Browser-capable runners fail closed
 // when no lists are configured; ordinary runners retain the historical
 // no-name-filtering behavior unless an operator explicitly configures a list.
+// A profile that sets UnrestrictedHTTPHosts gives browser-capable runners the
+// same unrestricted default; that is the profile owner's decision to drop the
+// SSRF destination check until a list is configured.
 func installRunnerHTTPHostPolicy(cfg runnerConfig) func() {
 	configured := cfg.httpHostPolicyAllow != nil || cfg.httpHostPolicyDeny != nil
-	browserCapable := runnerConfigHasCapability(cfg, standaloneBrowserCDPCapability)
+	browserCapable := runnerConfigHasCapability(cfg, standaloneBrowserCDPCapability) &&
+		!cfg.profile.UnrestrictedHTTPHosts
 
 	var restores []func()
 	if configured || browserCapable {
