@@ -872,11 +872,18 @@ export interface XFlowApiClient {
    */
   cancelExecution(id: string): Promise<CancelExecutionResult>;
   /**
-   * POST /v1/executions/{id}/signals: delivers one named signal. A 200 only
-   * means the signal was accepted for delivery — the node may still refuse it
-   * (an approver not in the chain, a signal name for the wrong mode), which is
-   * visible only in the node's published `ignored` trail. Requires the
-   * `execution` scope.
+   * POST /v1/executions/{id}/signals: delivers one named signal. A 200 means
+   * the server took it, not that a node acted on it. The wire response's
+   * `outcome` is `resumed` (woke a waiting node), `buffered` (stored under its
+   * name: the wait has not started, a quorum is incomplete, or the execution
+   * is queued) or `inactive` (the execution is over); this client surfaces
+   * only `accepted`. A signal is judged only once it reaches the node, i.e.
+   * when its name is one the gate is waiting on; only then can the node refuse
+   * it into the published `ignored` trail (an actor not in the chain, an
+   * approver's name used by someone else). A signal under a name no node waits
+   * on — a chain-external approver's per-person name, or a name for a
+   * different mode — is buffered, never ignored. Requires the `execution`
+   * scope.
    */
   deliverSignal(id: string, signal: SignalDelivery): Promise<DeliverSignalResult>;
   /**

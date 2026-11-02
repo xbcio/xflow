@@ -54,7 +54,7 @@ describe("approval signal names (§6.12 / approval.go:813-847)", () => {
   });
 
   it("keeps actions and ports distinct", () => {
-    // A signal named after the port is ignored by the node (signal-name-mismatch).
+    // A signal named after the port is not a name the node waits on; it is buffered.
     expect(approvalActionPort).toEqual({ approve: "approved", reject: "rejected", return: "returned" });
     expect(Object.values(approvalActions)).toEqual([
       "approve",

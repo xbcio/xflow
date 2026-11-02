@@ -39,7 +39,8 @@ export type ApprovalDecisionAction = (typeof approvalDecisionActions)[number];
 
 /**
  * Action → the output port the node leaves by. `approve` never leaves by
- * `approve`, and a signal named after the port is ignored (`signal-name-mismatch`).
+ * `approve`; a signal named after the port is not a name the node waits on,
+ * so it is stored (buffered) without deciding anything.
  */
 export const approvalActionPort: Record<ApprovalDecisionAction, "approved" | "rejected" | "returned"> = {
   approve: "approved",
@@ -119,8 +120,8 @@ function durationText(value: unknown): string | undefined {
 /**
  * Reads the approval node's parameters. Everything the dialog cannot know from
  * a literal value is left `undefined` (and the dialog goes read-only) rather
- * than guessed: a wrong mode yields a wrong signal name, which the node records
- * as `signal-name-mismatch` instead of counting the decision.
+ * than guessed: a wrong mode yields a signal name the node is not waiting on,
+ * so the signal is stored (buffered) and never counts as a decision.
  */
 export function approvalParamsFrom(parameters: Record<string, unknown> | undefined): ApprovalParams {
   const params = parameters ?? {};
@@ -321,8 +322,8 @@ export function approvalCanForce(
  * - force                    → `<node>/approval/force`
  *
  * `undefined` means no name can be computed (an unknown mode, or a subject the
- * caller could not establish); sending another spelling would be ignored by the
- * node as `signal-name-mismatch`.
+ * caller could not establish); another spelling is not a name the node waits
+ * on, so the signal is stored (buffered) instead of deciding anything.
  */
 export function approvalSignalName(
   nodeName: string,

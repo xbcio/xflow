@@ -959,9 +959,10 @@ export default function WorkflowDetailPage() {
     [api, reportForbidden],
   );
 
-  // §6.12: a signal POST answers only "accepted". The 2s poll reads the node's
-  // public ledger back, which is what lets the dialog tell a counted decision
-  // from one the node ignored.
+  // §6.12: a signal POST's `accepted` says only that the server took it — it is
+  // true for a buffered signal too, and `resumed` does not mean the node counted
+  // the decision. The 2s poll reads the node's public ledger back, which is what
+  // lets the dialog tell a counted decision from one the node ignored.
   const handleSignal = useCallback(
     async (executionId: string, signal: XFlowApprovalSignal) => {
       try {

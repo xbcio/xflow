@@ -638,7 +638,7 @@ export function ApprovalDialog({
         <div className="xflow-editor-approval__banner" data-tone="info" role="note">
           <strong>未计入的审批人不计入通过条件</strong>
           <span>
-            已转交或已加签时由新审批人接替，不会重复计数。提交后若信号未被采纳（不在审批链、已决定等），会在「未计入」中显示原因。
+            已转交或已加签时由新审批人接替，不会重复计数。信号到达节点后若未被采纳（不在审批链、已决定等），会在「未计入」中显示原因；节点尚未挂起或未监听该名字时，信号会先暂存，待节点挂起后再判定。
           </span>
         </div>
       ) : null}
