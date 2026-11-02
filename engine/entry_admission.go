@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -64,9 +65,16 @@ type ResultHash string
 
 // ComputeResultHash deterministically hashes the entry-unit outcome and exits.
 // Exits are sorted by (NodeName, Port) for stability regardless of input order.
+//
+// The hashed byte stream is the one `fmt` "%v" produces for each data value;
+// it is the dedupe key admission compares across runners and across control
+// plane versions, so it must not change. Values built only from nil, string,
+// bool, float64, []any and map[string]any (what a JSON body decodes to) are
+// streamed straight into the hash; anything else goes through fmt unchanged.
 func ComputeResultHash(outcome GroupOutcome, exits []BoundaryExit) ResultHash {
 	h := sha256.New()
-	h.Write([]byte(outcome))
+	w := bufio.NewWriterSize(h, 4096)
+	_, _ = w.WriteString(string(outcome))
 	// Sort exits by NodeName+Port for determinism.
 	sorted := make([]BoundaryExit, len(exits))
 	copy(sorted, exits)
@@ -77,7 +85,10 @@ func ComputeResultHash(outcome GroupOutcome, exits []BoundaryExit) ResultHash {
 		return sorted[i].Port < sorted[j].Port
 	})
 	for _, ex := range sorted {
-		fmt.Fprintf(h, "%s/%s/", ex.NodeName, ex.Port)
+		_, _ = w.WriteString(ex.NodeName)
+		_ = w.WriteByte('/')
+		_, _ = w.WriteString(ex.Port)
+		_ = w.WriteByte('/')
 		// Sort data keys for determinism.
 		keys := make([]string, 0, len(ex.Data))
 		for k := range ex.Data {
@@ -85,10 +96,89 @@ func ComputeResultHash(outcome GroupOutcome, exits []BoundaryExit) ResultHash {
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			fmt.Fprintf(h, "%s=%v,", k, ex.Data[k])
+			_, _ = w.WriteString(k)
+			_ = w.WriteByte('=')
+			writeHashValue(w, ex.Data[k])
+			_ = w.WriteByte(',')
 		}
 	}
+	_ = w.Flush()
 	return ResultHash(hex.EncodeToString(h.Sum(nil)))
+}
+
+// writeHashValue writes v exactly as fmt.Fprintf(w, "%v", v) would.
+func writeHashValue(w *bufio.Writer, v any) {
+	if !isPlainHashValue(v) {
+		_, _ = fmt.Fprintf(w, "%v", v)
+		return
+	}
+	writePlainHashValue(w, v)
+}
+
+// isPlainHashValue reports whether v is built only from the types
+// writePlainHashValue reproduces byte-for-byte.
+func isPlainHashValue(v any) bool {
+	switch x := v.(type) {
+	case nil, string, bool, float64:
+		return true
+	case []any:
+		for _, e := range x {
+			if !isPlainHashValue(e) {
+				return false
+			}
+		}
+		return true
+	case map[string]any:
+		for _, e := range x {
+			if !isPlainHashValue(e) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func writePlainHashValue(w *bufio.Writer, v any) {
+	switch x := v.(type) {
+	case nil:
+		_, _ = w.WriteString("<nil>")
+	case string:
+		_, _ = w.WriteString(x)
+	case bool:
+		if x {
+			_, _ = w.WriteString("true")
+		} else {
+			_, _ = w.WriteString("false")
+		}
+	case float64:
+		_, _ = fmt.Fprintf(w, "%v", x)
+	case []any:
+		_ = w.WriteByte('[')
+		for i, e := range x {
+			if i > 0 {
+				_ = w.WriteByte(' ')
+			}
+			writePlainHashValue(w, e)
+		}
+		_ = w.WriteByte(']')
+	case map[string]any:
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		_, _ = w.WriteString("map[")
+		for i, k := range keys {
+			if i > 0 {
+				_ = w.WriteByte(' ')
+			}
+			_, _ = w.WriteString(k)
+			_ = w.WriteByte(':')
+			writePlainHashValue(w, x[k])
+		}
+		_ = w.WriteByte(']')
+	}
 }
 
 // DeterministicExecutionID derives a stable execution ID from an admission key.

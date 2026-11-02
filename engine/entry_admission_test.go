@@ -2,8 +2,15 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math"
+	"math/rand"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -705,6 +712,144 @@ func TestSeedAdmissionRefusal(t *testing.T) {
 		}
 		if resp.State != "" {
 			t.Fatalf("state = %q, want empty", resp.State)
+		}
+	})
+}
+
+// referenceResultHash is the pre-streaming implementation of ComputeResultHash.
+// It pins the byte stream the hash has always been computed over: a hash that
+// drifts makes a duplicate admission look like a conflict across a rolling
+// control plane deploy.
+func referenceResultHash(outcome GroupOutcome, exits []BoundaryExit) ResultHash {
+	h := sha256.New()
+	h.Write([]byte(outcome))
+	sorted := make([]BoundaryExit, len(exits))
+	copy(sorted, exits)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].NodeName != sorted[j].NodeName {
+			return sorted[i].NodeName < sorted[j].NodeName
+		}
+		return sorted[i].Port < sorted[j].Port
+	})
+	for _, ex := range sorted {
+		fmt.Fprintf(h, "%s/%s/", ex.NodeName, ex.Port)
+		keys := make([]string, 0, len(ex.Data))
+		for k := range ex.Data {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Fprintf(h, "%s=%v,", k, ex.Data[k])
+		}
+	}
+	return ResultHash(hex.EncodeToString(h.Sum(nil)))
+}
+
+func randomHashValue(r *rand.Rand, depth int) any {
+	n := 7
+	if depth >= 3 {
+		n = 4
+	}
+	switch r.Intn(n) {
+	case 0:
+		return nil
+	case 1:
+		return []string{"", "a b", "x=y,", "中文", "map[k:v]", "<nil>", "\n\t\"q\""}[r.Intn(7)]
+	case 2:
+		return r.Intn(2) == 0
+	case 3:
+		return []float64{0, 1, -1, 3.14, 1e21, 1e-7, 123456789, 1.5e300, math.Inf(1), math.NaN()}[r.Intn(10)]
+	case 4:
+		out := make([]any, r.Intn(4))
+		for i := range out {
+			out[i] = randomHashValue(r, depth+1)
+		}
+		return out
+	case 5:
+		out := make(map[string]any, 4)
+		for i := r.Intn(4); i > 0; i-- {
+			out[[]string{"a", "B", "k1", "k10", "k2", "", "z z", "é"}[r.Intn(8)]] = randomHashValue(r, depth+1)
+		}
+		return out
+	default:
+		return []any(nil)
+	}
+}
+
+func TestComputeResultHash_MatchesReferenceByteStream(t *testing.T) {
+	t.Run("random json-shaped data", func(t *testing.T) {
+		r := rand.New(rand.NewSource(20261029))
+		for i := 0; i < 3000; i++ {
+			exits := make([]BoundaryExit, 1+r.Intn(3))
+			for j := range exits {
+				data := map[string]any{}
+				for k := r.Intn(5); k > 0; k-- {
+					data[fmt.Sprintf("key%d", r.Intn(8))] = randomHashValue(r, 0)
+				}
+				exits[j] = BoundaryExit{NodeName: fmt.Sprintf("n%d", r.Intn(3)), Port: fmt.Sprintf("p%d", r.Intn(2)), Data: data}
+			}
+			outcome := []GroupOutcome{GroupOutcomeSuccess, GroupOutcomeFailed}[r.Intn(2)]
+			if got, want := ComputeResultHash(outcome, exits), referenceResultHash(outcome, exits); got != want {
+				t.Fatalf("iteration %d: hash drifted: got %s want %s (exits=%#v)", i, got, want, exits)
+			}
+		}
+	})
+
+	t.Run("non json values fall back to fmt", func(t *testing.T) {
+		type named struct{ A int }
+		exits := []BoundaryExit{{
+			NodeName: "n", Port: "p",
+			Data: map[string]any{
+				"int":      7,
+				"json_num": json.Number("12.50"),
+				"bytes":    []byte("xy"),
+				"strs":     []string{"a", "b"},
+				"typed":    map[string][]string{"v": {"a"}},
+				"struct":   named{A: 1},
+				"ptr":      &named{A: 2},
+				"mixed":    []any{1, "s", map[string]any{"k": int64(3)}},
+				"err":      errors.New("boom"),
+			},
+		}}
+		if got, want := ComputeResultHash(GroupOutcomeSuccess, exits), referenceResultHash(GroupOutcomeSuccess, exits); got != want {
+			t.Fatalf("hash drifted: got %s want %s", got, want)
+		}
+	})
+
+	t.Run("empty and nil exits", func(t *testing.T) {
+		for _, exits := range [][]BoundaryExit{nil, {}, {{NodeName: "n", Port: "p"}}, {{NodeName: "n", Port: "p", Data: map[string]any{}}}} {
+			if got, want := ComputeResultHash(GroupOutcomeFailed, exits), referenceResultHash(GroupOutcomeFailed, exits); got != want {
+				t.Fatalf("hash drifted for %#v: got %s want %s", exits, got, want)
+			}
+		}
+	})
+
+	t.Run("exit order does not matter", func(t *testing.T) {
+		a := BoundaryExit{NodeName: "a", Port: "p", Data: map[string]any{"x": "1"}}
+		b := BoundaryExit{NodeName: "b", Port: "p", Data: map[string]any{"y": []any{"2"}}}
+		if ComputeResultHash(GroupOutcomeSuccess, []BoundaryExit{a, b}) != ComputeResultHash(GroupOutcomeSuccess, []BoundaryExit{b, a}) {
+			t.Fatal("hash depends on exit order")
+		}
+	})
+}
+
+func BenchmarkComputeResultHash(b *testing.B) {
+	body := strings.Repeat("x", 90_000)
+	items := make([]any, 100)
+	for i := range items {
+		items[i] = map[string]any{"req": body[:400], "resp": body[:500], "n": float64(i), "ok": true, "tags": []any{"a", "b"}}
+	}
+	exits := []BoundaryExit{{NodeName: "collect", Port: "main", Data: map[string]any{"results": items, "raw": body}}}
+	b.Run("streaming", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_ = ComputeResultHash(GroupOutcomeSuccess, exits)
+		}
+	})
+	b.Run("reference", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_ = referenceResultHash(GroupOutcomeSuccess, exits)
 		}
 	})
 }
