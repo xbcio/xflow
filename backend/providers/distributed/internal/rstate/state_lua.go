@@ -45,13 +45,20 @@ end
 return nil
 `)
 
-// suspendOrConsumeMultiCollectLua atomically consumes every pre-delivered
-// signal of a multi-signal suspend into the batch hash in one transition.
+// suspendOrConsumeMultiCollectLua atomically consumes the pre-delivered signals
+// named by its keys into the batch hash in one transition.
 // Doing GET→HSET→DEL per signal as separate commands left a window where a
 // crash after DEL removed a signal before the quorum check parked the node,
-// losing the signal. This script collects all ready signals atomically; even
-// if the caller crashes before the quorum check, the signals remain in the
+// losing the signal. This script records each consumed signal atomically; even
+// if the caller crashes before the quorum check, the signal remains in the
 // batch hash for the next suspend/deliver attempt.
+//
+// The caller drives it one awaited signal at a time and stops once the batch
+// hash holds a quorum (see suspendOrConsumeMulti), leaving later signals in
+// their signal keys for the next suspension. It passes one name per call rather
+// than the whole wait because the stop decision needs the quorum, which this
+// script's ARGV/KEYS layout does not carry; a single call over every name would
+// consume signals the resume payload never individually delivers.
 // KEYS[1] = signal batch hash key, KEYS[2..] = signal keys (one per awaited signal)
 // ARGV[1] = ttl seconds, ARGV[2..] = signal names (parallel to KEYS[2..])
 // Returns a flat array [name, raw, name, raw, ...] of consumed signals.

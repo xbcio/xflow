@@ -189,6 +189,54 @@ func RunSuspendSignalBufferContract(t *testing.T, manifest *Manifest, newStore f
 		assertSuspended(t, s, id)
 	})
 
+	// The same rule holds when the wait is driven through SuspendOrConsume
+	// rather than through a claimed lease. That call returns the payload
+	// directly, and a consumer that resumes per signal (sequential approval)
+	// reads the triggering Name/Data rather than All: a signal consumed past the
+	// quorum reaches neither the decisions of that resume nor the stored signals
+	// of the next one, so it vanishes for that consumer. Collecting only up to
+	// the quorum and leaving the rest stored is what keeps every arrival
+	// individually resumable.
+	t.Run("SuspendOrConsumeMultiStopsAtQuorumAndKeepsTheRest", func(t *testing.T) {
+		s, id, _ := start(t)
+		spec := &types.SuspendSpec{
+			Mode: types.ModeMultiSignal, Signals: []string{"one", "two", "three"}, Quorum: 2,
+		}
+		deliver(t, s, id, "one")
+		deliver(t, s, id, "two")
+		deliver(t, s, id, "three")
+
+		payload, err := s.SuspendOrConsume(ctx, id, waiter, spec)
+		if err != nil {
+			t.Fatalf("SuspendOrConsume() error = %v", err)
+		}
+		if payload == nil {
+			t.Fatal("SuspendOrConsume() parked, want the satisfied quorum collected")
+		}
+		wantAll(t, payload, "one", "two")
+
+		// Re-suspending finds only the signal the first call left behind, so a
+		// quorum of two is not met and the call parks with it still stored.
+		again, err := s.SuspendOrConsume(ctx, id, waiter, spec)
+		if err != nil {
+			t.Fatalf("SuspendOrConsume(second) error = %v", err)
+		}
+		if again != nil {
+			t.Fatalf("SuspendOrConsume(second) = %+v, want nil: one stored signal is "+
+				"below the quorum of two", again)
+		}
+		assertSuspended(t, s, id)
+
+		// One more arrival completes the next quorum together with the signal
+		// the first call left behind, instead of finding it consumed and gone.
+		node, resumed, err := s.DeliverSignal(ctx, id, "one", map[string]any{"by": "one"})
+		if err != nil || node != waiter || resumed == nil {
+			t.Fatalf("DeliverSignal(one) = (node %q, payload %+v, err %v), want a resume of %q",
+				node, resumed, err, waiter)
+		}
+		wantAll(t, resumed, "three", "one")
+	})
+
 	// With a quorum of two, a suspension stops once two stored signals have
 	// been collected. The third stays stored and counts toward the next
 	// collection instead of being consumed and dropped.

@@ -114,19 +114,37 @@ func (s *Store) suspendOrConsumeMulti(ctx context.Context, id types.ExecutionID,
 	ttl := s.suspendTTL(ctx, id, spec)
 	t := namespace.FromContext(ctx)
 	batchKey := signalBatchKey(t, id, name)
+	quorum := signalQuorum(spec)
 
-	// Atomically collect every pre-delivered signal into the batch hash. The
-	// collection (GET→HSET→DEL per signal) runs in one Lua transition so a crash
-	// cannot delete a signal before the quorum check parks the node.
-	keys := []string{batchKey}
-	args := []any{int(ttl.Seconds())}
-	for _, sigName := range spec.Signals {
-		keys = append(keys, signalKey(t, id, sigName))
-		args = append(args, sigName)
-	}
-	collected, err := suspendOrConsumeMultiCollectLua.Run(ctx, s.rdb, keys, args...).StringSlice()
-	if err != nil && err != redis.Nil {
-		return nil, fmt.Errorf("suspend or consume multi collect %q/%q: %w", id, name, err)
+	// Collect pre-delivered signals in spec order, stopping as soon as the batch
+	// holds a quorum. Each collection is one Lua transition, so a crash can
+	// neither delete a signal without recording it in the batch nor lose one
+	// already collected there. The script is invoked one awaited name at a time
+	// (its ARGV/KEYS layout is unchanged) because only the caller knows the
+	// quorum and can decide when to stop: a signal taken past the quorum is not
+	// the triggering payload a consumer that resumes per signal reads, and it is
+	// no longer stored for the next suspension, so it would vanish. The memory
+	// backend stops collecting at the same point.
+	var collected []string
+	for i, sigName := range spec.Signals {
+		batch, err := suspendOrConsumeMultiCollectLua.Run(ctx, s.rdb,
+			[]string{batchKey, signalKey(t, id, sigName)},
+			int(ttl.Seconds()), sigName,
+		).StringSlice()
+		if err != nil && err != redis.Nil {
+			return nil, fmt.Errorf("suspend or consume multi collect %q/%q: %w", id, name, err)
+		}
+		collected = append(collected, batch...)
+		if i == len(spec.Signals)-1 {
+			break
+		}
+		size, err := s.rdb.HLen(ctx, batchKey).Result()
+		if err != nil {
+			return nil, fmt.Errorf("multi-signal batch size %q/%q: %w", id, name, err)
+		}
+		if int(size) >= quorum {
+			break
+		}
 	}
 
 	// Evaluate quorum using the batch hash populated atomically above. Use the
