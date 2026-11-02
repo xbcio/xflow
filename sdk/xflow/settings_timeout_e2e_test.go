@@ -417,21 +417,32 @@ func TestSettingsTimeoutRerunStartsANewClock(t *testing.T) {
 	// The node hangs until its context ends while the first run is on, which is
 	// what makes the parent time out, and does a second of work once the test has
 	// flipped rerunPhase, which is what lets the rerun finish.
+	//
+	// Both phases also return when the engine's release channel closes, exactly
+	// as settingsTimeoutHold does. Without that, a regression that leaves the
+	// parent without a deadline would leave this handler parked on a context
+	// that never ends, and eng.Stop in Cleanup would wait on it until go test's
+	// own timeout instead of letting the case fail within settingsTimeoutWaitLimit.
 	var rerunPhase atomic.Bool
 	work := node.Define("test.settings_timeout.rerun_work",
 		func(ctx context.Context, _ *types.Input) (*types.Output, error) {
-			wait := time.Duration(-1)
-			if rerunPhase.Load() {
-				wait = rerunWork
+			var release chan struct{}
+			if p := settingsTimeoutHoldRelease.Load(); p != nil {
+				release = *p
 			}
-			if wait < 0 {
-				<-ctx.Done()
-				return nil, ctx.Err()
+			// A nil channel blocks forever, so the first run waits on the context
+			// and the release channel alone.
+			var finished <-chan time.Time
+			if rerunPhase.Load() {
+				finished = time.After(rerunWork)
 			}
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
-			case <-time.After(wait):
+			case <-release:
+				// Not a success, for the same reason as in settingsTimeoutHold.
+				return nil, context.Canceled
+			case <-finished:
 				return &types.Output{Data: map[string]any{"reran": true}}, nil
 			}
 		})
