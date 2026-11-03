@@ -26,9 +26,11 @@ const raceRerunSkew = 2 * time.Second
 
 // TestExpireRacingARerunGivesTheRerunItsOwnClockOnRedis replays the race between
 // the deadline sweep expiring an execution and a rerun of that same execution.
-// The parent is overdue by construction (it was created two hours ago against a
-// one-hour budget) while its workflow still declares a one-hour budget, so the
-// execution a rerun creates is a fresh run that is not due.
+// The parent is overdue by construction: its snapshot names a creation two hours
+// back against a one-hour budget, and though the store stamps created_at itself
+// and ignores that instant, it keeps the deadline, which is therefore an hour in
+// the past. Its workflow still declares a one-hour budget, so the execution a
+// rerun creates is a fresh run that is not due.
 //
 // A rerun is refused while its parent is not yet terminal, so the rerun side
 // retries until the parent's timeout write has landed. The rerun can therefore
@@ -121,7 +123,17 @@ func TestExpireRacingARerunGivesTheRerunItsOwnClockOnRedis(t *testing.T) {
 			t.Fatalf("round %d: rerun deadline = %v from created %v, want created + %v (less at most %v of stamping skew)",
 				round, fresh.Deadline, fresh.CreatedAt, raceRerunTimeout, raceRerunSkew)
 		}
-		if !fresh.CreatedAt.After(parent.CreatedAt) || !fresh.Deadline.After(parent.Deadline.Add(time.Hour)) {
+		// created_at is the store's stamp, not the caller's: createExecution and
+		// the seed script both write their own clock, so the parent reads back at
+		// its create call rather than at the two-hours-ago instant its snapshot
+		// carried, and the rerun reads back at the seed call. Millisecond
+		// resolution cannot order two calls that land in the same millisecond,
+		// which the parent (created at the top of the round) and the rerun
+		// (created moments later) routinely do; equality is therefore not a
+		// regression, and only an instant before the parent's would be. The
+		// restarted clock is proven by the deadline, which the engine derived for
+		// the rerun alone and which must sit a full budget beyond the parent's.
+		if fresh.CreatedAt.Before(parent.CreatedAt) || !fresh.Deadline.After(parent.Deadline.Add(time.Hour)) {
 			t.Fatalf("round %d: rerun clock (%v .. %v) was not restarted from the parent's (%v .. %v)",
 				round, fresh.CreatedAt, fresh.Deadline, parent.CreatedAt, parent.Deadline)
 		}
