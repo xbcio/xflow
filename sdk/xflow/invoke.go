@@ -81,6 +81,11 @@ func (e *Engine) Invoke(ctx context.Context, workflowID types.WorkflowID, entry 
 		subDef = &stamped
 	}
 	ctx = enginecore.WithWorkflowDef(ctx, subDef)
+	// The hash is taken from the SAME record whose graph is submitted above:
+	// the live record, or the archived payload the version pin substituted. It
+	// is copied verbatim — the registry's hash is the definition identity, and
+	// recomputing it from the graph could name a different revision.
+	ctx = enginecore.WithDefinitionHash(ctx, rec.DefinitionHash)
 	return e.eng.Invoke(ctx, rec.Graph, entry.nodeName, input, cfg.runtime)
 }
 
