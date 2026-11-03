@@ -215,9 +215,14 @@ func (m *webhookModule) handleWebhookEntry(w http.ResponseWriter, r *http.Reques
 		AdmissionKey:    engine.AdmissionKey("trigger:" + string(workflowID) + ":" + entryUnitID + ":" + webhookKind + ":" + event.ID),
 		WorkflowID:      workflowID,
 		WorkflowVersion: rec.Version,
-		EntryUnitID:     entryUnitID,
-		Outcome:         outcome,
-		Exits:           exits,
+		// The registry hash of the record whose compiled graph this route just
+		// resolved the entry unit from, copied verbatim. The seed path persists
+		// identity from the request (not from the submission context), so the
+		// hash travels here alongside the version.
+		DefinitionHash: rec.DefinitionHash,
+		EntryUnitID:    entryUnitID,
+		Outcome:        outcome,
+		Exits:          exits,
 		// ResultHash is computed server-side, exactly as on the runner face: the
 		// caller supplies nothing it could be derived from. It covers the REQUEST,
 		// not the exits — see webhookResultHash.
