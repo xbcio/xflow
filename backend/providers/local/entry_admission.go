@@ -149,9 +149,11 @@ func (s *memoryState) seedExecutionFromEntryLocked(ctx context.Context, req engi
 		// The admitted entry unit carries the workflow identity the control
 		// plane derived the admission key from. Persisting it here is what lets
 		// Inspect/GetExecution name the workflow a trigger-created execution
-		// ran, exactly as the submission path does.
+		// ran, exactly as the submission path does. The definition hash is part
+		// of the same identity and is copied verbatim (empty = unknown).
 		WorkflowID:      req.WorkflowID,
 		WorkflowVersion: req.WorkflowVersion,
+		DefinitionHash:  req.DefinitionHash,
 		Namespace:       string(registrationNamespace),
 	}
 	// An engine submission stamps the execution budget before it reaches the
