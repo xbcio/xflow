@@ -264,6 +264,11 @@ func seedRecordsTheResolvedUnits(t *testing.T, state engine.StateStore) {
 	if seeded.UpdatedAt.Before(seeded.CreatedAt) {
 		t.Fatalf("UpdatedAt = %v before CreatedAt = %v after the seed", seeded.UpdatedAt, seeded.CreatedAt)
 	}
+	// A seed whose snapshot carries no hash reads back empty rather than
+	// inventing one: absent identity is "unknown", the documented state.
+	if seeded.DefinitionHash != "" {
+		t.Fatalf("DefinitionHash = %q on a seed that carried none, want empty", seeded.DefinitionHash)
+	}
 
 	node, err := state.GetNode(ctx, snap.ID, "start")
 	if err != nil {
@@ -453,6 +458,7 @@ func seedRecordsTheRerunOrigin(t *testing.T, state engine.StateStore) {
 	snap.Depth = 2
 	snap.WorkflowID = "wf-seed"
 	snap.WorkflowVersion = "v5"
+	snap.DefinitionHash = "sha256:seed"
 	// The registration namespace must survive the seed path too: a rerun is
 	// created only here (never through CreateExecution), and its dispatch
 	// resolves sub-workflows by this value.
@@ -492,6 +498,12 @@ func seedRecordsTheRerunOrigin(t *testing.T, state engine.StateStore) {
 	}
 	if persisted.WorkflowVersion != snap.WorkflowVersion {
 		t.Fatalf("WorkflowVersion = %q, want %q", persisted.WorkflowVersion, snap.WorkflowVersion)
+	}
+	// The definition hash is part of the identity the seed must carry: a rerun
+	// reports the hash of the definition it actually runs (the parent's), and a
+	// seed path that drops it leaves every rerun unable to name that definition.
+	if persisted.DefinitionHash != snap.DefinitionHash {
+		t.Fatalf("DefinitionHash = %q, want %q", persisted.DefinitionHash, snap.DefinitionHash)
 	}
 	if persisted.Namespace != snap.Namespace {
 		t.Fatalf("Namespace = %q, want %q", persisted.Namespace, snap.Namespace)

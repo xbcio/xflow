@@ -115,6 +115,7 @@ func buildAdmissionRequest(t *testing.T, g *graph.Graph, key engine.AdmissionKey
 		Namespace:       namespace.Default,
 		WorkflowID:      "wf-test",
 		WorkflowVersion: "v1",
+		DefinitionHash:  "sha256:admitted",
 		EntryUnitID:     gm.Name,
 		EntryUnitIdx:    gm.UnitIdx,
 		Graph:           g,
@@ -275,6 +276,14 @@ func RunEntryAdmissionContract(t *testing.T, newStore func(*testing.T) EntryAdmi
 			t.Fatalf("execution identity = (%q, %q), want the admitted request's (%q, %q)",
 				snap.WorkflowID, snap.WorkflowVersion, req.WorkflowID, req.WorkflowVersion)
 		}
+		// The definition hash is the rest of the same identity. The admission
+		// creates the execution inside its own transition, so it must be written
+		// there or every trigger-created execution reports "cannot confirm" on
+		// the replay view.
+		if snap.DefinitionHash != req.DefinitionHash {
+			t.Fatalf("DefinitionHash = %q, want the admitted request's %q",
+				snap.DefinitionHash, req.DefinitionHash)
+		}
 	})
 
 	t.Run("AcceptedWritesBoundaryOutputs", func(t *testing.T) {
@@ -349,12 +358,13 @@ func RunEntryAdmissionContract(t *testing.T, newStore func(*testing.T) EntryAdmi
 			Namespace:       namespace.Default,
 			WorkflowID:      "wf-test",
 			WorkflowVersion: "v1",
+			DefinitionHash:  "sha256:admitted",
 			EntryUnitID:     gm.Name,
 			EntryUnitIdx:    gm.UnitIdx,
 			Graph:           g,
 			Outcome:         engine.GroupOutcomeSuccess,
-			Exits:           []engine.BoundaryExit{{NodeName: "body", Port: "main", Data: map[string]any{"r": 1}}},
-			ResultHash:      engine.ComputeResultHash(engine.GroupOutcomeSuccess, []engine.BoundaryExit{{NodeName: "body", Port: "main", Data: map[string]any{"r": 1}}}),
+			Exits:           []engine.BoundaryExit{{NodeName: "body", Port: "main", Data: map[string]any{"r": "one"}}},
+			ResultHash:      engine.ComputeResultHash(engine.GroupOutcomeSuccess, []engine.BoundaryExit{{NodeName: "body", Port: "main", Data: map[string]any{"r": "one"}}}),
 			Downstream:      downstream,
 		}
 
@@ -376,6 +386,24 @@ func RunEntryAdmissionContract(t *testing.T, newStore func(*testing.T) EntryAdmi
 		}
 		if types.IsTerminalExecutionStatus(snap.Status) {
 			t.Fatalf("multi-unit execution must not be terminal after single group admission, got %s", snap.Status)
+		}
+		if snap.DefinitionHash != req.DefinitionHash {
+			t.Fatalf("DefinitionHash = %q, want the admitted request's %q", snap.DefinitionHash, req.DefinitionHash)
+		}
+
+		// One exit and one downstream arrival in the SAME admission is the shape
+		// that pins the script's variable-slot offsets: both blocks sit after the
+		// fixed slots, so an offset that does not move with a new fixed slot
+		// writes the exit body from the arrival arguments (or vice versa). This
+		// output is the exits half of the proof; the outbox check below is the
+		// scheduling half.
+		out, err := s.GetOutput(ctx, resp.ExecutionID, "body")
+		if err != nil {
+			t.Fatalf("GetOutput(body): %v", err)
+		}
+		if out == nil || out["r"] != "one" {
+			t.Fatalf("boundary output = %#v, want {r:one}: the exit block's key/argument offsets "+
+				"must follow the fixed slots", out)
 		}
 
 		// Outbox should have a downstream entry.

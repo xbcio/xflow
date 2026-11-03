@@ -56,11 +56,13 @@ func RunStateStoreContract(t *testing.T, manifest *Manifest, state engine.StateS
 		ParentNode: "collect",
 		Depth:      3,
 		RerunFrom:  "start",
-		// The workflow identity an inspect consumer reads back. Both are
-		// immutable submission metadata, and a JSON backend that persists the
-		// snapshot field-by-field must round-trip them like every other field.
+		// The workflow identity an inspect consumer reads back, and the
+		// definition hash recorded with it. All three are immutable submission
+		// metadata, and a JSON backend that persists the snapshot field-by-field
+		// must round-trip them like every other field.
 		WorkflowID:      "wf-contract",
 		WorkflowVersion: "v7",
+		DefinitionHash:  "sha256:contract",
 		Namespace:       "tenant-x",
 	}); err != nil {
 		t.Fatalf("CreateExecution() error = %v", err)
@@ -137,6 +139,13 @@ func RunStateStoreContract(t *testing.T, manifest *Manifest, state engine.StateS
 	if snap.WorkflowVersion != "v7" {
 		t.Fatalf("WorkflowVersion = %q, want %q", snap.WorkflowVersion, "v7")
 	}
+	// The definition hash is what the detail endpoint reports as
+	// definition_hash and what the replay view matches against stored versions.
+	// A backend that drops it makes every run look like "cannot confirm", which
+	// is a silent loss of the identity the submission carried.
+	if snap.DefinitionHash != "sha256:contract" {
+		t.Fatalf("DefinitionHash = %q, want %q", snap.DefinitionHash, "sha256:contract")
+	}
 	// The registration namespace is what dispatch resolves a sub-workflow
 	// binding against. Dispatch runs off a queue whose worker starts from
 	// context.Background(), so the ctx namespace there names the deployment, not
@@ -165,6 +174,9 @@ func RunStateStoreContract(t *testing.T, manifest *Manifest, state engine.StateS
 	}
 	if legacy.Namespace != "" {
 		t.Fatalf("Namespace = %q on an execution created without one, want empty", legacy.Namespace)
+	}
+	if legacy.DefinitionHash != "" {
+		t.Fatalf("DefinitionHash = %q on an execution created without one, want empty", legacy.DefinitionHash)
 	}
 
 	loaded, err := state.LoadGraph(ctx, id)
