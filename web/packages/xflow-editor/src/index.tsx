@@ -5991,7 +5991,7 @@ export function XFlowEditor({
             </span>
           ) : null}
           <span className="xflow-editor-runs-statusbar__item" data-tone="faint">
-            {executionDefinitionStale ? "未取得该次运行的定义版本，回放使用当前定义" : "只读回放 · 定义为当次运行版本"}
+            {executionDefinitionStale ? "无法确认该次运行的定义，回放使用当前定义" : "只读回放 · 定义为当次运行版本"}
           </span>
         </div>
       ) : (
