@@ -2904,6 +2904,12 @@ func (m *workflowControlModule) handleExecuteWorkflowByID(w http.ResponseWriter,
 	// asynchronous dispatch span inherits it as a real W3C remote parent,
 	// closing the submit→dispatch causality gap for this route too.
 	ctx = engine.WithWorkflowDef(ctx, subDef)
+	// The hash is the one the registry recorded on the SAME record whose graph
+	// is submitted above (the live record, or the archived payload the version
+	// branch substituted). It is copied verbatim — recomputing it here could
+	// name a different revision than the one that runs. The engine ignores it
+	// when the submission carries no workflow id.
+	ctx = engine.WithDefinitionHash(ctx, rec.DefinitionHash)
 	ctx = engine.WithTraceCarrier(ctx, tracing.InjectCarrier(ctx))
 	ctx = engine.WithTestRun(ctx, req.Test)
 	// A keyed request is scoped to the registered workflow, so one key means one
