@@ -1423,17 +1423,22 @@ func (c *Core) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecut
 	// When no registry is wired (embedded / in-process seeds already carry a
 	// resolved Graph/Downstream/EntryUnitIdx), preserve today's behavior.
 	if c.workflowRegistry != nil {
-		def, err := c.resolveEntrySeedTopology(ctx, &req)
+		rec, err := c.resolveEntrySeedTopology(ctx, &req)
 		if err != nil {
 			return engine.SeedExecutionFromEntryResponse{}, err
 		}
+		// The record resolveEntrySeedTopology just took req.Graph from is also
+		// where the definition identity comes from: the hash is copied verbatim,
+		// never recomputed, so it names the revision whose topology is admitted.
+		// The version was already checked against this same record above.
+		req.DefinitionHash = rec.DefinitionHash
 		// Attach the resolved definition so the durable SQL projection can
 		// record the workflow id this seed creates an execution for. The id the
 		// registry resolved (req.WorkflowID) is authoritative: always stamp it,
 		// overriding any id a legacy stored definition still carries, so a
 		// client-supplied definition id cannot hijack attribution.
-		if def != nil {
-			stamped := *def
+		if rec.Definition != nil {
+			stamped := *rec.Definition
 			stamped.ID = string(req.WorkflowID)
 			ctx = engine.WithWorkflowDef(ctx, &stamped)
 		}
@@ -1453,21 +1458,22 @@ func (c *Core) SeedExecutionFromEntry(ctx context.Context, req engine.SeedExecut
 
 // resolveEntrySeedTopology looks up the registered workflow for req and stamps
 // the authoritative Graph, EntryUnitIdx and downstream arrivals onto it. It
-// returns the record's definition so the caller can attach the workflow
-// identity to the seeding context. It fails CLOSED
+// returns the record that graph came from, so the caller can attach its
+// definition and definition hash to the seed — the identity of the exact record
+// whose topology was admitted. It fails CLOSED
 // (ErrEntrySeedWorkflowUnknown) when the workflow is not registered, the
 // version/hash does not match, or the entry unit cannot be resolved in the
 // compiled graph — a remote seed without a resolvable graph must never be
 // admitted with no downstream fan-out (spec §11.5). Any other registry error is
 // normalized to a generic internal error so backend details never reach the
 // caller.
-func (c *Core) resolveEntrySeedTopology(ctx context.Context, req *engine.SeedExecutionFromEntryRequest) (*types.WorkflowDef, error) {
+func (c *Core) resolveEntrySeedTopology(ctx context.Context, req *engine.SeedExecutionFromEntryRequest) (backend.WorkflowRecord, error) {
 	rec, err := c.workflowRegistry.GetWorkflow(ctx, req.WorkflowID)
 	if err != nil {
 		if errors.Is(err, backend.ErrWorkflowNotFound) {
-			return nil, ErrEntrySeedWorkflowUnknown
+			return backend.WorkflowRecord{}, ErrEntrySeedWorkflowUnknown
 		}
-		return nil, normalizeRunnerError(err, c.logger, "entry_seed_resolve")
+		return backend.WorkflowRecord{}, normalizeRunnerError(err, c.logger, "entry_seed_resolve")
 	}
 	// The seed's declared version must match the registered record. On the remote
 	// path (registry present), an empty version is treated as a mismatch and
@@ -1476,19 +1482,19 @@ func (c *Core) resolveEntrySeedTopology(ctx context.Context, req *engine.SeedExe
 	// topology. A non-empty version that disagrees with the record is likewise
 	// rejected.
 	if req.WorkflowVersion == "" || (rec.Version != "" && req.WorkflowVersion != rec.Version) {
-		return nil, ErrEntrySeedWorkflowUnknown
+		return backend.WorkflowRecord{}, ErrEntrySeedWorkflowUnknown
 	}
 	if rec.Graph == nil {
-		return nil, ErrEntrySeedWorkflowUnknown
+		return backend.WorkflowRecord{}, ErrEntrySeedWorkflowUnknown
 	}
 	idx, downstream, err := deriveEntrySeedTopology(rec.Graph, req.EntryUnitID, req.Exits)
 	if err != nil {
 		// deriveEntrySeedTopology only returns ErrEntrySeedWorkflowUnknown-wrapped
 		// errors; surface the sentinel so the transport maps it to 404/409.
 		if errors.Is(err, ErrEntrySeedWorkflowUnknown) {
-			return nil, ErrEntrySeedWorkflowUnknown
+			return backend.WorkflowRecord{}, ErrEntrySeedWorkflowUnknown
 		}
-		return nil, normalizeRunnerError(err, c.logger, "entry_seed_resolve")
+		return backend.WorkflowRecord{}, normalizeRunnerError(err, c.logger, "entry_seed_resolve")
 	}
 	req.Graph = rec.Graph
 	req.EntryUnitIdx = idx
@@ -1496,7 +1502,7 @@ func (c *Core) resolveEntrySeedTopology(ctx context.Context, req *engine.SeedExe
 	// The trigger kind is derived from the same authoritative graph and always
 	// overwritten: it is control-plane metadata, never a runner-supplied value.
 	req.TriggerKind = entryTriggerKind(rec.Graph, idx)
-	return rec.Definition, nil
+	return rec, nil
 }
 
 // fenceEntrySeedGeneration enforces the generation fence for one seed request.
