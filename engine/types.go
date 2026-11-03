@@ -302,6 +302,13 @@ type ExecutionSnapshot struct {
 	// never have executed.
 	WorkflowID      types.WorkflowID `json:"workflow_id,omitempty"`
 	WorkflowVersion string           `json:"workflow_version,omitempty"`
+	// DefinitionHash is the definition hash the registry recorded for the
+	// submitted definition, captured at submission (WithDefinitionHash) and
+	// recorded verbatim, never recomputed from the graph. Like the id, it is
+	// written only when the submission carried a workflow id: a hash with no id
+	// cannot be resolved back to a workflow. Empty means unattributed or an
+	// execution recorded before this field existed -- unknown, never a guess.
+	DefinitionHash string `json:"definition_hash,omitempty"`
 	// CreatedAt is when the backend created the execution, and UpdatedAt is the
 	// wall clock of its latest status transition (creation included). The
 	// inspect API exposes them so a client can time a run — the editor's run bar

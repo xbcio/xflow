@@ -16,6 +16,7 @@ type traceCarrierCtxKey struct{}
 type executionScopeCtxKey struct{}
 type executionTransientCtxKey struct{}
 type testRunCtxKey struct{}
+type definitionHashCtxKey struct{}
 
 // WithExecutionTTL attaches a retention TTL hint for a single execution
 // submission. StateStore implementations may use it to choose key or record
@@ -48,6 +49,24 @@ func WithWorkflowDef(ctx context.Context, def *types.WorkflowDef) context.Contex
 func WorkflowDefFromContext(ctx context.Context) (*types.WorkflowDef, bool) {
 	def, ok := ctx.Value(workflowDefCtxKey{}).(*types.WorkflowDef)
 	return def, ok && def != nil
+}
+
+// WithDefinitionHash attaches the definition hash the registry recorded for a
+// single execution submission. The engine copies it onto the execution snapshot
+// verbatim; it is opaque here (the registry's own definition hash), and an
+// empty hash is ignored.
+func WithDefinitionHash(ctx context.Context, hash string) context.Context {
+	if hash == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, definitionHashCtxKey{}, hash)
+}
+
+// DefinitionHashFromContext extracts the definition hash attached to the
+// submission context. Returns "" when none was attached.
+func DefinitionHashFromContext(ctx context.Context) (string, bool) {
+	hash, ok := ctx.Value(definitionHashCtxKey{}).(string)
+	return hash, ok && hash != ""
 }
 
 // WithExecutionID attaches a pre-allocated execution id to the submission

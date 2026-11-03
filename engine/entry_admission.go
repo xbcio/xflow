@@ -205,8 +205,12 @@ type SeedExecutionFromEntryRequest struct {
 	Namespace       namespace.Namespace
 	WorkflowID      types.WorkflowID
 	WorkflowVersion string
-	EntryUnitID     string
-	EntryUnitIdx    int
+	// DefinitionHash is the registry-recorded hash of the definition this entry
+	// activation was resolved from. It travels with the identity so the created
+	// execution can report it; empty means the caller had no hash in hand.
+	DefinitionHash string
+	EntryUnitID    string
+	EntryUnitIdx   int
 	// TriggerKind names the trigger node type that delivered this entry
 	// activation (types.TriggerKind* constants). The control plane derives it
 	// from the authoritative graph; it is never taken from the runner body.

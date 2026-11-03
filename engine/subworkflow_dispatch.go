@@ -507,8 +507,12 @@ func (e *Engine) startSubWorkflowChild(ctx context.Context, task *Task, g *graph
 	// workflow, so it is recorded only alongside the id — the same rule
 	// attachSubmissionMetadata applies to a directly submitted execution.
 	childWorkflowVersion := ""
+	childDefinitionHash := ""
 	if childWorkflowID != "" {
 		childWorkflowVersion = target.Version
+		// The hash the resolver pinned for this target, alongside the version:
+		// both are parts of the same child identity.
+		childDefinitionHash = target.DefinitionHash
 	}
 	childSnap := &ExecutionSnapshot{
 		ID:     child.ID,
@@ -522,6 +526,7 @@ func (e *Engine) startSubWorkflowChild(ctx context.Context, task *Task, g *graph
 		// unversioned record.
 		WorkflowID:      childWorkflowID,
 		WorkflowVersion: childWorkflowVersion,
+		DefinitionHash:  childDefinitionHash,
 		// The link back to the parent. ParentID reuses the field the snapshot
 		// already reserved for a sub-execution; ParentNode is what names the
 		// node whose wait this child satisfies.

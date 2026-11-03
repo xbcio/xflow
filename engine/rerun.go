@@ -240,6 +240,16 @@ func (e *Engine) seedRerun(ctx context.Context, seeder ExecutionSeeder, req Reru
 	if snap.WorkflowID != "" && snap.WorkflowVersion == "" {
 		snap.WorkflowVersion = parent.WorkflowVersion
 	}
+	// A rerun executes the parent's own graph (loadGraph from the parent's
+	// stored definition), so the hash of what runs is the parent snapshot's,
+	// not whatever the submission context carried. Same id: inherit it and
+	// overwrite the context value. Different id: this rerun cannot name the
+	// parent's definition, so it carries no hash rather than a mismatched one.
+	if snap.WorkflowID != "" && snap.WorkflowID == parent.WorkflowID {
+		snap.DefinitionHash = parent.DefinitionHash
+	} else {
+		snap.DefinitionHash = ""
+	}
 	ctx = attachTransientHint(ctx, g)
 
 	entries := []OutboxEntry(nil)

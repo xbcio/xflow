@@ -20,6 +20,12 @@ type ExecutionDetail struct {
 	// an unattributed run must not be reported under a guessed workflow.
 	WorkflowID      types.WorkflowID `json:"workflow_id,omitempty"`
 	WorkflowVersion string           `json:"workflow_version,omitempty"`
+	// DefinitionHash is the registry definition hash recorded at submission
+	// (see ExecutionSnapshot.DefinitionHash), omitted when the execution is
+	// unattributed or predates the field. It identifies the exact definition
+	// revision; a missing or unmatched value means "cannot confirm", not "the
+	// definition changed", because a hash format may be upgraded in place.
+	DefinitionHash string `json:"definition_hash,omitempty"`
 	// TraceID is the correlation id of the external tracing system that
 	// accepted the submission — the trace id captured when the execution was
 	// submitted (see ExecutionSnapshot.TraceID). It is diagnostic metadata, not
@@ -114,6 +120,7 @@ func (e *Engine) InspectStatus(ctx context.Context, id types.ExecutionID) (Execu
 		Status:          snap.Status,
 		WorkflowID:      snap.WorkflowID,
 		WorkflowVersion: snap.WorkflowVersion,
+		DefinitionHash:  snap.DefinitionHash,
 		TraceID:         snap.TraceID,
 		CreatedAt:       timePtr(snap.CreatedAt),
 		UpdatedAt:       timePtr(snap.UpdatedAt),

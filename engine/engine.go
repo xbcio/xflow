@@ -594,6 +594,11 @@ func attachSubmissionMetadata(ctx context.Context, snap *ExecutionSnapshot) {
 	if def, ok := WorkflowDefFromContext(ctx); ok && def.ID != "" {
 		snap.WorkflowID = types.WorkflowID(def.ID)
 		snap.WorkflowVersion = def.Version
+		// The hash is part of the same identity: a version without an id is a
+		// half identity, and a hash without an id is the same half.
+		if hash, ok := DefinitionHashFromContext(ctx); ok {
+			snap.DefinitionHash = hash
+		}
 	}
 	snap.TestRun = TestRunFromContext(ctx)
 	// Carry the REGISTRATION namespace with the execution. Dispatch runs off a
