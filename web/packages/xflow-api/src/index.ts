@@ -283,6 +283,16 @@ export interface ExecutionDetail {
    */
   workflowVersion?: string;
   /**
+   * The definition hash the registry recorded at submission. Unlike
+   * {@link workflowVersion} it names the definition itself, so the replay can
+   * match it against a version list even when the label was re-published in
+   * place. Absent (or unequal to every listed row) only means the run's
+   * definition cannot be confirmed, not that it has necessarily changed: the
+   * hash format may be upgraded in place by reconciliation. Compare only for
+   * equality.
+   */
+  definitionHash?: string;
+  /**
    * The external tracing system's correlation id captured at submission
    * (`trace_id`): a handle for opening the run's trace in a tracing UI, not
    * business data. Absent when the submission carried no trace context —
@@ -1151,6 +1161,8 @@ interface ExecutionDetailWire {
   /** `engine.ExecutionDetail` JSON; `omitempty` on the server. */
   workflow_id?: string;
   workflow_version?: string;
+  /** `engine.ExecutionDetail` JSON; `omitempty` on the server. */
+  definition_hash?: string;
   /** External tracing correlation id; `omitempty` on the server. */
   trace_id?: string;
   status: ExecutionStatus;
@@ -1922,6 +1934,12 @@ function mapExecutionDetail(response: ApiResponse<unknown>): ExecutionDetail {
   const workflowVersion = optionalString(data, "workflow_version", response);
   if (workflowVersion !== undefined) {
     detail.workflowVersion = workflowVersion;
+  }
+  // The hash is an identity token: an absent or empty one means the run's
+  // definition cannot be confirmed, so it must stay absent rather than "".
+  const definitionHash = optionalString(data, "definition_hash", response);
+  if (definitionHash !== undefined && definitionHash !== "") {
+    detail.definitionHash = definitionHash;
   }
   // Strictly a string when present: a malformed trace id must not be coerced
   // into a link target, and an absent one must stay absent rather than "".

@@ -839,6 +839,7 @@ describe("createXFlowApiClient", () => {
           execution_id: "exec-attr",
           workflow_id: "customer_sync",
           workflow_version: "1.4.2",
+          definition_hash: "runtime-sha256:abc123",
           status: "success"
         });
       }
@@ -851,8 +852,29 @@ describe("createXFlowApiClient", () => {
       executionId: "exec-attr",
       workflowId: "customer_sync",
       workflowVersion: "1.4.2",
+      definitionHash: "runtime-sha256:abc123",
       status: "success"
     } satisfies ExecutionDetail);
+  });
+
+  it("keeps an absent or empty definition hash absent rather than \"\"", async () => {
+    for (const wire of [{}, { definition_hash: "" }]) {
+      const client = createXFlowApiClient({
+        baseUrl: "/v1",
+        fetcher: async () => success({
+          execution_id: "exec-nohash",
+          workflow_id: "customer_sync",
+          status: "success",
+          ...wire
+        })
+      });
+
+      const detail = await client.getExecution("exec-nohash");
+
+      // The hash is an identity token: a missing or empty one means the run's
+      // definition cannot be confirmed, never that it equals "".
+      expect(detail).not.toHaveProperty("definitionHash");
+    }
   });
 
   it("carries the execution timestamps and the derivation lineage", async () => {
