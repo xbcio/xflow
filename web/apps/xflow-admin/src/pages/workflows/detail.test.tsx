@@ -201,6 +201,10 @@ beforeEach(() => {
   host.api.saveWorkflow.mockResolvedValue({});
   host.api.listNodeTypes.mockResolvedValue({ node_types: [] });
   host.api.listExecutions.mockResolvedValue({ list: [], total: 0 });
+  // The replay resolves a run's definition hash against the version list; an
+  // empty list is the honest default (no match -> stale) for tests that do not
+  // care about the snapshot.
+  host.api.listWorkflowVersions.mockResolvedValue({ list: [], total: 0 });
 });
 
 afterEach(() => {
@@ -1218,23 +1222,37 @@ describe('run records mode (§6.8)', () => {
     ...(queuePosition === undefined ? {} : { queuePosition }),
   });
 
-  it('enters 运行记录 from ?exec= and replays the captured workflow version', async () => {
+  const versionRow = {
+    version: '3',
+    definitionHash: 'hash-v3',
+    registryRevision: 3,
+    current: false,
+    archived: true,
+  };
+
+  it('enters 运行记录 from ?exec= and confirms the captured definition by hash', async () => {
     host.search = '?exec=exec-1';
     host.api.getExecution.mockResolvedValue({
       executionId: 'exec-1',
       status: 'success',
       workflowId: 'wf-1',
-      workflowVersion: '3',
+      definitionHash: 'hash-current',
     });
-    host.api.getWorkflowVersion.mockResolvedValue({ workflow: { ...stored, name: 'Orders v3', id: undefined } });
+    // A current row may carry an empty version label; the replay must use the
+    // already-loaded definition instead of asking for /versions/.
+    host.api.listWorkflowVersions.mockResolvedValue({
+      list: [{ ...versionRow, version: '', definitionHash: 'hash-current', current: true, archived: false }],
+      total: 1,
+    });
 
     await mounted();
 
     expect(editor().mode).toBe('runs');
     await waitFor(() => expect(editor().selectedExecution?.executionId).toBe('exec-1'));
-    expect(host.api.getWorkflowVersion).toHaveBeenCalledWith('wf-1', '3');
-    await waitFor(() => expect(editor().executionSnapshotWorkflow?.name).toBe('Orders v3'));
-    expect(editor().executionDefinitionStale).toBe(false);
+    expect(host.api.listWorkflowVersions).toHaveBeenCalledWith('wf-1', { pageSize: 200 });
+    expect(host.api.getWorkflowVersion).not.toHaveBeenCalled();
+    await waitFor(() => expect(editor().executionDefinitionStale).toBe(false));
+    expect(editor().executionSnapshotWorkflow?.name).toBe('Orders');
   });
 
   it('loads this workflow’s executions, selects the newest and rewrites ?exec=', async () => {
@@ -1347,8 +1365,9 @@ describe('run records mode (§6.8)', () => {
         executionId: 'exec-1',
         status: 'success',
         workflowId: 'wf-1',
-        workflowVersion: '3',
+        definitionHash: 'hash-v3',
       });
+      host.api.listWorkflowVersions.mockResolvedValue({ list: [versionRow], total: 1 });
       host.api.getWorkflowVersion.mockResolvedValue({ workflow: { ...stored, name: 'Orders v3', id: undefined } });
 
       await act(async () => editor().onModeChange?.('runs'));
@@ -1447,14 +1466,15 @@ describe('run records mode (§6.8)', () => {
     }
   });
 
-  it('falls back to the current definition when the run version cannot be read', async () => {
+  it('falls back to the current definition when the matched version cannot be read', async () => {
     host.search = '?exec=exec-2';
     host.api.getExecution.mockResolvedValue({
       executionId: 'exec-2',
       status: 'failed',
       workflowId: 'wf-1',
-      workflowVersion: '9',
+      definitionHash: 'hash-v3',
     });
+    host.api.listWorkflowVersions.mockResolvedValue({ list: [versionRow], total: 1 });
     host.api.getWorkflowVersion.mockRejectedValue(new Error('version gone'));
 
     await mounted();
@@ -1464,13 +1484,129 @@ describe('run records mode (§6.8)', () => {
     expect(editor().executionSnapshotWorkflow?.name).toBe('Orders');
   });
 
-  it('marks a run without a recorded version stale without asking the server', async () => {
+  it('marks a run without a recorded definition hash stale without asking the server', async () => {
     host.search = '?exec=exec-3';
     host.api.getExecution.mockResolvedValue({ executionId: 'exec-3', status: 'failed', workflowId: 'wf-1' });
 
     await mounted();
 
     await waitFor(() => expect(editor().selectedExecution?.executionId).toBe('exec-3'));
+    await waitFor(() => expect(editor().executionDefinitionStale).toBe(true));
+    expect(host.api.listWorkflowVersions).not.toHaveBeenCalled();
+    expect(host.api.getWorkflowVersion).not.toHaveBeenCalled();
+  });
+
+  it('does not fall back to the route id for a run without a workflow id', async () => {
+    host.search = '?exec=exec-4';
+    host.api.getExecution.mockResolvedValue({
+      executionId: 'exec-4',
+      status: 'failed',
+      definitionHash: 'hash-v3',
+    });
+
+    await mounted();
+
+    await waitFor(() => expect(editor().selectedExecution?.executionId).toBe('exec-4'));
+    await waitFor(() => expect(editor().executionDefinitionStale).toBe(true));
+    // The route id names the page's workflow, not necessarily the run's; an
+    // unattributed run must not be replayed from this workflow's history.
+    expect(host.api.listWorkflowVersions).not.toHaveBeenCalled();
+    expect(host.api.getWorkflowVersion).not.toHaveBeenCalled();
+  });
+
+  it('treats a run recorded under another workflow as stale', async () => {
+    host.search = '?exec=exec-5';
+    host.api.getExecution.mockResolvedValue({
+      executionId: 'exec-5',
+      status: 'success',
+      workflowId: 'wf-2',
+      definitionHash: 'hash-v3',
+    });
+
+    await mounted();
+
+    await waitFor(() => expect(editor().selectedExecution?.executionId).toBe('exec-5'));
+    await waitFor(() => expect(editor().executionDefinitionStale).toBe(true));
+    expect(host.api.listWorkflowVersions).not.toHaveBeenCalled();
+  });
+
+  it('stays stale when no listed definition carries the run hash', async () => {
+    host.search = '?exec=exec-6';
+    host.api.getExecution.mockResolvedValue({
+      executionId: 'exec-6',
+      status: 'success',
+      workflowId: 'wf-1',
+      definitionHash: 'hash-missing',
+    });
+    host.api.listWorkflowVersions.mockResolvedValue({ list: [versionRow], total: 1 });
+
+    await mounted();
+
+    await waitFor(() => expect(editor().selectedExecution?.executionId).toBe('exec-6'));
+    await waitFor(() => expect(editor().executionDefinitionStale).toBe(true));
+    expect(host.api.getWorkflowVersion).not.toHaveBeenCalled();
+    expect(editor().executionSnapshotWorkflow?.name).toBe('Orders');
+  });
+
+  it('stays stale when the version list cannot be read', async () => {
+    host.search = '?exec=exec-7';
+    host.api.getExecution.mockResolvedValue({
+      executionId: 'exec-7',
+      status: 'success',
+      workflowId: 'wf-1',
+      definitionHash: 'hash-current',
+    });
+    host.api.listWorkflowVersions.mockRejectedValue(new Error('versions gone'));
+
+    await mounted();
+
+    await waitFor(() => expect(editor().selectedExecution?.executionId).toBe('exec-7'));
+    await waitFor(() => expect(editor().executionDefinitionStale).toBe(true));
+    expect(host.api.getWorkflowVersion).not.toHaveBeenCalled();
+  });
+
+  it('does not claim the run definition while the hash is still resolving', async () => {
+    host.search = '?exec=exec-8';
+    host.api.getExecution.mockResolvedValue({
+      executionId: 'exec-8',
+      status: 'success',
+      workflowId: 'wf-1',
+      definitionHash: 'hash-current',
+    });
+    let settle: (page: { list: unknown[]; total: number }) => void = () => {};
+    host.api.listWorkflowVersions.mockReturnValue(new Promise((resolve) => { settle = resolve; }));
+
+    await mounted();
+    await waitFor(() => expect(editor().selectedExecution?.executionId).toBe('exec-8'));
+
+    expect(editor().executionDefinitionStale).toBe(true);
+
+    await act(async () => {
+      settle({ list: [{ ...versionRow, definitionHash: 'hash-current', current: true, archived: false }], total: 1 });
+    });
+    await waitFor(() => expect(editor().executionDefinitionStale).toBe(false));
+  });
+
+  it('does not present unsaved edits as the run definition on a current-row hit', async () => {
+    await mounted();
+    // Edit mode, then an unsaved edit before opening 运行记录: the page keeps
+    // the dirty draft, which is not what the registry serves.
+    act(() => editor().onChange?.({ ...stored, name: 'Draft edits' }));
+    host.api.getExecution.mockResolvedValue({
+      executionId: 'exec-9',
+      status: 'success',
+      workflowId: 'wf-1',
+      definitionHash: 'hash-current',
+    });
+    host.api.listWorkflowVersions.mockResolvedValue({
+      list: [{ ...versionRow, definitionHash: 'hash-current', current: true, archived: false }],
+      total: 1,
+    });
+
+    await act(async () => editor().onModeChange?.('runs'));
+    await act(async () => editor().onSelectExecution?.('exec-9'));
+
+    await waitFor(() => expect(editor().selectedExecution?.executionId).toBe('exec-9'));
     await waitFor(() => expect(editor().executionDefinitionStale).toBe(true));
     expect(host.api.getWorkflowVersion).not.toHaveBeenCalled();
   });
@@ -1768,8 +1904,9 @@ describe('run records mode (§6.8)', () => {
         executionId: 'exec-1',
         status: 'running',
         workflowId: 'wf-1',
-        workflowVersion: '3',
+        definitionHash: 'hash-v3',
       });
+      host.api.listWorkflowVersions.mockResolvedValue({ list: [versionRow], total: 1 });
       host.api.getWorkflowVersion.mockResolvedValue({ workflow: { ...stored, name: 'Orders v3', id: undefined } });
 
       await act(async () => editor().onModeChange?.('runs'));

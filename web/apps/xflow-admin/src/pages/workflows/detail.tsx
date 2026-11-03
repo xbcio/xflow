@@ -754,34 +754,71 @@ export default function WorkflowDetailPage() {
     };
   }, [api, message, mode, replaceExec, reportForbidden, selectedExecutionId]);
 
-  // §6.8 snapshot definition: replay the run's captured workflow_version. An
-  // execution recorded before versions were stamped (or one whose version the
-  // server cannot resolve) falls back to the current definition, and the status
-  // bar says the run's version was not obtained instead of claiming it is the
-  // run's version.
+  // §6.8 snapshot definition: replay the definition the run executed. The
+  // version label is not an identity: the same version can be re-published in
+  // place without archiving, so matching the label would replay the rewritten
+  // definition while still calling it the run's. The execution records the
+  // registry definition hash instead, and the version list is matched on it:
+  //   - no recorded workflow id or hash, or a run attributed to another
+  //     workflow: unconfirmable here, fall back to the current definition;
+  //   - a matching current row: the live record is the run's definition, so the
+  //     already-loaded definition is used (GET .../versions/ would 404 when the
+  //     current row's label is empty);
+  //   - a matching archived row: read that version;
+  //   - no match or a failed read: fall back to the current definition.
+  // The status bar stays on its stale copy until the match is confirmed, so a
+  // slow lookup never claims a definition it has not verified.
   const selectedDetailReady = selectedExecution?.executionId === selectedExecutionId;
-  const snapshotVersion = selectedDetailReady ? selectedExecution?.workflowVersion : undefined;
   const snapshotWorkflowId = selectedDetailReady ? selectedExecution?.workflowId : undefined;
+  const snapshotDefinitionHash = selectedDetailReady ? selectedExecution?.definitionHash : undefined;
   useEffect(() => {
-    if (mode !== 'runs' || !selectedExecutionId || !selectedDetailReady) return undefined;
-    if (!snapshotVersion) {
-      setSnapshotWorkflow(workflowRef.current);
+    if (mode !== 'runs' || !selectedExecutionId) return undefined;
+    if (!selectedDetailReady) {
       setSnapshotStale(true);
       return undefined;
     }
+    const fallBack = () => {
+      setSnapshotWorkflow(workflowRef.current);
+      setSnapshotStale(true);
+    };
+    if (!snapshotWorkflowId || !snapshotDefinitionHash || snapshotWorkflowId !== workflowId) {
+      fallBack();
+      return undefined;
+    }
     let cancelled = false;
-    setSnapshotStale(false);
-    api.getWorkflowVersion(snapshotWorkflowId || workflowId, snapshotVersion).then(
-      (loaded) => {
-        if (!cancelled) setSnapshotWorkflow({ ...loaded.workflow, id: workflowId });
-      },
-      (error: unknown) => {
+    setSnapshotStale(true);
+    void (async () => {
+      try {
+        const page = await api.listWorkflowVersions(snapshotWorkflowId, { pageSize: 200 });
+        if (cancelled) return;
+        const match = page.list.find((row) => row.definitionHash === snapshotDefinitionHash);
+        if (!match) {
+          fallBack();
+          return;
+        }
+        if (match.current) {
+          // A current-row match confirms the run used the live record. The
+          // editor's value may still be an unsaved draft (or a 查看 archived
+          // version), which is not what the registry serves, so only a
+          // persisted definition may be presented as the run's.
+          if (JSON.stringify(workflowRef.current) !== persistedRef.current) {
+            fallBack();
+            return;
+          }
+          setSnapshotWorkflow(workflowRef.current);
+          setSnapshotStale(false);
+          return;
+        }
+        const loaded = await api.getWorkflowVersion(snapshotWorkflowId, match.version);
+        if (cancelled) return;
+        setSnapshotWorkflow({ ...loaded.workflow, id: workflowId });
+        setSnapshotStale(false);
+      } catch (error) {
         if (cancelled) return;
         reportForbidden(error);
-        setSnapshotWorkflow(workflowRef.current);
-        setSnapshotStale(true);
-      },
-    );
+        fallBack();
+      }
+    })();
     return () => {
       cancelled = true;
     };
@@ -791,7 +828,7 @@ export default function WorkflowDetailPage() {
     reportForbidden,
     selectedDetailReady,
     selectedExecutionId,
-    snapshotVersion,
+    snapshotDefinitionHash,
     snapshotWorkflowId,
     workflowId,
   ]);
