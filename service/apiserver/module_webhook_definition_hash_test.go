@@ -2,8 +2,10 @@ package apiserver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -12,15 +14,22 @@ import (
 	"github.com/xbcio/xflow/engine"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/service/control"
+	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/store"
 	"github.com/xbcio/xflow/store/memstore"
 	"github.com/xbcio/xflow/types"
 )
 
+// webhookDetailToken authenticates only the inspect request in the hash test;
+// the webhook route itself is authenticated by its HMAC signature, never by a
+// principal.
+const webhookDetailToken = "tok-webhook-detail"
+
 // seedCaptureState records the entry-admission request the engine hands to the
-// store. The in-memory entry-admission backend does not persist the definition
-// hash itself, so the request is the observable seam on this route: it is what
-// a hash-aware backend would write onto the execution.
+// store, so a test can assert the request itself carries the registry hash. The
+// execution detail is asserted separately, from the backend's persisted
+// snapshot, so a request that reaches the store but never reaches the record
+// still fails.
 type seedCaptureState struct {
 	engine.StateStore
 
@@ -80,10 +89,15 @@ func newWebhookSeedCaptureServer(t *testing.T) (*APIServer, store.Supplies, *see
 	}
 	supplies := memstore.New()
 	srv, err := New(Config{
-		PrincipalAuth: staticPrincipalAuth{err: errors.New("no principal")},
-		Authorizer:    ScopeAuthorizer{},
-		AuditSink:     NewInMemoryAuditSink(),
-		Supplies:      supplies,
+		// The webhook route sits outside the authz wrapper, so this principal
+		// only has to read the execution detail created by the seed.
+		PrincipalAuth: NewBearerPrincipalAuthMulti([]TokenPrincipalMapping{{
+			Token: webhookDetailToken, Subject: "op-webhook-detail",
+			Namespace: string(namespace.Default), Scopes: []string{"execution"},
+		}}),
+		Authorizer: ScopeAuthorizer{},
+		AuditSink:  NewInMemoryAuditSink(),
+		Supplies:   supplies,
 	}, WithControlPlane(cp))
 	if err != nil {
 		t.Fatalf("apiserver.New: %v", err)
@@ -93,8 +107,9 @@ func newWebhookSeedCaptureServer(t *testing.T) (*APIServer, store.Supplies, *see
 
 // TestWebhookEntrySeedsTheRegistryDefinitionHash pins that the server-hosted
 // webhook route carries the hash of the registry record it resolved into the
-// entry admission. The hash is copied from that record — the route has no
-// execution in hand and must not derive one.
+// entry admission, and that the admitted execution's detail reports that same
+// hash under the wire name `definition_hash`. The hash is copied from that
+// record — the route has no execution in hand and must not derive one.
 func TestWebhookEntrySeedsTheRegistryDefinitionHash(t *testing.T) {
 	srv, supplies, provider := newWebhookSeedCaptureServer(t)
 	putWebhookSecret(t, supplies, "hook-secret", webhookTestSecret)
@@ -116,6 +131,13 @@ func TestWebhookEntrySeedsTheRegistryDefinitionHash(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d (%s), want 200", recorder.Code, recorder.Body.String())
 	}
+	var seedResp protocol.SeedExecutionResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &seedResp); err != nil {
+		t.Fatalf("decode seed response %q: %v", recorder.Body.String(), err)
+	}
+	if seedResp.ExecutionID == "" {
+		t.Fatal("no execution id returned; the caller cannot correlate the admission")
+	}
 
 	seed := provider.state.lastSeed(t)
 	if seed.WorkflowID != id {
@@ -123,6 +145,17 @@ func TestWebhookEntrySeedsTheRegistryDefinitionHash(t *testing.T) {
 	}
 	if seed.DefinitionHash != rec.DefinitionHash {
 		t.Fatalf("seed definition hash = %q, want the registry record's %q", seed.DefinitionHash, rec.DefinitionHash)
+	}
+
+	// The end-to-end half: the admission's own record must expose the hash to
+	// the detail API under the documented JSON name. Reading it off the wire
+	// catches a dropped field in the backend copy and a wrong json tag at once.
+	httpSrv := httptest.NewServer(srv.Handler())
+	defer httpSrv.Close()
+	data := getExecutionDetailData(t, httpSrv.URL, webhookDetailToken, types.ExecutionID(seedResp.ExecutionID))
+	got, _ := data["definition_hash"].(string)
+	if got != rec.DefinitionHash {
+		t.Fatalf("execution detail definition_hash = %q, want the seeded record's %q", got, rec.DefinitionHash)
 	}
 }
 
