@@ -85,6 +85,7 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 				Status:          types.ExecutionStatusRunning,
 				WorkflowID:      "wf-01H8XG",
 				WorkflowVersion: "v7",
+				DefinitionHash:  "runtime-sha256:9f2c",
 				CreatedAt:       &now,
 				UpdatedAt:       &now,
 				Nodes: []engine.NodeDetail{

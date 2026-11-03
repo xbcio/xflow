@@ -5283,6 +5283,24 @@ components:
             snapshot with `GET /v1/workflows/{id}/versions/{version}`.
             Absent when there is no recorded identity or the definition
             declares no version.
+        definition_hash:
+          type: string
+          description: |
+            The definition hash the workflow registry recorded for the record
+            this execution was submitted from, copied verbatim at submission
+            (never recomputed from the executed graph). A client matches it
+            against the `definition_hash` of the workflow's version list to
+            recover the exact definition revision that ran.
+            Absent when the submission had no registry record (an inline
+            definition), or on executions recorded before the field existed.
+            A missing value — or one that matches no row of the version list —
+            means the run's definition CANNOT BE CONFIRMED; it does not mean
+            the definition changed. The registry may upgrade a stored hash's
+            format in place during reconciliation (for example from
+            `sha256:` to `runtime-sha256:`), so an old execution's recorded
+            hash can legitimately differ from every current row. Clients must
+            treat a mismatch as unknown and fall back to the current
+            definition rather than declaring the execution stale.
         trace_id:
           type: string
           description: |
