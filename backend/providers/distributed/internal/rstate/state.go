@@ -683,6 +683,7 @@ func createdExecutionKeys(t namespace.Namespace, id types.ExecutionID, g *graph.
 		// reader that still finds the execution cannot name or time what it ran.
 		execKey(t, id, "workflow_id"),
 		execKey(t, id, "workflow_version"),
+		execKey(t, id, "definition_hash"),
 		execKey(t, id, "created_at_ms"),
 		execKey(t, id, "updated_at_ms"),
 		// The absolute deadline of the execution's time budget; written once with

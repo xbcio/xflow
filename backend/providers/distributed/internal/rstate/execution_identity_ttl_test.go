@@ -31,7 +31,7 @@ func TestExtendExecTTLKeepsWorkflowIdentity(t *testing.T) {
 	id := types.ExecutionID("exec-suspend-identity")
 	if err := state.CreateExecution(ctx, &engine.ExecutionSnapshot{
 		ID: id, Status: types.ExecutionStatusRunning, Graph: testDurableGraph(),
-		WorkflowID: "wf-suspend", WorkflowVersion: "v9",
+		WorkflowID: "wf-suspend", WorkflowVersion: "v9", DefinitionHash: "sha256:suspend",
 	}); err != nil {
 		t.Fatalf("CreateExecution: %v", err)
 	}
@@ -48,6 +48,11 @@ func TestExtendExecTTLKeepsWorkflowIdentity(t *testing.T) {
 		t.Fatalf("identity after the renewed retention = (%q, %q), want (%q, %q): "+
 			"extendExecTTL did not renew the identity keys", snap.WorkflowID,
 			snap.WorkflowVersion, "wf-suspend", "v9")
+	}
+	if snap.DefinitionHash != "sha256:suspend" {
+		t.Fatalf("DefinitionHash after the renewed retention = %q, want %q: "+
+			"extendExecTTL did not renew the definition identity key",
+			snap.DefinitionHash, "sha256:suspend")
 	}
 	// The execution's clock is written once with the execution too, so a wait
 	// longer than the creation retention must renew it here or a resumed
@@ -67,6 +72,7 @@ func TestWorkflowIdentityInTransientKeys(t *testing.T) {
 	want := []string{
 		execKey(namespace.Default, id, "workflow_id"),
 		execKey(namespace.Default, id, "workflow_version"),
+		execKey(namespace.Default, id, "definition_hash"),
 	}
 	for _, w := range want {
 		found := false

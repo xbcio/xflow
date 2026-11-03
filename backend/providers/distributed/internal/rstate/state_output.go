@@ -171,6 +171,7 @@ func (s *Store) extendExecTTL(ctx context.Context, id types.ExecutionID, nodeNam
 	// unattributed.
 	pipe.Expire(ctx, execKey(t, id, "workflow_id"), ttl)
 	pipe.Expire(ctx, execKey(t, id, "workflow_version"), ttl)
+	pipe.Expire(ctx, execKey(t, id, "definition_hash"), ttl)
 	// The execution's clock is written once with the execution too, and must
 	// survive a wait that outlives the creation retention for the same reason
 	// the identity must: a resumed execution whose status lives on but whose

@@ -111,6 +111,9 @@ func TestCreatedExecutionKeyInventoryCoverage(t *testing.T) {
 			name: "all-optional",
 			mutate: func(e *engine.ExecutionSnapshot) {
 				e.Namespace = "default"
+				e.WorkflowID = "wf-inventory"
+				e.WorkflowVersion = "v3"
+				e.DefinitionHash = "sha256:inventory"
 				e.Params = map[string]any{"k": "v"}
 				e.Runtime = &types.Runtime{Vars: map[string]any{"r": 1}}
 				e.Scope = map[string]any{"$item": "x"}
@@ -126,7 +129,8 @@ func TestCreatedExecutionKeyInventoryCoverage(t *testing.T) {
 			},
 			withSkipEntry: true,
 			wantSuffixes: []string{
-				"namespace", "params", "runtime", "scope", "test_run",
+				"namespace", "workflow_id", "workflow_version", "definition_hash",
+				"params", "runtime", "scope", "test_run",
 				"trace_id", "span_id", "trace_carrier", "parent",
 				"parent_node", "depth", "rerun_from", "deadline_ms", "schedule:0",
 				"outbox:ready", "outbox:body",

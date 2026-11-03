@@ -322,6 +322,15 @@ func (s *Store) createExecution(ctx context.Context, e *engine.ExecutionSnapshot
 		pipe.Set(ctx, execKey(t, e.ID, "workflow_version"), e.WorkflowVersion, ttl)
 		keys = append(keys, execKey(t, e.ID, "workflow_version"))
 	}
+	// The definition hash recorded with that identity, alongside the id and
+	// version it belongs to. Immutable and written once with the execution:
+	// a reader that found the execution must be able to name the exact
+	// definition revision even after that definition is gone. Empty writes
+	// nothing, which reads back as "unknown", never a guess.
+	if e.DefinitionHash != "" {
+		pipe.Set(ctx, execKey(t, e.ID, "definition_hash"), e.DefinitionHash, ttl)
+		keys = append(keys, execKey(t, e.ID, "definition_hash"))
+	}
 	// Acyclic executions use these counters as the O(1) completion source of
 	// truth. Cyclic graphs retain their activation-based completion protocol.
 	// UnitCount() is used instead of NodeCount() so that grouped nodes count as
@@ -1138,6 +1147,7 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 	depthCmd := pipe.Get(ctx, execKey(t, id, "depth"))
 	workflowIDCmd := pipe.Get(ctx, execKey(t, id, "workflow_id"))
 	workflowVersionCmd := pipe.Get(ctx, execKey(t, id, "workflow_version"))
+	definitionHashCmd := pipe.Get(ctx, execKey(t, id, "definition_hash"))
 	createdAtCmd := pipe.Get(ctx, execKey(t, id, "created_at_ms"))
 	updatedAtCmd := pipe.Get(ctx, execKey(t, id, "updated_at_ms"))
 	deadlineCmd := pipe.Get(ctx, execKey(t, id, "deadline_ms"))
@@ -1272,6 +1282,15 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 	} else if err != redis.Nil {
 		return nil, fmt.Errorf("get execution workflow version %q: %w", id, err)
 	}
+	// The definition hash is the third part of the same identity snapshot. It is
+	// absent for executions recorded before the field existed and for every
+	// unattributed run, both of which read back empty rather than guessed.
+	var definitionHash string
+	if raw, err := definitionHashCmd.Result(); err == nil {
+		definitionHash = raw
+	} else if err != redis.Nil {
+		return nil, fmt.Errorf("get execution definition hash %q: %w", id, err)
+	}
 	// The execution's clock. Absent for executions created before these keys
 	// existed, which reads back as a zero time and is omitted from the inspect
 	// payload rather than guessed.
@@ -1312,6 +1331,7 @@ func (s *Store) GetExecution(ctx context.Context, id types.ExecutionID) (*engine
 		Scope:           scope,
 		WorkflowID:      types.WorkflowID(workflowID),
 		WorkflowVersion: workflowVersion,
+		DefinitionHash:  definitionHash,
 		CreatedAt:       createdAt,
 		UpdatedAt:       updatedAt,
 		Deadline:        deadline,

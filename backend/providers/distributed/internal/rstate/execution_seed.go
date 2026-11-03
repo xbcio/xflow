@@ -393,7 +393,8 @@ func (s *Store) SeedExecution(ctx context.Context, req engine.SeedExecutionReque
 	// must never find it without the origin it was created from. parent_node and
 	// depth are the sub-workflow half of the same link. The workflow identity
 	// rides along for the same reason: a seeded rerun must name the definition
-	// it runs without the definition being re-read. The registration namespace
+	// it runs without the definition being re-read, and the definition hash is
+	// the third part of that identity. The registration namespace
 	// is immutable metadata too, and the seed path is the only one a rerun
 	// takes — a rerun's dispatch resolves its sub-workflows from it. The time
 	// budget's deadline rides along too: it is immutable and, like the rest, it
@@ -410,6 +411,7 @@ func (s *Store) SeedExecution(ctx context.Context, req engine.SeedExecutionReque
 	if req.Execution.ParentID != "" || req.Execution.RerunFrom != "" ||
 		req.Execution.ParentNode != "" || req.Execution.Depth > 0 ||
 		req.Execution.WorkflowID != "" || req.Execution.WorkflowVersion != "" ||
+		req.Execution.DefinitionHash != "" ||
 		req.Execution.Namespace != "" || !req.Execution.Deadline.IsZero() {
 		linkPipe := s.rdb.TxPipeline()
 		if !req.Execution.Deadline.IsZero() {
@@ -435,6 +437,9 @@ func (s *Store) SeedExecution(ctx context.Context, req engine.SeedExecutionReque
 		}
 		if req.Execution.WorkflowVersion != "" {
 			linkPipe.Set(ctx, execKey(t, execID, "workflow_version"), req.Execution.WorkflowVersion, ttl)
+		}
+		if req.Execution.DefinitionHash != "" {
+			linkPipe.Set(ctx, execKey(t, execID, "definition_hash"), req.Execution.DefinitionHash, ttl)
 		}
 		if _, err := linkPipe.Exec(ctx); err != nil {
 			return engine.SeedExecutionResponse{}, fmt.Errorf("persist rerun origin for %q: %w", execID, err)
