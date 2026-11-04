@@ -166,6 +166,14 @@ describe("buildAntdTheme", () => {
         });
         // The 25% primary soft ring is batch A behaviour: not the opaque ring.
         expect(components.Input.activeShadow).toBe(`0 0 0 3px ${palette.primary}40`);
+        // An outlined input's idle ground is the alias token, not a component
+        // token; it must match the Select selector so neighbouring fields do
+        // not show two shades. InputNumber, DatePicker and Mentions reuse the
+        // same input variants under their own token scopes.
+        expect(components.Input.colorBgContainer).toBe(palette.field);
+        expect(components.InputNumber.colorBgContainer).toBe(palette.field);
+        expect(components.DatePicker.colorBgContainer).toBe(palette.field);
+        expect(components.Mentions.colorBgContainer).toBe(palette.field);
         expect(components.Select).toMatchObject({
           activeOutlineColor: `${palette.primary}40`,
           optionSelectedFontWeight: 600,

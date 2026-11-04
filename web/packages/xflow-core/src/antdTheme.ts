@@ -109,12 +109,24 @@ export interface SharedAntdComponents {
     headerBg: string;
     headerPaddingSM: number;
   };
+  DatePicker: {
+    colorBgContainer: string;
+  };
   Input: {
     activeBg: string;
     activeBorderColor: string;
     activeShadow: string;
+    // Idle ground: AntD paints the outlined input with the alias token while
+    // hover/focus take the component tokens above.
+    colorBgContainer: string;
     hoverBg: string;
     hoverBorderColor: string;
+  };
+  InputNumber: {
+    colorBgContainer: string;
+  };
+  Mentions: {
+    colorBgContainer: string;
   };
   Menu: {
     dangerItemColor: string;
@@ -363,13 +375,24 @@ export function buildAntdTheme(mode: Appearance, options: AntdThemeOptions = {})
         headerBg: palette.surfaceSunken,
         headerPaddingSM: 10,
       },
+      // Picker renders the shared outlined-input variants, whose idle ground
+      // reads this alias token; downstream fields match Select's selector.
+      DatePicker: { colorBgContainer: palette.field },
       Input: {
         activeBg: palette.field,
         activeBorderColor: palette.primary,
         activeShadow: `0 0 0 3px ${softRing}`,
+        // AntD's outlined input takes its idle ground from the alias token, so
+        // a component-scoped override is the only way to match the Select
+        // selector; TextArea, Password and Search share this token scope.
+        colorBgContainer: palette.field,
         hoverBg: palette.field,
         hoverBorderColor: palette.primary,
       },
+      // InputNumber and Mentions reuse the input variants under their own
+      // component token scopes; both need the same idle ground.
+      InputNumber: { colorBgContainer: palette.field },
+      Mentions: { colorBgContainer: palette.field },
       Menu: menuDangerTokens(palette),
       Modal: {
         borderRadiusLG: px(foundationTokens.radiusLg),
