@@ -58,6 +58,8 @@ const messages: Record<string, string> = {
   "Harvest": "采集",
   "Limits": "限制",
   "Request": "请求",
+  "Headers & Query": "请求头与查询",
+  "Routing": "路由",
   "Advanced": "高级",
   "Source": "来源",
   "Environment": "运行环境",
@@ -67,6 +69,8 @@ const messages: Record<string, string> = {
   // ---------------------------------------------------------- approval
   "Approvers": "审批人",
   "List of approver identifiers": "审批人标识列表",
+  "Approval Mode": "审批方式",
+  "Approval Timeout": "审批超时",
   "Mode": "模式",
   "Approval mode: \"any\", \"all\", or \"sequential\"": "审批模式：\"any\"、\"all\" 或 \"sequential\"",
   "Any": "任一",
@@ -115,6 +119,7 @@ const messages: Record<string, string> = {
   "Max rows to return for select": "select 返回的最大行数",
 
   // ---------------------------------------------------------- function
+  "Fill in one of the two; Code is ignored when Function Name is set": "二选一，填了函数名时忽略代码",
   "Function Name": "函数名",
   "Name of a pre-registered Go function to call": "要调用的预注册 Go 函数名",
   "Code": "代码",
@@ -428,6 +433,7 @@ const messages: Record<string, string> = {
   "Quorum": "法定数量",
   "Number of signals required to proceed; 0 or unset means all (multi-signal mode)": "继续执行所需的信号数；0 或不设置表示全部（多信号模式）",
   "Maximum wait duration before routing to timeout port (e.g. \"48h\")": "转到 timeout 端口前的最长等待时间（如 \"48h\"）",
+  "Wait Timeout": "等待超时",
   "Duration": "时长",
   "Fixed wait duration (timer mode, e.g. \"5m\")": "固定等待时长（timer 模式，如 \"5m\"）",
   "Until": "截止时间",

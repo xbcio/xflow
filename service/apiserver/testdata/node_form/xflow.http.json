@@ -49,6 +49,11 @@
       "display_name": "Request"
     },
     {
+      "key": "headers",
+      "display_name": "Headers \u0026 Query",
+      "collapsed": true
+    },
+    {
       "key": "advanced",
       "display_name": "Advanced",
       "collapsed": true
@@ -104,30 +109,6 @@
       ]
     },
     {
-      "name": "mode",
-      "path": "/parameters/mode",
-      "label": "Mode",
-      "type": "string",
-      "fallback": "json",
-      "help": "Payload encoding: \"json\" (default, body is marshalled and the response parsed) or \"raw\" (body in/out as opaque base64 bytes, every status is a result)",
-      "group": "request",
-      "expression": {
-        "mode": "template"
-      },
-      "options": [
-        {
-          "value": "json",
-          "label": "JSON",
-          "description": "Body marshalled to JSON; response parsed; 4xx is a node error"
-        },
-        {
-          "value": "raw",
-          "label": "Raw",
-          "description": "Body in and out as base64 bytes; every status is a result"
-        }
-      ]
-    },
-    {
       "name": "authentication",
       "path": "/parameters/authentication",
       "label": "Authentication",
@@ -158,29 +139,13 @@
       }
     },
     {
-      "name": "body_b64",
-      "path": "/parameters/body_b64",
-      "label": "Raw Body (base64)",
-      "type": "string",
-      "widget": "base64",
-      "help": "Request body as base64-encoded bytes, sent verbatim with no Content-Type added. Only read when mode=raw",
-      "group": "request",
-      "expression": {
-        "mode": "template"
-      },
-      "visible_when": {
-        "param": "mode",
-        "eq": "raw"
-      }
-    },
-    {
       "name": "headers",
       "path": "/parameters/headers",
       "label": "Headers",
       "type": "object",
       "widget": "key-value",
       "help": "Request headers",
-      "group": "request",
+      "group": "headers",
       "expression": {
         "mode": "template"
       }
@@ -192,9 +157,49 @@
       "type": "object",
       "widget": "key-value",
       "help": "URL query parameters",
-      "group": "request",
+      "group": "headers",
       "expression": {
         "mode": "template"
+      }
+    },
+    {
+      "name": "mode",
+      "path": "/parameters/mode",
+      "label": "Mode",
+      "type": "string",
+      "fallback": "json",
+      "help": "Payload encoding: \"json\" (default, body is marshalled and the response parsed) or \"raw\" (body in/out as opaque base64 bytes, every status is a result)",
+      "group": "advanced",
+      "expression": {
+        "mode": "template"
+      },
+      "options": [
+        {
+          "value": "json",
+          "label": "JSON",
+          "description": "Body marshalled to JSON; response parsed; 4xx is a node error"
+        },
+        {
+          "value": "raw",
+          "label": "Raw",
+          "description": "Body in and out as base64 bytes; every status is a result"
+        }
+      ]
+    },
+    {
+      "name": "body_b64",
+      "path": "/parameters/body_b64",
+      "label": "Raw Body (base64)",
+      "type": "string",
+      "widget": "base64",
+      "help": "Request body as base64-encoded bytes, sent verbatim with no Content-Type added. Only read when mode=raw",
+      "group": "advanced",
+      "expression": {
+        "mode": "template"
+      },
+      "visible_when": {
+        "param": "mode",
+        "eq": "raw"
       }
     },
     {

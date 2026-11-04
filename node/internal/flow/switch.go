@@ -63,6 +63,7 @@ func (n *SwitchNode) Descriptor() types.Descriptor {
 		CardSummary: []string{"rules", "expression"},
 		Params: []types.ParamSpec{
 			{Name: "mode", DisplayName: "Mode", Type: types.ParamString, Required: true, Description: "Routing mode: \"rules\" or \"expression\"",
+				Group: "routing",
 				Enum: []types.EnumOption{
 					{Value: "rules", DisplayName: "Rules", Description: "First rule whose condition holds picks the output"},
 					{Value: "expression", DisplayName: "Expression", Description: "Expression result is the output port name"},
@@ -74,9 +75,10 @@ func (n *SwitchNode) Descriptor() types.Descriptor {
 			// not part of any workflow hash, and no Default is involved, so
 			// relaxing it changes no registered workflow.
 			{Name: "outputs", DisplayName: "Outputs", Type: types.ParamArray, Required: false, Description: "List of output port names (dynamic)",
-				Item: nodeinternal.StringItem()},
+				Group: "routing", Item: nodeinternal.StringItem()},
 			// Execute treats an empty mode as rules, hence the nil.
 			{Name: "rules", DisplayName: "Rules", Type: types.ParamArray, Required: false, Description: "Rule list for rules mode",
+				Group:       "routing",
 				VisibleWhen: nodeinternal.CondIn("mode", "rules", nil),
 				Item: &types.ParamSpec{Type: types.ParamObject, Fields: []types.ParamSpec{
 					{Name: "condition", DisplayName: "Condition", Type: types.ParamString, Description: "Boolean expression; a rule with an empty condition is skipped",
@@ -85,10 +87,13 @@ func (n *SwitchNode) Descriptor() types.Descriptor {
 						Widget: nodeinternal.WidgetPortSelect},
 				}}},
 			{Name: "expression", DisplayName: "Expression", Type: types.ParamString, Required: false, Description: "Expression for expression mode",
-				Widget: nodeinternal.WidgetExpression, Constraints: nodeinternal.Format(nodeinternal.FormatExpression),
+				Group: "routing", Widget: nodeinternal.WidgetExpression, Constraints: nodeinternal.Format(nodeinternal.FormatExpression),
 				VisibleWhen: nodeinternal.CondEq("mode", "expression"), RequiredWhen: nodeinternal.CondEq("mode", "expression")},
 			{Name: "default_output", DisplayName: "Default Output", Type: types.ParamString, Required: false, Description: "Port name used when no rule matches",
-				Widget: nodeinternal.WidgetPortSelect},
+				Group: "routing", Widget: nodeinternal.WidgetPortSelect},
+		},
+		Groups: []types.GroupSpec{
+			{Key: "routing", DisplayName: "Routing"},
 		},
 		Inputs:             []types.PortSpec{{Name: "main", DisplayName: "Main"}},
 		Outputs:            []types.PortSpec{},

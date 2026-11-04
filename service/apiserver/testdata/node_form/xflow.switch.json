@@ -40,6 +40,12 @@
       "from": "/parameters/outputs"
     }
   },
+  "groups": [
+    {
+      "key": "routing",
+      "display_name": "Routing"
+    }
+  ],
   "fields": [
     {
       "name": "mode",
@@ -49,6 +55,7 @@
       "required": true,
       "fallback": "rules",
       "help": "Routing mode: \"rules\" or \"expression\"",
+      "group": "routing",
       "expression": {
         "mode": "template"
       },
@@ -71,6 +78,7 @@
       "label": "Outputs",
       "type": "array",
       "help": "List of output port names (dynamic)",
+      "group": "routing",
       "expression": {
         "mode": "template"
       },
@@ -87,6 +95,7 @@
       "label": "Rules",
       "type": "array",
       "help": "Rule list for rules mode",
+      "group": "routing",
       "expression": {
         "mode": "template"
       },
@@ -145,6 +154,7 @@
         "eq": "expression"
       },
       "help": "Expression for expression mode",
+      "group": "routing",
       "expression": {
         "mode": "pure"
       },
@@ -167,6 +177,7 @@
       "widget": "port-select",
       "fallback": "default",
       "help": "Port name used when no rule matches",
+      "group": "routing",
       "expression": {
         "mode": "template"
       }

@@ -100,7 +100,7 @@ exports[`A6-generated node-types fixture > xflow.approval@1 snapshot 1`] = `
             "type": "string",
           },
           "fxToggle": true,
-          "label": "Mode",
+          "label": "Approval Mode",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/mode",
@@ -116,7 +116,7 @@ exports[`A6-generated node-types fixture > xflow.approval@1 snapshot 1`] = `
       "f.parameters.mode:control": {
         "props": {
           "defaultHint": "any",
-          "label": "Mode",
+          "label": "Approval Mode",
           "options": [
             {
               "description": "The first approver's decision closes the gate",
@@ -157,7 +157,7 @@ exports[`A6-generated node-types fixture > xflow.approval@1 snapshot 1`] = `
             "type": "string",
           },
           "fxToggle": true,
-          "label": "Timeout",
+          "label": "Approval Timeout",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/timeout",
@@ -172,7 +172,7 @@ exports[`A6-generated node-types fixture > xflow.approval@1 snapshot 1`] = `
       },
       "f.parameters.timeout:control": {
         "props": {
-          "label": "Timeout",
+          "label": "Approval Timeout",
           "unit": "string",
           "value": {
             "$bindState": "/parameters/timeout",
@@ -228,7 +228,8 @@ exports[`A6-generated node-types fixture > xflow.approval@1 snapshot 1`] = `
       },
       "form": {
         "children": [
-          "g.type.default",
+          "g.type.approval",
+          "g.type.advanced",
         ],
         "props": {
           "descriptionPlacement": "tooltip",
@@ -236,17 +237,27 @@ exports[`A6-generated node-types fixture > xflow.approval@1 snapshot 1`] = `
         },
         "type": "Form",
       },
-      "g.type.default": {
+      "g.type.advanced": {
+        "children": [
+          "f.parameters.force_approvers",
+        ],
+        "props": {
+          "collapsible": true,
+          "defaultCollapsed": true,
+          "title": "Advanced",
+        },
+        "type": "FieldGroup",
+      },
+      "g.type.approval": {
         "children": [
           "f.parameters.approvers",
           "f.parameters.mode",
           "f.parameters.timeout",
           "f.parameters.timeout_action",
-          "f.parameters.force_approvers",
         ],
         "props": {
           "collapsible": true,
-          "title": "参数",
+          "title": "Approval",
         },
         "type": "FieldGroup",
       },
@@ -1184,7 +1195,8 @@ exports[`A6-generated node-types fixture > xflow.function@1 snapshot 1`] = `
           },
         ],
         "children": [
-          "g.type.default",
+          "g.type.function",
+          "g.type.advanced",
         ],
         "props": {
           "descriptionPlacement": "tooltip",
@@ -1192,15 +1204,26 @@ exports[`A6-generated node-types fixture > xflow.function@1 snapshot 1`] = `
         },
         "type": "Form",
       },
-      "g.type.default": {
+      "g.type.advanced": {
         "children": [
-          "f.parameters.function_name",
-          "f.parameters.code",
           "f.parameters.params",
         ],
         "props": {
           "collapsible": true,
-          "title": "参数",
+          "defaultCollapsed": true,
+          "title": "Advanced",
+        },
+        "type": "FieldGroup",
+      },
+      "g.type.function": {
+        "children": [
+          "f.parameters.code",
+          "f.parameters.function_name",
+        ],
+        "props": {
+          "collapsible": true,
+          "description": "Fill in one of the two; Code is ignored when Function Name is set",
+          "title": "Function",
         },
         "type": "FieldGroup",
       },
@@ -1821,6 +1844,7 @@ exports[`A6-generated node-types fixture > xflow.http@1 snapshot 1`] = `
       "form": {
         "children": [
           "g.type.request",
+          "g.type.headers",
           "g.type.advanced",
         ],
         "props": {
@@ -1831,6 +1855,8 @@ exports[`A6-generated node-types fixture > xflow.http@1 snapshot 1`] = `
       },
       "g.type.advanced": {
         "children": [
+          "f.parameters.mode",
+          "f.parameters.body_b64",
           "f.parameters.options",
         ],
         "props": {
@@ -1840,16 +1866,24 @@ exports[`A6-generated node-types fixture > xflow.http@1 snapshot 1`] = `
         },
         "type": "FieldGroup",
       },
+      "g.type.headers": {
+        "children": [
+          "f.parameters.headers",
+          "f.parameters.query",
+        ],
+        "props": {
+          "collapsible": true,
+          "defaultCollapsed": true,
+          "title": "Headers & Query",
+        },
+        "type": "FieldGroup",
+      },
       "g.type.request": {
         "children": [
           "f.parameters.method",
           "f.parameters.url",
-          "f.parameters.mode",
           "f.parameters.authentication",
           "f.parameters.body",
-          "f.parameters.body_b64",
-          "f.parameters.headers",
-          "f.parameters.query",
         ],
         "props": {
           "collapsible": true,
@@ -2238,7 +2272,7 @@ exports[`A6-generated node-types fixture > xflow.merge@1 snapshot 1`] = `
       },
       "form": {
         "children": [
-          "g.type.default",
+          "g.type.merge",
         ],
         "props": {
           "descriptionPlacement": "tooltip",
@@ -2246,14 +2280,14 @@ exports[`A6-generated node-types fixture > xflow.merge@1 snapshot 1`] = `
         },
         "type": "Form",
       },
-      "g.type.default": {
+      "g.type.merge": {
         "children": [
           "f.parameters.mode",
           "f.parameters.on_others",
         ],
         "props": {
           "collapsible": true,
-          "title": "参数",
+          "title": "Merge",
         },
         "type": "FieldGroup",
       },
@@ -3317,7 +3351,7 @@ exports[`A6-generated node-types fixture > xflow.switch@1 snapshot 1`] = `
       },
       "form": {
         "children": [
-          "g.type.default",
+          "g.type.routing",
         ],
         "props": {
           "descriptionPlacement": "tooltip",
@@ -3325,7 +3359,7 @@ exports[`A6-generated node-types fixture > xflow.switch@1 snapshot 1`] = `
         },
         "type": "Form",
       },
-      "g.type.default": {
+      "g.type.routing": {
         "children": [
           "f.parameters.mode",
           "f.parameters.outputs",
@@ -3335,7 +3369,7 @@ exports[`A6-generated node-types fixture > xflow.switch@1 snapshot 1`] = `
         ],
         "props": {
           "collapsible": true,
-          "title": "参数",
+          "title": "Routing",
         },
         "type": "FieldGroup",
       },
@@ -7050,7 +7084,7 @@ exports[`A6-generated node-types fixture > xflow.wait@1 snapshot 1`] = `
             "type": "string",
           },
           "fxToggle": true,
-          "label": "Timeout",
+          "label": "Wait Timeout",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/timeout",
@@ -7065,7 +7099,7 @@ exports[`A6-generated node-types fixture > xflow.wait@1 snapshot 1`] = `
       },
       "f.parameters.timeout:control": {
         "props": {
-          "label": "Timeout",
+          "label": "Wait Timeout",
           "unit": "string",
           "value": {
             "$bindState": "/parameters/timeout",
@@ -7158,7 +7192,7 @@ exports[`A6-generated node-types fixture > xflow.wait@1 snapshot 1`] = `
       },
       "form": {
         "children": [
-          "g.type.default",
+          "g.type.wait",
         ],
         "props": {
           "descriptionPlacement": "tooltip",
@@ -7166,19 +7200,19 @@ exports[`A6-generated node-types fixture > xflow.wait@1 snapshot 1`] = `
         },
         "type": "Form",
       },
-      "g.type.default": {
+      "g.type.wait": {
         "children": [
           "f.parameters.mode",
           "f.parameters.signal_name",
           "f.parameters.signals",
           "f.parameters.quorum",
-          "f.parameters.timeout",
           "f.parameters.duration",
           "f.parameters.until",
+          "f.parameters.timeout",
         ],
         "props": {
           "collapsible": true,
-          "title": "参数",
+          "title": "Wait",
         },
         "type": "FieldGroup",
       },

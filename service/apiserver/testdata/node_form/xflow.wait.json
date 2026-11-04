@@ -43,6 +43,12 @@
       }
     ]
   },
+  "groups": [
+    {
+      "key": "wait",
+      "display_name": "Wait"
+    }
+  ],
   "fields": [
     {
       "name": "mode",
@@ -51,6 +57,7 @@
       "type": "string",
       "default": "signal",
       "help": "Trigger mode: \"signal\" (default) or \"timer\"",
+      "group": "wait",
       "expression": {
         "mode": "template"
       },
@@ -73,6 +80,7 @@
       "label": "Signal Name",
       "type": "string",
       "help": "Name of the external signal to wait for (signal mode)",
+      "group": "wait",
       "expression": {
         "mode": "template"
       },
@@ -90,6 +98,7 @@
       "label": "Signal Names",
       "type": "array",
       "help": "List of signal names to wait for (multi-signal mode)",
+      "group": "wait",
       "expression": {
         "mode": "template"
       },
@@ -113,6 +122,7 @@
       "label": "Quorum",
       "type": "number",
       "help": "Number of signals required to proceed; 0 or unset means all (multi-signal mode)",
+      "group": "wait",
       "expression": {
         "mode": "template"
       },
@@ -133,23 +143,6 @@
       }
     },
     {
-      "name": "timeout",
-      "path": "/parameters/timeout",
-      "label": "Timeout",
-      "type": "string",
-      "widget": "duration",
-      "help": "Maximum wait duration before routing to timeout port (e.g. \"48h\")",
-      "expression": {
-        "mode": "template"
-      },
-      "rules": [
-        {
-          "type": "format",
-          "format": "duration"
-        }
-      ]
-    },
-    {
       "name": "duration",
       "path": "/parameters/duration",
       "label": "Duration",
@@ -168,6 +161,7 @@
         ]
       },
       "help": "Fixed wait duration (timer mode, e.g. \"5m\")",
+      "group": "wait",
       "expression": {
         "mode": "template"
       },
@@ -201,6 +195,7 @@
         ]
       },
       "help": "Absolute time expression to wait until (timer mode)",
+      "group": "wait",
       "expression": {
         "mode": "template"
       },
@@ -208,6 +203,24 @@
         "param": "mode",
         "eq": "timer"
       }
+    },
+    {
+      "name": "timeout",
+      "path": "/parameters/timeout",
+      "label": "Wait Timeout",
+      "type": "string",
+      "widget": "duration",
+      "help": "Maximum wait duration before routing to timeout port (e.g. \"48h\")",
+      "group": "wait",
+      "expression": {
+        "mode": "template"
+      },
+      "rules": [
+        {
+          "type": "format",
+          "format": "duration"
+        }
+      ]
     }
   ]
 }

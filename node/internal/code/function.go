@@ -48,10 +48,16 @@ func (n *FunctionNode) Descriptor() types.Descriptor {
 		}},
 		CardSummary: []string{"function_name", "code"},
 		Params: []types.ParamSpec{
-			{Name: "function_name", DisplayName: "Function Name", Type: types.ParamString, Required: false, Description: "Name of a pre-registered Go function to call"},
 			{Name: "code", DisplayName: "Code", Type: types.ParamString, Required: false, Description: "Inline Expr expression to evaluate; ignored when function_name is set",
-				Widget: nodeinternal.WidgetExpression, Constraints: nodeinternal.Format(nodeinternal.FormatExpression)},
-			{Name: "params", DisplayName: "Params", Type: types.ParamObject, Required: false, Description: "Extra parameters passed to the function or expression"},
+				Group: "function", Widget: nodeinternal.WidgetExpression, Constraints: nodeinternal.Format(nodeinternal.FormatExpression)},
+			{Name: "function_name", DisplayName: "Function Name", Type: types.ParamString, Required: false, Description: "Name of a pre-registered Go function to call",
+				Group: "function"},
+			{Name: "params", DisplayName: "Params", Type: types.ParamObject, Required: false, Description: "Extra parameters passed to the function or expression",
+				Group: "advanced"},
+		},
+		Groups: []types.GroupSpec{
+			{Key: "function", DisplayName: "Function", Description: "Fill in one of the two; Code is ignored when Function Name is set"},
+			{Key: "advanced", DisplayName: "Advanced", Collapsed: true},
 		},
 		// at_least, not exactly: Execute accepts both and prefers
 		// function_name, so exactly would reject a configuration that runs.

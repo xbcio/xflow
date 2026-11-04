@@ -37,6 +37,7 @@ func (n *MergeNode) Descriptor() types.Descriptor {
 		CardSummary: []string{"mode", "on_others"},
 		Params: []types.ParamSpec{
 			{Name: "mode", DisplayName: "Mode", Type: types.ParamString, Required: true, Description: "Merge strategy: \"wait_all\" or \"wait_any\"",
+				Group: "merge",
 				Enum: []types.EnumOption{
 					{Value: string(nodeinternal.MergeWaitAll), DisplayName: "Wait All", Description: "Wait for every upstream branch"},
 					{Value: string(nodeinternal.MergeWaitAny), DisplayName: "Wait Any", Description: "Take the first branch to arrive"},
@@ -44,11 +45,15 @@ func (n *MergeNode) Descriptor() types.Descriptor {
 			// The handler forwards on_others verbatim as _on_others; the two
 			// values are the ones DSL-SPECIFICATION.md defines.
 			{Name: "on_others", DisplayName: "On Others", Type: types.ParamString, Required: false, Default: "cancel", Description: "Action for remaining branches in wait_any mode (default: cancel)",
+				Group: "merge",
 				Enum: []types.EnumOption{
 					{Value: "cancel", DisplayName: "Cancel", Description: "Best-effort cancel of the remaining branches"},
 					{Value: "detach", DisplayName: "Detach", Description: "Let the remaining branches run and ignore their output"},
 				},
 				VisibleWhen: nodeinternal.CondEq("mode", string(nodeinternal.MergeWaitAny))},
+		},
+		Groups: []types.GroupSpec{
+			{Key: "merge", DisplayName: "Merge"},
 		},
 		Inputs:  []types.PortSpec{},
 		Outputs: []types.PortSpec{{Name: "main", DisplayName: "Main"}},
