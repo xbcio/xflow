@@ -160,9 +160,9 @@ type Config struct {
 	// The same instance is passed to control and management so newly minted
 	// pool tokens are immediately usable by enroll.
 	RunnerPools control.RunnerPoolStore
-	// RunnerInstanceIdleTTL is the heartbeat/enrollment idle window before an
-	// active pool instance enters the leader-only prune saga. Zero uses the
-	// control-plane default.
+	// RunnerInstanceIdleTTL is the heartbeat idle window before an active pool
+	// instance enters the leader-only prune saga. Zero uses the control-plane
+	// default.
 	RunnerInstanceIdleTTL time.Duration
 	// RunnerInstancePruneInterval is the leader-only prune cadence. Zero uses
 	// the control-plane default.
