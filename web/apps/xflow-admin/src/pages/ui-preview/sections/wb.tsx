@@ -6,6 +6,7 @@ import {
   DockDownIcon,
   DockMaxIcon,
   DownIcon,
+  EditIcon,
   FitIcon,
   GridIcon,
   HelpIcon,
@@ -23,12 +24,12 @@ import {
   SideRightIcon,
   SkipIcon,
   SlidersIcon,
-  ThemeIcon,
   UndoIcon,
+  UploadIcon,
   VarIcon,
   WarnIcon,
 } from '@xflow/icons';
-import { Button, Collapse, Input, Segmented, Select, Tabs } from 'antd';
+import { Button, Collapse, Input, Segmented, Select, Tabs, Tooltip } from 'antd';
 import { Fragment, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 
 import { cx } from '../components/cx';
@@ -67,6 +68,40 @@ import { COMPACT_LEFT, COMPACT_RIGHT, fitScale, FRAME_LABEL_OFFSET, RULER, canva
 import { nodeStatusMeta, typeIcon } from '../meta';
 
 const wbRun = wbRunVariant;
+
+/**
+ * Same glyph as the real editor's theme trigger (`ThemeContrastIcon` in
+ * `web/packages/xflow-editor/src/index.tsx`): a half-filled circle. AntD has no
+ * contrast glyph, and its paint bucket reads as a colour picker.
+ */
+function ThemeContrastIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 3.5v17a8.5 8.5 0 0 0 0-17z" fill="currentColor" />
+    </svg>
+  );
+}
+
+/**
+ * Topbar fold thresholds (§6.3, 2026-11-04 ruling), measured on the header
+ * itself rather than the window. The two side tracks are equal 1fr, so the
+ * right cluster's natural width sets both: header = 24 padding + 24 gaps +
+ * tools + 2 × right. Measured at 1600 the full right cluster is 530, at 1280
+ * the folded one is 403. At 1280 the header is 1230, so it sits in tier 1
+ * (matching the spec's estimate); 1600 (1550) stays at tier 0.
+ *
+ *   tier 0 fits: 48 + tools 298 + 2 × right 530 = 1406
+ *   tier 1 fits: 48 + tools 298 + 2 × right 403 = 1152
+ *   tier 2 hides subtitle/spec for title room. It changes neither the right
+ *   cluster nor the tools, so it cannot widen the right track; 1200 is the
+ *   last collision-free band above the 1152 fit boundary. Below 1152 the
+ *   8-button group stops fitting and tier 3 takes over.
+ *   tier 3 fits down to: 48 + tools 139 + 2 × right 403 = 993
+ */
+const TOP_FOLD_1 = 1406;
+const TOP_FOLD_2 = 1200;
+const TOP_FOLD_3 = 1152;
 
 function RailButton({
   icon,
@@ -363,6 +398,7 @@ function Diagnostics({ idPrefix }: { idPrefix: string }) {
 export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}) {
   const canvasRef = useRef<HTMLDivElement>(null);
   const shellRef = useRef<HTMLDivElement>(null);
+  const topRef = useRef<HTMLElement>(null);
   /**
    * `null` means "follow the fitView"; a number is the user's manual zoom. The
    * mock opens fitted rather than at a fixed 62% (the mockup's value), because
@@ -384,8 +420,17 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
    * this shell, so the collapse follows the box the workbench was given.
    */
   const shellWidth = useElementWidth(shellRef);
+  const topWidth = useElementWidth(topRef);
   const compactLeft = shellWidth > 0 && shellWidth < COMPACT_LEFT;
   const compactRight = shellWidth > 0 && shellWidth < COMPACT_RIGHT;
+  /** Tier 0 until the header has been measured, so the first paint is never folded. */
+  const fold = topWidth === 0 || topWidth >= TOP_FOLD_1
+    ? 0
+    : topWidth >= TOP_FOLD_2
+      ? 1
+      : topWidth >= TOP_FOLD_3
+        ? 2
+        : 3;
   const leftDocked = leftOpen && !compactLeft;
   const rightDocked = rightOpen && !compactRight;
   /**
@@ -419,7 +464,7 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
       data-left={leftDocked ? undefined : leftOpen ? 'drawer' : 'collapsed'}
       data-right={rightDocked ? undefined : rightOpen ? 'drawer' : 'collapsed'}
     >
-      <header className="xflow-pv-top">
+      <header className="xflow-pv-top" data-fold={fold} ref={topRef}>
         <div className="xflow-pv-top-id">
           {/* 早期稿：logo 取代返回箭头（2026-10-30 用户指示），点击仍回列表。 */}
           <Button type="text" className="xflow-pv-logo" aria-label="返回工作流列表">
@@ -428,8 +473,16 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
           <div className="xflow-pv-top-title">
             <div className="xflow-pv-title">
               <strong title={`${wbWorkflow.id} · ${wbWorkflow.version}`}>{wbWorkflow.name}</strong>
-              <span className="xflow-pv-chip" data-tone="neutral">spec {wbWorkflow.specVersion}</span>
-              <span className="xflow-pv-chip" data-tone="info">{wbWorkflow.version}</span>
+              {fold < 2 ? (
+                <span className="xflow-pv-chip" data-tone="neutral">spec {wbWorkflow.specVersion}</span>
+              ) : null}
+              {/* 版本 chip 是版本历史的入口（§6.3 / §6.10），预览里只做点击态和 tooltip。 */}
+              <Tooltip title="版本历史">
+                <button type="button" className="xflow-pv-chip xflow-pv-chip--action" data-tone="info">
+                  {wbWorkflow.version}
+                  <DownIcon />
+                </button>
+              </Tooltip>
               {/* 未保存数 = 草稿差异数组的长度，与发布对话框的差异行数是同一份（S10）。 */}
               <StatusChip
                 tone="warning"
@@ -437,67 +490,74 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
                 label={`未保存 ${wbPendingChanges.length} 处 · 基于 ${wbWorkflow.version}`}
               />
             </div>
-            <p className="xflow-pv-subtitle">
-              {wbWorkflow.id} / {wbGraphStats.nodes} nodes / Asia/Shanghai / timeout 168h
-            </p>
+            {fold < 2 ? (
+              <p className="xflow-pv-subtitle">
+                {wbWorkflow.id} · {wbGraphStats.nodes} 个节点 · Asia/Shanghai · 超时 168h
+              </p>
+            ) : null}
           </div>
         </div>
         {/*
-         * 居中带边框的画布工具组（早期稿，2026-10-30 用户指示）：撤销 / 重做搬进
-         * 这里，与选择、添加、连线、适应、执行、运行同一组。紧凑宽度下整组隐藏，
-         * 次要操作由右端 ⋯ 收纳（§6.0.1）。
+         * 居中带边框的画布工具组（§6.3，2026-11-04）：顺序 撤销/重做 │ 选择/
+         * 连线/添加/适应 │ 测试此节点/运行。只有运行带文字，且是顶栏唯一的
+         * primary。宿主没接 onRunNode，所以第 7 个按钮挂「待接入」标注。
          */}
-        {compactLeft ? null : (
-          <div className="xflow-pv-top-tools" role="toolbar" aria-label="画布工具">
-            <IconButton small label="撤销" icon={<UndoIcon />} />
-            <IconButton small label="重做" icon={<RedoIcon />} />
-            <VerticalSep />
-            <IconButton small label="选择" icon={<CursorIcon />} active />
-            <IconButton small label="添加节点" icon={<PlusIcon />} />
-            <IconButton small label="连线" icon={<ConnectIcon />} />
-            <IconButton small label="适应视图" icon={<FitIcon />} />
-            <VerticalSep />
-            <IconButton small label="执行选中节点" icon={<SkipIcon />} />
-            <IconButton small label="运行工作流" icon={<PlayIcon />} />
-          </div>
-        )}
+        <div className="xflow-pv-top-tools" role="toolbar" aria-label="画布工具">
+          <IconButton small label="撤销 ⌘Z" icon={<UndoIcon />} />
+          <IconButton small label="重做 ⌘⇧Z" icon={<RedoIcon />} />
+          {fold < 3 ? (
+            <>
+              <VerticalSep />
+              <IconButton small label="选择 V" icon={<CursorIcon />} active />
+              <IconButton small label="连线 L" icon={<ConnectIcon />} active={false} />
+              <IconButton small label="添加节点 A" icon={<PlusIcon />} />
+              <IconButton small label="适应视图" icon={<FitIcon />} />
+              <VerticalSep />
+              <Todo label="宿主未接 onRunNode">
+                <IconButton small label="运行到选中节点" icon={<SkipIcon />} />
+              </Todo>
+              <VerticalSep />
+            </>
+          ) : null}
+          <Tooltip title="运行工作流 ⌘↵">
+            <Button type="primary" size="small" className="xflow-pv-top-run" icon={<PlayIcon />}>
+              运行
+            </Button>
+          </Tooltip>
+        </div>
         <div className="xflow-pv-top-right">
           {/*
-           * 编辑 / 预览分段（早期稿，2026-10-30 用户指示）。运行记录模式仍由
-           * runs 节演示，工作台顶栏不再保留它的入口。
+           * 视图分段（§6.3）：编辑 | 运行记录，两项都带图标。编辑器没有预览
+           * 模式（2026-10-19 已由运行记录取代），W0 的「预览」作废。
            */}
           <Segmented
             aria-label="视图模式"
             value="edit"
-            options={[{ value: 'edit', label: '编辑' }, { value: 'preview', label: '预览' }]}
+            options={[
+              { value: 'edit', label: '编辑', icon: <EditIcon /> },
+              { value: 'runs', label: '运行记录', icon: <HistoryIcon /> },
+            ]}
           />
           {/*
-           * Compact (§6.0.1): 校验 / 主题 collapse into one menu button; 保存 /
-           * 发布 stay — they are the two the operator needs on a narrow screen.
+           * 收纳第 1 档：校验、主题收进 ⋯。保存 / 发布始终保留。⋯ 本身在任何
+           * 宽度都是最后一项，收纳不会让它移位（2026-10-17 裁定）。
            */}
-          {compactLeft ? (
-            <IconButton label="更多操作" icon={<MoreIcon />} />
-          ) : (
+          {fold < 1 ? (
             <>
               <Button type="text" className="xflow-pv-top-text" icon={<ShieldIcon />}>
                 校验
               </Button>
-              <IconButton label="主题设置" icon={<ThemeIcon />} />
-              {/*
-               * 沉浸布局 / 新建工作流 live in this menu at every width (user
-               * ruling 2026-10-17); it is the last item before 保存, as the
-               * compact ⋯ is, so collapsing the cluster does not move it.
-               */}
-              <IconButton label="更多操作" icon={<MoreIcon />} />
-              <VerticalSep />
+              <IconButton label="主题设置" icon={<ThemeContrastIcon />} />
             </>
-          )}
+          ) : null}
+          <IconButton label="更多操作" icon={<MoreIcon />} />
+          <VerticalSep />
           <Button className="xflow-pv-top-text">
             保存 <Kbd>⌘S</Kbd>
           </Button>
-          <Todo label="待接入">
-            <Button type="primary">发布</Button>
-          </Todo>
+          <Button className="xflow-pv-top-text" icon={<UploadIcon />}>
+            发布
+          </Button>
         </div>
       </header>
 

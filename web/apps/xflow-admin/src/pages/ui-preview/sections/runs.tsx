@@ -1,7 +1,7 @@
 import {
-  BackIcon,
   ClockIcon,
   CopyIcon,
+  EditIcon,
   GridIcon,
   HistoryIcon,
   MoreIcon,
@@ -345,18 +345,28 @@ export function RunsSection() {
     <div className="xflow-pv-wb xflow-pv-wb--runs">
       <header className="xflow-pv-top">
         <div className="xflow-pv-top-id">
-          <Button type="text" className="xflow-pv-icon-btn" aria-label="返回工作流列表" icon={<BackIcon />} />
+          <Button type="text" className="xflow-pv-logo" aria-label="返回工作流列表">
+            X
+          </Button>
           <div className="xflow-pv-title">
             <strong title={`${wbWorkflow.id} · ${wbWorkflow.version}`}>{wbWorkflow.name}</strong>
             <StatusChip tone="neutral" icon={<ClockIcon />} label={`运行版本 ${wbRunReplay.version}`} />
           </div>
         </div>
-        <div className="xflow-pv-top-center">
-          <Todo label="需新字段">
-            <Segmented aria-label="视图模式" value="runs" options={[{ value: 'edit', label: '编辑' }, { value: 'runs', label: '运行记录' }]} />
-          </Todo>
-        </div>
+        {/*
+         * 运行记录模式不渲染中间画布工具组（画布只读，§6.3）。分段位置不动：
+         * 两种模式下它都是右簇的第一项，这里不再有 top-center。
+         */}
         <div className="xflow-pv-top-right">
+          {/* 真实编辑器已有这个分段（index.tsx 的 viewMode Segmented），不需要「需新字段」。 */}
+          <Segmented
+            aria-label="视图模式"
+            value="runs"
+            options={[
+              { value: 'edit', label: '编辑', icon: <EditIcon /> },
+              { value: 'runs', label: '运行记录', icon: <HistoryIcon /> },
+            ]}
+          />
           <span className="xflow-pv-mono xflow-pv-faint">{wbRunReplay.execId}</span>
           <StatusChip
             tone={workflowStatusMeta[wbRunReplay.status].tone}
