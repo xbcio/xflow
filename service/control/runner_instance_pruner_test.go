@@ -3,6 +3,8 @@ package control
 import (
 	"context"
 	"errors"
+	"reflect"
+	"sort"
 	"testing"
 	"time"
 
@@ -60,9 +62,20 @@ func TestRunnerInstancePrunerIdleDecision(t *testing.T) {
 	createPrunerTestPool(t, pools, "pool", now.Add(-48*time.Hour))
 	for _, runnerID := range []string{"runner-fresh", "runner-stale", "runner-missing"} {
 		enrollPrunerTestInstance(t, pools, "pool", runnerID, runnerID, now.Add(-48*time.Hour))
+		if err := identities.Issue(ctx, IssuedIdentity{
+			RunnerID: runnerID, TokenHash: HashSecret("token-" + runnerID), PoolID: "pool",
+			OwnerNamespace: "team-a", IssuedAt: now.Add(-48 * time.Hour),
+			Scope: RunnerPolicy{AllowedNodeTypes: []string{"*"}, AllowedNamespaces: []string{"*"}},
+		}); err != nil {
+			t.Fatalf("Issue(%s): %v", runnerID, err)
+		}
 	}
 	registerPrunerTestRunner(t, directory, "runner-fresh", now.Add(-time.Hour), 1)
 	registerPrunerTestRunner(t, directory, "runner-stale", now.Add(-25*time.Hour), 1)
+	// runner-missing never enters the directory. That is exactly what an empty
+	// or replaced state store looks like: every live runner's record is absent,
+	// while LastEnrolledAt still says the instance enrolled 48h ago. Absence
+	// must not be read as idleness, or a store cutover drains the live fleet.
 
 	pruner := NewRunnerInstancePruner(RunnerInstancePrunerConfig{
 		Pools: pools, IssuedIdentities: identities, Directory: directory,
@@ -73,15 +86,42 @@ func TestRunnerInstancePrunerIdleDecision(t *testing.T) {
 		t.Fatalf("Sweep: %v", err)
 	}
 	active, err := pools.ListInstancesByState(ctx, store.InstanceActive)
-	if err != nil || len(active) != 1 || active[0].RunnerID != "runner-fresh" {
-		t.Fatalf("active = %+v, err=%v; want only runner-fresh", active, err)
+	if err != nil {
+		t.Fatalf("ListInstancesByState(active): %v", err)
+	}
+	activeIDs := make([]string, 0, len(active))
+	for _, instance := range active {
+		activeIDs = append(activeIDs, instance.RunnerID)
+	}
+	sort.Strings(activeIDs)
+	if want := []string{"runner-fresh", "runner-missing"}; !reflect.DeepEqual(activeIDs, want) {
+		t.Fatalf("active = %v, want %v", activeIDs, want)
 	}
 	pruned, err := pools.ListInstancesByState(ctx, store.InstancePruned)
-	if err != nil || len(pruned) != 2 {
-		t.Fatalf("pruned = %+v, err=%v; want stale and missing", pruned, err)
+	if err != nil {
+		t.Fatalf("ListInstancesByState(pruned): %v", err)
+	}
+	prunedIDs := make([]string, 0, len(pruned))
+	for _, instance := range pruned {
+		prunedIDs = append(prunedIDs, instance.RunnerID)
+	}
+	sort.Strings(prunedIDs)
+	if want := []string{"runner-stale"}; !reflect.DeepEqual(prunedIDs, want) {
+		t.Fatalf("pruned = %v, want %v", prunedIDs, want)
 	}
 	if _, ok := directory.Runner(ctx, "runner-stale"); ok {
 		t.Fatal("stale runner directory entry survived pruning")
+	}
+
+	// The missing runner is live: its identity must survive the sweep. This is
+	// the direct anchor for the incident — an empty store must not revoke an
+	// absent-but-running fleet.
+	auth := NewIssuedIdentityAuthenticator(identities)
+	if _, err := auth.AuthenticateOngoing("runner-stale", "token-runner-stale", TransportInfo{}); !errors.Is(err, ErrAuthUnknownToken) {
+		t.Fatalf("stale identity authentication = %v, want ErrAuthUnknownToken", err)
+	}
+	if _, err := auth.AuthenticateOngoing("runner-missing", "token-runner-missing", TransportInfo{}); err != nil {
+		t.Fatalf("missing runner identity was revoked: %v", err)
 	}
 }
 
@@ -174,10 +214,12 @@ func TestRunnerInstancePrunerNonLeaderDoesNothing(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 9, 29, 5, 0, 0, 0, time.UTC)
 	pools := NewMemoryRunnerPoolStore()
+	directory := NewMemoryRunnerDirectory()
 	createPrunerTestPool(t, pools, "pool", now.Add(-48*time.Hour))
 	enrollPrunerTestInstance(t, pools, "pool", "system", "runner", now.Add(-48*time.Hour))
+	registerPrunerTestRunner(t, directory, "runner", now.Add(-25*time.Hour), 1)
 	pruner := NewRunnerInstancePruner(RunnerInstancePrunerConfig{
-		Pools: pools, IssuedIdentities: NewMemoryIssuedIdentityStore(), Directory: NewMemoryRunnerDirectory(),
+		Pools: pools, IssuedIdentities: NewMemoryIssuedIdentityStore(), Directory: directory,
 		Leader: prunerTestLeader(false), IdleTTL: 24 * time.Hour,
 		Clock: func() time.Time { return now },
 	})
@@ -194,10 +236,12 @@ func TestRunnerInstancePrunerWithoutLeaderDoesNothing(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 9, 29, 5, 30, 0, 0, time.UTC)
 	pools := NewMemoryRunnerPoolStore()
+	directory := NewMemoryRunnerDirectory()
 	createPrunerTestPool(t, pools, "pool", now.Add(-48*time.Hour))
 	enrollPrunerTestInstance(t, pools, "pool", "system", "runner", now.Add(-48*time.Hour))
+	registerPrunerTestRunner(t, directory, "runner", now.Add(-25*time.Hour), 1)
 	pruner := NewRunnerInstancePruner(RunnerInstancePrunerConfig{
-		Pools: pools, IssuedIdentities: NewMemoryIssuedIdentityStore(), Directory: NewMemoryRunnerDirectory(),
+		Pools: pools, IssuedIdentities: NewMemoryIssuedIdentityStore(), Directory: directory,
 		IdleTTL: 24 * time.Hour, Clock: func() time.Time { return now },
 	})
 	if err := pruner.Sweep(ctx); err != nil {

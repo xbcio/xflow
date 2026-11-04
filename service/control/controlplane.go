@@ -198,8 +198,8 @@ type Config struct {
 	// for enrolled runners. Nil rejects pool-bound tokens without changing the
 	// static-authenticator path.
 	RunnerPools RunnerPoolStore
-	// RunnerInstanceIdleTTL is the heartbeat/enrollment idle window before an
-	// active pool instance enters the prune saga. Zero uses 24 hours.
+	// RunnerInstanceIdleTTL is the heartbeat idle window before an active pool
+	// instance enters the prune saga. Zero uses 24 hours.
 	RunnerInstanceIdleTTL time.Duration
 	// RunnerInstancePruneInterval is the leader-only sweep cadence. Zero uses
 	// one minute.

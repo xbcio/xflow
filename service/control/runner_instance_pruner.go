@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/xbcio/xflow/engine"
@@ -41,6 +42,12 @@ type RunnerInstancePrunerConfig struct {
 
 // RunnerInstancePruner transitions idle instances through active -> draining
 // -> pruned, revoking credentials before it removes directory state.
+//
+// Invariant: a missing directory record means "unknown", never "idle". The
+// directory returns no error, so absence cannot distinguish a never-registered
+// runner from an empty or replaced state store, a transient backend failure, or
+// a deleted record. Only a present record with a stale heartbeat is evidence
+// that the instance is idle.
 type RunnerInstancePruner struct {
 	pools      RunnerPoolStore
 	identities IssuedIdentityStore
@@ -87,7 +94,7 @@ func NewRunnerInstancePruner(cfg RunnerInstancePrunerConfig) *RunnerInstancePrun
 // listByState is the one place the pruner reads instances, so the scope
 // decision cannot differ between the active and draining passes. An unscoped
 // pruner reports every instance with an empty PoolOwnerKind: the legacy store
-// call does not know it, and the platform guard below only applies when scoped.
+// call does not know it.
 func (p *RunnerInstancePruner) listByState(ctx context.Context, state store.InstanceState) ([]store.ScopedRunnerInstance, error) {
 	if p.owned == nil {
 		instances, err := p.pools.ListInstancesByState(ctx, state)
@@ -126,24 +133,22 @@ func (p *RunnerInstancePruner) Sweep(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("list active runner instances: %w", err)
 	}
-	var skippedPlatform int
+	var skippedAbsent []string
 	for _, instance := range active {
 		snapshot, found := p.directory.Runner(ctx, instance.RunnerID)
-		idle := found && snapshot.LastHeartbeat.Before(cutoff)
 		if !found {
-			// A scoped pruner's directory only holds the runners of its own
-			// deployment, so absence from it proves nothing about a platform
-			// instance: it may be alive in another deployment's directory. The
-			// LastEnrolledAt fallback below would then drain a live runner.
-			// Tenant pools are unaffected — their owner is this deployment, so
-			// its directory is the right place to look.
-			if p.owned != nil && instance.PoolOwnerKind == store.PoolOwnerPlatform {
-				skippedPlatform++
-				continue
-			}
-			idle = instance.LastEnrolledAt.Before(cutoff)
+			// Absence from the directory is not evidence of idleness. Runner
+			// returns no error, so a missing record is indistinguishable from an
+			// empty or replaced state store, a transient backend failure, or a
+			// deleted record. Draining on that ambiguity would revoke the
+			// identities of a live fleet during a store cutover. Normal reaping
+			// is unaffected: directory records carry no TTL, so a runner that
+			// registered and then died still has a record with a stale
+			// heartbeat.
+			skippedAbsent = append(skippedAbsent, instance.RunnerID)
+			continue
 		}
-		if !idle {
+		if !snapshot.LastHeartbeat.Before(cutoff) {
 			continue
 		}
 		if err := p.pools.TransitionInstance(ctx, instance.RunnerID, store.InstanceActive, store.InstanceDraining, now); err != nil {
@@ -157,9 +162,13 @@ func (p *RunnerInstancePruner) Sweep(ctx context.Context) error {
 			p.logger.Info("runner instance entered draining", "runner_id", instance.RunnerID)
 		}
 	}
-	if skippedPlatform > 0 && p.logger != nil {
-		p.logger.Debug("runner instance prune skipped platform instances absent from this deployment's directory",
-			"count", skippedPlatform)
+	if len(skippedAbsent) > 0 && p.logger != nil {
+		sample := skippedAbsent
+		if len(sample) > 5 {
+			sample = sample[:5]
+		}
+		p.logger.Debug("runner instance prune skipped instances absent from this deployment's directory",
+			"count", len(skippedAbsent), "sample_runner_ids", strings.Join(sample, ","))
 	}
 
 	draining, err := p.listByState(ctx, store.InstanceDraining)
