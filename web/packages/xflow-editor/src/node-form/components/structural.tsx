@@ -26,6 +26,8 @@ import { cx, expectationSchema, isExpressionString, matchesShape, NODEFORM, RawN
 export interface NodeNameInputProps {
   label?: string;
   description?: string;
+  /** The base card marks the name required; the rename callback owns the check. */
+  required?: boolean;
   value?: unknown;
 }
 
@@ -70,6 +72,7 @@ function NodeNameField({
       nodeId={node.id}
       label={props.label}
       description={props.description}
+      required={props.required}
       issues={issues}
       hint={active && active.text !== current ? "失焦或回车后改名" : undefined}
     >
@@ -104,7 +107,12 @@ function NodeNameField({
 }
 
 const nodeNameSchema = zodProps(
-  z.strictObject({ label: z.string().optional(), description: z.string().optional(), value: z.unknown().optional() })
+  z.strictObject({
+    label: z.string().optional(),
+    description: z.string().optional(),
+    required: z.boolean().optional(),
+    value: z.unknown().optional()
+  })
 );
 
 export function createNodeNameInput(onRename?: RenameCallback): ComposerComponent<NodeNameInputProps> {

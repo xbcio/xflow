@@ -142,7 +142,7 @@ describe("XFlowEditor canvas multi-selection", () => {
     // All three cards paint the one selection outline; the Inspector stays on
     // the last node picked.
     expect(selectedCards()).toEqual(["start", "tail", "worker"]);
-    expect((within(inspector()).getByLabelText("节点名称") as HTMLInputElement).value).toBe("tail");
+    expect((within(inspector()).getByLabelText(/^节点名称/) as HTMLInputElement).value).toBe("tail");
   });
 
   it("collapses to one node on a plain click and drops the others", () => {
@@ -155,7 +155,7 @@ describe("XFlowEditor canvas multi-selection", () => {
 
     clickCard("worker");
     expect(selectedCards()).toEqual(["worker"]);
-    expect((within(inspector()).getByLabelText("节点名称") as HTMLInputElement).value).toBe("worker");
+    expect((within(inspector()).getByLabelText(/^节点名称/) as HTMLInputElement).value).toBe("worker");
   });
 
   it("deletes every selected node and its edges in one undoable snapshot", () => {
@@ -239,14 +239,14 @@ describe("XFlowEditor marquee selection", () => {
   it("keeps the current primary while it stays inside the marquee", () => {
     render(<XFlowEditor value={workflow} onChange={vi.fn()} />);
     clickCard("tail");
-    expect((within(inspector()).getByLabelText("节点名称") as HTMLInputElement).value).toBe("tail");
+    expect((within(inspector()).getByLabelText(/^节点名称/) as HTMLInputElement).value).toBe("tail");
 
     dragPane();
 
     expect(selectedCards()).toEqual(["start", "tail", "worker"]);
     // The rectangle picked several nodes at once, so it names no primary and
     // the Inspector keeps following the node it already showed.
-    expect((within(inspector()).getByLabelText("节点名称") as HTMLInputElement).value).toBe("tail");
+    expect((within(inspector()).getByLabelText(/^节点名称/) as HTMLInputElement).value).toBe("tail");
   });
 
   it("leaves the marquee to Space-pan instead of selecting", () => {
@@ -382,7 +382,7 @@ describe("XFlowEditor batch copy", () => {
 
     // The selection moves to the copies; the primary follows its own clone.
     expect(selectedCards()).toEqual(["tail_1", "worker_1"]);
-    expect((within(inspector()).getByLabelText("节点名称") as HTMLInputElement).value).toBe("tail_1");
+    expect((within(inspector()).getByLabelText(/^节点名称/) as HTMLInputElement).value).toBe("tail_1");
 
     // One undo removes every clone and its copied edge.
     undo();

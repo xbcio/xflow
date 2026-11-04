@@ -45,6 +45,10 @@ export const commonSchema: NodeFormSchema = {
       label: "节点名称",
       type: "string",
       widget: COMMON_WIDGET_NODE_NAME,
+      // Empty names are rejected by the rename flow (workflowOps), not by a
+      // composer check: NodeNameInput has no binding and carries no checks.
+      // `required` only draws the asterisk the Inspector's base card shows.
+      required: true,
       help: "引用名：连线和表达式靠它找到节点，改名会同步更新引用",
       group: "identity",
       order: 10

@@ -34,6 +34,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > commonSchema 
         "props": {
           "description": "引用名：连线和表达式靠它找到节点，改名会同步更新引用",
           "label": "节点名称",
+          "required": true,
           "value": {
             "$state": "/name",
           },

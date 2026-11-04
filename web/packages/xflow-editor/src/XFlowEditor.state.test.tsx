@@ -82,7 +82,7 @@ describe("XFlowEditor state commits", () => {
     // Typed but not blurred: leaving the JSON tab commits the pending draft.
     fireEvent.change(jsonTab(inspector), { target: { value: '{ "a": 3 }' } });
     formTab(inspector);
-    const nodeName = within(inspector).getByLabelText("节点名称");
+    const nodeName = within(inspector).getByLabelText(/^节点名称/);
     fireEvent.change(nodeName, { target: { value: "executor" } });
     fireEvent.blur(nodeName);
 
@@ -90,7 +90,7 @@ describe("XFlowEditor state commits", () => {
     expect(saved.nodes?.[1]).toMatchObject({ name: "executor", parameters: { a: 3 } });
     expect(saved.connections?.start?.main).toEqual([{ node: "executor" }]);
     // Selection is keyed by name for this id-less node; it must follow the rename.
-    expect((within(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).getByLabelText("节点名称") as HTMLInputElement).value)
+    expect((within(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).getByLabelText(/^节点名称/) as HTMLInputElement).value)
       .toBe("executor");
   });
 
@@ -166,7 +166,7 @@ describe("XFlowEditor state commits", () => {
 
   const renameSelected = (inspector: HTMLElement, name: string) => {
     formTab(inspector);
-    const field = within(inspector).getByLabelText("节点名称");
+    const field = within(inspector).getByLabelText(/^节点名称/);
     fireEvent.change(field, { target: { value: name } });
     fireEvent.blur(field);
   };
@@ -183,7 +183,7 @@ describe("XFlowEditor state commits", () => {
 
     formTab(inspector);
     expect(within(inspector).getByText(/参数 JSON 未通过解析，表单暂为只读/)).toBeTruthy();
-    const name = within(inspector).getByLabelText("节点名称") as HTMLInputElement;
+    const name = within(inspector).getByLabelText(/^节点名称/) as HTMLInputElement;
     expect(name.readOnly).toBe(true);
     fireEvent.change(name, { target: { value: "executor" } });
     fireEvent.blur(name);

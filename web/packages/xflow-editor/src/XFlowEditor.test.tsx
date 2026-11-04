@@ -1266,7 +1266,7 @@ describe("XFlowEditor", () => {
     fireEvent.click(locate);
 
     expect(
-      within(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).getByText("xflow.switch", {
+      within(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).getByText("route_by_amount · xflow.switch", {
         selector: ".xflow-editor-inspector-head__type"
       })
     ).toBeTruthy();
@@ -1332,8 +1332,8 @@ describe("XFlowEditor", () => {
     expect(within(inspector).getByText("属性")).toBeTruthy();
     expect(within(inspector).getAllByText(/route_by_amount/).length).toBeGreaterThan(0);
     expect(within(inspector).queryByText("running")).toBeNull();
-    expect(within(inspector).getByText("xflow.switch", { selector: ".xflow-editor-inspector-head__type" })).toBeTruthy();
-    expect(within(inspector).getByLabelText("节点名称").className).toContain("xflow-editor-nodeform-node-name-control");
+    expect(within(inspector).getByText("route_by_amount · xflow.switch", { selector: ".xflow-editor-inspector-head__type" })).toBeTruthy();
+    expect(within(inspector).getByLabelText(/^节点名称/).className).toContain("xflow-editor-nodeform-node-name-control");
     expect(within(inspector).getByRole("tab", { name: "配置" }).getAttribute("aria-selected")).toBe("true");
     expect(within(inspector).getByRole("tab", { name: "连接" })).toBeTruthy();
     expect(within(inspector).getByRole("tab", { name: "运行" })).toBeTruthy();
@@ -1378,7 +1378,7 @@ describe("XFlowEditor", () => {
 
     fireEvent.click(canvasNode("worker"));
     const inspector = screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
-    const nodeName = within(inspector).getByLabelText("节点名称");
+    const nodeName = within(inspector).getByLabelText(/^节点名称/);
     fireEvent.change(nodeName, { target: { value: "executor" } });
     fireEvent.blur(nodeName);
 
@@ -1421,7 +1421,7 @@ describe("XFlowEditor", () => {
 
     fireEvent.click(canvasNode("route_by_amount"));
     const inspector = screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
-    const nodeName = within(inspector).getByLabelText("节点名称");
+    const nodeName = within(inspector).getByLabelText(/^节点名称/);
 
     fireEvent.change(nodeName, { target: { value: "   " } });
     fireEvent.blur(nodeName);

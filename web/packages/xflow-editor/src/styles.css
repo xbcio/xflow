@@ -5771,4 +5771,77 @@ button.xflow-editor-overview__run:hover {
   margin-top: calc(var(--xflow-space-3) * -1);
   width: 24px;
 }
+
+/* ---- Inspector content (xflow-04) ---- */
+/* 基础信息 (§2.2): the SectionCard is the only card. Its compiled identity
+ * form is bare (no FieldGroup), so the identity gap is the card's own. */
+.xflow-editor .xflow-editor-config__identity {
+  display: flex;
+  flex-direction: column;
+  gap: var(--xflow-space-3);
+  min-width: 0;
+}
+
+.xflow-editor .xflow-editor-config__identity .xflow-editor-node-form {
+  gap: 0;
+}
+
+/* The rename refusal sits directly under 节点名称. */
+.xflow-editor .xflow-editor-config__rename-feedback {
+  margin: 0;
+}
+
+/* Help text under a control: the row's second column, so it lines up with the
+ * input rather than with the label. */
+.xflow-editor .xflow-editor-field-hint {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-xs);
+  grid-column: 2;
+  line-height: var(--xflow-line-height-xs);
+  margin: 0;
+}
+
+/* 参数 (§2.2): each descriptor group is a top-level card; there is no
+ * 节点参数 wrapper any more, so the FieldGroup owns the frame. */
+.xflow-editor .xflow-editor-config__params .xflow-editor-node-form {
+  gap: var(--xflow-space-3);
+}
+
+.xflow-editor .xflow-editor-config__params > .xflow-editor-node-form > .xflow-composer-form > .xflow-composer-field-group {
+  background: var(--xflow-surface-raised);
+  border: 0;
+  box-shadow: var(--xflow-elev-1);
+}
+
+.xflow-editor .xflow-editor-config__params > .xflow-editor-node-form > .xflow-composer-form > .xflow-composer-field-group > .xflow-composer-section-header {
+  min-height: 36px;
+  padding: var(--xflow-space-2) var(--xflow-space-3);
+}
+
+/* The JSON source view replaces the parameter cards and takes the same frame. */
+.xflow-editor .xflow-editor-config__params > .xflow-editor-param-source {
+  background: var(--xflow-surface-raised);
+  border-radius: var(--xflow-radius-md);
+  box-shadow: var(--xflow-elev-1);
+  padding: var(--xflow-space-3);
+}
+
+/* 头部 (§2.1): the display name and the neutral 已禁用 chip share the first
+ * line; the technical type line keeps its own row below. */
+.xflow-editor .xflow-editor-inspector-head__name-row {
+  align-items: center;
+  display: flex;
+  gap: var(--xflow-space-2);
+  min-width: 0;
+}
+
+.xflow-editor .xflow-editor-inspector-head__name-row > .xflow-editor-inspector-head__name,
+.xflow-editor .xflow-editor-inspector-head__name-row > .xflow-editor-inspector-head__rename {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.xflow-editor .xflow-editor-inspector-head__disabled {
+  flex: 0 0 auto;
+}
 }

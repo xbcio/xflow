@@ -47,8 +47,8 @@ describe("inspector header (§6.4)", () => {
     expect(chip?.getAttribute("data-tone")).toBe("danger");
 
     const typeLine = panel.querySelector(".xflow-editor-inspector-head__type");
-    // C03: no label, so the name is not repeated — the type line carries the type only.
-    expect(typeLine?.textContent).toBe("xflow.http");
+    // §2.1: the type line always reads 节点名 · 类型 · vN.
+    expect(typeLine?.textContent).toBe("api · xflow.http");
     expect(typeLine?.querySelector("code, em")).toBeNull();
   });
 
@@ -265,16 +265,13 @@ describe("inspector footer (baseline 测试此节点)", () => {
     expect(onRunNode.mock.calls[0]?.[1]).toEqual({ node: "api", mode: "to" });
   });
 
-  it("draws the key disabled with a user-language reason when the host has no onRunNode, and none without a node", () => {
+  it("draws no footer at all when the host has no onRunNode, and none without a node", () => {
     render(<XFlowEditor value={workflow} />);
     const panel = selectNode("api");
-    const button = within(panel).getByRole("button", { name: "测试此节点" }) as HTMLButtonElement;
-    expect(button.disabled).toBe(true);
-    // The reason is both the tooltip and the accessible description (ED-12).
-    const descriptionId = button.getAttribute("aria-describedby");
-    expect(descriptionId).toBeTruthy();
-    expect(document.getElementById(descriptionId as string)?.textContent).toBe("当前环境不支持单节点运行");
-    expect(panel.textContent).not.toContain("宿主");
+    // §6.1: a host that cannot run a single node gets no permanently disabled
+    // key; the whole strip stays out of the layout.
+    expect(within(panel).queryByRole("button", { name: "测试此节点" })).toBeNull();
+    expect(panel.querySelector(".xflow-editor-inspector-foot")).toBeNull();
     fireEvent.keyDown(window, { key: "Escape" });
     expect(within(inspector()).queryByRole("button", { name: "测试此节点" })).toBeNull();
   });
@@ -334,11 +331,11 @@ describe("inspector header rename keeps display name and identity apart", () => 
   const label = () =>
     within(inspector()).getByText("拉取客户档案", { selector: ".xflow-editor-inspector-head__name" });
 
-  it("shows the display name and a type line with the technical name and template", () => {
+  it("shows the display name and the type line with the technical name", () => {
     render(<XFlowEditor value={labelled} />);
     const panel = selectNode("fetch_profile");
     expect(panel.querySelector(".xflow-editor-inspector-head__type")?.textContent).toBe(
-      "fetch_profile · xflow.http · 模板 tpl_a"
+      "fetch_profile · xflow.http"
     );
   });
 
@@ -495,7 +492,7 @@ describe("node display name and header identity (IN-01 / C03)", () => {
     const { unmount } = render(<XFlowEditor value={echoed} />);
     let panel = selectNode("api");
     expect(within(head(panel)).getAllByText("api")).toHaveLength(1);
-    expect(panel.querySelector(".xflow-editor-inspector-head__type")?.textContent).toBe("xflow.http");
+    expect(panel.querySelector(".xflow-editor-inspector-head__type")?.textContent).toBe("api · xflow.http");
     unmount();
 
     // An empty label falls back to the name, still exactly once.
@@ -509,7 +506,7 @@ describe("node display name and header identity (IN-01 / C03)", () => {
     );
     panel = selectNode("api");
     expect(within(head(panel)).getAllByText("api")).toHaveLength(1);
-    expect(panel.querySelector(".xflow-editor-inspector-head__type")?.textContent).toBe("xflow.http");
+    expect(panel.querySelector(".xflow-editor-inspector-head__type")?.textContent).toBe("api · xflow.http");
   });
 
   it("shows a distinct label as the primary line and the name as the secondary one", () => {
@@ -582,7 +579,7 @@ describe("node template field (IN-02 / §6.4)", () => {
     expect("type" in (next.nodes?.[1] ?? {})).toBe(false);
     const updatedPanel = inspector();
     expect(selectedLabel(updatedPanel)).toBe("tpl_a");
-    expect(updatedPanel.querySelector(".xflow-editor-inspector-head__type")?.textContent).toContain("模板 tpl_a");
+    expect(updatedPanel.querySelector(".xflow-editor-inspector-head__type")?.textContent).toBe("api · unknown");
     expect(within(updatedPanel).getByText("参数由模板提供，切换模板会改变表单。")).toBeTruthy();
 
     // One undo entry puts both fields back.
@@ -707,17 +704,17 @@ describe("inspector tabs (§6.4, AntD Tabs)", () => {
     render(<XFlowEditor value={workflow} />);
     selectNode("api");
     expect(tabPanels()).toHaveLength(1);
-    expect(inspector().querySelector('[aria-label="节点参数"]')).not.toBeNull();
+    expect(inspector().querySelector('[data-inspector-section="parameters"]')).not.toBeNull();
     expect(within(inspector()).getByRole("button", { name: "执行策略" })).toBeTruthy();
 
     fireEvent.click(tab("连接"));
     expect(tabPanels()).toHaveLength(1);
-    expect(inspector().querySelector('[aria-label="节点参数"]')).toBeNull();
+    expect(inspector().querySelector('[data-inspector-section="parameters"]')).toBeNull();
     expect(within(inspector()).queryByRole("button", { name: "执行策略" })).toBeNull();
 
     fireEvent.click(tab("运行"));
     expect(tabPanels()).toHaveLength(1);
-    expect(inspector().querySelector('[aria-label="节点参数"]')).toBeNull();
+    expect(inspector().querySelector('[data-inspector-section="parameters"]')).toBeNull();
   });
 
   it("keeps every old 设置 function in the merged execution section", () => {

@@ -615,7 +615,9 @@ describe("commonSchema (Doc C §4.2)", () => {
 
   it("/name is the host rename component reading, not binding, the name", () => {
     const [[, name]] = bound(spec, "/name");
-    expect(name).toMatchObject({ type: "NodeNameInput", props: { value: { $state: "/name" } } });
+    expect(name).toMatchObject({ type: "NodeNameInput", props: { value: { $state: "/name" }, required: true } });
+    // The asterisk is chrome only: the rename callback owns the empty-name error.
+    expect(name.checks).toBeUndefined();
     expect(JSON.stringify(spec)).not.toContain('"$bindState":"/name"');
   });
 
@@ -743,9 +745,12 @@ describe("section (Inspector 参数 / 设置 tabs)", () => {
         ).toEqual([]);
       }
     }
-    // The element sets partition too (apart from the shared root).
+    // The element sets partition too (apart from the shared root). identity is
+    // the one exception: its section emits bare fields, so the "all" form's
+    // 基础信息 wrapper has no counterpart in any section.
     const ids = (spec: ComposerSpec) => Object.keys(spec.elements).filter((id) => id !== ROOT_ID);
-    expect(parts.flatMap(ids).sort()).toEqual(ids(all).sort());
+    const identityWrapper = "g.common.identity";
+    expect(parts.flatMap(ids).sort()).toEqual(ids(all).filter((id) => id !== identityWrapper).sort());
     for (const spec of parts) {
       expect(validateSpec(spec, { schemas, checks, expressions })).toEqual([]);
       expect(resolveWith(spec, { name: "n1", parameters: {} }).specErrors).toEqual([]);
@@ -775,14 +780,13 @@ describe("section (Inspector 参数 / 设置 tabs)", () => {
   });
 
   it("identity and notes hold only their own common group", () => {
-    for (const [section, id] of [
-      ["identity", "g.common.identity"],
-      ["notes", "g.common.notes"]
-    ] as const) {
-      const { spec } = compileNodeForm(waitSchema, { section });
-      expect(spec.elements[ROOT_ID].children).toEqual([id]);
-      expect(spec.elements[ROOT_ID].checks).toBeUndefined();
-    }
+    const notes = compileNodeForm(waitSchema, { section: "notes" }).spec;
+    expect(notes.elements[ROOT_ID].children).toEqual(["g.common.notes"]);
+    expect(notes.elements[ROOT_ID].checks).toBeUndefined();
+    // 基础信息 emits /name bare: the Inspector's SectionCard draws the heading.
+    const identity = compileNodeForm(waitSchema, { section: "identity" }).spec;
+    expect(identity.elements[ROOT_ID].children).toEqual(["f.name"]);
+    expect(identity.elements[ROOT_ID].checks).toBeUndefined();
     expect(writtenPaths(compileNodeForm(waitSchema, { section: "identity" }).spec)).toEqual(["/name"]);
     expect(writtenPaths(compileNodeForm(waitSchema, { section: "notes" }).spec)).toEqual(["/notes"]);
   });

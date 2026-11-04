@@ -1,6 +1,5 @@
 import * as React from "react";
 import {
-  BranchIcon,
   CodeIcon,
   CopyIcon,
   FormatPainterIcon,
@@ -20,6 +19,7 @@ import type { ComposerSpec, Issue, Patch } from "@xflow/composer/core";
 import { Section } from "@xflow/composer/form";
 import { Composer, type FocusRequest, type Registry } from "@xflow/composer/react";
 import { nodeHasTemplate, NodeFormCompiler, portsForNode } from "../node-form";
+import type { Condition, NodeFormSchema } from "../node-form";
 import {
   EditorPanel,
   SectionCard,
@@ -27,7 +27,6 @@ import {
   editorSelectClassNames,
   editorTextAreaClassNames,
   editorTooltipClassNames,
-  hostCapabilityCopy,
   serializeJson,
   type WorkflowJsonDraft,
   type WorkflowJsonField,
@@ -47,7 +46,6 @@ import {
   relabelConnectionInput,
   removeConnectionFromWorkflow,
   renameNodeInWorkflow,
-  selectedPorts,
   supportedInputPorts,
   supportedOutputPorts,
   updateNodeByKey,
@@ -96,22 +94,32 @@ const editorInspectorTabsClassNames = {
 
 /** The common execution group the compiler emits for section="settings". */
 const executionGroupId = "g.common.execution";
+/** The common notes group the compiler emits for section="notes". */
+const notesGroupId = "g.common.notes";
 
 /**
- * Attaches the Inspector's header summary to the compiled execution group.
- * The compiler lives in node-form, which carries no Inspector copy, so the
- * summary is added here; the shallow clone leaves the memoised spec intact.
+ * Attaches the Inspector's header summary to one compiled group. The compiler
+ * lives in node-form, which carries no Inspector copy, so the summary is added
+ * here; the shallow clone leaves the memoised spec intact.
  */
-function withSectionSummary(spec: ComposerSpec, summary: string): ComposerSpec {
-  const group = spec.elements[executionGroupId];
+function withGroupSummary(spec: ComposerSpec, groupId: string, summary: string | undefined): ComposerSpec {
+  if (!summary) return spec;
+  const group = spec.elements[groupId];
   if (!group) return spec;
   return {
     ...spec,
     elements: {
       ...spec.elements,
-      [executionGroupId]: { ...group, props: { ...group.props, summary } }
+      [groupId]: { ...group, props: { ...group.props, summary } }
     }
   };
+}
+
+/** Applies several group summaries in one pass (one shallow clone per group). */
+function withGroupSummaries(spec: ComposerSpec, summaries: Readonly<Record<string, string>>): ComposerSpec {
+  let next = spec;
+  for (const [groupId, summary] of Object.entries(summaries)) next = withGroupSummary(next, groupId, summary);
+  return next;
 }
 
 const errorPolicySummary: Readonly<Record<string, string>> = {
@@ -172,8 +180,8 @@ function filterTemplateOption(input: string, option?: { label?: unknown; value?:
 /**
  * The header's identity (C03, §6.7): `display` is `editor_metadata.ui[key].label`
  * when it differs from the node name, else the name itself. `distinct` says
- * whether the type line must carry the name as the secondary line — a label
- * that is empty or merely repeats the name is never shown twice.
+ * whether a connection endpoint must show both the label and the name — a
+ * label that is empty or merely repeats the name is never shown twice.
  */
 function nodeIdentity(node: WorkflowNode, index: number): { name: string; display: string; distinct: boolean } {
   const name = nodeName(node, index);
@@ -205,6 +213,68 @@ function executionSummary(workflow: WorkflowDef, node: WorkflowNode | undefined)
   if (typeof maxAttempts === "number" && maxAttempts > 0) parts.push(`重试 ${maxAttempts} 次`);
   if (typeof node.timeout === "number" && node.timeout > 0) parts.push(`超时 ${formatNodeTimeout(node.timeout)}`);
   return parts.join(" · ");
+}
+
+/** 备注's header summary: the first line, at most 20 characters, 无 when empty. */
+function notesSummary(node: WorkflowNode | undefined): string {
+  const text = typeof node?.notes === "string" ? node.notes : "";
+  const firstLine = text.split("\n")[0]?.trim() ?? "";
+  if (firstLine === "") return "无";
+  const chars = Array.from(firstLine);
+  return chars.length > 20 ? `${chars.slice(0, 20).join("")}…` : firstLine;
+}
+
+/** A param is "set" when its key exists and the value is neither nil nor "" (types/node.go). */
+function isSetParam(value: unknown): boolean {
+  return value !== undefined && value !== null && value !== "";
+}
+
+/**
+ * Evaluates a field's visible_when against the node's current parameters, so
+ * the group summary counts only the fields the reader can see. Mirrors the
+ * engine's leaf rule: a missing param compares as null.
+ */
+function conditionHolds(condition: Condition, parameters: Record<string, unknown>): boolean {
+  let holds = true;
+  if (condition.param !== undefined && condition.param !== "") {
+    const value = parameters[condition.param] ?? null;
+    if (condition.eq !== undefined) holds = holds && value === condition.eq;
+    if (condition.in !== undefined) holds = holds && condition.in.includes(value);
+    if (condition.truthy !== undefined) holds = holds && Boolean(value) === condition.truthy;
+  }
+  if (condition.all_of) holds = holds && condition.all_of.every((child) => conditionHolds(child, parameters));
+  // Go: a present-but-empty any_of holds for nothing (as compileCondition does).
+  if (condition.any_of) {
+    holds = holds && condition.any_of.length > 0 && condition.any_of.some((child) => conditionHolds(child, parameters));
+  }
+  if (condition.not) holds = holds && !conditionHolds(condition.not, parameters);
+  return holds;
+}
+
+/** Composite ids mirror Compiler.add's sanitizeId. */
+function groupElementId(groupKey: string): string {
+  return `g.type.${groupKey.replace(/[@#]/g, "_")}`;
+}
+
+/**
+ * 「已填 N 项 / 未设置」 for every default-collapsed parameter group (§2.2), from
+ * the schema and the node's committed parameters.
+ */
+function parameterGroupSummaries(schema: NodeFormSchema | null, parameters: unknown): Record<string, string> {
+  const summaries: Record<string, string> = {};
+  if (!schema) return summaries;
+  const values = parameters !== null && typeof parameters === "object" ? (parameters as Record<string, unknown>) : {};
+  for (const group of schema.groups ?? []) {
+    if (!group.collapsed) continue;
+    const set = schema.fields.filter(
+      (field) =>
+        (field.group ?? "") === group.key &&
+        !(field.visible_when && !conditionHolds(field.visible_when, values)) &&
+        isSetParam(values[field.name])
+    ).length;
+    summaries[groupElementId(group.key)] = set > 0 ? `已填 ${set} 项` : "未设置";
+  }
+  return summaries;
 }
 
 function NodeParametersForm({
@@ -255,10 +325,12 @@ function NodeParametersForm({
     schemasLoaded: Boolean(nodeTypes),
     section
   });
-  const renderedSpec = React.useMemo(
-    () => (sectionSummary ? withSectionSummary(spec, sectionSummary) : spec),
-    [sectionSummary, spec]
-  );
+  const renderedSpec = React.useMemo(() => {
+    const summarised =
+      section === "parameters" ? withGroupSummaries(spec, parameterGroupSummaries(schema, node.parameters)) : spec;
+    const groupId = section === "settings" ? executionGroupId : section === "notes" ? notesGroupId : undefined;
+    return groupId ? withGroupSummary(summarised, groupId, sectionSummary) : summarised;
+  }, [node.parameters, schema, section, sectionSummary, spec]);
   const ports = portsForNode(schema, node);
   const portsKey = JSON.stringify(ports);
   const credentialsKey = Object.keys(workflow.credentials ?? {}).join("\u0000");
@@ -926,11 +998,11 @@ function NodeHeader({
   const declaredCategory =
     node.type && nodeCategories && Object.hasOwn(nodeCategories, node.type) ? nodeCategories[node.type] : undefined;
   const identity = nodeIdentity(node, index);
-  // C03: the name is the type line's leading segment only when the display
-  // name above it is a different label; otherwise the header would say it twice.
-  const typeParts = identity.distinct ? [identity.name, node.type ?? "unknown"] : [node.type ?? "unknown"];
+  // §2.1: the type line always reads 节点名 · 类型 · vN; the display name leads
+  // the row above it, so the technical name has to appear here even when the
+  // two are equal.
+  const typeParts = [identity.name, node.type ?? "unknown"];
   if (version !== undefined) typeParts.push(`v${version}`);
-  if (node.template) typeParts.push(`模板 ${node.template}`);
   const typeLine = typeParts.join(" · ");
   const snapshot = runtimeForNode(runtime, node);
   // Every node has a status while running, pending (排队) included (spec §6.1).
@@ -940,35 +1012,43 @@ function NodeHeader({
     <div className="xflow-editor-inspector-head">
       <NodeCategoryIcon category={declaredCategory} type={node.type} />
       <div className="xflow-editor-inspector-head__identity">
-        {renaming ? (
-          <Input
-            aria-label="节点显示名"
-            autoFocus
-            className="xflow-editor-inspector-head__rename"
-            size="small"
-            value={renameDraft}
-            onBlur={onCommitRename}
-            onChange={(event) => onRenameDraft(event.target.value)}
-            onFocus={(event) => event.currentTarget.select()}
-            onKeyDown={(event) => {
-              if (event.key !== "Escape") return;
-              event.preventDefault();
-              event.stopPropagation();
-              onCancelRename();
-            }}
-            onPressEnter={onCommitRename}
-          />
-        ) : (
-          <Tooltip classNames={editorTooltipClassNames} title={canRename ? "双击改名" : undefined}>
-            <span
-              className="xflow-editor-inspector-head__name"
-              title={label}
-              onDoubleClick={canRename ? onBeginRename : undefined}
-            >
-              {label}
+        <div className="xflow-editor-inspector-head__name-row">
+          {renaming ? (
+            <Input
+              aria-label="节点显示名"
+              autoFocus
+              className="xflow-editor-inspector-head__rename"
+              size="small"
+              value={renameDraft}
+              onBlur={onCommitRename}
+              onChange={(event) => onRenameDraft(event.target.value)}
+              onFocus={(event) => event.currentTarget.select()}
+              onKeyDown={(event) => {
+                if (event.key !== "Escape") return;
+                event.preventDefault();
+                event.stopPropagation();
+                onCancelRename();
+              }}
+              onPressEnter={onCommitRename}
+            />
+          ) : (
+            <Tooltip classNames={editorTooltipClassNames} title={canRename ? "双击改名" : undefined}>
+              <span
+                className="xflow-editor-inspector-head__name"
+                title={label}
+                onDoubleClick={canRename ? onBeginRename : undefined}
+              >
+                {label}
+              </span>
+            </Tooltip>
+          )}
+          {/* §2.1: the 禁用 switch lives in 执行策略 now, so the head says so. */}
+          {node.disabled ? (
+            <span className="xflow-editor-chip xflow-editor-inspector-head__disabled" data-tone="neutral">
+              已禁用
             </span>
-          </Tooltip>
-        )}
+          ) : null}
+        </div>
         <div className="xflow-editor-inspector-head__type" title={typeLine}>
           {typeLine}
         </div>
@@ -1307,11 +1387,9 @@ export function Inspector({
   // The disabled 测试此节点 key explains itself through the tooltip and through
   // aria-describedby; both point at the same sentence (ED-12).
   const runReasonId = React.useId();
-  const runDisabledReason = onRunNode
-    ? running
-      ? "正在运行，请稍后再试"
-      : undefined
-    : hostCapabilityCopy.runNode;
+  // §6.1: the only disabled reason left is an in-flight run; a host without
+  // onRunNode gets no footer at all instead of a permanently disabled key.
+  const runDisabledReason = running ? "正在运行，请稍后再试" : undefined;
   const renameFinishedRef = React.useRef(false);
   const renameOriginalRef = React.useRef("");
   const startHeaderRename = React.useCallback(() => {
@@ -1511,9 +1589,13 @@ export function Inspector({
     },
     [formReadOnly, onChangeWith, selectedNodeIdentity, selectedTemplate]
   );
-  // Interim bridge (I2a): 节点名称 and 备注 render through their compiled
-  // sections until the Inspector content rewrite gives them their own layout.
-  const commonSectionForm = (node: WorkflowNode, section: "identity" | "notes") => (
+  // 基础信息 / 备注 render through their compiled common sections (§6.1). The
+  // 基础信息 section emits bare fields: the SectionCard below is its card.
+  const commonSectionForm = (
+    node: WorkflowNode,
+    section: "identity" | "notes",
+    sectionSummary?: string
+  ) => (
     <NodeParametersForm
       externalIssues={externalIssues}
       host={formHost}
@@ -1523,6 +1605,7 @@ export function Inspector({
       nodeTypes={nodeTypes}
       readOnly={formReadOnly}
       section={section}
+      sectionSummary={sectionSummary}
       showNotices={false}
       workflow={workflow}
       onApplyPatches={onApplyNodePatches}
@@ -1531,78 +1614,60 @@ export function Inspector({
   const parametersPanel = selectedNode ? (
     <div className="xflow-editor-config">
       <SectionCard ariaLabel="基础信息" icon={<InfoIcon />} title="基础信息">
-        {commonSectionForm(selectedNode, "identity")}
-        <label className="xflow-editor-form-row xflow-editor-form-row--node">
-          <span>显示名</span>
-          <Input
-            aria-label="显示名"
-            className="xflow-editor-field"
-            classNames={editorInputClassNames}
-            disabled={formReadOnly || !onChangeWith}
-            placeholder={nodeName(selectedNode, selectedIndex)}
-            value={displayNameDraft}
-            onBlur={commitDisplayName}
-            onChange={(event) => setDisplayNameDraft(event.target.value)}
-            onPressEnter={commitDisplayName}
-          />
-        </label>
-        {templateNames.length > 0 ? (
-          <>
-            <label className="xflow-editor-form-row xflow-editor-form-row--node">
-              <span>模板</span>
-              <Select<string>
-                aria-label="模板"
-                className="xflow-editor-field"
-                classNames={editorSelectClassNames}
-                disabled={formReadOnly || !onChangeWith}
-                options={[
-                  { label: "无模板", value: "" },
-                  ...templateNames.map((name) => ({ label: name, value: name }))
-                ]}
-                placeholder="无模板"
-                showSearch={{ filterOption: filterTemplateOption }}
-                value={selectedTemplate === "" ? undefined : selectedTemplate}
-                onChange={commitTemplate}
-              />
-            </label>
-            {selectedTemplate !== "" ? (
-              <p className="xflow-editor-empty">参数由模板提供，切换模板会改变表单。</p>
-            ) : null}
-          </>
-        ) : null}
-      </SectionCard>
-      {selectedNode.type?.includes("switch") ? (
-        <SectionCard ariaLabel="路由配置" icon={<BranchIcon />} title="路由配置">
+        <div className="xflow-editor-config__identity">
+          {commonSectionForm(selectedNode, "identity")}
+          {activeRenameFeedback ? (
+            <span
+              className={`${activeRenameFeedback.kind === "error" ? "xflow-editor-error" : "xflow-editor-warning"} xflow-editor-config__rename-feedback`}
+              role="status"
+            >
+              {activeRenameFeedback.message}
+            </span>
+          ) : null}
           <label className="xflow-editor-form-row xflow-editor-form-row--node">
-            <span>输出端口</span>
+            <span>显示名</span>
             <Input
-              aria-label="输出端口"
+              aria-label="显示名"
               className="xflow-editor-field"
               classNames={editorInputClassNames}
-              readOnly
-              value={selectedPorts(workflow, selectedNode).join(", ") || "未配置"}
+              disabled={formReadOnly || !onChangeWith}
+              placeholder={nodeName(selectedNode, selectedIndex)}
+              value={displayNameDraft}
+              onBlur={commitDisplayName}
+              onChange={(event) => setDisplayNameDraft(event.target.value)}
+              onPressEnter={commitDisplayName}
             />
+            <span className="xflow-editor-field-hint">只改画布上显示的文字，不影响引用；留空时显示节点名称</span>
           </label>
-          <p className="xflow-editor-empty">路由条件在下方节点参数中编辑；这里仅展示当前数据输出端口。</p>
-        </SectionCard>
-      ) : null}
-      <SectionCard
-        actions={
-          <ParameterSourceToggle
-            pressed={parameterTab === "json"}
-            readOnly={!editable}
-            onToggle={() => changeParameterTab(parameterTab === "json" ? "form" : "json")}
-          />
-        }
-        ariaLabel="节点参数"
-        icon={<GearIcon />}
-        title="节点参数"
-      >
-        {activeRenameFeedback ? (
-          <span className={activeRenameFeedback.kind === "error" ? "xflow-editor-error" : "xflow-editor-warning"} role="status">
-            {activeRenameFeedback.message}
-          </span>
-        ) : null}
+          {templateNames.length > 0 ? (
+            <>
+              <label className="xflow-editor-form-row xflow-editor-form-row--node">
+                <span>模板</span>
+                <Select<string>
+                  aria-label="模板"
+                  className="xflow-editor-field"
+                  classNames={editorSelectClassNames}
+                  disabled={formReadOnly || !onChangeWith}
+                  options={[
+                    { label: "无模板", value: "" },
+                    ...templateNames.map((name) => ({ label: name, value: name }))
+                  ]}
+                  placeholder="无模板"
+                  showSearch={{ filterOption: filterTemplateOption }}
+                  value={selectedTemplate === "" ? undefined : selectedTemplate}
+                  onChange={commitTemplate}
+                />
+              </label>
+              {selectedTemplate !== "" ? (
+                <p className="xflow-editor-empty">参数由模板提供，切换模板会改变表单。</p>
+              ) : null}
+            </>
+          ) : null}
+        </div>
+      </SectionCard>
+      {/* §2.2: no 节点参数 wrapper — each descriptor group is its own card.
+       * The JSON source view replaces this area only. */}
+      <div className="xflow-editor-config__params" data-inspector-section="parameters">
         {parameterTab === "json" ? (
           <ParameterSourceView
             error={selectedDraft?.error}
@@ -1628,7 +1693,7 @@ export function Inspector({
             onFocusRequestHandled={onFocusRequestHandled}
           />
         )}
-      </SectionCard>
+      </div>
       {/* The old 设置 tab, merged after the parameters as one collapsible
        * section. The common schema's execution group already carries the
        * collapse state and error badge; the summary is the Inspector's copy. */}
@@ -1648,9 +1713,10 @@ export function Inspector({
           onApplyPatches={onApplyNodePatches}
         />
       </div>
-      {/* Interim bridge (I2a): 备注 renders as its own compiled card until the
-       * Inspector content rewrite decides where it sits. */}
-      <div className="xflow-editor-config__notes">{commonSectionForm(selectedNode, "notes")}</div>
+      {/* 备注 (§2.2): collapsed, with the note's first line as its summary. */}
+      <div className="xflow-editor-config__notes">
+        {commonSectionForm(selectedNode, "notes", notesSummary(selectedNode))}
+      </div>
     </div>
   ) : (
     <WorkflowSettings
@@ -1767,6 +1833,17 @@ export function Inspector({
           id="xflow-editor-inspector"
           items={inspectorTabs}
           size="small"
+          // §2.1: the JSON source toggle sits at the tab bar's right end and
+          // only while 配置 is the active tab.
+          tabBarExtraContent={
+            activeTab === "parameters" ? (
+              <ParameterSourceToggle
+                pressed={parameterTab === "json"}
+                readOnly={!editable}
+                onToggle={() => changeParameterTab(parameterTab === "json" ? "form" : "json")}
+              />
+            ) : undefined
+          }
           onChange={(key) => setActiveTab(key as InspectorTabKey)}
           onFocus={activateFocusedTab}
         />
@@ -1779,7 +1856,7 @@ export function Inspector({
           <div className="xflow-editor-inspector-settings__config">{parametersPanel}</div>
         </div>
       )}
-      {selectedNode && !(replay && !onRerunFromNode) ? (
+      {selectedNode && (onRerunFromNode || (onRunNode && !replay)) ? (
         <div className="xflow-editor-inspector-foot">
           {onRerunFromNode ? (
             <Button
@@ -1805,7 +1882,7 @@ export function Inspector({
                     aria-label="测试此节点"
                     block
                     className="xflow-editor-inspector-run-button"
-                    disabled={!onRunNode || running}
+                    disabled={running}
                     icon={<PlayIcon />}
                     loading={running}
                     onClick={onRunNode}

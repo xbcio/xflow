@@ -357,8 +357,15 @@ class Compiler {
     if (control.type === "KeyValue") controlChecks.push({ type: "secretLike", severity: "warning", message: MSG.secretLike });
 
     if (control.type === "NodeNameInput") {
-      const { label, description } = chrome;
-      control.props = { ...control.props, ...(label !== undefined && { label }), ...(description !== undefined && { description }) };
+      // `required` is chrome only: this host component validates through the
+      // rename callback, so the computed checks are deliberately not attached.
+      const { label, description, required } = chrome;
+      control.props = {
+        ...control.props,
+        ...(label !== undefined && { label }),
+        ...(description !== undefined && { description }),
+        ...(required === true && { required: true })
+      };
       return [this.add(idBase, withVisible(control, visible))];
     }
 
@@ -704,14 +711,16 @@ class Compiler {
    * Compiles a schema's fields into FieldGroup elements; returns their ids and
    * a key → ids map so the caller can assemble sections in its own order.
    * `include` filters by group key ("" is the implicit default group),
-   * `statusFor` decides each emitted group's header badge (§6.1).
+   * `statusFor` decides each emitted group's header badge (§6.1), and `wrap`
+   * false emits the fields directly (no FieldGroup card).
    */
   groups(
     schema: NodeFormSchema,
     prefix: string,
     implicitTitle: string,
     include: (key: string) => boolean = () => true,
-    statusFor: GroupStatusFor = defaultGroupStatus
+    statusFor: GroupStatusFor = defaultGroupStatus,
+    wrap = true
   ): { ids: string[]; hidden: Set<string>; byGroup: Map<string, string[]> } {
     const target: Target = { kind: schema.kind, nodeType: schema.node_type, ports: portsFor(schema) };
     const declared = schema.groups ?? [];
@@ -741,6 +750,13 @@ class Compiler {
         children.push(...out);
       }
       if (children.length === 0) return;
+      if (!wrap) {
+        // The Inspector's 基础信息 card draws its own title: a FieldGroup here
+        // would put a second heading inside the card.
+        ids.push(...children);
+        byGroup.set(key, [...(byGroup.get(key) ?? []), ...children]);
+        return;
+      }
       const props: Record<string, unknown> = { title, collapsible: true };
       const headerStatus = statusFor(key, hasRequiredField);
       if (headerStatus) props.headerStatus = headerStatus;
@@ -947,7 +963,15 @@ export function compileNodeForm(schema: NodeFormSchema | null | undefined, optio
   if (common && section !== "parameters") {
     const only = section === "all" ? undefined : SECTION_GROUPS[section];
     const include = (key: string) => only === undefined || only.has(key);
-    commonByGroup = compiler.groups(common, "common", "通用", include, commonGroupStatus).byGroup;
+    // 基础信息 stays unwrapped: the Inspector's SectionCard is its card (§6.1).
+    commonByGroup = compiler.groups(
+      common,
+      "common",
+      "通用",
+      include,
+      commonGroupStatus,
+      section !== "identity"
+    ).byGroup;
     children.push(...(commonByGroup.get("identity") ?? []));
   }
 
@@ -996,7 +1020,13 @@ export function compileNodeForm(schema: NodeFormSchema | null | undefined, optio
     for (const [key, ids] of commonByGroup) if (key !== "identity") children.push(...ids);
   }
 
-  const root: ElementDef = { type: "Form", props: { layout: "vertical", descriptionPlacement: "tooltip" }, children };
+  // 基础信息 shows its help as text under the field (§2.2); every other
+  // section keeps the editor's help-icon tooltips.
+  const root: ElementDef = {
+    type: "Form",
+    props: { layout: "vertical", descriptionPlacement: section === "identity" ? "below" : "tooltip" },
+    children
+  };
   if (rootChecks.length > 0) root.checks = rootChecks;
   const elements = { [ROOT_ID]: root, ...compiler.elements };
   return { spec: { spec: "composer/v1", minor: 0, root: ROOT_ID, elements }, warnings: compiler.warnings };

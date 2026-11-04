@@ -28,7 +28,7 @@ const selectNode = (name: string) => {
   return inspector();
 };
 const undoButton = () => within(screen.getByRole("toolbar", { name: "画布工具" })).getByRole("button", { name: "撤销" });
-/** The parameters JSON lives behind the 节点参数 card's </> toggle. */
+/** The parameters JSON lives behind the tab bar's </> toggle. */
 const jsonSourceButton = (root: HTMLElement = inspector()) =>
   within(root).getByRole("button", { name: "以 JSON 编辑参数" });
 const jsonTab = (root: HTMLElement = inspector()) => {
@@ -242,7 +242,7 @@ describe("node form: the patch reducer (Doc C §6.1)", () => {
     const handleChange = vi.fn();
     render(<XFlowEditor value={waitWorkflow} nodeTypes={nodeTypes} onChange={handleChange} />);
     const root = selectNode("pause");
-    const name = within(root).getByLabelText("节点名称");
+    const name = within(root).getByLabelText(/^节点名称/);
 
     fireEvent.change(name, { target: { value: "hold" } });
     fireEvent.blur(name);
@@ -251,10 +251,10 @@ describe("node form: the patch reducer (Doc C §6.1)", () => {
     expect(handleChange).toHaveBeenCalledTimes(1);
     expect(lastWorkflow(handleChange).nodes?.[1]?.name).toBe("hold");
     expect(lastWorkflow(handleChange).connections).toEqual({ start: { main: [{ node: "hold" }] } });
-    expect((within(inspector()).getByLabelText("节点名称") as HTMLInputElement).value).toBe("hold");
+    expect((within(inspector()).getByLabelText(/^节点名称/) as HTMLInputElement).value).toBe("hold");
     // The header follows the rename: the display name and the type badge.
     expect(within(inspector()).getByText("hold", { selector: ".xflow-editor-inspector-head__name" })).toBeTruthy();
-    expect(within(inspector()).getByText("xflow.wait · v1", { selector: ".xflow-editor-inspector-head__type" })).toBeTruthy();
+    expect(within(inspector()).getByText("hold · xflow.wait · v1", { selector: ".xflow-editor-inspector-head__type" })).toBeTruthy();
   });
 });
 
@@ -379,7 +379,7 @@ describe("node form: nodes without a schema (Doc C §2.1)", () => {
     const root = selectNode("odd");
 
     expect(within(root).getByText("该节点类型未在 server 注册，参数按 JSON 编辑")).toBeTruthy();
-    expect(within(root).getByLabelText("节点名称")).toBeTruthy();
+    expect(within(root).getByLabelText(/^节点名称/)).toBeTruthy();
     expect(root.querySelector('[data-node-form-schema="none"]')).not.toBeNull();
 
     const parameters = jsonTab(root);
@@ -450,7 +450,7 @@ describe("node form: the JSON tab (Doc C §6.2)", () => {
     expect((within(root).getByLabelText("参数 JSON") as HTMLTextAreaElement).value).toBe("{ broken");
     // The header names the node the JSON view belongs to.
     expect(within(root).getByText("api", { selector: ".xflow-editor-inspector-head__name" })).toBeTruthy();
-    expect(within(root).getByText("xflow.http · v1", { selector: ".xflow-editor-inspector-head__type" })).toBeTruthy();
+    expect(within(root).getByText("api · xflow.http · v1", { selector: ".xflow-editor-inspector-head__type" })).toBeTruthy();
   });
 
   it("keeps drafts across a real unmount: panel collapse and the compact drawer", async () => {

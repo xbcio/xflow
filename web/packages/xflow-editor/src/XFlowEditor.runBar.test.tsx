@@ -406,7 +406,7 @@ describe("canvas run bar (§6.3)", () => {
 
     expect(onLocateNode).toHaveBeenCalledWith("fail");
     const type = document.querySelector(".xflow-editor-inspector-head__type")?.textContent;
-    expect(type).toBe("xflow.end");
+    expect(type).toBe("fail · xflow.end");
   });
 
   it("clears a rejected action's error once the next action succeeds", async () => {
