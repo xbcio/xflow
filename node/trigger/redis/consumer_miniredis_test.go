@@ -283,9 +283,14 @@ func TestRedisConsumerCloseStopsItsGoroutine(t *testing.T) {
 	if err := consumer.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
-	if got := countGoroutineFrames(frame); got != 0 {
+	// Close blocks on c.done, but runStream closes that channel from a defer, so
+	// the goroutine can still be unwinding when Close returns — the frame is
+	// then finishing its deferred close, not reading. Poll a short bounded
+	// window instead of counting once; a read loop that Close failed to stop
+	// would still be alive well past it.
+	if !waitForGoroutineFramesGone(frame, time.Second) {
 		t.Fatalf("runStream goroutine count = %d after Close, want 0: Close returned "+
-			"before the read loop had stopped", got)
+			"before the read loop had stopped", countGoroutineFrames(frame))
 	}
 	// Idempotent, and a second Close must not block on an already-closed done.
 	if err := consumer.Close(); err != nil {
@@ -348,4 +353,18 @@ func waitForGoroutineFrames(frame string, want int, timeout time.Duration) bool 
 		time.Sleep(10 * time.Millisecond)
 	}
 	return false
+}
+
+// waitForGoroutineFramesGone is the "count reaches zero" side of
+// waitForGoroutineFrames: >= 0 is always true, so an exit cannot use that
+// helper. Returning false means the frame was still present at the deadline.
+func waitForGoroutineFramesGone(frame string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if countGoroutineFrames(frame) == 0 {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return countGoroutineFrames(frame) == 0
 }
