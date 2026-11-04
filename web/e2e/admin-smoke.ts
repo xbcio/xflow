@@ -8,7 +8,7 @@ const SERVER_NAMESPACE = "ns-smoke";
  * same `--xflow-surface-raised` variable, so equality proves the surface is
  * derived and not a literal. Callers run it per colour scheme: a hard-coded
  * `#ffffff` passes the light pass and fails the dark one
- * (`--xflow-surface-raised: #222428`).
+ * (`--xflow-surface-raised: #292b30`).
  */
 async function tableSurface(page: Page): Promise<{ token: string; card: string }> {
   return page.locator('[data-table="workflows"]').evaluate((element) => {
@@ -147,7 +147,7 @@ export async function assertAdminSmoke(page: Page): Promise<void> {
 
   // 2. The card surface resolves from the token, not from a hard-coded colour.
   // Light first, then dark: a literal `#ffffff` passes the light half and must
-  // fail the dark half, where the token resolves to `#222428`.
+  // fail the dark half, where the token resolves to `#292b30`.
   const light = await tableSurface(page);
   expect(light.token).not.toBe("");
   expect(light.card).toBe(light.token);

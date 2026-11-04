@@ -47,11 +47,11 @@ describe("palette contrast (spec §3.3)", () => {
   // 4.5 floor holds on every light surface step.
   const groundsByKey: Record<
     keyof typeof floors,
-    ReadonlyArray<"surfacePanel" | "surfaceApp" | "surfaceSunken" | "surfaceOverlay">
+    ReadonlyArray<"surfacePanel" | "surfaceApp" | "surfaceSunken" | "surfaceRaised" | "surfaceOverlay">
   > = {
-    text: ["surfacePanel", "surfaceApp"],
-    textSecondary: ["surfacePanel", "surfaceApp"],
-    textTertiary: ["surfacePanel", "surfaceApp", "surfaceSunken"],
+    text: ["surfacePanel", "surfaceApp", "surfaceRaised", "surfaceOverlay"],
+    textSecondary: ["surfacePanel", "surfaceApp", "surfaceRaised", "surfaceOverlay"],
+    textTertiary: ["surfacePanel", "surfaceApp", "surfaceSunken", "surfaceRaised", "surfaceOverlay"],
   };
   for (const appearance of appearances) {
     for (const [key, floor] of Object.entries(floors)) {
@@ -64,6 +64,12 @@ describe("palette contrast (spec §3.3)", () => {
       }
     }
   }
+
+  it("dark: the surface steps ascend strictly in luminance (spec §3.3)", () => {
+    const palette = paletteTokens.dark;
+    expect(luminance(rgbOf(palette.surfacePanel))).toBeLessThan(luminance(rgbOf(palette.surfaceRaised)));
+    expect(luminance(rgbOf(palette.surfaceRaised))).toBeLessThan(luminance(rgbOf(palette.surfaceOverlay)));
+  });
 
   for (const appearance of appearances) {
     it(`${appearance}: every derived -fg stays above 6:1 on panel`, () => {

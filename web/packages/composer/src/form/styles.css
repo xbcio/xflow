@@ -57,7 +57,7 @@
   gap: 0;
   min-width: 0;
   overflow: hidden;
-  border: 1px solid var(--xflow-border, #e2e5ea);
+  border: 1px solid var(--xflow-border, #d8dbdf);
   border-radius: var(--xflow-composer-section-radius, var(--xflow-radius-md, 8px));
   background: var(--xflow-panel-raised, #eef0f3);
 }
@@ -69,7 +69,7 @@
 /* Expanded: the hairline between header and body. Collapsed: the header is the
  * whole card, and the card's radius + overflow round its corners. */
 .xflow-composer-field-group:not(.is-collapsed) > .xflow-composer-section-header {
-  border-bottom: 1px solid var(--xflow-border, #e2e5ea);
+  border-bottom: 1px solid var(--xflow-border, #d8dbdf);
 }
 
 .xflow-composer-field-group > .xflow-composer-section-description,
@@ -128,7 +128,7 @@
 
 .xflow-composer-section-description {
   margin: 0;
-  color: var(--xflow-text-secondary, #4a5260);
+  color: var(--xflow-text-secondary, #464d5a);
   font-size: var(--xflow-font-sm, 12px);
 }
 
@@ -177,7 +177,7 @@
 
 .xflow-composer-object-group {
   padding: 10px 12px;
-  border: 1px solid var(--xflow-border, #e2e5ea);
+  border: 1px solid var(--xflow-border, #d8dbdf);
   border-radius: var(--xflow-radius-sm, 6px);
   background: var(--xflow-panel-raised, #eef0f3);
 }
@@ -210,7 +210,7 @@
   align-items: baseline;
   gap: 2px;
   min-width: 0;
-  color: var(--xflow-text-secondary, #4a5260);
+  color: var(--xflow-text-secondary, #464d5a);
   font-size: var(--xflow-font-sm, 12px);
   font-weight: 500;
   line-height: 20px;
@@ -258,7 +258,7 @@
 }
 
 .xflow-composer-field-help:hover {
-  color: var(--xflow-text-secondary, #4a5260);
+  color: var(--xflow-text-secondary, #464d5a);
 }
 
 .xflow-composer-field-help:focus-visible {
@@ -308,7 +308,7 @@
 }
 
 .xflow-composer-option-description {
-  color: var(--xflow-text-secondary, #4a5260);
+  color: var(--xflow-text-secondary, #464d5a);
   font-size: var(--xflow-font-sm, 12px);
   line-height: 18px;
   white-space: normal;
@@ -324,7 +324,7 @@
 }
 
 .xflow-composer-field-description {
-  color: var(--xflow-text-secondary, #4a5260);
+  color: var(--xflow-text-secondary, #464d5a);
   font-size: var(--xflow-font-sm, 12px);
   line-height: 18px;
 }
@@ -468,7 +468,7 @@
   margin-bottom: 2px;
   padding: 0 6px;
   border-radius: var(--xflow-radius-xs, 4px);
-  background: var(--xflow-field, #ffffff);
+  background: var(--xflow-field, #f6f7f9);
   color: var(--xflow-text-tertiary, #616b79);
   font-size: var(--xflow-font-xs, 11px);
   line-height: 18px;
@@ -535,7 +535,7 @@
 
 .xflow-composer-empty {
   padding: 8px 10px;
-  border: 1px dashed var(--xflow-border, #e2e5ea);
+  border: 1px dashed var(--xflow-border, #d8dbdf);
   border-radius: var(--xflow-radius-xs, 4px);
   color: var(--xflow-text-tertiary, #616b79);
   font-size: var(--xflow-font-sm, 12px);
@@ -559,7 +559,7 @@
   display: flex;
   flex-direction: column;
   min-width: 0;
-  border: 1px solid var(--xflow-border, #e2e5ea);
+  border: 1px solid var(--xflow-border, #d8dbdf);
   border-radius: var(--xflow-radius-sm, 6px);
   background: var(--xflow-panel, #ffffff);
   overflow: hidden;
@@ -578,7 +578,7 @@
 }
 
 .xflow-composer-array-row + .xflow-composer-array-row {
-  border-top: 1px solid var(--xflow-border, #e2e5ea);
+  border-top: 1px solid var(--xflow-border, #d8dbdf);
 }
 
 .xflow-composer-array-row > .xflow-composer-field,
@@ -595,7 +595,7 @@
 }
 
 .xflow-composer-array-heading {
-  color: var(--xflow-text-secondary, #4a5260);
+  color: var(--xflow-text-secondary, #464d5a);
   font-size: var(--xflow-font-sm, 12px);
   font-weight: 500;
   line-height: 20px;
@@ -639,7 +639,7 @@
   padding: 6px 8px;
   overflow: auto;
   border-radius: var(--xflow-radius-xs, 4px);
-  background: var(--xflow-field, #ffffff);
+  background: var(--xflow-field, #f6f7f9);
   color: var(--xflow-text, #16191d);
   font-family: var(--xflow-font-mono, "JetBrains Mono", "SF Mono", Menlo, monospace);
   font-size: var(--xflow-font-sm, 12px);
@@ -681,13 +681,13 @@
 }
 
 .xflow-composer-placeholder-message {
-  color: var(--xflow-text-secondary, #4a5260);
+  color: var(--xflow-text-secondary, #464d5a);
 }
 
 .xflow-composer-placeholder-issues {
   margin: 0;
   padding-left: 16px;
-  color: var(--xflow-text-secondary, #4a5260);
+  color: var(--xflow-text-secondary, #464d5a);
 }
 
 }

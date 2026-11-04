@@ -112,22 +112,23 @@ export interface Palette {
 /**
  * Surface scale values per appearance. Light separates raised/overlay from the
  * panel by shadow alone (all three are #ffffff, as the design draws them);
- * dark lifts each step in L* so adjacent surfaces stay ≥3 L* apart without
- * relying on the shadow.
+ * dark orders every step in L*. The §3.3 text-contrast floor caps `overlay`
+ * below the old ≥3 L* spacing, so raised/overlay now sit ~0.8 L* apart and
+ * lean on elev3/elev4 for the remaining separation.
  */
 const lightSurfaces = {
   surfaceSunken: "#eef0f3",
-  surfaceApp: "#f4f5f7",
+  surfaceApp: "#e9ebed",
   surfacePanel: "#ffffff",
   surfaceRaised: "#ffffff",
   surfaceOverlay: "#ffffff",
 } as const;
 
 const darkSurfaces = {
-  surfaceSunken: "#0e0f10",
-  surfaceApp: "#111213",
-  surfacePanel: "#1b1c1f",
-  surfaceRaised: "#222428",
+  surfaceSunken: "#121314",
+  surfaceApp: "#151617",
+  surfacePanel: "#24262a",
+  surfaceRaised: "#292b30",
   surfaceOverlay: "#2a2d32",
 } as const;
 
@@ -154,16 +155,19 @@ export const palettes: Record<Appearance, Palette> = {
     app: lightSurfaces.surfaceApp,
     panel: lightSurfaces.surfacePanel,
     panelRaised: lightSurfaces.surfaceSunken,
-    field: "#ffffff",
+    field: "#f6f7f9",
     canvas: "#f7f8fa",
     canvasDot: "#d4d8df",
     borderSubtle: "#eceef1",
-    border: "#e2e5ea",
-    borderStrong: "#c9ced6",
+    border: "#d8dbdf",
+    borderStrong: "#b9bec5",
     // Text-tinted wash so hover reads on panel, raised and overlay alike.
     hover: "rgba(22, 25, 29, .06)",
     text: "#16191d",
-    textSecondary: "#4a5260",
+    // The W1 app ground (#e9ebed) drops #4a5260 to 6.59:1, below the spec's
+    // 7:1 floor for secondary text, so it deepens just far enough to clear it
+    // (7.12:1 on the app ground, 8.50:1 on panel).
+    textSecondary: "#464d5a",
     // Spec §3.3 named #6b7280 (user ruling 2026-10-20), which held 4.83:1 on
     // `surfacePanel` but only 4.43:1 on the app ground and 4.23:1 on
     // `surfaceSunken` — tertiary labels are painted on all three, so stage 1b
@@ -178,7 +182,7 @@ export const palettes: Record<Appearance, Palette> = {
     primarySolid: "#1f69e0",
     primarySolidHover: "#1a5fcf",
     primarySolidActive: "#164fb0",
-    // 5.05:1 on panel/overlay, 4.63:1 on the app ground — opaque, so it cannot
+    // 5.05:1 on panel/overlay, 4.23:1 on the app ground — opaque, so it cannot
     // wash out against the surface it sits on.
     focusRing: "#1f69e0",
     info: "#2f7cff",
@@ -203,12 +207,14 @@ export const palettes: Record<Appearance, Palette> = {
     app: darkSurfaces.surfaceApp,
     panel: darkSurfaces.surfacePanel,
     panelRaised: darkSurfaces.surfaceRaised,
-    field: "#16171a",
-    canvas: "#151617",
-    canvasDot: "#2c2f34",
-    borderSubtle: "#26292d",
-    border: "#2e3136",
-    borderStrong: "#41454c",
+    field: "#1e2023",
+    canvas: "#202225",
+    // 1.355:1 against the new dark canvas — the same dot visibility HEAD had
+    // (#2c2f34 on #151617 measured 1.349:1).
+    canvasDot: "#35383d",
+    borderSubtle: "#2e3136",
+    border: "#3a3d43",
+    borderStrong: "#4b5058",
     hover: "rgba(238, 240, 243, .06)",
     text: "#eef0f3",
     textSecondary: "#b9bfc8",
@@ -224,7 +230,7 @@ export const palettes: Record<Appearance, Palette> = {
     primarySolid: "#2d6fdd",
     primarySolidHover: "#2a66cc",
     primarySolidActive: "#255fb8",
-    // 8.16:1 on panel, 6.96:1 on overlay, 8.98:1 on the app ground.
+    // 7.25:1 on panel, 6.61:1 on overlay, 8.67:1 on the app ground.
     focusRing: "#8ab4ff",
     info: "#5b9bff",
     success: "#35c98b",
