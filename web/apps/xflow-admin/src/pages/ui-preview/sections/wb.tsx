@@ -319,7 +319,7 @@ function InspectorConfig() {
                   ]}
                 />
               </Field>
-              <Field label="原始请求体">
+              <Field label="原始请求体（base64）">
                 <Input placeholder="仅 raw 模式可编辑" />
               </Field>
               <Field label="选项">
