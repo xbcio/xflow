@@ -184,6 +184,78 @@ describe("switch row (P1-c S6)", () => {
   });
 });
 
+describe("horizontal label placement (§6.4)", () => {
+  const sideLabel = /\.xflow-composer-form--horizontal \.xflow-composer-field--horizontal\.xflow-composer-field--label-side/;
+
+  it("puts the label in a 96px column and the body in the control column", () => {
+    expect(css).toMatch(
+      /\.xflow-composer-field--label-side\s*\{[^}]*grid-template-columns:\s*var\(--xflow-composer-label-width,\s*96px\)\s*minmax\(0,\s*1fr\)/
+    );
+    expect(css).toMatch(/\.xflow-composer-field--label-side > \.xflow-composer-field-body\s*\{[^}]*grid-column:\s*2;/);
+  });
+
+  it("centres the label from the control height and the label line height, not a literal 5px", () => {
+    expect(css).not.toMatch(/padding-top:\s*5px/);
+    expect(sideLabel.test(css)).toBe(true);
+    expect(css).toMatch(
+      /\.xflow-composer-field--label-side > \.xflow-composer-field-label\s*\{[^}]*padding-top:\s*calc\([\s\S]*?var\(--xflow-composer-control-height,\s*var\(--xflow-control-height,\s*32px\)\)[\s\S]*?var\(\s*--xflow-composer-label-line-height,\s*var\(--xflow-line-height,\s*20px\)\s*\)[\s\S]*?\)\s*\/\s*2\s*\)/
+    );
+    expect(css).toMatch(
+      /\.xflow-composer-field-label\s*\{[^}]*line-height:\s*var\(--xflow-composer-label-line-height,\s*var\(--xflow-line-height,\s*20px\)\)/
+    );
+  });
+
+  it("centres the Switch label on the small row instead of the field height", () => {
+    expect(css).toMatch(
+      /\.xflow-composer-field--label-side\.xflow-composer-switch > \.xflow-composer-field-label\s*\{[^}]*var\(--xflow-composer-switch-height,\s*var\(--xflow-control-height-sm,\s*24px\)\)/
+    );
+  });
+
+  it("gives a tooltip-mode Switch label row the same small-row correction", () => {
+    // The label row is a direct child in tooltip mode; without its own rule it
+    // takes the field-height padding and sits low by (control - switch) / 2.
+    expect(css).toMatch(
+      /\.xflow-composer-field--label-side\.xflow-composer-switch > \.xflow-composer-field-label-row\s*\{[^}]*var\(--xflow-composer-switch-height,\s*var\(--xflow-control-height-sm,\s*24px\)\)/
+    );
+  });
+
+  it("makes only the horizontal form the inline-size query container and falls back below 260px", () => {
+    expect(css).toMatch(
+      /\.xflow-composer-form--horizontal\s*\{[^}]*container-name:\s*xflow-composer-form;[^}]*container-type:\s*inline-size;/
+    );
+    // Vertical forms never query: a generic container-type would collapse them
+    // in auto-width parents and change their width from HEAD.
+    expect(css).toMatch(/\.xflow-composer-form--vertical\s*\{[^}]*container-type:\s*normal;/);
+    expect(css).not.toMatch(/\.xflow-composer-form\s*\{[^}]*container-(?:name|type):/);
+    expect(css).toMatch(/\.xflow-composer-form\s*\{[^}]*box-sizing:\s*border-box;/);
+    const start = css.indexOf("@container xflow-composer-form (max-width: 259.98px)");
+    expect(start).toBeGreaterThan(-1);
+    const fallback = css.slice(start);
+    expect(fallback).toContain("grid-template-columns: minmax(0, 1fr);");
+    expect(fallback).toMatch(/padding-top:\s*0;/);
+    expect(fallback).toMatch(
+      /\.xflow-composer-field--label-side\.xflow-composer-switch > \.xflow-composer-field-label\s*\{\s*padding-top:\s*0;/
+    );
+    expect(fallback).toMatch(
+      /\.xflow-composer-field--label-side\.xflow-composer-switch > \.xflow-composer-field-label-row\s*\{\s*padding-top:\s*0;/
+    );
+    expect(fallback).toMatch(/grid-column:\s*1;/);
+  });
+
+  it("gives only the horizontal form a definite inline width for flex hosts", () => {
+    expect(css).toMatch(/\.xflow-composer-form--horizontal\s*\{[^}]*width:\s*100%;/);
+    expect(css).not.toMatch(/\.xflow-composer-form--vertical\s*\{[^}]*width:/);
+  });
+
+  it("restores the baseline object-group inset through a host knob", () => {
+    expect(css).toMatch(
+      /\.xflow-composer-object-group\s*\{[^}]*padding:\s*var\(--xflow-composer-object-group-padding,\s*10px 12px\)/
+    );
+    // The composer reads the knob; only a host declares it.
+    expect(css).not.toMatch(/--xflow-composer-object-group-padding\s*:/);
+  });
+});
+
 describe("key/value rows (P1-c S6)", () => {
   it("lays a row out as centred flex with a 6px gap", () => {
     expect(css).toMatch(

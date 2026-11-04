@@ -53,6 +53,8 @@ function ArrayTableField({ node, props, value, onChange, defaultHint, issues, re
       issues={issues}
       hint={unset && defaultHint !== undefined ? hintText(defaultHint, (v) => safeJson(v)) : undefined}
       labelMode="group"
+      // The table needs the full row (§6.4 D2).
+      labelPlacementDefault="top"
       stateClassName={unset ? "is-unset" : undefined}
     >
       {() => {

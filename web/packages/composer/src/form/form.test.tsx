@@ -5,7 +5,7 @@
 
 import { fireEvent, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ElementDef, Patch } from "../core";
+import type { ComposerSpec, ElementDef, Patch } from "../core";
 import { createRegistry, type ComposerComponent } from "../react";
 import { allPatches, mountComposer } from "../testing/harness";
 import { change, clickButton, clickClear, fieldOf, formSpec, kernels, one, pickOption, shownText } from "./form.testkit";
@@ -314,6 +314,188 @@ for (const kernel of kernels) {
         }
       });
     }
+
+    describe("horizontal label placement (§6.4)", () => {
+      const horizontalSpec = (elements: Record<string, ElementDef>, children: string[]): ComposerSpec => ({
+        spec: "composer/v1",
+        root: "form",
+        elements: { form: { type: "Form", props: { layout: "horizontal" }, children }, ...elements }
+      });
+      const has = (container: HTMLElement, id: string, name: string) =>
+        fieldOf(container, id).classList.contains(`xflow-composer-field--label-${name}`);
+
+      it("defaults to the side column and keeps full-row controls on top", async () => {
+        const m = mountComposer({
+          kernel,
+          registry,
+          spec: horizontalSpec(
+            {
+              input: { type: "Input", props: { label: "输入", value: { $bindState: "/input" } } },
+              sw: { type: "Switch", props: { label: "开关", value: { $bindState: "/sw" } } },
+              area: { type: "TextArea", props: { label: "备注", value: { $bindState: "/area" } } },
+              code: { type: "CodeEditor", props: { label: "代码", value: { $bindState: "/code" } } },
+              json: { type: "JsonEditor", props: { label: "JSON", value: { $bindState: "/json" } } },
+              kv: { type: "KeyValue", props: { label: "映射", value: { $bindState: "/kv" } } },
+              table: { type: "ArrayTable", props: { label: "规则", value: { $bindState: "/table" } } }
+            },
+            ["input", "sw", "area", "code", "json", "kv", "table"]
+          ),
+          value: {}
+        });
+        await m.flush();
+        expect(has(m.container, "input", "side")).toBe(true);
+        expect(has(m.container, "sw", "side")).toBe(true);
+        for (const id of ["area", "code", "json", "kv", "table"]) {
+          expect(has(m.container, id, "top"), id).toBe(true);
+          expect(has(m.container, id, "side"), id).toBe(false);
+        }
+        expect(m.log).toEqual([]);
+      });
+
+      it("lets a field override either default", async () => {
+        const m = mountComposer({
+          kernel,
+          registry,
+          spec: horizontalSpec(
+            {
+              input: { type: "Input", props: { label: "输入", labelPlacement: "top", value: { $bindState: "/input" } } },
+              area: { type: "TextArea", props: { label: "备注", labelPlacement: "side", value: { $bindState: "/area" } } }
+            },
+            ["input", "area"]
+          ),
+          value: {}
+        });
+        await m.flush();
+        expect(has(m.container, "input", "top")).toBe(true);
+        expect(has(m.container, "input", "side")).toBe(false);
+        expect(has(m.container, "area", "side")).toBe(true);
+        expect(has(m.container, "area", "top")).toBe(false);
+      });
+
+      it("moves a Switch label into the left column", async () => {
+        const m = mountComposer({
+          kernel,
+          registry,
+          spec: horizontalSpec(
+            { sw: { type: "Switch", props: { label: "开关", value: { $bindState: "/sw" } } } },
+            ["sw"]
+          ),
+          value: {}
+        });
+        await m.flush();
+        const field = fieldOf(m.container, "sw");
+        const direct = [...field.children].filter((el) => el.classList.contains("xflow-composer-field-label"));
+        expect(direct).toHaveLength(1);
+        const row = one<HTMLElement>(field, ".xflow-composer-switch-row");
+        expect(row.querySelector(".xflow-composer-field-label")).toBeNull();
+        expect(direct[0]!.getAttribute("for")).toBe(one<HTMLElement>(row, '[role="switch"]').id);
+      });
+
+      it("keeps the Switch label inside the row in a vertical form", async () => {
+        const m = mountComposer({
+          kernel,
+          registry,
+          spec: formSpec({ sw: { type: "Switch", props: { label: "开关", value: { $bindState: "/sw" } } } }, ["sw"]),
+          value: {}
+        });
+        await m.flush();
+        const field = fieldOf(m.container, "sw");
+        expect(field.classList.contains("xflow-composer-field--label-side")).toBe(false);
+        const row = one<HTMLElement>(field, ".xflow-composer-switch-row");
+        expect(row.querySelector(".xflow-composer-field-label")).not.toBeNull();
+        expect([...field.children].some((el) => el.classList.contains("xflow-composer-field-label"))).toBe(false);
+      });
+
+      it("stacks a top-placed Switch label above its row", async () => {
+        const m = mountComposer({
+          kernel,
+          registry,
+          spec: horizontalSpec(
+            { sw: { type: "Switch", props: { label: "开关", labelPlacement: "top", value: { $bindState: "/sw" } } } },
+            ["sw"]
+          ),
+          value: {}
+        });
+        await m.flush();
+        const field = fieldOf(m.container, "sw");
+        expect(has(m.container, "sw", "top")).toBe(true);
+        expect(has(m.container, "sw", "side")).toBe(false);
+        const direct = [...field.children].filter((el) => el.classList.contains("xflow-composer-field-label"));
+        expect(direct).toHaveLength(1);
+        const row = one<HTMLElement>(field, ".xflow-composer-switch-row");
+        expect(row.querySelector(".xflow-composer-field-label")).toBeNull();
+        expect(direct[0]!.getAttribute("for")).toBe(one<HTMLElement>(row, '[role="switch"]').id);
+        expect(m.log).toEqual([]);
+      });
+
+      it("puts a Radio label in the left column and the group in the control column", async () => {
+        const m = mountComposer({
+          kernel,
+          registry,
+          spec: horizontalSpec(
+            {
+              radio: {
+                type: "Radio",
+                props: { label: "审批模式", options: opts, value: { $bindState: "/radio" } }
+              }
+            },
+            ["radio"]
+          ),
+          value: { radio: "a" }
+        });
+        await m.flush();
+        expect(has(m.container, "radio", "side")).toBe(true);
+        const field = fieldOf(m.container, "radio");
+        const label = [...field.children].find((el) => el.classList.contains("xflow-composer-field-label")) as HTMLElement;
+        const body = [...field.children].find((el) => el.classList.contains("xflow-composer-field-body")) as HTMLElement;
+        expect(label).toBeTruthy();
+        expect(body).toBeTruthy();
+        expect(label.nextElementSibling).toBe(body);
+        const row = one<HTMLElement>(body, ".xflow-composer-radio-row");
+        expect(row.querySelector(".xflow-composer-field-label")).toBeNull();
+        expect(one<HTMLElement>(row, '[role="radiogroup"]').getAttribute("aria-labelledby")).toBe(label.id);
+        expect(m.log).toEqual([]);
+      });
+
+      it("keeps an unlabelled field in the control column", async () => {
+        const m = mountComposer({
+          kernel,
+          registry,
+          spec: horizontalSpec({ bare: { type: "Input", props: { value: { $bindState: "/bare" } } } }, ["bare"]),
+          value: {}
+        });
+        await m.flush();
+        const field = fieldOf(m.container, "bare");
+        expect(field.classList.contains("xflow-composer-field--label-none")).toBe(true);
+        expect(field.querySelector(".xflow-composer-field-label")).toBeNull();
+        expect([...field.children].some((el) => el.classList.contains("xflow-composer-field-body"))).toBe(true);
+      });
+
+      it("keeps an ObjectGroup's fields in the enclosing horizontal layout", async () => {
+        const m = mountComposer({
+          kernel,
+          registry,
+          spec: horizontalSpec(
+            {
+              og: {
+                type: "ObjectGroup",
+                props: { label: "对象", value: { $bindState: "/og" } },
+                children: ["inner"]
+              },
+              inner: { type: "Input", props: { label: "内层", value: { $bindState: "/og/inner" } } }
+            },
+            ["og"]
+          ),
+          value: { og: { inner: "x" } }
+        });
+        await m.flush();
+        const group = fieldOf(m.container, "og");
+        expect(group.classList.contains("xflow-composer-object-group")).toBe(true);
+        expect(group.classList.contains("xflow-composer-field")).toBe(false);
+        expect(fieldOf(m.container, "inner").classList.contains("xflow-composer-field--label-side")).toBe(true);
+        expect(m.log).toEqual([]);
+      });
+    });
 
     describe("structure and placeholders", () => {
       it("renders Form / FieldGroup with zero patches and labels associated", async () => {

@@ -267,6 +267,12 @@ export interface ObjectGroupProps extends FieldGroupProps {
   clearable?: boolean;
 }
 
+/*
+ * ObjectGroup is a full-row control by construction (§6.4 D2): its label is the
+ * section header and its body spans the form, so it has no label column and no
+ * `labelPlacement`; the fields inside it follow the enclosing form layout.
+ */
+
 function ObjectGroupView({
   nodeId,
   props,

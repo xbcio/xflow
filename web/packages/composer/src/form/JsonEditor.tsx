@@ -71,6 +71,8 @@ function JsonField({ node, props, value, onChange, defaultHint, issues, readOnly
       {...props}
       issues={issues}
       localIssues={localIssues}
+      // JSON needs the full row (§6.4 D2).
+      labelPlacementDefault="top"
       stateClassName={value === undefined ? "is-unset" : undefined}
     >
       {(ids) => (

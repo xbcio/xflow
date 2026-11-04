@@ -40,6 +40,13 @@ export type DescriptionPlacement = "below" | "tooltip";
 export const DescriptionPlacementContext = createContext<DescriptionPlacement>("below");
 
 /**
+ * Where a field's label sits in the horizontal layout, from the component's
+ * `labelPlacement` prop: "side" puts it in the label column (default), "top"
+ * stacks it above the control (the full-row exception, §6.4).
+ */
+export type LabelPlacement = "side" | "top";
+
+/**
  * Set by a Section (FieldGroup / ObjectGroup): every FieldFrame below it
  * reports its issues (null on unmount), its value path and its root element
  * (so a collapsed section can both show that it hides errors and order them
@@ -61,7 +68,9 @@ export const fieldShape = {
    * `required` check.
    */
   required: z.boolean().optional(),
-  disabled: z.boolean().optional()
+  disabled: z.boolean().optional(),
+  /** Overrides the component's own default in a horizontal form (§6.4). */
+  labelPlacement: z.enum(["side", "top"]).optional()
 };
 
 export interface FieldProps {
@@ -69,6 +78,8 @@ export interface FieldProps {
   description?: string;
   required?: boolean;
   disabled?: boolean;
+  /** Overrides the component's own default in a horizontal form (§6.4). */
+  labelPlacement?: LabelPlacement;
 }
 
 /** Option of Select / Radio / MultiSelect. */
@@ -172,6 +183,12 @@ export interface FieldFrameProps extends FieldProps {
   groupRole?: "group" | null;
   /** Extra state classes / attributes on the frame. */
   stateClassName?: string;
+  /**
+   * The component's own label placement when the field does not override it;
+   * "side" otherwise. Full-row controls (TextArea, CodeEditor, JsonEditor,
+   * KeyValue, ArrayTable) pass "top" (§6.4).
+   */
+  labelPlacementDefault?: LabelPlacement;
   style?: CSSProperties;
   nodeId: string;
   /** `label` is the rendered label (or null); "inline-after" fields place it. */
@@ -209,7 +226,11 @@ export function FieldFrame(props: FieldFrameProps) {
       .join(" ") || undefined;
   const ids: FieldIds = { controlId, labelId, describedBy, invalid: status === "error", status };
   const groupMode = props.labelMode === "group";
-  const inlineAfter = props.labelMode === "inline-after";
+  const placement = props.labelPlacement ?? props.labelPlacementDefault ?? "side";
+  const side = layout === "horizontal" && placement === "side";
+  // A horizontal form puts the switch's label in the left column; every other
+  // layout keeps it inside the switch row.
+  const inlineAfter = props.labelMode === "inline-after" && layout !== "horizontal";
   const hiddenLabel = layout === "cell" || layout === "inline";
   // Tooltip mode needs a visible label to sit next to; the description then
   // stays in the DOM (visually hidden) so aria-describedby still reaches it.
@@ -256,7 +277,7 @@ export function FieldFrame(props: FieldFrameProps) {
       label
     );
 
-  const control = props.children(ids, labelRow);
+  const control = props.children(ids, inlineAfter ? labelRow : null);
   return (
     <div
       ref={rootRef}
@@ -264,6 +285,8 @@ export function FieldFrame(props: FieldFrameProps) {
         "xflow-composer-field",
         props.className,
         `xflow-composer-field--${layout}`,
+        layout === "horizontal" && `xflow-composer-field--label-${placement}`,
+        side && !props.label && "xflow-composer-field--label-none",
         inlineAfter && "xflow-composer-field--label-after",
         status && `is-${status}`,
         props.disabled && "is-disabled",

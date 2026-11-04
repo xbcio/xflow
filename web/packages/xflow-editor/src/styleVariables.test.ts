@@ -46,6 +46,8 @@ const hostKnobs: Record<string, keyof typeof stylesheets> = {
   "--xflow-composer-control-block-padding": "composer",
   "--xflow-composer-field-gap": "composer",
   "--xflow-composer-font-size": "composer",
+  "--xflow-composer-label-line-height": "composer",
+  "--xflow-composer-object-group-padding": "composer",
   "--xflow-composer-section-radius": "composer",
   "--xflow-composer-section-header-padding": "composer",
   "--xflow-composer-section-body-gap": "composer",

@@ -75,6 +75,9 @@ function TextField({
       disabled={disabled}
       issues={issues}
       labelMode={wrong ? "group" : "control"}
+      labelPlacement={props.labelPlacement}
+      // A text area / code editor needs the full row (§6.4 D2).
+      labelPlacementDefault={variant === "textarea" || variant === "code" ? "top" : undefined}
       stateClassName={value === undefined ? "is-unset" : undefined}
     >
       {(ids) => {

@@ -175,8 +175,13 @@
   font-size: var(--xflow-font-sm, 12px);
 }
 
+/* The frame and the group's inner inset. The default is the baseline inset
+ * (10px block, 12px inline), so a bare composer looks as it always did. The
+ * knob lets a host that already pads the header and body itself (the editor)
+ * remove the double inset by setting it to 0; the composer never declares it.
+ * A nested group's children still follow the enclosing form layout (§6.4 D2). */
 .xflow-composer-object-group {
-  padding: 10px 12px;
+  padding: var(--xflow-composer-object-group-padding, 10px 12px);
   border: 1px solid var(--xflow-border, #d8dbdf);
   border-radius: var(--xflow-radius-sm, 6px);
   background: var(--xflow-panel-raised, #eef0f3);
@@ -195,14 +200,56 @@
   min-width: 0;
 }
 
-.xflow-composer-form--horizontal .xflow-composer-field--horizontal {
-  grid-template-columns: var(--xflow-composer-label-width, 120px) minmax(0, 1fr);
+/*
+ * Horizontal field (§6.4, user ruling 2026-10-30): the label sits in a left
+ * column and the control in the right one, so every control in a panel shares
+ * one left edge. A field whose `labelPlacement` is "top" keeps the stacked
+ * layout; the full-row controls (TextArea, CodeEditor, JsonEditor, KeyValue,
+ * ArrayTable) default to it. The label's top padding centres its first line on
+ * the control (32px by default, 28px under the editor density) and keeps that
+ * line centred when the label wraps to two.
+ */
+.xflow-composer-form--horizontal .xflow-composer-field--horizontal.xflow-composer-field--label-side {
+  grid-template-columns: var(--xflow-composer-label-width, 96px) minmax(0, 1fr);
   align-items: start;
   column-gap: 12px;
 }
 
-.xflow-composer-form--horizontal .xflow-composer-field--horizontal > .xflow-composer-field-label {
-  padding-top: 5px;
+.xflow-composer-form--horizontal .xflow-composer-field--horizontal.xflow-composer-field--label-side > .xflow-composer-field-label {
+  padding-top: calc(
+    (var(--xflow-composer-control-height, var(--xflow-control-height, 32px)) - var(
+            --xflow-composer-label-line-height,
+            var(--xflow-line-height, 20px)
+          )) / 2
+  );
+}
+
+/* A Switch's row is the small control height, not the field height: centre the
+ * label on that row instead (§6.4). Tooltip mode wraps the label and its help
+ * icon in the label row, so that row needs the same correction; otherwise it
+ * takes the field-height padding above and sits low by half the difference. */
+.xflow-composer-form--horizontal .xflow-composer-field--horizontal.xflow-composer-field--label-side.xflow-composer-switch > .xflow-composer-field-label {
+  padding-top: calc(
+    (var(--xflow-composer-switch-height, var(--xflow-control-height-sm, 24px)) - var(
+            --xflow-composer-label-line-height,
+            var(--xflow-line-height, 20px)
+          )) / 2
+  );
+}
+
+.xflow-composer-form--horizontal .xflow-composer-field--horizontal.xflow-composer-field--label-side.xflow-composer-switch > .xflow-composer-field-label-row {
+  padding-top: calc(
+    (var(--xflow-composer-switch-height, var(--xflow-control-height-sm, 24px)) - var(
+            --xflow-composer-label-line-height,
+            var(--xflow-line-height, 20px)
+          )) / 2
+  );
+}
+
+/* The body always starts in the control column, so a field without a visible
+ * label still shares the panel's control edge; the label column stays empty. */
+.xflow-composer-form--horizontal .xflow-composer-field--horizontal.xflow-composer-field--label-side > .xflow-composer-field-body {
+  grid-column: 2;
 }
 
 .xflow-composer-field-label {
@@ -213,7 +260,7 @@
   color: var(--xflow-text-secondary, #464d5a);
   font-size: var(--xflow-font-sm, 12px);
   font-weight: 500;
-  line-height: 20px;
+  line-height: var(--xflow-composer-label-line-height, var(--xflow-line-height, 20px));
   overflow-wrap: anywhere;
 }
 
@@ -229,14 +276,73 @@
   min-width: 0;
 }
 
-.xflow-composer-form--horizontal .xflow-composer-field--horizontal > .xflow-composer-field-label-row {
-  padding-top: 5px;
+.xflow-composer-form--horizontal .xflow-composer-field--horizontal.xflow-composer-field--label-side > .xflow-composer-field-label-row {
+  padding-top: calc(
+    (var(--xflow-composer-control-height, var(--xflow-control-height, 32px)) - var(
+            --xflow-composer-label-line-height,
+            var(--xflow-line-height, 20px)
+          )) / 2
+  );
 }
 
 /* An "inline-after" field keeps its label inside the row (Switch), so the body
- * spans the label column instead of being laid into it. */
+ * spans the label column instead of being laid into it. Horizontal forms put
+ * the label in the left column instead and never add this class. */
 .xflow-composer-field--label-after > .xflow-composer-field-body {
   grid-column: 1 / -1;
+}
+
+/*
+ * Narrow fallback (§6.4): below 260px of form width the label column would
+ * leave the control unusably narrow, so side fields stack. Only the horizontal
+ * form is the query container. `container-type: inline-size` removes
+ * content-based intrinsic sizing on the inline axis, so an auto-width parent
+ * (flex row wrapper, inline-block, grid auto track, float) cannot size a
+ * horizontal form from its content: that form needs the host to give it a
+ * definite inline width. When the form itself is the flex item, no host width
+ * exists to inherit, so it takes `width: 100%` to claim the container's width
+ * instead of collapsing to its (zeroed) content. Vertical forms never query,
+ * so they keep normal sizing and normal content-based width. `box-sizing:
+ * border-box` keeps any padding the host puts on the form inside that
+ * definite width.
+ */
+.xflow-composer-form {
+  box-sizing: border-box;
+}
+
+.xflow-composer-form--vertical {
+  container-type: normal;
+}
+
+.xflow-composer-form--horizontal {
+  width: 100%;
+  container-name: xflow-composer-form;
+  container-type: inline-size;
+}
+
+@container xflow-composer-form (max-width: 259.98px) {
+  .xflow-composer-form--horizontal .xflow-composer-field--horizontal.xflow-composer-field--label-side {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .xflow-composer-form--horizontal .xflow-composer-field--horizontal.xflow-composer-field--label-side > .xflow-composer-field-label,
+  .xflow-composer-form--horizontal .xflow-composer-field--horizontal.xflow-composer-field--label-side > .xflow-composer-field-label-row {
+    padding-top: 0;
+  }
+
+  /* The switch rules above are more specific than the pair above; reset them
+   * too, in both plain and tooltip-label-row form. */
+  .xflow-composer-form--horizontal .xflow-composer-field--horizontal.xflow-composer-field--label-side.xflow-composer-switch > .xflow-composer-field-label {
+    padding-top: 0;
+  }
+
+  .xflow-composer-form--horizontal .xflow-composer-field--horizontal.xflow-composer-field--label-side.xflow-composer-switch > .xflow-composer-field-label-row {
+    padding-top: 0;
+  }
+
+  .xflow-composer-form--horizontal .xflow-composer-field--horizontal.xflow-composer-field--label-side > .xflow-composer-field-body {
+    grid-column: 1;
+  }
 }
 
 .xflow-composer-field-help {
