@@ -148,7 +148,10 @@ describe("XFlowEditor", () => {
       setWidth(width: number) {
         for (const observer of [...observers]) {
           for (const target of [...observer.targets]) {
-            if (!(target instanceof HTMLElement) || !target.classList.contains("xflow-editor")) continue;
+            if (
+              !(target instanceof HTMLElement)
+              || !(target.classList.contains("xflow-editor") || target.classList.contains("xflow-editor-toolbar"))
+            ) continue;
             observer.callback(
               [{
                 target,
@@ -191,22 +194,40 @@ describe("XFlowEditor", () => {
     expect(screen.getByText("未命名工作流")).toBeTruthy();
   });
 
-  it("drives the canvas tool from shortcuts and keeps history in the toolbar", () => {
+  it("drives the canvas tool from the middle group and shortcuts, and keeps history there too", () => {
     const handleChange = vi.fn();
     render(<XFlowEditor value={workflow} onChange={handleChange} />);
 
     const editor = screen.getByRole("region", { name: "Purchase approval 编辑器" });
-    const tools = screen.getByRole("group", { name: "常用画布与历史工具" });
+    const tools = screen.getByRole("toolbar", { name: "画布工具" });
     const undo = within(tools).getByRole("button", { name: "撤销" }) as HTMLButtonElement;
     const redo = within(tools).getByRole("button", { name: "重做" }) as HTMLButtonElement;
+    const select = within(tools).getByRole("button", { name: "选择" });
+    const connect = within(tools).getByRole("button", { name: "连线" });
 
-    // §6.2 removed the select/connect mode buttons; V / L are the bindings.
-    expect(within(tools).getAllByRole("button")).toHaveLength(2);
-    expect(screen.queryByRole("button", { name: "选择工具" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "连线工具" })).toBeNull();
+    // §6.3 (2026-11-04): the middle group is 撤销/重做 │ 选择/连线/添加/适应 │
+    // 测试此节点/运行; without onRunNode the 测试此节点 key is not drawn.
+    expect(within(tools).getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual([
+      "撤销",
+      "重做",
+      "选择",
+      "连线",
+      "添加节点",
+      "适应视图",
+      "运行工作流"
+    ]);
     expect(editor.getAttribute("data-canvas-tool")).toBe("select");
+    expect(select.getAttribute("aria-pressed")).toBe("true");
+    expect(connect.getAttribute("aria-pressed")).toBe("false");
     expect(undo.disabled).toBe(true);
     expect(redo.disabled).toBe(true);
+
+    fireEvent.click(connect);
+    expect(editor.getAttribute("data-canvas-tool")).toBe("connect");
+    expect(connect.getAttribute("aria-pressed")).toBe("true");
+    expect(select.getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(select);
+    expect(editor.getAttribute("data-canvas-tool")).toBe("select");
 
     fireEvent.keyDown(window, { key: "l" });
     expect(editor.getAttribute("data-canvas-tool")).toBe("connect");
@@ -345,7 +366,7 @@ describe("XFlowEditor", () => {
   it("marks a definition without an id as unsaved until its first save", () => {
     render(<XFlowEditor value={{ name: "未命名工作流", spec: "1.0", nodes: [], connections: {} }} />);
 
-    const chip = document.querySelector(".xflow-editor-chip");
+    const chip = document.querySelector(".xflow-editor-title-chip");
     expect(chip?.textContent).toBe("未保存");
     expect(chip?.getAttribute("data-tone")).toBe("warning");
     // §6.3: 保存 keeps the quiet default appearance; dirty never turns it solid primary.
@@ -377,7 +398,7 @@ describe("XFlowEditor", () => {
 
   it("reports the persisted version on the chip and keeps 已保存 without one", () => {
     const { rerender } = render(<XFlowEditor value={{ ...workflow, version: "2.1.0" }} />);
-    const chip = () => document.querySelector(".xflow-editor-chip") as HTMLElement;
+    const chip = () => document.querySelector(".xflow-editor-title-chip") as HTMLElement;
     expect(chip().textContent).toBe("线上 v2.1.0");
     expect(chip().getAttribute("data-tone")).toBe("success");
 
@@ -388,7 +409,7 @@ describe("XFlowEditor", () => {
 
   it("counts edits against the saved version and returns to success after undo", () => {
     render(<XFlowEditor value={{ ...workflow, version: "2.1.0" }} onSave={vi.fn(async (next) => next)} />);
-    const chip = () => document.querySelector(".xflow-editor-chip") as HTMLElement;
+    const chip = () => document.querySelector(".xflow-editor-title-chip") as HTMLElement;
     expect(chip().textContent).toBe("线上 v2.1.0");
 
     const inspector = workflowSettings();
@@ -398,7 +419,7 @@ describe("XFlowEditor", () => {
     expect(chip().textContent).toBe("未保存 1 处 · 基于 v2.1.0");
     expect(chip().getAttribute("data-tone")).toBe("warning");
 
-    fireEvent.click(within(screen.getByRole("group", { name: "常用画布与历史工具" })).getByRole("button", { name: "撤销" }));
+    fireEvent.click(within(screen.getByRole("toolbar", { name: "画布工具" })).getByRole("button", { name: "撤销" }));
     expect(chip().textContent).toBe("线上 v2.1.0");
     expect(chip().getAttribute("data-tone")).toBe("success");
   });
@@ -410,7 +431,7 @@ describe("XFlowEditor", () => {
       target: { value: "3.0.0" }
     });
 
-    const chip = document.querySelector(".xflow-editor-chip") as HTMLElement;
+    const chip = document.querySelector(".xflow-editor-title-chip") as HTMLElement;
     expect(chip.textContent).toBe("未保存 1 处 · 基于 v2.1.0");
     expect(chip.getAttribute("data-tone")).toBe("warning");
   });
@@ -419,7 +440,7 @@ describe("XFlowEditor", () => {
     const draft = { name: "未命名工作流", spec: "1.0", nodes: [], connections: {} };
     const handleSave = vi.fn(async (next: typeof draft) => ({ ...next, id: "wf-new", version: "1.0.0" }));
     render(<XFlowEditor value={draft} onSave={handleSave} />);
-    const chip = () => document.querySelector(".xflow-editor-chip") as HTMLElement;
+    const chip = () => document.querySelector(".xflow-editor-title-chip") as HTMLElement;
     expect(chip().textContent).toBe("未保存");
 
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
@@ -439,7 +460,7 @@ describe("XFlowEditor", () => {
         }}
       />
     );
-    const chip = () => document.querySelector(".xflow-editor-chip") as HTMLElement;
+    const chip = () => document.querySelector(".xflow-editor-title-chip") as HTMLElement;
     expect(chip().textContent).toBe("线上 v2.1.0");
 
     fireEvent.change(within(workflowSettings()).getByLabelText("工作流名称"), {
@@ -465,7 +486,7 @@ describe("XFlowEditor", () => {
       return <XFlowEditor value={state} onChange={setState} />;
     };
     render(<Controlled />);
-    const chip = () => document.querySelector(".xflow-editor-chip") as HTMLElement;
+    const chip = () => document.querySelector(".xflow-editor-title-chip") as HTMLElement;
 
     fireEvent.change(within(workflowSettings()).getByLabelText("工作流名称"), {
       target: { value: "Renamed in a controlled host" }
@@ -483,7 +504,7 @@ describe("XFlowEditor", () => {
     const handleSave = vi.fn(() => pendingSave);
     const versioned = { ...workflow, version: "1.0.0" };
     render(<XFlowEditor value={versioned} onChange={vi.fn()} onSave={handleSave} />);
-    const chip = () => document.querySelector(".xflow-editor-chip") as HTMLElement;
+    const chip = () => document.querySelector(".xflow-editor-title-chip") as HTMLElement;
 
     // A clean draft cannot be saved (baseline clean state); dirty it first.
     const saved = { ...versioned, name: "Saved before pending" };
@@ -510,13 +531,16 @@ describe("XFlowEditor", () => {
     expect(chip().getAttribute("data-tone")).toBe("warning");
   });
 
-  it("renders the back button only when the host supplies onBack", () => {
+  it("renders the 28px X logo only when the host supplies onBack", () => {
     const handleBack = vi.fn();
     const { rerender } = render(<XFlowEditor value={workflow} onBack={handleBack} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "返回工作流列表" }));
+    const back = screen.getByRole("button", { name: "返回工作流列表" });
+    fireEvent.click(back);
     expect(handleBack).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole("button", { name: "返回工作流列表" }).querySelector("svg[data-xflow-icon]")).toBeTruthy();
+    // §6.3 (2026-11-04): the logo replaces the back arrow.
+    expect(back.textContent).toBe("X");
+    expect(back.className).toContain("xflow-editor-logo-button");
 
     rerender(<XFlowEditor value={workflow} />);
     expect(screen.queryByRole("button", { name: "返回工作流列表" })).toBeNull();
@@ -541,14 +565,13 @@ describe("XFlowEditor", () => {
     expect(layoutItem.getAttribute("aria-disabled")).toBeNull();
   });
 
-  it("opens the run options placeholder with its single disabled item", async () => {
+  it("drops the 运行 split's options placeholder from the top bar", () => {
     render(<XFlowEditor value={workflow} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "运行选项" }));
-    const items = await screen.findAllByRole("menuitem");
-    expect(items).toHaveLength(1);
-    expect(items[0].textContent).toBe("更多运行方式（未接入）");
-    expect(items[0].getAttribute("aria-disabled")).toBe("true");
+    // §6.3 (2026-11-04) overrides the 2026-10-17 placeholder ruling: the host
+    // never wired another run mode, so it is not drawn as a disabled control.
+    expect(screen.queryByRole("button", { name: "运行选项" })).toBeNull();
+    expect(screen.queryByText("更多运行方式（未接入）")).toBeNull();
   });
 
   it("uses the controlled light and dark appearances on the editor root", () => {
@@ -911,49 +934,63 @@ describe("XFlowEditor", () => {
     expect(editor.getAttribute("data-layout")).toBe("a");
   });
 
-  it("renders the ⋯ menu only in the compact layout", () => {
+  it("folds the bar by its own measured width, not by the layout tier", () => {
     mockSystemColorScheme(false);
     const container = mockEditorWidth();
-    render(<XFlowEditor value={workflow} />);
+    render(<XFlowEditor value={{ ...workflow, spec: "1.0" }} />);
     const toolbar = screen.getByRole("toolbar", { name: "编辑器工具栏" });
+    const tools = within(toolbar).getByRole("toolbar", { name: "画布工具" });
 
+    // Tier 0: everything is on the bar.
     act(() => container.setWidth(1600));
-    expect(within(toolbar).queryByRole("button", { name: "更多操作" })).toBeNull();
-    // The wide toolbar keeps the baseline's individual actions instead.
-    for (const name of ["撤销", "重做", "校验", "主题设置"]) {
-      expect(within(toolbar).getByRole("button", { name })).toBeTruthy();
-    }
+    expect(toolbar.getAttribute("data-fold")).toBe("0");
+    expect(within(toolbar).getByRole("button", { name: "校验" })).toBeTruthy();
+    expect(within(toolbar).getByRole("button", { name: "主题设置" })).toBeTruthy();
+    expect(toolbar.querySelector(".xflow-editor-subtitle")?.textContent).toBe("wf-purchase-approval · 3 个节点");
+    expect(toolbar.querySelector(".xflow-editor-spec-chip")?.textContent).toBe("spec 1.0");
+    expect(within(tools).getByRole("button", { name: "适应视图" })).toBeTruthy();
 
-    act(() => container.setWidth(1279));
-    expect(within(toolbar).getByRole("button", { name: "更多操作" })).toBeTruthy();
+    // Tier 1 (fits 1327): 校验 / 主题 move into ⋯; the middle group stays whole.
+    act(() => container.setWidth(1280));
+    expect(toolbar.getAttribute("data-fold")).toBe("1");
+    expect(within(toolbar).queryByRole("button", { name: "校验" })).toBeNull();
+    expect(within(toolbar).queryByRole("button", { name: "主题设置" })).toBeNull();
+    expect(within(tools).getByRole("button", { name: "适应视图" })).toBeTruthy();
+
+    // Tier 2 (fits 1083): the subtitle and the spec chip give way.
+    act(() => container.setWidth(1090));
+    expect(toolbar.getAttribute("data-fold")).toBe("2");
+    expect(toolbar.querySelector(".xflow-editor-subtitle")).toBeNull();
+    expect(toolbar.querySelector(".xflow-editor-spec-chip")).toBeNull();
+    expect(within(tools).getByRole("button", { name: "适应视图" })).toBeTruthy();
+
+    // Tier 3 (fits 924): the middle group keeps 撤销 / 重做 / 运行 only.
+    act(() => container.setWidth(1000));
+    expect(toolbar.getAttribute("data-fold")).toBe("3");
+    expect(within(tools).getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual([
+      "撤销",
+      "重做",
+      "运行工作流"
+    ]);
   });
 
-  it("keeps 撤销 / 重做 / 校验 / 主题 independent at wide and folds them into ⋯ when compact", async () => {
+  it("folds 校验 / 主题 into ⋯ by tier while 撤销 / 重做 stay in the middle group", async () => {
     mockSystemColorScheme(false);
     const container = mockEditorWidth();
     render(<XFlowEditor value={workflow} />);
     const editor = screen.getByRole("region", { name: "Purchase approval 编辑器" });
+    const toolbar = screen.getByRole("toolbar", { name: "编辑器工具栏" });
+    const tools = within(toolbar).getByRole("toolbar", { name: "画布工具" });
 
-    // Layout a: each secondary action keeps its own top-bar button.
-    for (const name of ["撤销", "重做", "校验", "主题设置"]) {
-      expect(screen.getByRole("button", { name })).toBeTruthy();
+    // Tier 0: each action keeps its top-bar button, and ⋯ is still there for
+    // the view-level entries (§6.3: 沉浸布局 / 新建工作流 never leave the bar).
+    act(() => container.setWidth(1600));
+    for (const name of ["撤销", "重做", "校验", "主题设置", "更多操作"]) {
+      expect(within(toolbar).getByRole("button", { name })).toBeTruthy();
     }
-
-    // Deselect at desktop width: inside the compact drawer Escape would close
-    // the drawer instead of clearing the canvas selection.
-    workflowSettings();
-
-    act(() => container.setWidth(1279));
-    // Layout c (compact): those buttons are gone; only the ⋯ menu carries them,
-    // and the inspector is a drawer opened from the compact rail.
-    for (const name of ["撤销", "重做", "校验", "主题设置"]) {
-      expect(screen.queryByRole("button", { name })).toBeNull();
-    }
-    fireEvent.click(within(screen.getByRole("complementary", { name: "紧凑导航" })).getByRole("button", { name: "属性面板" }));
-    await waitFor(() => expect(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).toBeTruthy());
 
     const openMenu = async () => {
-      if (!screen.queryByRole("menu")) fireEvent.click(within(screen.getByRole("toolbar", { name: "编辑器工具栏" })).getByRole("button", { name: "更多操作" }));
+      if (!screen.queryByRole("menu")) fireEvent.click(within(toolbar).getByRole("button", { name: "更多操作" }));
       return within(await screen.findByRole("menu"));
     };
     const choose = async (name: string) => {
@@ -962,35 +999,36 @@ describe("XFlowEditor", () => {
       await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
     };
 
-    // Empty history: both entries exist, disabled, with the independent
-    // buttons' shortcut hint; the row order is the §6.3 order.
+    // Tier 0: the menu carries only the view entries. 撤销 / 重做 never enter it
+    // at any tier, and 校验 / 主题 are still on the bar, not duplicated.
     const menu = await openMenu();
-    expect(menu.getByRole("menuitem", { name: "撤销" }).getAttribute("aria-disabled")).toBe("true");
-    expect(menu.getByRole("menuitem", { name: "重做" }).getAttribute("aria-disabled")).toBe("true");
-    expect(menu.getByRole("menuitem", { name: "撤销" }).getAttribute("title")).toContain("Ctrl + Z");
+    expect(menu.queryByRole("menuitem", { name: "撤销" })).toBeNull();
+    expect(menu.queryByRole("menuitem", { name: "重做" })).toBeNull();
+    expect(menu.queryByRole("menuitem", { name: "校验" })).toBeNull();
     expect(menu.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
-      "撤销",
-      "重做",
-      "校验",
-      "浅色",
-      "深色",
-      "跟随系统（当前）",
       "进入沉浸布局",
       "新建工作流"
     ]);
+    fireEvent.click(within(toolbar).getByRole("button", { name: "更多操作" }));
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
 
-    // 撤销 really undoes the edit the menu offers it for. The compact drawer is
-    // already showing the workflow settings (no node selected), so query it
-    // directly: Escape would close the drawer instead of deselecting.
-    const settings = await waitFor(() => screen.getByRole("region", { name: /^(属性|工作流设置)$/ }));
+    // 撤销 / 重做 really act from the middle group, at the docked width.
+    const settings = workflowSettings();
     fireEvent.change(within(settings).getByLabelText("工作流名称"), { target: { value: "Narrow edit" } });
-    expect(document.querySelector(".xflow-editor-chip")?.textContent).toBe("未保存 1 处");
-    await choose("撤销");
-    expect(document.querySelector(".xflow-editor-chip")?.textContent).toBe("已保存");
+    expect(document.querySelector(".xflow-editor-title-chip")?.textContent).toBe("未保存 1 处");
+    fireEvent.click(within(tools).getByRole("button", { name: "撤销" }));
+    expect(document.querySelector(".xflow-editor-title-chip")?.textContent).toBe("已保存");
+    fireEvent.click(within(tools).getByRole("button", { name: "重做" }));
+    expect(document.querySelector(".xflow-editor-title-chip")?.textContent).toBe("未保存 1 处");
 
-    // 重做 re-applies the very edit 撤销 took away.
-    await choose("重做");
-    expect(document.querySelector(".xflow-editor-chip")?.textContent).toBe("未保存 1 处");
+    // Tier 1 (header 1280): 校验 / 主题 leave the bar; 撤销 / 重做 stay put.
+    act(() => container.setWidth(1280));
+    expect(editor.getAttribute("data-layout")).toBe("c");
+    expect(toolbar.getAttribute("data-fold")).toBe("1");
+    expect(within(toolbar).queryByRole("button", { name: "校验" })).toBeNull();
+    expect(within(toolbar).queryByRole("button", { name: "主题设置" })).toBeNull();
+    expect(within(tools).getByRole("button", { name: "撤销" })).toBeTruthy();
+    expect(within(tools).getByRole("button", { name: "重做" })).toBeTruthy();
 
     // 校验 really validates: the live region reports the verdict, panel opens.
     await choose("校验");
@@ -1018,21 +1056,13 @@ describe("XFlowEditor", () => {
     fireEvent.click(themeMenu.getByRole("menuitem", { name: "深色" }));
     await waitFor(() => expect(editor.getAttribute("data-theme")).toBe("dark"));
     await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
-    const themedMenu = await openMenu();
-    expect(themedMenu.getByRole("menuitem", { name: /深色.*当前/ })).toBeTruthy();
-    // Close the ⋯ menu before switching tiers.
-    fireEvent.click(within(screen.getByRole("toolbar", { name: "编辑器工具栏" })).getByRole("button", { name: "更多操作" }));
-    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
 
-    // Layout c (narrow tier and manual immersive) folds the same four actions,
-    // and its menu items stay live.
-    act(() => container.setWidth(1023));
-    expect(editor.getAttribute("data-layout")).toBe("c");
-    for (const name of ["撤销", "重做", "校验", "主题设置"]) {
-      expect(screen.queryByRole("button", { name })).toBeNull();
-    }
+    // Tier 3 (header 1000): the canvas extras join the menu, whose folded rows
+    // stay live.
+    act(() => container.setWidth(1000));
+    expect(toolbar.getAttribute("data-fold")).toBe("3");
     const narrowMenu = await openMenu();
-    for (const name of ["撤销", "重做", "校验", "浅色"]) {
+    for (const name of ["选择", "连线", "添加节点", "适应视图", "校验", "浅色"]) {
       expect(narrowMenu.getByRole("menuitem", { name })).toBeTruthy();
     }
     fireEvent.click(narrowMenu.getByRole("menuitem", { name: "浅色" }));
@@ -2077,7 +2107,7 @@ describe("XFlowEditor", () => {
       connections: {}
     });
     // The fresh draft is its own baseline: nothing to compare, so no count (§6.3).
-    expect(document.querySelector(".xflow-editor-chip")?.textContent).toBe("未保存");
+    expect(document.querySelector(".xflow-editor-title-chip")?.textContent).toBe("未保存");
     // §6.2 empty canvas: the trigger card replaces the preview's default note.
     expect(screen.getByRole("heading", { name: "添加触发器开始" })).toBeTruthy();
     expect(screen.queryByText("No nodes to preview")).toBeNull();
@@ -2113,7 +2143,7 @@ describe("XFlowEditor", () => {
     expect(screen.queryByRole("heading", { name: "添加触发器开始" })).toBeNull();
 
     fireEvent.click(
-      within(screen.getByRole("group", { name: "常用画布与历史工具" })).getByRole("button", { name: "撤销" })
+      within(screen.getByRole("toolbar", { name: "画布工具" })).getByRole("button", { name: "撤销" })
     );
     expect((onChange.mock.calls.at(-1)?.[0] as WorkflowDef).nodes).toEqual([]);
     expect(screen.getByRole("heading", { name: "添加触发器开始" })).toBeTruthy();

@@ -24,7 +24,7 @@ const jsonTab = (root: HTMLElement = inspector()) => {
   return within(root).getByLabelText("参数 JSON") as HTMLTextAreaElement;
 };
 const historyButton = (name: "撤销" | "重做") =>
-  within(screen.getByRole("group", { name: "常用画布与历史工具" })).getByRole("button", { name });
+  within(screen.getByRole("toolbar", { name: "画布工具" })).getByRole("button", { name });
 const lastWorkflow = (spy: ReturnType<typeof vi.fn>) => spy.mock.calls.at(-1)?.[0] as WorkflowDef;
 /** How many Diagnostics lines are attributed to the node (each carries one "定位节点 X" button). */
 const diagnosticCount = (name: string) => screen.queryAllByRole("button", { name: `定位节点 ${name}` }).length;

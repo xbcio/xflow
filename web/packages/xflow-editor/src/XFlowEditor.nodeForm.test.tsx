@@ -27,7 +27,7 @@ const selectNode = (name: string) => {
   fireEvent.click(canvasNode(name));
   return inspector();
 };
-const undoButton = () => within(screen.getByRole("group", { name: "常用画布与历史工具" })).getByRole("button", { name: "撤销" });
+const undoButton = () => within(screen.getByRole("toolbar", { name: "画布工具" })).getByRole("button", { name: "撤销" });
 /** The parameters JSON lives behind the 节点参数 card's </> toggle. */
 const jsonSourceButton = (root: HTMLElement = inspector()) =>
   within(root).getByRole("button", { name: "以 JSON 编辑参数" });

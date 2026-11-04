@@ -1,9 +1,10 @@
 import {
-  BackIcon,
   BranchIcon,
   CheckIcon,
   ClockIcon,
   CodeIcon,
+  ConnectIcon,
+  CursorIcon,
   DownIcon,
   EditIcon,
   EyeIcon,
@@ -73,6 +74,7 @@ import {
   cardSummaryRows,
   declaredOutputPorts,
   executionOpLabel,
+  formatNodeTimeout,
   isSupplyNode,
   isTextEntryTarget,
   missingCapabilityScopes,
@@ -817,6 +819,33 @@ function contentInlineSize(element: HTMLElement): number {
 }
 
 /**
+ * Border-box inline size, the unit the §6.3 fold thresholds are stated in: the
+ * header's own 24px padding and 16px of gaps are part of its budget, so feeding
+ * the content box here would fold 24px early. `borderBoxSize` is the RO-native
+ * value; the content-box fallback keeps mocked/older observers on the same
+ * number the caller passed in.
+ */
+function borderInlineSize(element: HTMLElement, entry?: ResizeObserverEntry): number {
+  const size = entry?.borderBoxSize as ResizeObserverSize | ReadonlyArray<ResizeObserverSize> | undefined;
+  const first = Array.isArray(size) ? size[0] : size;
+  if (first && typeof first.inlineSize === "number" && first.inlineSize > 0) {
+    return first.inlineSize;
+  }
+  if (entry) {
+    const style = window.getComputedStyle(element);
+    const px = (value: string) => Number.parseFloat(value) || 0;
+    return (
+      entry.contentRect.width +
+      px(style.paddingLeft) +
+      px(style.paddingRight) +
+      px(style.borderLeftWidth) +
+      px(style.borderRightWidth)
+    );
+  }
+  return element.getBoundingClientRect().width;
+}
+
+/**
  * Inline size of the editor's own box (the `.xflow-editor` root, which is the
  * named inline-size container). The breakpoints are measured here rather than
  * on the window, so an editor embedded in a narrow host collapses with the box
@@ -825,7 +854,10 @@ function contentInlineSize(element: HTMLElement): number {
  * measured yet": SSR and hosts without ResizeObserver stay on the wide layout
  * instead of guessing.
  */
-function useEditorWidth(ref: React.RefObject<HTMLElement | null>): number {
+function useEditorWidth(
+  ref: React.RefObject<HTMLElement | null>,
+  box: "content" | "border" = "content"
+): number {
   const [width, setWidth] = React.useState(0);
 
   React.useLayoutEffect(() => {
@@ -833,16 +865,69 @@ function useEditorWidth(ref: React.RefObject<HTMLElement | null>): number {
     if (!element || typeof ResizeObserver === "undefined") {
       return undefined;
     }
+    const read = (entry?: ResizeObserverEntry) =>
+      box === "border"
+        ? borderInlineSize(element, entry)
+        : entry
+          ? entry.contentRect.width
+          : contentInlineSize(element);
     const commit = (next: number) => setWidth((current) => (current === next ? current : next));
     // Seed before the first paint: a ResizeObserver callback lands after it, so
     // a narrow editor would otherwise paint one frame of the wide layout.
-    commit(contentInlineSize(element));
-    const observer = new ResizeObserver(([entry]) => commit(entry.contentRect.width));
+    commit(read());
+    const observer = new ResizeObserver(([entry]) => commit(read(entry)));
     observer.observe(element);
     return () => observer.disconnect();
-  }, [ref]);
+  }, [box, ref]);
 
   return width;
+}
+
+/**
+ * Top bar fold thresholds (§6.3, 2026-11-04): measured in a real browser on the
+ * header itself, not copied from the baseline. The bar is
+ * `minmax(0, 1fr) auto minmax(0, 1fr)`, so both side tracks are equal and the
+ * right cluster's natural width sets both. Widths below are border-box (the
+ * unit `useEditorWidth(toolbarRef, "border")` reports). Per tier:
+ *
+ *   header = 24px padding + two 8px gaps + tools + 2 × side
+ *          = 40 + tools + 2 × max(right natural, left floor)
+ *
+ * Measured on the real 52px bar (headless Chromium, full left cluster):
+ *   tools 298 (8 keys, same as the ui-preview baseline) / 262 (7, no onRunNode)
+ *         / 139 (3 at tier 3+)
+ *   right 494 (tier 0) / 372 (tier 1, 校验 + 主题 folded into ⋯)
+ *         259 (tier 4, mode switch icon-only, ⌘S keycap hidden)
+ *   left natural 319 (tier 0) / 201 (tier 2); the title ellipsizes, so 201 is
+ *   the removable floor here — below the right cluster in every tier, which
+ *   therefore decides all thresholds.
+ *
+ *   tier 0 fits: 40 + 298 + 2 × 494.36 = 1326.72 → 1327
+ *   tier 1 fits: 40 + 298 + 2 × 372.36 = 1082.72 → 1083
+ *   tier 2 hides the subtitle and the spec chip for title room. It changes
+ *   neither the right cluster nor the tools, so it cannot widen a side track;
+ *   1100 is the last collision-free 50px band above the 1083 fit boundary (the
+ *   same rounding the baseline used: its 1152 fit became 1200).
+ *   tier 3 folds the canvas extras into ⋯; it fits down to
+ *   40 + 139 + 2 × 372.36 = 923.72 → 924, so that is where tier 4 starts.
+ *   tier 4 makes the mode switch icon-only (names move to tooltips) and drops
+ *   the ⌘S keycap: 40 + 139 + 2 × 259 = 697 is the bottom of the supported
+ *   range; below it the right cluster itself is squeezed, and there is no
+ *   further fold step.
+ *
+ * 1280 (the §6.3 hard case) sits in tier 1: all 8 keys stay on the bar,
+ * centred, with 校验 / 主题 in ⋯. 1600 stays at tier 0.
+ */
+const TOOLBAR_FOLD_STEPS = [1327, 1100, 1083, 924] as const;
+
+/** 0 while unmeasured, so the first paint shows everything the bar can hold. */
+function toolbarFoldLevel(width: number): number {
+  if (width <= 0) return 0;
+  if (width >= TOOLBAR_FOLD_STEPS[0]) return 0;
+  if (width >= TOOLBAR_FOLD_STEPS[1]) return 1;
+  if (width >= TOOLBAR_FOLD_STEPS[2]) return 2;
+  if (width >= TOOLBAR_FOLD_STEPS[3]) return 3;
+  return 4;
 }
 
 /**
@@ -2442,8 +2527,10 @@ export function XFlowEditor({
   const widthTier = layoutTier(editorWidth);
   const [layoutPolicy, setLayoutPolicy] = React.useState<LayoutPolicy>("auto");
   const layout: EditorLayout = layoutPolicy === "compact" || widthTier === "compact" ? "c" : "a";
-  // §6.3: in compact (layout c, manual immersive included) the secondary
-  // history / validate / theme actions fold into the ⋯ menu.
+  // §6.3 (2026-11-04): the top bar folds on its own measured width, not on the
+  // layout tier. `compactToolbar` stays only for the panel/drawer decisions.
+  const toolbarRef = React.useRef<HTMLElement | null>(null);
+  const toolbarFold = toolbarFoldLevel(useEditorWidth(toolbarRef, "border"));
   const compactToolbar = layout !== "a";
   const [compactDrawer, setCompactDrawer] = React.useState<"left" | "right" | undefined>();
   const [leftDrawerTab, setLeftDrawerTab] = React.useState<"library" | "variables" | "executions">("library");
@@ -2533,6 +2620,18 @@ export function XFlowEditor({
   const titleTooltip = [draftWorkflow.id, draftWorkflow.version ? `v${draftWorkflow.version}` : undefined]
     .filter((part): part is string => Boolean(part))
     .join(" · ") || undefined;
+  // §6.3: id · N 个节点 · 时区 · 超时 Nh. An absent field drops only its own
+  // segment; the node count always exists.
+  const subtitle = [
+    draftWorkflow.id,
+    `${nodes.length} 个节点`,
+    draftWorkflow.settings?.timezone,
+    draftWorkflow.settings?.timeout
+      ? `超时 ${formatNodeTimeout(draftWorkflow.settings.timeout)}`
+      : undefined
+  ]
+    .filter((part): part is string => Boolean(part))
+    .join(" · ");
   // §6.8: the switch is 编辑 | 运行记录. A controlled `mode` is the host's
   // (it owns `?exec=`); without one the editor keeps its own state.
   const [uncontrolledMode, setUncontrolledMode] = React.useState<XFlowEditorMode>("edit");
@@ -3229,11 +3328,6 @@ export function XFlowEditor({
     setSelectedKey(undefined);
   }, [commitWorkflow]);
 
-  // 运行 ▾ is a placeholder until P3: one disabled item, no behaviour to hang.
-  const runOptionItems: MenuProps["items"] = [
-    { key: "more-run", label: "更多运行方式（未接入）", disabled: true }
-  ];
-
   // Computed once and shared by the Diagnostics panel and the validate button,
   // so the button's verdict always matches the panel's findings. The node
   // forms' own rows join through the same 参数 area (WB-13), with param_issues
@@ -3308,27 +3402,53 @@ export function XFlowEditor({
     historicalVersion,
     onExitHistory
   });
-  const moreMenuItems: MenuProps["items"] = [
-    { key: "undo", label: "撤销", title: "撤销（⌘ / Ctrl + Z）", disabled: !editMode || history.undo.length === 0 },
-    { key: "redo", label: "重做", title: "重做（⌘ / Ctrl + Shift + Z）", disabled: !editMode || history.redo.length === 0 },
-    {
-      key: "validate",
-      label: "校验",
-      title: runsMode ? "运行记录模式不提供诊断台" : "校验当前工作流",
-      // A replay has no draft and no diagnostics dock: the action would
-      // change hidden state with no visible result.
-      disabled: runsMode
-    },
-    {
-      type: "group",
-      label: "主题",
-      children: [
-        themeMenuItem("theme-light", "浅色", "light"),
-        themeMenuItem("theme-dark", "深色", "dark"),
-        themeMenuItem("theme-system", "跟随系统", "system")
+  // §6.3 fold tiers (2026-11-04): ⋯ always holds the view-level entries and
+  // gains the folded top-bar actions. 撤销 / 重做 never move here: the middle
+  // group always keeps them.
+  const foldedCanvasItems: MenuProps["items"] = toolbarFold >= 3
+    ? [
+        { key: "tool-select", label: "选择", title: "选择工具（V）" },
+        { key: "tool-connect", label: "连线", title: "连线工具（L）" },
+        { key: "tool-add-node", label: "添加节点", title: "添加节点（A）" },
+        { key: "tool-fit-view", label: "适应视图" },
+        ...(onRunNode
+          ? [{
+              key: "tool-run-node",
+              label: "测试此节点",
+              title: selectedKey ? "运行到选中节点" : "先选中一个节点",
+              disabled: !selectedKey || running
+            }]
+          : [])
       ]
-    },
-    { type: "divider" },
+    : [];
+  // Fold tier 1 moves 校验 and 主题 off the bar. The theme rows are a radio
+  // group whose current value names itself in the accessible name. A replay
+  // never draws them on the bar at all, so its ⋯ keeps them at every width.
+  const foldedBarItems: MenuProps["items"] = toolbarFold >= 1 || runsMode
+    ? [
+        {
+          key: "validate",
+          label: "校验",
+          title: runsMode ? "运行记录模式不提供诊断台" : "校验当前工作流",
+          // A replay has no draft and no diagnostics dock: the action would
+          // change hidden state with no visible result.
+          disabled: runsMode
+        },
+        {
+          type: "group",
+          label: "主题",
+          children: [
+            themeMenuItem("theme-light", "浅色", "light"),
+            themeMenuItem("theme-dark", "深色", "dark"),
+            themeMenuItem("theme-system", "跟随系统", "system")
+          ]
+        }
+      ]
+    : [];
+  const moreMenuItems: MenuProps["items"] = [
+    ...foldedCanvasItems,
+    ...foldedBarItems,
+    ...(foldedCanvasItems.length > 0 || foldedBarItems.length > 0 ? [{ type: "divider" as const }] : []),
     { key: "layout", label: layoutPolicy === "auto" ? "进入沉浸布局" : "恢复自动布局" },
     {
       key: "new",
@@ -3338,12 +3458,15 @@ export function XFlowEditor({
     }
   ];
   const handleMoreMenuClick: MenuProps["onClick"] = ({ key }) => {
-    if (key === "undo") undoWorkflow();
-    else if (key === "redo") redoWorkflow();
-    else if (key === "validate") validateCurrentWorkflow();
+    if (key === "validate") validateCurrentWorkflow();
     else if (key === "theme-light") changeAppearance("light");
     else if (key === "theme-dark") changeAppearance("dark");
     else if (key === "theme-system") changeAppearance("system");
+    else if (key === "tool-select") setCanvasTool("select");
+    else if (key === "tool-connect") setCanvasTool("connect");
+    else if (key === "tool-add-node") openNodeLibrary();
+    else if (key === "tool-fit-view") fitCanvasView();
+    else if (key === "tool-run-node" && selectedKey) void runNode(selectedKey, "to");
     else if (key === "layout") {
       setLayoutPolicy((policy) => (policy === "auto" ? "compact" : "auto"));
     } else if (key === "new" && editMode) {
@@ -4346,6 +4469,11 @@ export function XFlowEditor({
     previewHandleRef.current = handle;
   }, []);
 
+  /** §6.3 适应视图: the readable minimum zoom the layout fit already uses. */
+  const fitCanvasView = React.useCallback(() => {
+    previewHandleRef.current?.fitView({ minZoom: READABLE_FIT_ZOOM });
+  }, []);
+
   /** The rendered card of a node, by the id the preview puts on it. */
   const canvasNodeElement = React.useCallback(
     (key: string) =>
@@ -5285,22 +5413,36 @@ export function XFlowEditor({
         data-theme={resolvedAppearance}
         data-view-mode={viewMode}
       >
-      <header className="xflow-editor-toolbar" role="toolbar" aria-label="编辑器工具栏">
-        {onBack ? (
-          <Tooltip classNames={editorTooltipClassNames} title="返回工作流列表">
-            <Button
-              aria-label="返回工作流列表"
-              className="xflow-editor-icon-button"
-              icon={<BackIcon />}
-              type="text"
-              onClick={onBack}
-            />
-          </Tooltip>
-        ) : null}
-        <div className="xflow-editor-title">
-          <strong title={titleTooltip}>{title}</strong>
+      <header
+        className="xflow-editor-toolbar"
+        data-fold={toolbarFold}
+        ref={toolbarRef}
+        role="toolbar"
+        aria-label="编辑器工具栏"
+      >
+        <div className="xflow-editor-toolbar-left">
+          {onBack ? (
+            <Tooltip classNames={editorTooltipClassNames} title="返回工作流列表">
+              <Button
+                aria-label="返回工作流列表"
+                className="xflow-editor-logo-button"
+                type="text"
+                onClick={onBack}
+              >
+                X
+              </Button>
+            </Tooltip>
+          ) : null}
+          <div className="xflow-editor-title-block">
+            <div className="xflow-editor-title">
+              <strong title={titleTooltip}>{title}</strong>
+              {draftWorkflow.spec && toolbarFold < 2 ? (
+                <span className="xflow-editor-chip xflow-editor-spec-chip" data-tone="neutral">
+                  spec {draftWorkflow.spec}
+                </span>
+              ) : null}
           {runsMode ? (
-            <span className="xflow-editor-chip" data-tone="neutral">
+            <span className="xflow-editor-chip xflow-editor-title-chip" data-tone="neutral">
               <span aria-hidden="true" className="xflow-editor-chip__icon">
                 <ClockIcon />
               </span>
@@ -5337,7 +5479,7 @@ export function XFlowEditor({
             >
               <button
                 aria-label="版本历史"
-                className="xflow-editor-chip xflow-editor-version-chip"
+                className="xflow-editor-chip xflow-editor-title-chip xflow-editor-version-chip"
                 data-tone={versionChip.tone}
                 type="button"
               >
@@ -5345,41 +5487,26 @@ export function XFlowEditor({
               </button>
             </Popover>
           ) : (
-            <span className="xflow-editor-chip" data-tone={versionChip.tone}>
+            <span className="xflow-editor-chip xflow-editor-title-chip" data-tone={versionChip.tone}>
               <span>{versionChip.label}</span>
             </span>
           )}
+            </div>
+            {toolbarFold < 2 && subtitle ? (
+              <p className="xflow-editor-subtitle">{subtitle}</p>
+            ) : null}
+          </div>
         </div>
-        {canViewExecutions ? (
-          <Segmented
-            aria-label="视图模式"
-            classNames={{
-              item: "xflow-editor-mode-segmented__item",
-              label: "xflow-editor-mode-segmented__label",
-              root: "xflow-editor-mode-segmented__root"
-            }}
-            rootClassName="xflow-editor-mode-segmented"
-            value={viewMode}
-            options={[
-              { label: "编辑", value: "edit" },
-              { label: "运行记录", value: "runs" }
-            ]}
-            onChange={(nextView) => {
-              if (nextView === "runs") enterRuns();
-              else changeMode("edit");
-            }}
-          />
-        ) : null}
-        <div className="xflow-editor-toolbar-actions">
-          {runsMode ? runsToolbar : compactToolbar ? moreMenuButton : (
-            <>
-          <span aria-label="常用画布与历史工具" className="xflow-editor-history-group" role="group">
+        {editMode ? (
+          // §6.3: the canvas tools sit exactly in the middle track; a read-only
+          // or replaying bar draws no tools at all.
+          <div className="xflow-editor-canvas-tools" role="toolbar" aria-label="画布工具">
             <Tooltip classNames={editorTooltipClassNames} title="撤销（⌘ / Ctrl + Z）">
               <span>
                 <Button
                   aria-label="撤销"
                   className="xflow-editor-icon-button"
-                  disabled={!editMode || history.undo.length === 0}
+                  disabled={history.undo.length === 0}
                   icon={<UndoIcon />}
                   type="text"
                   onClick={undoWorkflow}
@@ -5391,15 +5518,147 @@ export function XFlowEditor({
                 <Button
                   aria-label="重做"
                   className="xflow-editor-icon-button"
-                  disabled={!editMode || history.redo.length === 0}
+                  disabled={history.redo.length === 0}
                   icon={<RedoIcon />}
                   type="text"
                   onClick={redoWorkflow}
                 />
               </span>
             </Tooltip>
-          </span>
-          <Divider className="xflow-editor-sep" orientation="vertical" />
+            {toolbarFold < 3 ? (
+              <>
+            <Divider className="xflow-editor-sep" orientation="vertical" />
+            <Tooltip classNames={editorTooltipClassNames} title="选择工具（V）">
+              <span>
+                <Button
+                  aria-label="选择"
+                  aria-pressed={canvasTool === "select"}
+                  className="xflow-editor-icon-button"
+                  icon={<CursorIcon />}
+                  type="text"
+                  onClick={() => setCanvasTool("select")}
+                />
+              </span>
+            </Tooltip>
+            <Tooltip classNames={editorTooltipClassNames} title="连线工具（L）">
+              <span>
+                <Button
+                  aria-label="连线"
+                  aria-pressed={canvasTool === "connect"}
+                  className="xflow-editor-icon-button"
+                  icon={<ConnectIcon />}
+                  type="text"
+                  onClick={() => setCanvasTool("connect")}
+                />
+              </span>
+            </Tooltip>
+            <Tooltip classNames={editorTooltipClassNames} title="添加节点（A）">
+              <span>
+                <Button
+                  aria-label="添加节点"
+                  className="xflow-editor-icon-button"
+                  icon={<PlusIcon />}
+                  type="text"
+                  onClick={openNodeLibrary}
+                />
+              </span>
+            </Tooltip>
+            <Tooltip classNames={editorTooltipClassNames} title="适应视图">
+              <span>
+                <Button
+                  aria-label="适应视图"
+                  className="xflow-editor-icon-button"
+                  icon={<FitIcon />}
+                  type="text"
+                  onClick={fitCanvasView}
+                />
+              </span>
+            </Tooltip>
+            {onRunNode ? (
+              <>
+                <Divider className="xflow-editor-sep" orientation="vertical" />
+                <Tooltip
+                  classNames={editorTooltipClassNames}
+                  title={selectedKey ? "运行到选中节点" : "先选中一个节点"}
+                >
+                  <span>
+                    <Button
+                      aria-label="测试此节点"
+                      className="xflow-editor-icon-button"
+                      disabled={!selectedKey || running}
+                      icon={<SkipIcon />}
+                      type="text"
+                      onClick={() => {
+                        if (selectedKey) void runNode(selectedKey, "to");
+                      }}
+                    />
+                  </span>
+                </Tooltip>
+                {/* Baseline truth: 测试此节点 and 运行 sit in their own
+                    segments, so the run key reads apart from the partial run. */}
+                <Divider className="xflow-editor-sep" orientation="vertical" />
+              </>
+            ) : null}
+              </>
+            ) : null}
+            <Tooltip classNames={editorTooltipClassNames} title={onRun ? "运行工作流（⌘ / Ctrl + Enter）" : hostCapabilityCopy.run}>
+              <span>
+                <Button
+                  aria-label="运行工作流"
+                  className="xflow-editor-run-button"
+                  disabled={running || !onRun}
+                  icon={<PlayIcon />}
+                  loading={running}
+                  size="small"
+                  type="primary"
+                  onClick={() => void runWorkflow()}
+                >
+                  运行
+                </Button>
+              </span>
+            </Tooltip>
+          </div>
+        ) : null}
+        <div className="xflow-editor-toolbar-right">
+          {canViewExecutions ? (
+            <Segmented
+              aria-label="视图模式"
+              classNames={{
+                item: "xflow-editor-mode-segmented__item",
+                label: "xflow-editor-mode-segmented__label",
+                root: "xflow-editor-mode-segmented__root"
+              }}
+              rootClassName="xflow-editor-mode-segmented"
+              value={viewMode}
+              options={[
+                {
+                  // Fold 4 (§6.3): icon-only, name and shortcut live in the
+                  // tooltip; the visually hidden text keeps the radio's
+                  // accessible name so name queries keep working.
+                  label:
+                    toolbarFold >= 4 ? <span className="xflow-editor-sr-only">编辑</span> : "编辑",
+                  value: "edit",
+                  icon: <EditIcon />,
+                  ...(toolbarFold >= 4 ? { tooltip: "编辑" } : {})
+                },
+                {
+                  label:
+                    toolbarFold >= 4 ? <span className="xflow-editor-sr-only">运行记录</span> : "运行记录",
+                  value: "runs",
+                  icon: <HistoryIcon />,
+                  ...(toolbarFold >= 4 ? { tooltip: "运行记录" } : {})
+                }
+              ]}
+              onChange={(nextView) => {
+                if (nextView === "runs") enterRuns();
+                else changeMode("edit");
+              }}
+            />
+          ) : null}
+          {runsMode ? runsToolbar : (
+            <>
+              {toolbarFold < 1 ? (
+                <>
           <Tooltip classNames={editorTooltipClassNames} title="校验当前工作流">
             <Button
               aria-label="校验"
@@ -5437,6 +5696,9 @@ export function XFlowEditor({
               type="text"
             />
           </Popover>
+                </>
+              ) : null}
+              {moreMenuButton}
               <Divider className="xflow-editor-sep" orientation="vertical" />
             </>
           )}
@@ -5444,7 +5706,10 @@ export function XFlowEditor({
               both drop the editing actions instead of showing disabled copies. */}
           {editMode ? (
             <>
-            <Tooltip classNames={editorTooltipClassNames} title={saveTooltip}>
+            <Tooltip
+              classNames={editorTooltipClassNames}
+              title={toolbarFold >= 4 ? `${saveTooltip}（⌘S）` : saveTooltip}
+            >
               <span>
                 <Button
                   aria-label="保存"
@@ -5456,7 +5721,9 @@ export function XFlowEditor({
                   onClick={() => void saveWorkflow()}
                 >
                   保存
-                  <kbd className="xflow-editor-kbd">⌘S</kbd>
+                  {/* Fold 4 (§6.3): the ⌘S keycap is the first thing to go; the
+                      shortcut stays in the tooltip. */}
+                  {toolbarFold < 4 ? <kbd className="xflow-editor-kbd">⌘S</kbd> : null}
                   {formIssueSummary.errors > 0 ? (
                     <span className="xflow-editor-save-issues" data-testid="save-issue-count">
                       {formIssueSummary.errors}
@@ -5465,40 +5732,6 @@ export function XFlowEditor({
                 </Button>
               </span>
             </Tooltip>
-            <span className="xflow-editor-run-split">
-              <Tooltip classNames={editorTooltipClassNames} title={onRun ? "运行工作流（⌘ / Ctrl + Enter）" : hostCapabilityCopy.run}>
-                <span>
-                  <Button
-                    aria-label="运行工作流"
-                    className="xflow-editor-run-split__main"
-                    disabled={running || !onRun}
-                    icon={<PlayIcon className="xflow-editor-toolbar-icon" />}
-                    loading={running}
-                    type="primary"
-                    onClick={() => void runWorkflow()}
-                  >
-                    运行
-                  </Button>
-                </span>
-              </Tooltip>
-              <Tooltip classNames={editorTooltipClassNames} title="运行选项尚未接入">
-                <span>
-                  <Dropdown
-                    classNames={{ root: "xflow-editor-run-menu" }}
-                    menu={{ items: runOptionItems }}
-                    placement="bottomRight"
-                    trigger={["click"]}
-                  >
-                    <Button
-                      aria-label="运行选项"
-                      className="xflow-editor-run-split__options"
-                      icon={<DownIcon className="xflow-editor-toolbar-icon" />}
-                      type="primary"
-                    />
-                  </Dropdown>
-                </span>
-              </Tooltip>
-            </span>
             <Tooltip
               classNames={editorTooltipClassNames}
               title={onPublish

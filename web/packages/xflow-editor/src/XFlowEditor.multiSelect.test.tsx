@@ -28,7 +28,7 @@ const multiKeyDown = () => fireEvent.keyDown(window, { key: "Meta" });
 const multiKeyUp = () => fireEvent.keyUp(window, { key: "Meta" });
 const clickCard = (name: string) => fireEvent.click(canvasNode(name));
 const undo = () =>
-  fireEvent.click(within(screen.getByRole("group", { name: "常用画布与历史工具" })).getByRole("button", { name: "撤销" }));
+  fireEvent.click(within(screen.getByRole("toolbar", { name: "画布工具" })).getByRole("button", { name: "撤销" }));
 
 const workflow: WorkflowDef = {
   id: "wf-multi-select",

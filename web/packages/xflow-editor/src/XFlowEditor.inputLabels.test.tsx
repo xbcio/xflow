@@ -126,7 +126,7 @@ describe("merge input labels in the 连接 tab", () => {
 
     expect(handleChange).toHaveBeenCalledTimes(1);
     fireEvent.click(
-      within(screen.getByRole("group", { name: "常用画布与历史工具" })).getByRole("button", { name: "撤销" })
+      within(screen.getByRole("toolbar", { name: "画布工具" })).getByRole("button", { name: "撤销" })
     );
     expect(lastWorkflow(handleChange).connections?.stock).toEqual({ main: [{ node: "join" }] });
   });

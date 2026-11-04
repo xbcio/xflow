@@ -251,7 +251,7 @@ describe("visual section state (§6.2 / WB-01)", () => {
     expect(sectionBoxes()).toHaveLength(1);
 
     fireEvent.click(
-      within(screen.getByRole("group", { name: "常用画布与历史工具" })).getByRole("button", { name: "撤销" })
+      within(screen.getByRole("toolbar", { name: "画布工具" })).getByRole("button", { name: "撤销" })
     );
 
     // The node change is undone; the section is not part of that snapshot.

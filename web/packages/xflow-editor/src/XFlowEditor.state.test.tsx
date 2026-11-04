@@ -104,7 +104,7 @@ describe("XFlowEditor state commits", () => {
     fireEvent.change(parameters, { target: { value: "{ broken" } });
     // Undo reverts the committed parameters to { a: 1 }, which re-runs the
     // Inspector's resync. The user's unsaved draft must survive it.
-    fireEvent.click(within(screen.getByRole("group", { name: "常用画布与历史工具" })).getByRole("button", { name: "撤销" }));
+    fireEvent.click(within(screen.getByRole("toolbar", { name: "画布工具" })).getByRole("button", { name: "撤销" }));
 
     expect(lastWorkflow(handleChange).nodes?.[1]?.parameters).toEqual({ a: 1 });
     expect((within(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).getByLabelText("参数 JSON") as HTMLTextAreaElement).value)
@@ -214,7 +214,7 @@ describe("XFlowEditor state commits", () => {
     // A draft on the renamed node; undo puts the node back under "worker" and
     // the draft keyed "executor" then names no node.
     fireEvent.change(jsonTab(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })), { target: { value: "{ broken" } });
-    fireEvent.click(within(screen.getByRole("group", { name: "常用画布与历史工具" })).getByRole("button", { name: "撤销" }));
+    fireEvent.click(within(screen.getByRole("toolbar", { name: "画布工具" })).getByRole("button", { name: "撤销" }));
 
     renameSelected(selectNode("tail"), "executor");
 

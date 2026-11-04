@@ -31,7 +31,7 @@ const headerName = (panel: HTMLElement): HTMLElement =>
   within(panel).getByText("api", { selector: ".xflow-editor-inspector-head__name" });
 const lastWorkflow = (spy: ReturnType<typeof vi.fn>) => spy.mock.calls.at(-1)?.[0] as WorkflowDef;
 const undo = () =>
-  within(screen.getByRole("group", { name: "常用画布与历史工具" })).getByRole("button", { name: "撤销" });
+  within(screen.getByRole("toolbar", { name: "画布工具" })).getByRole("button", { name: "撤销" });
 
 describe("inspector header (§6.4)", () => {
   it("draws the status chip from nodeStatusMeta, and the type line as plain text", () => {

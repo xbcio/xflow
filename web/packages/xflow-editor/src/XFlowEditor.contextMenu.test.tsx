@@ -12,7 +12,7 @@ const canvasNode = (name: string): HTMLElement => {
 
 const lastWorkflow = (spy: ReturnType<typeof vi.fn>) => spy.mock.calls.at(-1)?.[0] as WorkflowDef;
 const historyButton = (name: "撤销" | "重做") =>
-  within(screen.getByRole("group", { name: "常用画布与历史工具" })).getByRole("button", { name });
+  within(screen.getByRole("toolbar", { name: "画布工具" })).getByRole("button", { name });
 const nodeNames = (workflow: WorkflowDef) => (workflow.nodes ?? []).map((node) => node.name);
 
 /** Right-click on a node card: the canvas forwards it as a node context menu. */

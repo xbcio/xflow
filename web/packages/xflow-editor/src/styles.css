@@ -89,27 +89,107 @@
   align-items: center;
   background: var(--xflow-panel);
   border-bottom: 1px solid var(--xflow-border-subtle);
-  display: flex;
+  display: grid;
   flex: 0 0 var(--xflow-editor-toolbar-height);
   gap: var(--xflow-space-2);
+  /* §6.3 (2026-11-04): equal side tracks keep the canvas tools exactly in the
+   * middle; the title ellipsizes instead of pushing them off centre. */
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   min-width: 0;
   padding: 0 var(--xflow-space-3);
   position: relative;
 }
 
-.xflow-editor-toolbar-actions {
+.xflow-editor-toolbar-left,
+.xflow-editor-toolbar-right {
   align-items: center;
   display: flex;
-  /* The title owns all of the bar's negative space (it is the only item with
-   * min-width: 0 + ellipsis), so a long name can never push 运行 / 发布 out of
-   * the clipped editor root at 1280. */
-  flex: 0 0 auto;
-  flex-wrap: nowrap;
   gap: var(--xflow-space-2);
-  margin-left: 0;
   min-width: 0;
-  position: relative;
-  z-index: 2;
+}
+
+.xflow-editor-toolbar-left {
+  /* The title pays for a long name; the logo and the chips never shrink. */
+  overflow: hidden;
+}
+
+.xflow-editor-toolbar-right {
+  justify-content: flex-end;
+}
+
+/* §6.3: the 28px logo replaces the back arrow; the click still leaves for the
+ * workflow list. */
+.xflow-editor-logo-button {
+  border: 1px solid var(--xflow-border-strong);
+  border-radius: var(--xflow-radius-sm);
+  color: var(--xflow-primary);
+  flex: none;
+  font-size: var(--xflow-font-lg);
+  font-weight: var(--xflow-font-weight-semibold);
+  height: 28px;
+  min-width: 28px;
+  padding: 0;
+  width: 28px;
+}
+
+/* Two lines: the name row over the id · nodes · timezone · timeout line. */
+.xflow-editor-title-block {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.xflow-editor-subtitle {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-xs);
+  line-height: var(--xflow-line-height-sm);
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* §6.3 canvas tools: 28px icon buttons in a bordered field trough, centred in
+ * the middle track. 运行 is the only labelled, and the only primary, button. */
+.xflow-editor-canvas-tools {
+  align-items: center;
+  background: var(--xflow-field);
+  border: 1px solid var(--xflow-border);
+  border-radius: var(--xflow-radius-sm);
+  display: inline-flex;
+  gap: 2px;
+  justify-self: center;
+  padding: var(--xflow-space-1);
+}
+
+.xflow-editor-canvas-tools .xflow-editor-icon-button {
+  height: 28px;
+  min-width: 28px;
+  /* AntD's icon-only button sets width: controlHeight (32); the baseline's
+   * `.xflow-pv-top-tools .xflow-pv-tool` is 28 in both axes. */
+  width: 28px;
+}
+
+/* The active canvas tool (选择 / 连线) is a pressed icon button, as the
+ * baseline's `.on` state draws it. */
+.xflow-editor-canvas-tools .xflow-editor-icon-button[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--xflow-primary) 12%, transparent);
+  color: var(--xflow-primary-fg);
+}
+
+.xflow-editor-canvas-tools .xflow-editor-sep {
+  /* Baseline `VerticalSep`: a 1 × 20 key with the group's 2px gap alone. */
+  height: 20px;
+  margin: 0;
+}
+
+.xflow-editor-run-button {
+  font-weight: var(--xflow-font-weight-medium);
+  /* No gap override: the baseline's `size="small"` primary keeps AntD's own
+   * icon gap (8px) and 1em (13px) icon, which is what makes it 69px wide. */
+  height: 28px;
+  padding-inline: var(--xflow-space-2-5);
 }
 
 /* The run-record toolbar carries the baseline `.btn` (32px) even though the
@@ -119,12 +199,6 @@
   height: var(--xflow-control-height);
   padding-inline: var(--xflow-space-3);
   border-radius: var(--xflow-radius-sm);
-}
-
-.xflow-editor-history-group {
-  align-items: center;
-  display: inline-flex;
-  gap: var(--xflow-space-2);
 }
 
 /* The 32px top-bar icon button from the baseline: bare glyph, square hit area.
@@ -182,31 +256,6 @@
 .xflow-editor-save-button__icon {
   color: var(--xflow-danger);
   font-size: var(--xflow-font-xl);
-}
-
-/* 运行 split button: joined corners and a 1px on-primary seam, as the baseline
- * `.xflow-pv-split-btn` pair draws it (§6.3). */
-.xflow-editor-run-split {
-  display: inline-flex;
-}
-
-.xflow-editor-run-split__main {
-  border-end-end-radius: 0;
-  border-start-end-radius: 0;
-  /* Baseline `.btn--primary`: 13/500, 12px side padding, 6px icon gap. */
-  font-weight: var(--xflow-font-weight-medium);
-  gap: var(--xflow-space-1-5);
-  padding-inline: var(--xflow-space-3);
-}
-
-.xflow-editor-run-split__options {
-  border-end-start-radius: 0;
-  border-inline-start: 1px solid color-mix(in srgb, var(--xflow-on-primary) 30%, transparent);
-  border-start-start-radius: 0;
-  /* The baseline split's options half is 34px: a 16px glyph in 8px padding
-   * plus the two 1px borders. */
-  min-width: 34px;
-  padding-inline: var(--xflow-space-2);
 }
 
 .xflow-editor-sep {
@@ -278,15 +327,15 @@
   align-items: center;
   display: flex;
   gap: var(--xflow-space-2);
-  /* §6.3: the name may ellipsize, but never below 160px, and the version chip
-   * is flex:none so the clamp never swallows it. */
-  min-width: 160px;
+  /* §6.3: the name may ellipsize; the chips are flex:none so the clamp never
+   * swallows them. The 1fr track supplies the width, so no floor is needed. */
+  min-width: 0;
 }
 
 .xflow-editor-title strong {
   display: block;
   flex: 0 1 auto;
-  font-size: var(--xflow-font-xl);
+  font-size: var(--xflow-font-lg);
   font-weight: var(--xflow-font-weight-semibold);
   margin: 0;
   min-width: 0;
@@ -3099,38 +3148,20 @@ button.xflow-editor-overview__run:hover {
   .xflow-editor-toolbar {
     align-items: center;
     flex: 0 0 var(--xflow-editor-toolbar-height);
-    flex-wrap: nowrap;
     gap: var(--xflow-space-2);
     padding: 0 var(--xflow-space-3);
   }
 
-  .xflow-editor-title {
-    flex: 0 1 auto;
-  }
-
-  /* The back button and the mode switch are fixed controls: their content is
-   * never squeezed, so the title pays for a long name down to its 160px floor
-   * instead and the 预览 label cannot paint under the actions cluster. */
-  .xflow-editor-toolbar > .xflow-editor-icon-button,
-  .xflow-editor-toolbar > .xflow-editor-mode-segmented {
-    flex: none;
-  }
-
-  .xflow-editor-toolbar > *:not(.xflow-editor-title),
-  .xflow-editor-main > * {
+  /* The bar stays one 52px grid row at every width: the 1fr title track
+   * ellipsizes, and neither side cluster wraps or yields. */
+  .xflow-editor-toolbar-left,
+  .xflow-editor-toolbar-right {
+    flex-wrap: nowrap;
     min-width: 0;
   }
 
-  /* The actions cluster never wraps and never yields either: with the fixed
-   * controls above, the title is the only item that pays for a long name, so
-   * 运行 / 发布 stay inside the bar at every width >= 720 (E0 left 运行 clipped
-   * at 802-925). */
-  .xflow-editor-toolbar-actions {
-    flex: 0 0 auto;
-    flex-wrap: nowrap;
-    justify-content: flex-end;
-    margin-left: 0;
-    max-width: none;
+  .xflow-editor-main > * {
+    min-width: 0;
   }
 
   .xflow-editor[data-layout="c"] .xflow-editor-main,
@@ -3200,11 +3231,7 @@ button.xflow-editor-overview__run:hover {
  * their existing values, now measured on the editor container. `<=` preserves
  * the inclusive `max-width` semantics of the viewport rules they replaced. */
 @container xflow-editor (width <= 560px) {
-  .xflow-editor-title {
-    flex-basis: 100%;
-  }
-
-  .xflow-editor-toolbar-actions {
+  .xflow-editor-toolbar-right {
     gap: var(--xflow-space-1-5);
   }
 
@@ -3276,15 +3303,10 @@ button.xflow-editor-overview__run:hover {
   padding: 0 var(--xflow-space-3);
 }
 
-.xflow-editor[data-layout="c"] .xflow-editor-title {
-  flex: 0 1 auto;
-}
-
-.xflow-editor[data-layout="c"] .xflow-editor-toolbar-actions {
-  flex: 0 0 auto;
+.xflow-editor[data-layout="c"] .xflow-editor-toolbar-left,
+.xflow-editor[data-layout="c"] .xflow-editor-toolbar-right {
   flex-wrap: nowrap;
-  justify-content: flex-end;
-  margin-left: 0;
+  min-width: 0;
 }
 
 .xflow-editor[data-layout="c"] .xflow-editor-main,
@@ -3408,7 +3430,8 @@ button.xflow-editor-overview__run:hover {
 .xflow-editor .xflow-editor-mode-segmented {
   border: 0;
   height: 30px;
-  margin-inline: auto;
+  /* The switch leads the right cluster, so it no longer centres itself. */
+  margin-inline: 0;
   min-height: 30px;
 }
 

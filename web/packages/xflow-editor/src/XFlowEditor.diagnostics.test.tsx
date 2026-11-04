@@ -517,7 +517,7 @@ describe("summary column (§6.5)", () => {
     expect(dd("节点").querySelectorAll(".xflow-editor-kvlist__mix")).toHaveLength(3);
     expect(dd("连线").textContent).toBe("2");
     expect(dd("凭证").textContent).toBe("crm_token");
-    expect(dd("版本").textContent).toBe(document.querySelector(".xflow-editor-chip")?.textContent);
+    expect(dd("版本").textContent).toBe(document.querySelector(".xflow-editor-title-chip")?.textContent);
     expect(dd("版本").textContent).toBe("线上 v1.2.0");
   });
 

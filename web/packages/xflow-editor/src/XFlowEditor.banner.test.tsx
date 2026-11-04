@@ -32,7 +32,7 @@ const bannerWith = (strong: string): HTMLElement => {
   if (!found) throw new Error(`banner ${strong} not shown`);
   return found;
 };
-const chipText = () => document.querySelector(".xflow-editor-chip")?.textContent;
+const chipText = () => document.querySelector(".xflow-editor-title-chip")?.textContent;
 /** A settled save: the button has left its loading state (it may stay disabled once the draft is clean). */
 const saveSettled = () => expect(screen.getByRole("button", { name: "保存" }).className).not.toContain("ant-btn-loading");
 
@@ -184,7 +184,7 @@ describe("save conflict banner", () => {
 
   it("draws the clean version chip as plain text, like the baseline top-bar chip", () => {
     render(<XFlowEditor value={workflow} />);
-    const chip = document.querySelector(".xflow-editor-title .xflow-editor-chip");
+    const chip = document.querySelector(".xflow-editor-title .xflow-editor-title-chip");
     expect(chip?.textContent).toBe("线上 v1.0.0");
     expect(chip?.getAttribute("data-tone")).toBe("success");
     expect(chip?.querySelector(".xflow-editor-chip__icon")).toBeNull();
@@ -321,7 +321,7 @@ describe("read-only banner", () => {
   it("hides 保存 / 发布 / 运行 instead of disabling them, even with handlers", () => {
     render(<XFlowEditor value={workflow} readOnlyReason={reason} {...handlers} />);
 
-    for (const name of ["保存", "发布", "运行工作流", "运行选项"]) {
+    for (const name of ["保存", "发布", "运行工作流"]) {
       expect(screen.queryByRole("button", { name }), name).toBeNull();
     }
   });
@@ -443,7 +443,7 @@ describe("capability-gated read-only", () => {
     const banner = bannerWith("只读");
     expect(banner.getAttribute("data-tone")).toBe("neutral");
     expect(banner.textContent).toContain("缺少 workflow 权限，编辑器为只读。");
-    for (const name of ["保存", "发布", "运行工作流", "运行选项"]) {
+    for (const name of ["保存", "发布", "运行工作流"]) {
       expect(within(view.container).queryByRole("button", { name }), name).toBeNull();
     }
     expect(within(view.container).queryByRole("button", { name: "添加节点 (A)" })).toBeNull();
@@ -512,10 +512,10 @@ describe("capability-gated read-only", () => {
         {...handlers}
       />
     );
-    const undo = within(view.container).getByRole("button", { name: "撤销" });
-    const redo = within(view.container).getByRole("button", { name: "重做" });
-    expect((undo as HTMLButtonElement).disabled).toBe(true);
-    expect((redo as HTMLButtonElement).disabled).toBe(true);
+    // §6.3: a read-only bar draws no middle group at all, so there is no
+    // disabled 撤销 / 重做 pair either.
+    expect(within(view.container).queryByRole("button", { name: "撤销" })).toBeNull();
+    expect(within(view.container).queryByRole("button", { name: "重做" })).toBeNull();
 
     fireEvent.keyDown(window, { key: "z", code: "KeyZ", metaKey: true });
     fireEvent.keyDown(window, { key: "z", code: "KeyZ", metaKey: true, shiftKey: true });

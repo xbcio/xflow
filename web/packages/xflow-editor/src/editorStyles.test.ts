@@ -138,35 +138,31 @@ describe("xflow.editor top bar (§6.3)", () => {
     expect(css).toMatch(/\.xflow-editor-toolbar\s*\{[^}]*border-bottom:\s*1px solid var\(--xflow-border-subtle\)\s*;/);
   });
 
-  it("lets the title absorb the bar's negative space and keeps the right cluster fixed", () => {
-    // A 1280 bar + long name must clip the title's ellipsis, never the actions.
-    // Anchored to the line so the compact-layout override cannot satisfy it.
-    expect(css).toMatch(/(?:^|\n)\.xflow-editor-toolbar-actions\s*\{[^}]*flex:\s*0 0 auto\s*;/);
-    expect(css).toMatch(/(?:^|\n)\.xflow-editor-toolbar-actions\s*\{[^}]*flex-wrap:\s*nowrap\s*;/);
-    // §6.3: name ellipsizes but keeps a 160px floor; the chip is flex:none so it
-    // can never be squeezed away by that floor.
-    expect(css).toMatch(/\.xflow-editor-title\s*\{[^}]*min-width:\s*160px\s*;/);
+  it("is a three-column grid with equal side tracks, so the canvas tools stay centred", () => {
+    // §6.3 (2026-11-04): minmax(0, 1fr) auto minmax(0, 1fr) is what keeps the
+    // middle group exactly on the bar's centre line at 1280.
+    expect(css).toMatch(
+      /\.xflow-editor-toolbar\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) auto minmax\(0, 1fr\)\s*;/
+    );
+    // The name ellipsizes inside the 1fr track; the chip is flex:none so the
+    // clamp can never swallow it.
     expect(css).toMatch(/\.xflow-editor-title strong\s*\{[^}]*text-overflow:\s*ellipsis\s*;/);
     expect(css).toMatch(/\.xflow-editor-chip\s*\{[^}]*flex:\s*none\s*;/);
-    expect(css).toMatch(/\.xflow-editor-history-group\s*\{[^}]*gap:\s*var\(--xflow-space-2\)\s*;/);
+    // The left cluster owns the bar's negative space; the right cluster is a
+    // normal flex row pinned to its end.
+    expect(css).toMatch(/\.xflow-editor-toolbar-left\s*\{[^}]*overflow:\s*hidden\s*;/);
+    expect(css).toMatch(/\.xflow-editor-toolbar-right\s*\{[^}]*justify-content:\s*flex-end\s*;/);
   });
 
-  it("keeps one nowrap 52px row at compact width so the right cluster is never clipped", () => {
+  it("keeps one nowrap 52px bar at compact width and lets the title track ellipsize", () => {
     // E0 legacy: the wrapped second row pushed 运行 outside the root at 802-925.
-    // The bar never wraps again; the title pays for a long name, not the actions.
     const compact = css.match(/@container xflow-editor \(width <= 1280px\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
     expect(compact).toMatch(/\.xflow-editor-toolbar\s*\{[^}]*flex:\s*0 0 var\(--xflow-editor-toolbar-height\)\s*;/);
-    expect(compact).toMatch(/\.xflow-editor-toolbar\s*\{[^}]*flex-wrap:\s*nowrap\s*;/);
-    expect(compact).toMatch(/\.xflow-editor-toolbar-actions\s*\{[^}]*flex:\s*0 0 auto\s*;/);
-    expect(compact).toMatch(/\.xflow-editor-toolbar-actions\s*\{[^}]*flex-wrap:\s*nowrap\s*;/);
-    expect(compact).not.toMatch(/\.xflow-editor-toolbar-actions\s*\{[^}]*flex:\s*1 1 100%\s*;/);
-    // The band's blanket min-width:0 must not eat the title's floor.
-    expect(compact).toMatch(/\.xflow-editor-toolbar > \*:not\(\.xflow-editor-title\)/);
-    // Fixed cluster members keep their intrinsic width in the compact band:
-    // the switch and back button used to shrink until 预览 painted under ⋯.
     expect(compact).toMatch(
-      /\.xflow-editor-toolbar > \.xflow-editor-icon-button,[\s\S]*?\.xflow-editor-toolbar > \.xflow-editor-mode-segmented\s*\{[^}]*flex:\s*none\s*;/
+      /\.xflow-editor-toolbar-left,[\s\S]*?\.xflow-editor-toolbar-right\s*\{[^}]*flex-wrap:\s*nowrap\s*;/
     );
+    // The flex-era actions cluster (which could grow or wrap) is gone.
+    expect(css).not.toContain(".xflow-editor-toolbar-actions");
   });
 
   it("keeps top-bar icon buttons in the body colour and save/publish at weight 500", () => {
@@ -194,10 +190,14 @@ describe("xflow.editor top bar (§6.3)", () => {
     expect(css).toMatch(/\.xflow-editor-kbd\s*\{[^}]*border-radius:\s*var\(--xflow-radius-xs\)\s*;/);
   });
 
-  it("draws the run split seam from on-primary", () => {
-    expect(css).toMatch(/\.xflow-editor-run-split__options\s*\{[^}]*border-inline-start:\s*1px solid color-mix\(in srgb, var\(--xflow-on-primary\)/);
-    // The options half is the baseline's 34px key, not AntD's 32px icon button.
-    expect(css).toMatch(/\.xflow-editor-run-split__options\s*\{[^}]*min-width:\s*34px\s*;/);
+  it("draws the 28px canvas-tools trough and the single primary 运行 inside it", () => {
+    expect(css).toMatch(/\.xflow-editor-canvas-tools\s*\{[^}]*border:\s*1px solid var\(--xflow-border\)\s*;/);
+    expect(css).toMatch(/\.xflow-editor-canvas-tools\s*\{[^}]*padding:\s*var\(--xflow-space-1\)\s*;/);
+    expect(css).toMatch(/\.xflow-editor-canvas-tools \.xflow-editor-icon-button\s*\{[^}]*height:\s*28px\s*;/);
+    expect(css).toMatch(/\.xflow-editor-run-button\s*\{[^}]*height:\s*28px\s*;/);
+    // §6.3 removed the split's options half together with its placeholder.
+    expect(css).not.toContain(".xflow-editor-run-split");
+    expect(css).not.toContain(".xflow-editor-run-menu");
   });
 
   it("keeps the locate list's 11px type label on the secondary text colour", () => {
