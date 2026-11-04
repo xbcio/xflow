@@ -185,7 +185,7 @@ func (n *HTTPNode) Descriptor() types.Descriptor {
 				Group: "headers", Widget: nodeinternal.WidgetKeyValue},
 			{Name: "query", DisplayName: "Query Params", Type: types.ParamObject, Required: false, Description: "URL query parameters",
 				Group: "headers", Widget: nodeinternal.WidgetKeyValue},
-			{Name: "mode", DisplayName: "Mode", Type: types.ParamString, Required: false, Description: "Payload encoding: \"json\" (default, body is marshalled and the response parsed) or \"raw\" (body in/out as opaque base64 bytes, every status is a result)",
+			{Name: "mode", DisplayName: "Encoding Mode", Type: types.ParamString, Required: false, Description: "Payload encoding: \"json\" (default, body is marshalled and the response parsed) or \"raw\" (body in/out as opaque base64 bytes, every status is a result)",
 				Group: "advanced",
 				Enum: []types.EnumOption{
 					{Value: string(modeJSON), DisplayName: "JSON", Description: "Body marshalled to JSON; response parsed; 4xx is a node error"},

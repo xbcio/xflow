@@ -1704,7 +1704,7 @@ exports[`A6-generated node-types fixture > xflow.http@1 snapshot 1`] = `
             "type": "string",
           },
           "fxToggle": true,
-          "label": "Mode",
+          "label": "Encoding Mode",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/mode",
@@ -1720,7 +1720,7 @@ exports[`A6-generated node-types fixture > xflow.http@1 snapshot 1`] = `
       "f.parameters.mode:control": {
         "props": {
           "defaultHint": "json",
-          "label": "Mode",
+          "label": "Encoding Mode",
           "options": [
             {
               "description": "Body marshalled to JSON; response parsed; 4xx is a node error",

@@ -982,7 +982,7 @@
         {
           "name": "mode",
           "path": "/parameters/mode",
-          "label": "Mode",
+          "label": "Encoding Mode",
           "type": "string",
           "fallback": "json",
           "help": "Payload encoding: \"json\" (default, body is marshalled and the response parsed) or \"raw\" (body in/out as opaque base64 bytes, every status is a result)",

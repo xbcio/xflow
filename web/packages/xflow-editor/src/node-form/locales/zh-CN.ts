@@ -152,6 +152,7 @@ const messages: Record<string, string> = {
   "Credential reference name": "凭据名称",
   "Body": "请求体",
   "Request body, marshalled to JSON. Ignored when mode=raw": "请求体，序列化为 JSON。mode=raw 时忽略",
+  "Encoding Mode": "编码模式",
   "Raw Body (base64)": "原始请求体（base64）",
   "Request body as base64-encoded bytes, sent verbatim with no Content-Type added. Only read when mode=raw":
     "base64 编码的请求体字节，原样发送，不添加 Content-Type。仅在 mode=raw 时读取",
