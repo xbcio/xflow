@@ -211,8 +211,8 @@ type RunnerPoolStore interface {
 }
 
 // ScopedRunnerInstance is a RunnerInstance together with the owner kind of its
-// pool. The prune worker needs the kind to treat platform instances differently
-// from tenant ones, and the instance row alone does not carry it.
+// pool. The instance row alone does not carry it; the kind describes the pool's
+// ownership and does not by itself decide whether an instance is idle.
 type ScopedRunnerInstance struct {
 	RunnerInstance
 	PoolOwnerKind PoolOwnerKind
