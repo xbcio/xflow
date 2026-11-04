@@ -1243,6 +1243,13 @@
     border: 0;
     border-radius: 0;
   }
+  /*
+   * 基础信息卡展开且不可折叠（§2.2）：`collapsible: 'icon'` + 隐藏箭头之后，
+   * AntD 仍给卡头留 pointer 光标；改回默认，卡头不再看起来能点。
+   */
+  .xflow-pv-sec-fixed .ant-collapse-header { cursor: default; }
+  /* tab 栏右端的「以 JSON 编辑」按钮与 tab 基线对齐（§2.1）。 */
+  .xflow-pv-insp-tabs-head .ant-tabs-extra-content { display: flex; align-items: center; }
   .xflow-pv-sec-label { display: inline-flex; align-items: center; gap: var(--xflow-space-1-5); min-width: 0; }
   .xflow-pv-sec-title { font-size: var(--xflow-font-md); font-weight: var(--xflow-font-weight-semibold); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .xflow-pv-sec-extra { font-size: var(--xflow-font-xs); font-weight: var(--xflow-font-weight-regular); color: var(--xflow-text-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

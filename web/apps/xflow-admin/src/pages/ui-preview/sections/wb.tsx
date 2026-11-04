@@ -1,5 +1,6 @@
 import {
   CheckIcon,
+  CodeIcon,
   ConnectIcon,
   CopyIcon,
   CursorIcon,
@@ -29,7 +30,7 @@ import {
   VarIcon,
   WarnIcon,
 } from '@xflow/icons';
-import { Button, Collapse, Input, Segmented, Select, Tabs, Tooltip } from 'antd';
+import { Button, Collapse, Input, Segmented, Select, Switch, Tabs, Tooltip } from 'antd';
 import { Fragment, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 
 import { cx } from '../components/cx';
@@ -173,25 +174,52 @@ function Field({ label, children, layout = 'side' }: { label: ReactNode; childre
 }
 
 /**
- * Inspector body for the workbench mock: the request group is the only one
- * expanded, mirroring the static mockup. The three-tab gallery and the real
- * composer controls are the second batch's `inspector` / `composer` sections.
+ * 配置 tab（§2.2，2026-11-04 定稿）：基础信息不可折叠，请求是首屏唯一的
+ * 主卡；罕用的头/查询、高级、执行策略、备注默认折叠，卡头用摘要代替内容。
+ * 「错误与重试」卡被执行策略取代，不再出现。
  */
 function InspectorConfig() {
   return (
     <Collapse
       ghost
       className="xflow-pv-secs"
-      defaultActiveKey={['request']}
+      defaultActiveKey={['base', 'request']}
       expandIconPlacement="start"
       expandIcon={({ isActive }) => <DownIcon style={{ transform: isActive ? undefined : 'rotate(-90deg)' }} />}
       classNames={{ header: 'xflow-pv-sec-head', body: 'xflow-pv-sec-body p-0' }}
       items={[
         {
           key: 'base',
-          className: 'xflow-pv-sec-card',
-          label: <SectionLabel title="基础信息" extra="拉取客户档案 · 无模板" />,
-          children: null,
+          className: 'xflow-pv-sec-card xflow-pv-sec-fixed',
+          /*
+           * 基础信息只放身份字段，展开且不可折叠：折起来会把它变成一屏里最先
+           * 消失的东西，而改名是面板里最常用的动作。`collapsible: 'icon'` 加上
+           * 隐藏箭头，卡头就没有可点的开关了。
+           */
+          collapsible: 'icon',
+          showArrow: false,
+          label: <SectionLabel title="基础信息" />,
+          children: (
+            <div className="xflow-pv-sec-fields">
+              <Field
+                label={
+                  <>
+                    节点名称
+                    <span className="xflow-pv-req" title="必填">
+                      *
+                    </span>
+                  </>
+                }
+              >
+                <Input defaultValue="fetch_profile" />
+                <span className="xflow-pv-hint">引用名：连线和表达式靠它找到节点，改名会同步更新引用</span>
+              </Field>
+              <Field label="显示名">
+                <Input defaultValue="拉取客户档案" placeholder="fetch_profile" />
+                <span className="xflow-pv-hint">只改画布上显示的文字，不影响引用；留空时显示节点名称</span>
+              </Field>
+            </div>
+          ),
         },
         {
           key: 'request',
@@ -215,7 +243,17 @@ function InspectorConfig() {
                 />
               </Field>
               {/* Template-mode long text stays a full row; awaiting user ruling (D2). */}
-              <Field label="URL" layout="top">
+              <Field
+                label={
+                  <>
+                    URL
+                    <span className="xflow-pv-req" title="必填">
+                      *
+                    </span>
+                  </>
+                }
+                layout="top"
+              >
                 <div className="flex gap-1.5">
                   <div className="xflow-pv-ctl xflow-pv-ctl--focus xflow-pv-ctl--expr">
                     <span className="xflow-pv-ctl-text">https://crm.example.test/api/customers</span>
@@ -235,6 +273,10 @@ function InspectorConfig() {
                 />
                 <span className="xflow-pv-hint">来自工作流变量 crm_token，运行时由宿主注入</span>
               </Field>
+              {/* §2.3：http 主卡里 method/url/auth/body 同屏；body 只在 json 模式出现。 */}
+              <Field label="请求体" layout="top">
+                <Input.TextArea rows={2} defaultValue={'{\n  "tier": "vip"\n}'} />
+              </Field>
             </div>
           ),
         },
@@ -242,18 +284,96 @@ function InspectorConfig() {
           key: 'headers',
           className: 'xflow-pv-sec-card',
           label: (
-            <span className="xflow-pv-sec-label">
-              <span className="xflow-pv-sec-title">请求头与查询</span>
-              <StatusChip tone="neutral" icon={<OutlineIcon />} label="3 项" />
-            </span>
+            <SectionLabel title="请求头与查询">
+              <StatusChip tone="neutral" icon={<OutlineIcon />} label="已填 2 项" />
+            </SectionLabel>
           ),
-          children: null,
+          children: (
+            <div className="xflow-pv-sec-fields">
+              <Field label="请求头">
+                <Input defaultValue="Accept: application/json" />
+              </Field>
+              <Field label="查询参数">
+                <Input defaultValue="page: 1" />
+              </Field>
+            </div>
+          ),
         },
         {
-          key: 'errors',
+          key: 'advanced',
           className: 'xflow-pv-sec-card',
-          label: <SectionLabel title="错误与重试" extra="继承工作流 · 重试 2 次" />,
-          children: null,
+          label: (
+            <SectionLabel title="高级">
+              <StatusChip tone="neutral" icon={<OutlineIcon />} label="未设置" />
+            </SectionLabel>
+          ),
+          children: (
+            <div className="xflow-pv-sec-fields">
+              <Field label="编码模式">
+                <Select
+                  className="w-full"
+                  defaultValue="json"
+                  options={[
+                    { value: 'json', label: 'json' },
+                    { value: 'raw', label: 'raw' },
+                  ]}
+                />
+              </Field>
+              <Field label="原始请求体">
+                <Input placeholder="仅 raw 模式可编辑" />
+              </Field>
+              <Field label="选项">
+                <Select
+                  className="w-full"
+                  defaultValue="默认"
+                  options={[{ value: '默认', label: '默认' }]}
+                />
+              </Field>
+            </div>
+          ),
+        },
+        {
+          key: 'execution',
+          className: 'xflow-pv-sec-card',
+          label: <SectionLabel title="执行策略" extra="继承工作流 · 重试 2 次" />,
+          children: (
+            <div className="xflow-pv-sec-fields">
+              <Field label="错误处理">
+                <Select
+                  className="w-full"
+                  defaultValue="继承工作流（停止）"
+                  options={[{ value: '继承工作流（停止）', label: '继承工作流（停止）' }]}
+                />
+              </Field>
+              {/* 与参数里的「审批超时」「等待超时」区分开（§2.3）。 */}
+              <Field label="节点执行超时">
+                <Input placeholder="继承工作流（30s）" />
+              </Field>
+              <Field label="重试">
+                <Input defaultValue="3 次" />
+              </Field>
+              <Field label="Runner 选择">
+                <Select
+                  className="w-full"
+                  defaultValue="继承工作流"
+                  options={[{ value: '继承工作流', label: '继承工作流' }]}
+                />
+              </Field>
+              <Field label="禁用">
+                <Switch size="small" aria-label="禁用节点" />
+              </Field>
+            </div>
+          ),
+        },
+        {
+          key: 'notes',
+          className: 'xflow-pv-sec-card',
+          label: <SectionLabel title="备注" extra="无" />,
+          children: (
+            <div className="xflow-pv-sec-fields">
+              <Input.TextArea rows={2} placeholder="给同事看的说明，不参与运行" />
+            </div>
+          ),
         },
       ]}
     />
@@ -847,33 +967,29 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
           </PanelTitle>
           <div className="xflow-pv-insp-head">
             <CategoryIcon category="action" icon="globe" />
-            <span className="xflow-pv-insp-node">fetch_profile</span>
+            <span className="xflow-pv-insp-node">拉取客户档案</span>
             <StatusChip tone="success" icon={<CheckIcon />} label="成功" />
             <IconButton small label="复制节点" icon={<CopyIcon />} />
             <IconButton small label="更多操作" icon={<MoreIcon />} />
             {/*
-             * The type id gets a row of its own instead of sharing one with the
-             * name and the chip: three items and two icon buttons in a 360px
-             * panel left it 60px wide and `xflow.http · v1` rendered as 「xflo…」.
+             * 第二行是「节点名 · 类型 · vN」（§2.1）：节点名和显示名分两行，
+             * 才看得出一处是引用名、一处是画布文案。
              */}
-            <div className="xflow-pv-insp-type">xflow.http · v1</div>
+            <div className="xflow-pv-insp-type">fetch_profile · xflow.http · v1</div>
           </div>
           <Tabs
             size="small"
             className="xflow-pv-insp-tabs"
-            defaultActiveKey="params"
+            defaultActiveKey="config"
+            // 「以 JSON 编辑」从参数卡头搬进 tab 栏右端（§2.1 / §6.1）。
+            tabBarExtraContent={<IconButton small label="以 JSON 编辑" icon={<CodeIcon />} />}
             classNames={{
               header: 'xflow-pv-insp-tabs-head',
               body: 'xflow-pv-insp-tabs-body',
               content: 'xflow-pv-insp-tabs-content',
             }}
             items={[
-              { key: 'params', label: '参数', children: <InspectorConfig /> },
-              {
-                key: 'settings',
-                label: '设置',
-                children: <p className="xflow-pv-tab-note">设置 tab 见预览页「属性面板」一节。</p>,
-              },
+              { key: 'config', label: '配置', children: <InspectorConfig /> },
               {
                 key: 'connections',
                 label: (
@@ -890,6 +1006,10 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
               },
             ]}
           />
+          {/*
+           * 宿主没传 onRunNode 时整条不渲染（§2.1）：基准页照旧用「待接入」
+           * 标注能力缺口，但真实编辑器里这一条不存在，省出 53px 高度。
+           */}
           <div className="xflow-pv-insp-foot">
             <Todo label="宿主未接 onRunNode">
               <Button block icon={<PlayIcon />}>

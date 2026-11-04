@@ -1007,7 +1007,10 @@ export interface PortRowSpec {
   link?: string;
 }
 
-/** 1b · the four healthy panels of the inspector gallery, plus the failing one. */
+/**
+ * 基础信息只放身份字段（§2.2，2026-11-04 定稿）：节点名从「通用」组移到这里，
+ * 和显示名并排对照。本工作流没有声明模板，所以不出现模板字段。
+ */
 export const inspSwitch = {
   label: '金额路由',
   nodeName: 'route_by_amount',
@@ -1015,15 +1018,20 @@ export const inspSwitch = {
   category: 'control' as Category,
   icon: 'branch' as IconKey,
   base: [
-    { label: '显示名', value: '金额路由' },
     {
-      label: '节点名',
+      label: '节点名称',
       value: 'route_by_amount',
       mono: true,
       required: true,
-      hint: '连线与表达式引用此名称',
+      hint: '引用名：连线和表达式靠它找到节点，改名会同步更新引用',
     },
-    { label: '模板', value: '无', control: 'select', placeholder: true },
+    { label: '显示名', value: '金额路由', hint: '只改画布上显示的文字，不影响引用；留空时显示节点名称' },
+  ] as FieldSpec[],
+  /** 路由卡首屏（§2.3）：先声明模式与端口，再写规则，最后是兜底输出。 */
+  route: [
+    { label: '模式', value: '规则', control: 'select', required: true, options: ['规则', '表达式'] },
+    { label: '输出端口', control: 'multi', options: ['level_1', 'level_2', 'level_3'] },
+    { label: '默认输出', value: 'level_3', control: 'select', options: ['level_1', 'level_2', 'level_3'] },
   ] as FieldSpec[],
   rules: [
     { id: 'r1', title: '规则 1', port: 'level_1', expr: '$params.amount < $vars.l1_max' },
@@ -1052,28 +1060,20 @@ export const inspConnectedCount = [...inspConnections.inputs, ...inspConnections
 ).length;
 
 /**
- * 设置 tab（node-form 的 settings 半边：错误处理 / 超时 / 重试）。与参数 tab
- * 分开是真实信息架构（用户裁定 2026-10-17），默认值都写「继承工作流」。
+ * 执行策略卡（§2.2，2026-11-04 定稿）：从原「设置」tab 并入配置页底部，默认
+ * 折叠；展开后依次是错误处理 / 节点执行超时 / 重试 / Runner 选择 / 禁用。
+ * 「超时」改名「节点执行超时」，与参数里的审批、等待超时区分。
  */
 export const inspSettings = [
   {
-    key: 'error',
-    title: '错误处理',
+    key: 'execution',
+    title: '执行策略',
     fields: [
-      { label: '出错时', value: '继承工作流（停止）', control: 'select', options: ['继承工作流（停止）', '继续后续分支', '跳到错误分支'] },
-    ] as FieldSpec[],
-  },
-  {
-    key: 'timeout',
-    title: '超时',
-    fields: [{ label: '超时', value: '继承工作流（30s）', placeholder: true }] as FieldSpec[],
-  },
-  {
-    key: 'retry',
-    title: '重试',
-    fields: [
-      { label: '最多尝试', value: '3', control: 'number', unit: '次' },
-      { label: '退避', value: '指数 · 1s 起 ×2', control: 'select', options: ['固定 · 1s', '指数 · 1s 起 ×2'] },
+      { label: '错误处理', value: '继承工作流（停止）', control: 'select', options: ['继承工作流（停止）', '继续后续分支', '跳到错误分支'] },
+      { label: '节点执行超时', value: '继承工作流（30s）', placeholder: true },
+      { label: '重试', value: '3', control: 'number', unit: '次' },
+      { label: 'Runner 选择', value: '继承工作流', control: 'select', options: ['继承工作流', '指定 runner 标签'] },
+      { label: '禁用', value: '关', control: 'switch', switchOn: false },
     ] as FieldSpec[],
   },
 ];

@@ -1,5 +1,6 @@
 import {
   CheckIcon,
+  CodeIcon,
   CopyIcon,
   DownIcon,
   MoreIcon,
@@ -12,7 +13,7 @@ import {
 import { Button, Collapse, Input, Tabs, Tooltip } from 'antd';
 import { Fragment, type ReactNode } from 'react';
 
-import { CategoryIcon, PanelTitle, SectionLabel, StatusChip } from '../components/primitives';
+import { CategoryIcon, IconButton, PanelTitle, SectionLabel, StatusChip } from '../components/primitives';
 import { SpecField } from '../components/SpecField';
 import { Todo } from '../components/Todo';
 import {
@@ -40,7 +41,7 @@ import type { Category } from '../meta';
 function Sections({
   items,
 }: {
-  items: { key: string; label: ReactNode; children: ReactNode; defaultActive?: boolean }[];
+  items: { key: string; label: ReactNode; children: ReactNode; defaultActive?: boolean; fixed?: boolean }[];
 }) {
   return (
     <Collapse
@@ -54,6 +55,8 @@ function Sections({
         key: item.key,
         label: item.label,
         children: <div className="xflow-pv-sec-fields">{item.children}</div>,
+        /* 基础信息卡不可折叠（§2.2）：只留图标作开关再把它藏掉，卡头就没有入口了。 */
+        ...(item.fixed ? { className: 'xflow-pv-sec-fixed', collapsible: 'icon' as const, showArrow: false } : null),
       }))}
     />
   );
@@ -124,7 +127,7 @@ function InspPanel({
   title?: string;
   titleCount?: ReactNode;
   head?: ReactNode;
-  activeTab?: 'params' | 'settings' | 'connections' | 'runs';
+  activeTab?: 'config' | 'connections' | 'runs';
   /** Linked edges in + out (user ruling 2026-10-17); 0 shows no count. */
   connected?: number;
   /** The node's latest run failed: the 运行 tab carries a danger dot. */
@@ -149,14 +152,15 @@ function InspPanel({
           size="small"
           className="xflow-pv-insp-tabs"
           defaultActiveKey={activeTab}
+          // 三个 tab（§2.1，2026-11-04 用户裁定）：设置并入配置页的执行策略卡。
+          tabBarExtraContent={<IconButton small label="以 JSON 编辑" icon={<CodeIcon />} />}
           classNames={{
             header: 'xflow-pv-insp-tabs-head',
             body: 'xflow-pv-insp-tabs-body',
             content: 'xflow-pv-insp-tabs-content',
           }}
           items={[
-            { key: 'params', label: '参数', children: tab('params', '参数') },
-            { key: 'settings', label: '设置', children: tab('settings', '设置') },
+            { key: 'config', label: '配置', children: tab('config', '配置') },
             {
               key: 'connections',
               label: (
@@ -252,7 +256,7 @@ const fields = (specs: FieldSpec[]) => specs.map((field) => <SpecField key={fiel
 const switchHead = (
   <NodeHead
     label={inspSwitch.label}
-    sub={`${inspSwitch.nodeName} · ${inspSwitch.type}`}
+    sub={`${inspSwitch.nodeName} · ${inspSwitch.type} · v1`}
     category={inspSwitch.category}
     icon={inspSwitch.icon}
   />
@@ -267,25 +271,27 @@ export function InspectorSection() {
     <div className="xflow-pv-gallery">
       <figure className="xflow-pv-figure">
         <InspPanel
-          activeTab="params"
+          activeTab="config"
           head={switchHead}
           body={
             <Sections
               items={[
                 {
                   key: 'base',
-                  label: <SectionLabel title="基础信息" extra="金额路由 · 无模板" />,
+                  fixed: true,
+                  label: <SectionLabel title="基础信息" />,
                   children: fields(inspSwitch.base),
                 },
                 {
-                  key: 'rules',
+                  key: 'route',
                   label: (
-                    <SectionLabel title="条件规则">
+                    <SectionLabel title="路由">
                       <StatusChip tone="success" icon={<CheckIcon />} label="有效" />
                     </SectionLabel>
                   ),
                   children: (
                     <>
+                      {fields(inspSwitch.route)}
                       {inspSwitch.rules.map((rule) => (
                         <Rule key={rule.id} rule={rule} />
                       ))}
@@ -294,6 +300,18 @@ export function InspectorSection() {
                       </Button>
                     </>
                   ),
+                },
+                {
+                  key: 'execution',
+                  defaultActive: false,
+                  label: <SectionLabel title="执行策略" extra="继承工作流 · 重试 2 次" />,
+                  children: fields(inspSettings[0].fields),
+                },
+                {
+                  key: 'notes',
+                  defaultActive: false,
+                  label: <SectionLabel title="备注" extra="无" />,
+                  children: <Input.TextArea rows={2} placeholder="给同事看的说明，不参与运行" />,
                 },
               ]}
             />
@@ -306,24 +324,36 @@ export function InspectorSection() {
             </Todo>
           }
         />
-        <figcaption>参数 tab：基础信息 + 条件规则（Switch 的规则在面板内编辑，端口在卡片上）</figcaption>
+        <figcaption>
+          配置 tab：基础信息（不可折叠）+ 路由（端口只在路由卡里出现一次），执行策略与备注折叠；宿主没接 onRunNode 时底部整条不渲染
+        </figcaption>
       </figure>
 
       <figure className="xflow-pv-figure">
         <InspPanel
-          activeTab="settings"
+          activeTab="config"
           head={switchHead}
           body={
             <Sections
-              items={inspSettings.map((section) => ({
-                key: section.key,
-                label: <SectionLabel title={section.title} />,
-                children: fields(section.fields),
-              }))}
+              items={[
+                ...inspSettings.map((section) => ({
+                  key: section.key,
+                  label: <SectionLabel title={section.title} />,
+                  children: fields(section.fields),
+                })),
+                {
+                  key: 'notes',
+                  defaultActive: false,
+                  label: <SectionLabel title="备注" extra="无" />,
+                  children: <Input.TextArea rows={2} placeholder="给同事看的说明，不参与运行" />,
+                },
+              ]}
             />
           }
         />
-        <figcaption>设置 tab：执行策略（错误处理 / 超时 / 重试），未改的项显示继承自工作流的值</figcaption>
+        <figcaption>
+          配置 tab 底部：执行策略展开态（错误处理 / 节点执行超时 / 重试 / Runner 选择 / 禁用），备注默认折叠
+        </figcaption>
       </figure>
 
       <figure className="xflow-pv-figure">
@@ -368,7 +398,7 @@ export function InspectorSection() {
           head={
             <NodeHead
               label="拉取客户档案"
-              sub="fetch_profile · xflow.http"
+              sub="fetch_profile · xflow.http · v1"
               category="action"
               icon="globe"
               chip={<StatusChip tone="success" icon={<CheckIcon />} label="成功" />}
@@ -430,12 +460,12 @@ export function InspectorSection() {
 
       <figure className="xflow-pv-figure">
         <InspPanel
-          activeTab="params"
+          activeTab="config"
           runFailed
           head={
             <NodeHead
               label="通知负责人"
-              sub="notify_owner · xflow.notification"
+              sub="notify_owner · xflow.notification · v1"
               category="action"
               icon="bell"
               renaming
@@ -445,6 +475,34 @@ export function InspectorSection() {
           body={<Sections items={[{ key: 'base', label: <SectionLabel title="基础信息" />, children: fields(inspSwitch.base.slice(0, 1)) }]} />}
         />
         <figcaption>失败 + 改名态：最近一次运行失败时「运行」tab 带红点；双击节点名进入内联改名，Enter 提交、Esc 取消</figcaption>
+      </figure>
+
+      <figure className="xflow-pv-figure">
+        <InspPanel
+          activeTab="config"
+          head={
+            <NodeHead
+              label={inspSwitch.label}
+              sub={`${inspSwitch.nodeName} · ${inspSwitch.type} · v1`}
+              category={inspSwitch.category}
+              icon={inspSwitch.icon}
+              chip={<StatusChip tone="neutral" icon={<OutlineIcon />} label="已禁用" />}
+            />
+          }
+          body={
+            <Sections
+              items={[
+                {
+                  key: 'base',
+                  fixed: true,
+                  label: <SectionLabel title="基础信息" />,
+                  children: fields(inspSwitch.base),
+                },
+              ]}
+            />
+          }
+        />
+        <figcaption>禁用态：名字旁显示 neutral「已禁用」；禁用开关在配置页的执行策略卡里</figcaption>
       </figure>
 
       <figure className="xflow-pv-figure">
@@ -519,11 +577,11 @@ export function InspectorSection() {
 
       <figure className="xflow-pv-figure">
         <InspPanel
-          activeTab="params"
+          activeTab="config"
           head={
             <NodeHead
               label={inspInvalid.label}
-              sub={`${inspInvalid.nodeName} · ${inspInvalid.type}`}
+              sub={`${inspInvalid.nodeName} · ${inspInvalid.type} · v1`}
               category={inspInvalid.category}
               icon={inspInvalid.icon}
               chip={<StatusChip tone="danger" icon={<WarnIcon />} label={`${inspInvalid.badge} 个错误`} />}
