@@ -731,9 +731,10 @@ describe("inspector tabs (§6.4, AntD Tabs)", () => {
     fireEvent.click(execution);
     expect(execution.getAttribute("aria-expanded")).toBe("true");
 
-    // Error policy and timeout.
+    // Error policy and timeout. The common field is 节点执行超时 now (§2.2),
+    // distinct from the per-type 审批超时 / 等待超时 parameters.
     expect(within(panel).getByLabelText("错误处理")).toBeTruthy();
-    expect(within(panel).getByLabelText("超时")).toBeTruthy();
+    expect(within(panel).getByLabelText("节点执行超时")).toBeTruthy();
 
     // Retry: every knob of the old 设置 tab (the object group renders inline).
     for (const label of ["启用", "最大尝试次数", "策略", "初始间隔", "最大间隔", "倍率"]) {

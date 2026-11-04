@@ -226,8 +226,8 @@ function NodeParametersForm({
   workflow: WorkflowDef;
   node: WorkflowNode;
   nodeKeyValue: string;
-  /** Which half of the compiled form to render: parameters or execution settings. */
-  section: "parameters" | "settings";
+  /** Which part of the compiled form to render (see NodeFormSection). */
+  section: "identity" | "parameters" | "settings" | "notes";
   /** Right-aligned status in the settings section header (e.g. 继承工作流 · 重试 2 次). */
   sectionSummary?: string;
   nodeTypes?: NodeTypesResponse;
@@ -1511,9 +1511,27 @@ export function Inspector({
     },
     [formReadOnly, onChangeWith, selectedNodeIdentity, selectedTemplate]
   );
+  // Interim bridge (I2a): 节点名称 and 备注 render through their compiled
+  // sections until the Inspector content rewrite gives them their own layout.
+  const commonSectionForm = (node: WorkflowNode, section: "identity" | "notes") => (
+    <NodeParametersForm
+      externalIssues={externalIssues}
+      host={formHost}
+      invalidDraft={invalidDraft}
+      node={node}
+      nodeKeyValue={selectedNodeIdentity ?? ""}
+      nodeTypes={nodeTypes}
+      readOnly={formReadOnly}
+      section={section}
+      showNotices={false}
+      workflow={workflow}
+      onApplyPatches={onApplyNodePatches}
+    />
+  );
   const parametersPanel = selectedNode ? (
     <div className="xflow-editor-config">
       <SectionCard ariaLabel="基础信息" icon={<InfoIcon />} title="基础信息">
+        {commonSectionForm(selectedNode, "identity")}
         <label className="xflow-editor-form-row xflow-editor-form-row--node">
           <span>显示名</span>
           <Input
@@ -1630,6 +1648,9 @@ export function Inspector({
           onApplyPatches={onApplyNodePatches}
         />
       </div>
+      {/* Interim bridge (I2a): 备注 renders as its own compiled card until the
+       * Inspector content rewrite decides where it sits. */}
+      <div className="xflow-editor-config__notes">{commonSectionForm(selectedNode, "notes")}</div>
     </div>
   ) : (
     <WorkflowSettings

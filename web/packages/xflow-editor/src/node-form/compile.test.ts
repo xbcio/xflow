@@ -603,9 +603,14 @@ describe("conditional linkage matches the Go descriptors (Doc C §4.4)", () => {
 describe("commonSchema (Doc C §4.2)", () => {
   const { spec } = compileNodeForm(null, { common: commonSchema });
 
-  it("places common groups before the type groups", () => {
+  it("orders identity before the type groups and execution/notes after them", () => {
     const withType = compileNodeForm(waitSchema).spec;
-    expect(withType.elements[ROOT_ID].children).toEqual(["g.common.general", "g.common.execution", "g.type.default"]);
+    expect(withType.elements[ROOT_ID].children).toEqual([
+      "g.common.identity",
+      "g.type.default",
+      "g.common.execution",
+      "g.common.notes"
+    ]);
   });
 
   it("/name is the host rename component reading, not binding, the name", () => {
@@ -634,6 +639,75 @@ describe("commonSchema (Doc C §4.2)", () => {
     expect(types(spec, "/disabled")).toEqual(["Switch"]);
     expect(types(spec, "/notes")).toEqual(["TextArea"]);
   });
+
+  it("splits the common fields into 基础信息 / 执行策略 / 备注", () => {
+    expect(spec.elements[ROOT_ID].children).toEqual([
+      "g.common.identity",
+      "n.unregistered-type",
+      "g.common.execution",
+      "g.common.notes"
+    ]);
+    expect(spec.elements["g.common.identity"].props).toEqual({ title: "基础信息", collapsible: true });
+    expect(spec.elements["g.common.identity"].children).toEqual(["f.name"]);
+    expect(spec.elements["g.common.execution"].props).toEqual({
+      title: "执行策略",
+      collapsible: true,
+      headerStatus: "errors",
+      defaultCollapsed: true
+    });
+    // disabled moved in last, behind the everyday execution knobs.
+    expect(spec.elements["g.common.execution"].children).toEqual([
+      "f.on_error",
+      "f.timeout",
+      "f.retry",
+      "f.runner_selector",
+      "f.disabled"
+    ]);
+    expect(spec.elements["g.common.notes"].props).toEqual({
+      title: "备注",
+      collapsible: true,
+      headerStatus: "errors",
+      defaultCollapsed: true
+    });
+    expect(bound(spec, "/timeout")[0][1].props?.label).toBe("节点执行超时");
+    expect(bound(spec, "/name")[0][1].props?.description).toBe("引用名：连线和表达式靠它找到节点，改名会同步更新引用");
+  });
+});
+
+describe("headerStatus (Inspector card badges §2.2)", () => {
+  it("marks a group with an emitted required field as validity, others as errors", () => {
+    const schema: NodeFormSchema = {
+      ...waitSchema,
+      groups: [
+        { key: "main", display_name: "主" },
+        { key: "extra", display_name: "额外" }
+      ],
+      fields: [
+        { name: "mode", path: "/parameters/mode", type: "string", required: true, group: "main" },
+        { name: "note", path: "/parameters/note", type: "string", group: "extra" }
+      ],
+      one_of: []
+    };
+    const spec = compile(schema).spec;
+    expect(spec.elements["g.type.main"].props).toMatchObject({ title: "主", headerStatus: "validity" });
+    expect(spec.elements["g.type.extra"].props).toMatchObject({ title: "额外", headerStatus: "errors" });
+  });
+
+  it("applies the same rule to the implicit default group", () => {
+    const required = compile({
+      ...waitSchema,
+      groups: [],
+      fields: [{ name: "a", path: "/parameters/a", type: "string", required: true }]
+    }).spec;
+    expect(required.elements["g.type.default"].props).toMatchObject({ title: "参数", headerStatus: "validity" });
+    // required_when is conditional, so it does not opt the card into 有效.
+    const conditional = compile({
+      ...waitSchema,
+      groups: [],
+      fields: [{ name: "a", path: "/parameters/a", type: "string", required_when: { param: "b", eq: "x" } }]
+    }).spec;
+    expect(conditional.elements["g.type.default"].props).toMatchObject({ title: "参数", headerStatus: "errors" });
+  });
 });
 
 describe("section (Inspector 参数 / 设置 tabs)", () => {
@@ -650,19 +724,29 @@ describe("section (Inspector 参数 / 设置 tabs)", () => {
 
   const cases: [string, NodeFormSchema | null][] = [...fixtureSchemas.map((s): [string, NodeFormSchema] => [s.node_type, s]), ["<no schema>", null]];
 
-  it.each(cases)("%s: parameters and settings partition the paths of all", (_name, schema) => {
+  it.each(cases)("%s: the four sections partition the paths of all", (_name, schema) => {
     const options = { parameters: { extra: 1 }, hasTemplate: true };
     const all = compileNodeForm(schema, options).spec;
-    const parameters = compileNodeForm(schema, { ...options, section: "parameters" }).spec;
-    const settings = compileNodeForm(schema, { ...options, section: "settings" }).spec;
-    const p = writtenPaths(parameters);
-    const s = writtenPaths(settings);
-    expect(p.filter((path) => s.includes(path))).toEqual([]);
-    expect([...p, ...s].sort()).toEqual(writtenPaths(all));
+    const parts = (["identity", "parameters", "settings", "notes"] as const).map(
+      (part) => compileNodeForm(schema, { ...options, section: part }).spec
+    );
+    const paths = parts.map(writtenPaths);
+    expect(paths.flat().sort()).toEqual(writtenPaths(all));
+    // A path has one writer: no two sections bind the same pointer (a single
+    // section may bind one twice, e.g. ExpressionInput and its literal slot).
+    const sets = paths.map((list) => new Set(list));
+    for (let a = 0; a < sets.length; a += 1) {
+      for (let b = a + 1; b < sets.length; b += 1) {
+        expect(
+          [...sets[a]].filter((path) => sets[b].has(path)),
+          `sections ${a} and ${b} write the same path`
+        ).toEqual([]);
+      }
+    }
     // The element sets partition too (apart from the shared root).
     const ids = (spec: ComposerSpec) => Object.keys(spec.elements).filter((id) => id !== ROOT_ID);
-    expect([...ids(parameters), ...ids(settings)].sort()).toEqual(ids(all).sort());
-    for (const spec of [parameters, settings]) {
+    expect(parts.flatMap(ids).sort()).toEqual(ids(all).sort());
+    for (const spec of parts) {
       expect(validateSpec(spec, { schemas, checks, expressions })).toEqual([]);
       expect(resolveWith(spec, { name: "n1", parameters: {} }).specErrors).toEqual([]);
     }
@@ -677,14 +761,30 @@ describe("section (Inspector 参数 / 设置 tabs)", () => {
     expect(writtenPaths(spec).some((path) => path.startsWith("/parameters/"))).toBe(false);
   });
 
-  it("parameters holds the notices, the general group, the type groups and the root checks", () => {
+  it("parameters holds the notices, the type groups and the root checks", () => {
     const schema = fixtureSchemas.find((s) => (s.one_of ?? []).length > 0) ?? httpSchema;
     const all = compileNodeForm(schema, { hasTemplate: true }).spec;
     const { spec } = compileNodeForm(schema, { section: "parameters", hasTemplate: true });
-    expect(spec.elements[ROOT_ID].children).toEqual(all.elements[ROOT_ID].children?.filter((id) => id !== "g.common.execution"));
+    const commonGroups = ["g.common.identity", "g.common.execution", "g.common.notes"];
+    expect(spec.elements[ROOT_ID].children).toEqual(
+      all.elements[ROOT_ID].children?.filter((id) => !commonGroups.includes(id))
+    );
     expect(spec.elements[ROOT_ID].children?.[0]).toBe("n.node-template");
-    expect(spec.elements[ROOT_ID].children).toContain("g.common.general");
+    expect(spec.elements[ROOT_ID].children?.some((id) => id.startsWith("g.common."))).toBe(false);
     expect(spec.elements[ROOT_ID].checks).toEqual(all.elements[ROOT_ID].checks);
+  });
+
+  it("identity and notes hold only their own common group", () => {
+    for (const [section, id] of [
+      ["identity", "g.common.identity"],
+      ["notes", "g.common.notes"]
+    ] as const) {
+      const { spec } = compileNodeForm(waitSchema, { section });
+      expect(spec.elements[ROOT_ID].children).toEqual([id]);
+      expect(spec.elements[ROOT_ID].checks).toBeUndefined();
+    }
+    expect(writtenPaths(compileNodeForm(waitSchema, { section: "identity" }).spec)).toEqual(["/name"]);
+    expect(writtenPaths(compileNodeForm(waitSchema, { section: "notes" }).spec)).toEqual(["/notes"]);
   });
 
   it('"all" is the default and emits both', () => {
@@ -699,7 +799,14 @@ describe("section (Inspector 参数 / 设置 tabs)", () => {
 describe("notices", () => {
   it("a missing schema shows the unregistered-type notice and common fields only", () => {
     const { spec } = compileNodeForm(null);
-    expect(spec.elements[ROOT_ID].children?.[0]).toBe("n.unregistered-type");
+    // 基础信息 leads; the notice belongs to the parameters slot, then the
+    // execution and notes groups close the form.
+    expect(spec.elements[ROOT_ID].children).toEqual([
+      "g.common.identity",
+      "n.unregistered-type",
+      "g.common.execution",
+      "g.common.notes"
+    ]);
     expect(Object.keys(spec.elements).some((id) => id.startsWith("g.type."))).toBe(false);
   });
 

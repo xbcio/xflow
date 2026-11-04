@@ -194,18 +194,18 @@ describe("node form: the patch reducer (Doc C §6.1)", () => {
 
     // Two writes in the same tick: composer delivers them as ONE onChange
     // batch. A reducer that committed per patch against render state would
-    // lose the first write (or record two undo entries).
+    // lose the first write (or record two undo entries). Both fields live in
+    // the parameters section; notes moved to its own section (§6.1).
     await act(async () => {
       change(one(fieldOf(container, "f.parameters.signal_name:control"), "input"), "approved");
-      change(one(fieldOf(container, "f.notes:control"), "textarea"), "a note");
+      change(one(fieldOf(container, "f.parameters.timeout:control"), "input"), "30s");
     });
 
     expect(handleChange).toHaveBeenCalledTimes(1);
     expect(lastWorkflow(handleChange).nodes?.[1]).toEqual({
       name: "pause",
       type: "xflow.wait",
-      notes: "a note",
-      parameters: { signal_name: "approved" }
+      parameters: { signal_name: "approved", timeout: "30s" }
     });
 
     fireEvent.click(undoButton());

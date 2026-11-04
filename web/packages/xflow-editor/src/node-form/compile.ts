@@ -47,20 +47,27 @@ export interface CompileNodeFormOptions {
    */
   registeredTypes?: Iterable<string>;
   /**
-   * Which part of the form to emit (the Inspector's 参数 / 设置 tabs).
-   * "settings" is the common schema's execution group (错误处理、超时、重试、
-   * Runner 选择); "parameters" is everything else: the other common groups,
-   * the notices, the type schema and its root checks. Every path lands in
-   * exactly one of the two, so one writer per path holds across tabs.
+   * Which part of the form to emit (§6.1). Every path lands in exactly one
+   * section, so one writer per path holds across independently mounted forms:
+   * - "identity": only the common identity group (/name).
+   * - "parameters": the notices and the type schema's groups, plus its root
+   *   checks; no common field.
+   * - "settings": only the common execution group.
+   * - "notes": only the common notes group.
+   * - "all": everything, ordered identity → notices/type → execution → notes.
    * Defaults to "all".
    */
   section?: NodeFormSection;
 }
 
-export type NodeFormSection = "all" | "parameters" | "settings";
+export type NodeFormSection = "all" | "parameters" | "settings" | "identity" | "notes";
 
-/** Common-schema groups shown under the "settings" section. */
-const SETTINGS_GROUPS: ReadonlySet<string> = new Set(["execution"]);
+/** Common-schema groups each explicit section renders (identity leads "all"). */
+const SECTION_GROUPS: Readonly<Record<"identity" | "settings" | "notes", ReadonlySet<string>>> = {
+  identity: new Set(["identity"]),
+  settings: new Set(["execution"]),
+  notes: new Set(["notes"])
+};
 
 export interface CompiledNodeForm {
   spec: ComposerSpec;
@@ -282,6 +289,19 @@ interface Target {
   nodeType: string;
   ports: PortItem[] | Expr;
 }
+
+type HeaderStatus = "errors" | "validity";
+type GroupStatusFor = (key: string, hasRequiredField: boolean) => HeaderStatus | undefined;
+
+/**
+ * Type schemas: a group holding an emitted `required: true` field claims
+ * 「有效」 when clean; any other group only speaks up on errors. A
+ * conditionally required field (`required_when`) does not opt the card into
+ * the validity claim: away from its condition the claim would be vacuous.
+ */
+const defaultGroupStatus: GroupStatusFor = (_key, hasRequiredField) => (hasRequiredField ? "validity" : "errors");
+/** Common groups: 基础信息 stays quiet; 执行策略 and 备注 only report errors. */
+const commonGroupStatus: GroupStatusFor = (key) => (key === "identity" ? undefined : "errors");
 
 class Compiler {
   readonly elements: Record<string, ElementDef> = {};
@@ -681,15 +701,18 @@ class Compiler {
   }
 
   /**
-   * Compiles a schema's fields into FieldGroup elements; returns their ids.
-   * `include` filters by group key ("" is the implicit default group).
+   * Compiles a schema's fields into FieldGroup elements; returns their ids and
+   * a key → ids map so the caller can assemble sections in its own order.
+   * `include` filters by group key ("" is the implicit default group),
+   * `statusFor` decides each emitted group's header badge (§6.1).
    */
   groups(
     schema: NodeFormSchema,
     prefix: string,
     implicitTitle: string,
-    include: (key: string) => boolean = () => true
-  ): { ids: string[]; hidden: Set<string> } {
+    include: (key: string) => boolean = () => true,
+    statusFor: GroupStatusFor = defaultGroupStatus
+  ): { ids: string[]; hidden: Set<string>; byGroup: Map<string, string[]> } {
     const target: Target = { kind: schema.kind, nodeType: schema.node_type, ports: portsFor(schema) };
     const declared = schema.groups ?? [];
     const known = new Set(declared.map((group) => group.key));
@@ -705,20 +728,27 @@ class Compiler {
     const scope: Scope = { kind: "absolute", base: "/parameters", segs: [], idBase: "f" };
     const hidden = new Set<string>();
     const ids: string[] = [];
+    const byGroup = new Map<string, string[]>();
     const emit = (key: string, title: string, fields: NodeFormField[], extra: { description?: string; collapsed?: boolean }) => {
       if (!include(key)) return;
       const children: string[] = [];
+      let hasRequiredField = false;
       for (const field of sortFields(fields)) {
         const fieldScope: Scope = field.path.startsWith("/parameters/") ? scope : { kind: "absolute", base: "", segs: [], idBase: "f" };
         const out = this.field(field, fieldScope, target);
         if (out.length === 0) hidden.add(field.name);
+        else if (field.required === true) hasRequiredField = true;
         children.push(...out);
       }
       if (children.length === 0) return;
       const props: Record<string, unknown> = { title, collapsible: true };
+      const headerStatus = statusFor(key, hasRequiredField);
+      if (headerStatus) props.headerStatus = headerStatus;
       if (extra.description) props.description = extra.description;
       if (extra.collapsed) props.defaultCollapsed = true;
-      ids.push(this.add(`g.${prefix}.${key || "default"}`, { type: "FieldGroup", props, children }));
+      const id = this.add(`g.${prefix}.${key || "default"}`, { type: "FieldGroup", props, children });
+      ids.push(id);
+      byGroup.set(key, [...(byGroup.get(key) ?? []), id]);
     };
     emit("", implicitTitle, buckets.get("") ?? [], {});
     for (const group of declared) {
@@ -727,7 +757,7 @@ class Compiler {
         collapsed: group.collapsed
       });
     }
-    return { ids, hidden };
+    return { ids, hidden, byGroup };
   }
 
   notice(code: NoticeCode, tone: "info" | "warning", message: string, count?: number): string {
@@ -907,8 +937,19 @@ export function compileNodeForm(schema: NodeFormSchema | null | undefined, optio
   if (!registered.has("Form") || !registered.has("FieldGroup")) compiler.warn("Form / FieldGroup are not registered");
   const section = options.section ?? "all";
   // The notices and the type schema belong to the parameters section.
-  const withType = section !== "settings";
+  const withType = section === "all" || section === "parameters";
   const children: string[] = [];
+
+  // Common groups: identity leads, execution and notes follow the type schema
+  // (§6.1). Every section but parameters compiles common groups.
+  const common = options.common === undefined ? commonSchema : options.common;
+  let commonByGroup: Map<string, string[]> | undefined;
+  if (common && section !== "parameters") {
+    const only = section === "all" ? undefined : SECTION_GROUPS[section];
+    const include = (key: string) => only === undefined || only.has(key);
+    commonByGroup = compiler.groups(common, "common", "通用", include, commonGroupStatus).byGroup;
+    children.push(...(commonByGroup.get("identity") ?? []));
+  }
 
   if (withType && !schema) {
     if (registered.has("FormNotice")) children.push(compiler.notice("unregistered-type", "warning", MSG.unregistered));
@@ -922,12 +963,6 @@ export function compileNodeForm(schema: NodeFormSchema | null | undefined, optio
         children.push(compiler.notice("undeclared-params", "info", `${undeclared.length} 个未声明参数，见 JSON 页签`, undeclared.length));
       }
     }
-  }
-
-  const common = options.common === undefined ? commonSchema : options.common;
-  if (common) {
-    const include = section === "all" ? undefined : (key: string) => SETTINGS_GROUPS.has(key) === (section === "settings");
-    children.push(...compiler.groups(common, "common", "通用", include).ids);
   }
 
   const rootChecks: CheckDef[] = [];
@@ -953,6 +988,12 @@ export function compileNodeForm(schema: NodeFormSchema | null | undefined, optio
         message: oneOfMessage(labels, mode)
       });
     }
+  }
+
+  // The remaining common groups (执行策略、备注, plus any extra declared group)
+  // keep their declared order after the type groups.
+  if (commonByGroup) {
+    for (const [key, ids] of commonByGroup) if (key !== "identity") children.push(...ids);
   }
 
   const root: ElementDef = { type: "Form", props: { layout: "vertical", descriptionPlacement: "tooltip" }, children };

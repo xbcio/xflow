@@ -244,6 +244,7 @@ exports[`A6-generated node-types fixture > xflow.approval@1 snapshot 1`] = `
         "props": {
           "collapsible": true,
           "defaultCollapsed": true,
+          "headerStatus": "errors",
           "title": "Advanced",
         },
         "type": "FieldGroup",
@@ -257,6 +258,7 @@ exports[`A6-generated node-types fixture > xflow.approval@1 snapshot 1`] = `
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "Approval",
         },
         "type": "FieldGroup",
@@ -630,6 +632,7 @@ exports[`A6-generated node-types fixture > xflow.browser.cdp@1 snapshot 1`] = `
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "errors",
           "title": "Harvest",
         },
         "type": "FieldGroup",
@@ -642,6 +645,7 @@ exports[`A6-generated node-types fixture > xflow.browser.cdp@1 snapshot 1`] = `
         "props": {
           "collapsible": true,
           "defaultCollapsed": true,
+          "headerStatus": "errors",
           "title": "Limits",
         },
         "type": "FieldGroup",
@@ -654,6 +658,7 @@ exports[`A6-generated node-types fixture > xflow.browser.cdp@1 snapshot 1`] = `
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "Target",
         },
         "type": "FieldGroup",
@@ -1065,6 +1070,7 @@ exports[`A6-generated node-types fixture > xflow.database@1 snapshot 1`] = `
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "参数",
         },
         "type": "FieldGroup",
@@ -1211,6 +1217,7 @@ exports[`A6-generated node-types fixture > xflow.function@1 snapshot 1`] = `
         "props": {
           "collapsible": true,
           "defaultCollapsed": true,
+          "headerStatus": "errors",
           "title": "Advanced",
         },
         "type": "FieldGroup",
@@ -1223,6 +1230,7 @@ exports[`A6-generated node-types fixture > xflow.function@1 snapshot 1`] = `
         "props": {
           "collapsible": true,
           "description": "Fill in one of the two; Code is ignored when Function Name is set",
+          "headerStatus": "errors",
           "title": "Function",
         },
         "type": "FieldGroup",
@@ -1465,6 +1473,7 @@ exports[`A6-generated node-types fixture > xflow.grpc@1 snapshot 1`] = `
         "props": {
           "collapsible": true,
           "defaultCollapsed": true,
+          "headerStatus": "errors",
           "title": "Advanced",
         },
         "type": "FieldGroup",
@@ -1479,6 +1488,7 @@ exports[`A6-generated node-types fixture > xflow.grpc@1 snapshot 1`] = `
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "Request",
         },
         "type": "FieldGroup",
@@ -1862,6 +1872,7 @@ exports[`A6-generated node-types fixture > xflow.http@1 snapshot 1`] = `
         "props": {
           "collapsible": true,
           "defaultCollapsed": true,
+          "headerStatus": "errors",
           "title": "Advanced",
         },
         "type": "FieldGroup",
@@ -1874,6 +1885,7 @@ exports[`A6-generated node-types fixture > xflow.http@1 snapshot 1`] = `
         "props": {
           "collapsible": true,
           "defaultCollapsed": true,
+          "headerStatus": "errors",
           "title": "Headers & Query",
         },
         "type": "FieldGroup",
@@ -1887,6 +1899,7 @@ exports[`A6-generated node-types fixture > xflow.http@1 snapshot 1`] = `
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "Request",
         },
         "type": "FieldGroup",
@@ -1942,6 +1955,7 @@ exports[`A6-generated node-types fixture > xflow.if@1 snapshot 1`] = `
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "参数",
         },
         "type": "FieldGroup",
@@ -2157,6 +2171,7 @@ exports[`A6-generated node-types fixture > xflow.map@1 snapshot 1`] = `
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "参数",
         },
         "type": "FieldGroup",
@@ -2287,6 +2302,7 @@ exports[`A6-generated node-types fixture > xflow.merge@1 snapshot 1`] = `
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "Merge",
         },
         "type": "FieldGroup",
@@ -2485,6 +2501,7 @@ exports[`A6-generated node-types fixture > xflow.notification@1 snapshot 1`] = `
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "参数",
         },
         "type": "FieldGroup",
@@ -2844,6 +2861,7 @@ exports[`A6-generated node-types fixture > xflow.script@1 snapshot 1`] = `
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "errors",
           "title": "Environment",
         },
         "type": "FieldGroup",
@@ -2857,6 +2875,7 @@ exports[`A6-generated node-types fixture > xflow.script@1 snapshot 1`] = `
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "Source",
         },
         "type": "FieldGroup",
@@ -3086,6 +3105,7 @@ exports[`A6-generated node-types fixture > xflow.subworkflow@1 snapshot 1`] = `
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "参数",
         },
         "type": "FieldGroup",
@@ -3369,6 +3389,7 @@ exports[`A6-generated node-types fixture > xflow.switch@1 snapshot 1`] = `
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "Routing",
         },
         "type": "FieldGroup",
@@ -3605,6 +3626,7 @@ exports[`A6-generated node-types fixture > xflow.transform.aggregate@1 snapshot 
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "参数",
         },
         "type": "FieldGroup",
@@ -3683,6 +3705,7 @@ exports[`A6-generated node-types fixture > xflow.transform.filter@1 snapshot 1`]
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "参数",
         },
         "type": "FieldGroup",
@@ -3797,6 +3820,7 @@ exports[`A6-generated node-types fixture > xflow.transform.limit@1 snapshot 1`] 
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "参数",
         },
         "type": "FieldGroup",
@@ -3868,6 +3892,7 @@ exports[`A6-generated node-types fixture > xflow.transform.pick@1 snapshot 1`] =
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "参数",
         },
         "type": "FieldGroup",
@@ -3954,6 +3979,7 @@ exports[`A6-generated node-types fixture > xflow.transform.remove_duplicates@1 s
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "参数",
         },
         "type": "FieldGroup",
@@ -4030,6 +4056,7 @@ exports[`A6-generated node-types fixture > xflow.transform.rename@1 snapshot 1`]
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "参数",
         },
         "type": "FieldGroup",
@@ -4131,6 +4158,7 @@ exports[`A6-generated node-types fixture > xflow.transform.set@1 snapshot 1`] = 
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "errors",
           "title": "参数",
         },
         "type": "FieldGroup",
@@ -4295,6 +4323,7 @@ exports[`A6-generated node-types fixture > xflow.transform.sort@1 snapshot 1`] =
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "参数",
         },
         "type": "FieldGroup",
@@ -4591,6 +4620,7 @@ exports[`A6-generated node-types fixture > xflow.trigger.cron@1 snapshot 1`] = `
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "参数",
         },
         "type": "FieldGroup",
@@ -5896,6 +5926,7 @@ exports[`A6-generated node-types fixture > xflow.trigger.kafka@1 snapshot 1`] = 
         "props": {
           "collapsible": true,
           "defaultCollapsed": true,
+          "headerStatus": "errors",
           "title": "Advanced",
         },
         "type": "FieldGroup",
@@ -5909,6 +5940,7 @@ exports[`A6-generated node-types fixture > xflow.trigger.kafka@1 snapshot 1`] = 
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "Connection",
         },
         "type": "FieldGroup",
@@ -5922,6 +5954,7 @@ exports[`A6-generated node-types fixture > xflow.trigger.kafka@1 snapshot 1`] = 
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "errors",
           "title": "Processing",
         },
         "type": "FieldGroup",
@@ -6508,6 +6541,7 @@ exports[`A6-generated node-types fixture > xflow.trigger.redis@1 snapshot 1`] = 
         "props": {
           "collapsible": true,
           "defaultCollapsed": true,
+          "headerStatus": "errors",
           "title": "Advanced",
         },
         "type": "FieldGroup",
@@ -6522,6 +6556,7 @@ exports[`A6-generated node-types fixture > xflow.trigger.redis@1 snapshot 1`] = 
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "Connection",
         },
         "type": "FieldGroup",
@@ -6601,6 +6636,7 @@ exports[`A6-generated node-types fixture > xflow.trigger.timer@1 snapshot 1`] = 
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "参数",
         },
         "type": "FieldGroup",
@@ -6799,6 +6835,7 @@ exports[`A6-generated node-types fixture > xflow.trigger.webhook@1 snapshot 1`] 
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "参数",
         },
         "type": "FieldGroup",
@@ -7212,6 +7249,7 @@ exports[`A6-generated node-types fixture > xflow.wait@1 snapshot 1`] = `
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "errors",
           "title": "Wait",
         },
         "type": "FieldGroup",

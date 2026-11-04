@@ -32,7 +32,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > commonSchema 
       },
       "f.name": {
         "props": {
-          "description": "失焦时改名，并同步更新连线、pin_data、分组与依赖边中的引用",
+          "description": "引用名：连线和表达式靠它找到节点，改名会同步更新引用",
           "label": "节点名称",
           "value": {
             "$state": "/name",
@@ -386,7 +386,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > commonSchema 
           "expect": {
             "type": "number",
           },
-          "label": "超时",
+          "label": "节点执行超时",
           "mode": "none",
           "observed": {
             "$state": "/timeout",
@@ -397,7 +397,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > commonSchema 
       "f.timeout:control": {
         "props": {
           "description": "单次执行的超时（线上为纳秒整数）；未设置继承引擎默认值，负值表示不限",
-          "label": "超时",
+          "label": "节点执行超时",
           "unit": "ns",
           "value": {
             "$bindState": "/timeout",
@@ -407,9 +407,10 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > commonSchema 
       },
       "form": {
         "children": [
+          "g.common.identity",
           "n.unregistered-type",
-          "g.common.general",
           "g.common.execution",
+          "g.common.notes",
         ],
         "props": {
           "descriptionPlacement": "tooltip",
@@ -423,23 +424,35 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > commonSchema 
           "f.timeout",
           "f.retry",
           "f.runner_selector",
+          "f.disabled",
         ],
         "props": {
           "collapsible": true,
           "defaultCollapsed": true,
+          "headerStatus": "errors",
           "title": "执行策略",
         },
         "type": "FieldGroup",
       },
-      "g.common.general": {
+      "g.common.identity": {
         "children": [
           "f.name",
-          "f.disabled",
+        ],
+        "props": {
+          "collapsible": true,
+          "title": "基础信息",
+        },
+        "type": "FieldGroup",
+      },
+      "g.common.notes": {
+        "children": [
           "f.notes",
         ],
         "props": {
           "collapsible": true,
-          "title": "通用",
+          "defaultCollapsed": true,
+          "headerStatus": "errors",
+          "title": "备注",
         },
         "type": "FieldGroup",
       },
@@ -858,6 +871,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.databas
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "参数",
         },
         "type": "FieldGroup",
@@ -1237,6 +1251,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
         "props": {
           "collapsible": true,
           "defaultCollapsed": true,
+          "headerStatus": "errors",
           "title": "Advanced",
         },
         "type": "FieldGroup",
@@ -1254,6 +1269,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "Request",
         },
         "type": "FieldGroup",
@@ -1469,6 +1485,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.map sna
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "参数",
         },
         "type": "FieldGroup",
@@ -1828,6 +1845,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "errors",
           "title": "Environment",
         },
         "type": "FieldGroup",
@@ -1841,6 +1859,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "Source",
         },
         "type": "FieldGroup",
@@ -2130,6 +2149,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.switch 
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "参数",
         },
         "type": "FieldGroup",
@@ -2366,6 +2386,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.transfo
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "参数",
         },
         "type": "FieldGroup",
@@ -3420,6 +3441,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
         "props": {
           "collapsible": true,
           "defaultCollapsed": true,
+          "headerStatus": "errors",
           "title": "Advanced",
         },
         "type": "FieldGroup",
@@ -3433,6 +3455,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "Connection",
         },
         "type": "FieldGroup",
@@ -3445,6 +3468,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "errors",
           "title": "Processing",
         },
         "type": "FieldGroup",
@@ -4027,6 +4051,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
         "props": {
           "collapsible": true,
           "defaultCollapsed": true,
+          "headerStatus": "errors",
           "title": "Advanced",
         },
         "type": "FieldGroup",
@@ -4041,6 +4066,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "validity",
           "title": "Connection",
         },
         "type": "FieldGroup",
@@ -4454,6 +4480,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.wait sn
         ],
         "props": {
           "collapsible": true,
+          "headerStatus": "errors",
           "title": "参数",
         },
         "type": "FieldGroup",

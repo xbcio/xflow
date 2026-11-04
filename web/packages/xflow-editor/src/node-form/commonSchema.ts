@@ -1,5 +1,7 @@
 // Fields every WorkflowNode has, independent of its type (Doc C §4.2).
-// compileNodeForm places them before the type schema.
+// compileNodeForm splits them into the Inspector's 基础信息 / 执行策略 / 备注
+// sections; the full form orders identity before the type schema and the
+// execution and notes groups after it (§6.1).
 //
 // Wire shapes (types/workflow.go NodeDef / RetrySettings; xflow-core
 // WorkflowNode / RetryPolicy):
@@ -31,8 +33,9 @@ export const commonSchema: NodeFormSchema = {
   node_version: 0,
   kind: "action",
   groups: [
-    { key: "general", display_name: "通用" },
-    { key: "execution", display_name: "执行策略", collapsed: true }
+    { key: "identity", display_name: "基础信息" },
+    { key: "execution", display_name: "执行策略", collapsed: true },
+    { key: "notes", display_name: "备注", collapsed: true }
   ],
   fields: [
     {
@@ -42,8 +45,8 @@ export const commonSchema: NodeFormSchema = {
       label: "节点名称",
       type: "string",
       widget: COMMON_WIDGET_NODE_NAME,
-      help: "失焦时改名，并同步更新连线、pin_data、分组与依赖边中的引用",
-      group: "general",
+      help: "引用名：连线和表达式靠它找到节点，改名会同步更新引用",
+      group: "identity",
       order: 10
     },
     {
@@ -53,8 +56,9 @@ export const commonSchema: NodeFormSchema = {
       type: "boolean",
       widget: "switch",
       default: false,
-      group: "general",
-      order: 20
+      group: "execution",
+      // Last in 执行策略: an escape hatch, not part of the everyday policy.
+      order: 50
     },
     {
       name: "notes",
@@ -62,8 +66,8 @@ export const commonSchema: NodeFormSchema = {
       label: "备注",
       type: "string",
       widget: "textarea",
-      group: "general",
-      order: 30
+      group: "notes",
+      order: 10
     },
     {
       name: "on_error",
@@ -84,7 +88,8 @@ export const commonSchema: NodeFormSchema = {
     {
       name: "timeout",
       path: "/timeout",
-      label: "超时",
+      // Distinct from the parameter-level 超时 fields (审批超时 / 等待超时).
+      label: "节点执行超时",
       type: "number",
       widget: COMMON_WIDGET_DURATION_NS,
       help: "单次执行的超时（线上为纳秒整数）；未设置继承引擎默认值，负值表示不限",
