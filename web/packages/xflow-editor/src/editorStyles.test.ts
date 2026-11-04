@@ -544,11 +544,10 @@ describe("xflow.editor left column (§6.0.1, §6.5)", () => {
     expect(css).not.toContain(".xflow-editor-library-search__suffix .xflow-editor-kbd");
   });
 
-  it("weighs the library group row 600 as a whole, so its count is as heavy as its label", () => {
-    // The baseline sets the weight on the row; a 400 count beside a 600 label
-    // was the browser-measured difference.
+  it("weighs the library group title 600 and its count regular, as the baseline does", () => {
+    // The baseline group row is 600; the count beside it is the regular step.
     expect(rule(".xflow-editor-node-group__title")).toMatch(/font-weight:\s*var\(--xflow-font-weight-semibold\)\s*;/);
-    expect(rule(".xflow-editor-node-group__count")).not.toMatch(/font-weight/);
+    expect(rule(".xflow-editor-node-group__count")).toMatch(/font-weight:\s*var\(--xflow-font-weight-regular\)\s*;/);
   });
 
   it("anchors the compact drawer to the workbench body, which sits between the top bar and the status bar", () => {
@@ -557,27 +556,41 @@ describe("xflow.editor left column (§6.0.1, §6.5)", () => {
     expect(rule(".xflow-editor-main")).toMatch(/position:\s*relative\s*;/);
   });
 
-  it("shows the draggable library rows with the grab cursor", () => {
+  it("shows the draggable library cards with the grab cursor", () => {
     expect(rule(".xflow-editor-node-tile")).toMatch(/cursor:\s*grab\s*;/);
-    // The baseline row is flush: no border, 6/8 padding, 52px total.
-    expect(rule(".xflow-editor-node-tile")).toMatch(/border:\s*0\s*;/);
-    expect(rule(".xflow-editor-node-tile")).toMatch(/padding:\s*var\(--xflow-space-1-5\) var\(--xflow-space-2\)\s*;/);
+    // The baseline card: 1px outlined, 4px inset, 44px tall on the field surface.
+    expect(rule(".xflow-editor-node-tile")).toMatch(/border:\s*1px solid var\(--xflow-border\)\s*;/);
+    expect(rule(".xflow-editor-node-tile")).toMatch(/padding:\s*var\(--xflow-space-1\)\s*;/);
+    expect(rule(".xflow-editor-node-tile")).toMatch(/background:\s*var\(--xflow-field\)\s*;/);
+    expect(rule(".xflow-editor-node-tile")).toMatch(/border-radius:\s*var\(--xflow-radius-sm\)\s*;/);
+    // A bare /height:/ also matches `min-height`, so the card's fixed 44px box
+    // needs the lookbehind.
+    expect(rule(".xflow-editor-node-tile")).toMatch(/(?<![\w-])height:\s*44px\s*;/);
   });
 
-  it("draws the library row icon as the baseline 28px block with a 15px glyph", () => {
+  it("draws the library card icon as the density 24px block with a 12px glyph", () => {
     const rule = (selector: string): string => {
       const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       return css.match(new RegExp(`(?:^|\\})\\s*${escaped}\\s*\\{([^}]*)\\}`))?.[1] ?? "";
     };
+    // The canvas card keeps the 28px step...
     const base = rule(".xflow-editor-category-icon");
     expect(base).toMatch(/width:\s*28px\s*;/);
     expect(base).toMatch(/height:\s*28px\s*;/);
     expect(base).toMatch(/border-radius:\s*var\(--xflow-radius-sm\)\s*;/);
-    // 15px is the mock's glyph box; the type scale has no 15 step, so the icon
-    // is sized by width/height instead of a bare font-size.
-    const glyph = rule(".xflow-editor-category-icon:not(.xflow-editor-category-icon--sm) .xflow-icon");
-    expect(glyph).toMatch(/width:\s*15px\s*;/);
-    expect(glyph).toMatch(/height:\s*15px\s*;/);
+    // The canvas glyph keeps the mock's 15px box (no 15 step exists in the type scale).
+    const baseGlyph = rule(".xflow-editor-category-icon:not(.xflow-editor-category-icon--sm) .xflow-icon");
+    expect(baseGlyph).toMatch(/width:\s*15px\s*;/);
+    expect(baseGlyph).toMatch(/height:\s*15px\s*;/);
+    // ...while the library card takes the baseline's 24px block, 15% tint and
+    // 12px glyph.
+    const tile = rule(".xflow-editor-node-tile .xflow-editor-category-icon");
+    expect(tile).toMatch(/width:\s*24px\s*;/);
+    expect(tile).toMatch(/height:\s*24px\s*;/);
+    expect(tile).toMatch(/color-mix\(in srgb, var\(--xflow-editor-category\) 15%, transparent\)/);
+    const glyph = rule(".xflow-editor-node-tile .xflow-editor-category-icon .xflow-icon");
+    expect(glyph).toMatch(/width:\s*12px\s*;/);
+    expect(glyph).toMatch(/height:\s*12px\s*;/);
     const sm = rule(".xflow-editor-category-icon--sm");
     expect(sm).toMatch(/width:\s*20px\s*;/);
     expect(sm).toMatch(/border-radius:\s*var\(--xflow-radius-xs\)\s*;/);
@@ -662,18 +675,21 @@ describe("xflow.editor browser-measured baseline fixes (E6)", () => {
     expect(css).toMatch(/--xflow-editor-panel-right-width:\s*360px\s*;/);
   });
 
-  it("narrows both docked columns at snug desktop widths (EL-02)", () => {
-    // 1440: 360+280+rail left the canvas at ~51%; the snug tier takes 40px off
-    // the left content and 40px off the right inspector. The override lives on
-    // `.xflow-editor-main`: a container query cannot style its own container,
-    // and the root's calc() is already resolved when it inherits.
+  it("keeps the left column at 240 and narrows only the inspector at snug widths (EL-02)", () => {
+    // W2: the left content is 240 at every width, so rail + content is 300.
+    expect(css).toMatch(/--xflow-editor-panel-left-content-width:\s*240px\s*;/);
+    // 1440: the snug tier now only takes 40px off the right inspector. The
+    // override lives on `.xflow-editor-main`: a container query cannot style its
+    // own container, and the root's calc() is already resolved when it inherits.
     const snug = css.match(/@container xflow-editor \(width <= 1440px\)\s*\{\s*\.xflow-editor-main\s*\{([^}]*)\}/)?.[1] ?? "";
-    expect(snug).toMatch(/--xflow-editor-panel-left-width:\s*calc\(var\(--xflow-editor-panel-rail-width\) \+ 240px\)\s*;/);
+    expect(snug).not.toMatch(/--xflow-editor-panel-left-width/);
     expect(snug).toMatch(/--xflow-editor-panel-right-width:\s*320px\s*;/);
   });
 
-  it("leaves the library rows flush: the 52px row is the whole pitch", () => {
-    expect(rule(".xflow-editor-node-list")).toMatch(/gap:\s*0\s*;/);
+  it("lays the library out as the baseline two-card grid", () => {
+    const list = rule(".xflow-editor-node-list");
+    expect(list).toMatch(/grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)\s*;/);
+    expect(list).toMatch(/gap:\s*var\(--xflow-space-2\)\s*;/);
   });
 
   it("draws a pressed title-bar action at 14% and the search prefix 16px tertiary", () => {
@@ -738,11 +754,31 @@ describe("xflow.editor browser-measured baseline fixes (E6)", () => {
     expect(css).not.toMatch(/\.xflow-editor-theme-trigger:focus-visible/);
   });
 
-  it("draws the library group head with the count last and a 4px side margin", () => {
+  it("draws the library group head with the count last and the baseline 4/4/8 margins", () => {
     const title = rule(".xflow-editor-node-group__title");
-    expect(title).toMatch(/margin:\s*0 var\(--xflow-space-1\) var\(--xflow-space-1\)\s*;/);
+    expect(title).toMatch(
+      /margin:\s*var\(--xflow-space-1\) var\(--xflow-space-1\) var\(--xflow-space-2\)\s*;/
+    );
     expect(title).toMatch(/width:\s*calc\(100% - 8px\)\s*;/);
     expect(rule(".xflow-editor-node-group__count")).toMatch(/margin-left:\s*auto\s*;/);
+    // The band between groups is the baseline's 12px (its 8px grid gap plus
+    // the header's 4px top margin, which a grid never collapses). Here the
+    // title's 4px top margin collapses into this margin, so the sibling margin
+    // carries the whole 12 rather than 8 + 4.
+    expect(rule(".xflow-editor-node-group + .xflow-editor-node-group")).toMatch(
+      /margin-top:\s*var\(--xflow-space-3\)\s*;/
+    );
+  });
+
+  it("tints the card's hover, gives a runner card the whole row and keeps the 60px rail", () => {
+    const hover = rule(".xflow-editor-node-tile:hover");
+    expect(hover).toMatch(/background:\s*var\(--xflow-hover\)\s*;/);
+    expect(hover).toMatch(/border-color:\s*var\(--xflow-primary\)\s*;/);
+    // The Runner badge costs about half a 108px card, so that rare card spans
+    // both columns while server cards keep the two-card grid.
+    expect(rule('.xflow-editor-node-tile[data-source="runner"]')).toMatch(/grid-column:\s*1 \/ -1\s*;/);
+    // The rail is the 60px column beside the 240px content (W2).
+    expect(css).toMatch(/--xflow-editor-panel-rail-width:\s*60px\s*;/);
   });
 
   it("reveals the group chevron on hover/focus and keeps it visible while collapsed", () => {

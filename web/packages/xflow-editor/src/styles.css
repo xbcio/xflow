@@ -15,7 +15,7 @@
   /* §6.0.1: the rail is a column of its own; the left panel's content area sits
    * beside it, so the docked left column is rail + content. */
   --xflow-editor-panel-rail-width: 60px;
-  --xflow-editor-panel-left-content-width: 280px;
+  --xflow-editor-panel-left-content-width: 240px;
   --xflow-editor-panel-left-width: calc(var(--xflow-editor-panel-rail-width) + var(--xflow-editor-panel-left-content-width));
   --xflow-editor-panel-right-width: 360px;
   /* §6.0: every panel title bar, docked or inside a compact drawer. */
@@ -754,9 +754,10 @@
   padding: 0 var(--xflow-space-2) var(--xflow-space-2);
 }
 
-/* The category block (baseline `.xflow-pv-cat`): 28px for the library rows. The
- * glyph keeps the 16px type step but is drawn at the mock's 15px; the outline's
- * --sm step keeps its own 12px glyph. */
+/* The category block (baseline `.xflow-pv-cat`): 28px is the base block; the
+ * node-library card takes it down to the density 24px (D9). The glyph keeps the
+ * 16px type step but is drawn at the mock's 15px; the outline's --sm step keeps
+ * its own 12px glyph. */
 .xflow-editor-category-icon {
   --xflow-editor-category: var(--xflow-neutral);
   background: color-mix(in srgb, var(--xflow-editor-category) 14%, transparent);
@@ -785,6 +786,21 @@
 }
 
 .xflow-editor-category-icon--sm .xflow-icon {
+  height: 12px;
+  width: 12px;
+}
+
+/* Library card (§6.1 / W2): the baseline draws the block at the density 24px
+ * with a 12px glyph and a 15% tint; the canvas card keeps the 28px step. */
+.xflow-editor-node-tile .xflow-editor-category-icon {
+  background: color-mix(in srgb, var(--xflow-editor-category) 15%, transparent);
+  flex: 0 0 24px;
+  font-size: var(--xflow-font-sm);
+  height: 24px;
+  width: 24px;
+}
+
+.xflow-editor-node-tile .xflow-editor-category-icon .xflow-icon {
   height: 12px;
   width: 12px;
 }
@@ -983,8 +999,21 @@
   width: 14px;
 }
 
+/* Baseline `.xflow-pv-lib-list`: one grid whose group bands sit 12px apart
+ * (its 8px gap plus the header's 4px top margin; grid items never collapse
+ * margins). Here the groups are blocks, so the header's 4px top margin
+ * collapses through the group box into this one: the visible gap is
+ * max(12, 4) = 12, where an 8 would have shown 8, not 8 + 4. It stays 12 when
+ * the previous group is collapsed: that group then ends at its header, whose
+ * bottom margin joins the same collapse, and the largest margin still wins.
+ * `display: flow-root` on the group would stop the collapse and stack the 4px
+ * on top of the 12 (16). */
 .xflow-editor-node-group {
-  margin-top: var(--xflow-space-2);
+  margin-top: 0;
+}
+
+.xflow-editor-node-group + .xflow-editor-node-group {
+  margin-top: var(--xflow-space-3);
 }
 
 .xflow-editor-node-group__title {
@@ -996,14 +1025,15 @@
   display: flex;
   font: inherit;
   font-size: var(--xflow-font-sm);
-  /* The baseline sets 600 on the whole group row, so the count beside the label
-   * is as heavy as the label itself. */
+  /* The baseline's group row is 600; the count beside the label keeps the
+   * regular step (see __count). */
   font-weight: var(--xflow-font-weight-semibold);
   gap: var(--xflow-space-1-5);
   justify-content: space-between;
   line-height: var(--xflow-line-height-md);
-  /* The baseline row sits 4px in from the list gutter on both sides (head 255 wide). */
-  margin: 0 var(--xflow-space-1) var(--xflow-space-1);
+  /* The baseline header sits 4px in from the list gutter and 8px above its
+   * cards, which the single-grid baseline gets from the grid gap. */
+  margin: var(--xflow-space-1) var(--xflow-space-1) var(--xflow-space-2);
   min-width: 0;
   padding: 0;
   text-align: left;
@@ -1044,6 +1074,7 @@
 .xflow-editor-node-group__count {
   color: var(--xflow-text-tertiary);
   font-size: var(--xflow-font-sm);
+  font-weight: var(--xflow-font-weight-regular);
   margin-left: auto;
 }
 
@@ -1076,34 +1107,50 @@
   grid-template-columns: minmax(0, 1fr);
 }
 
-/* The baseline library rows are flush: the 52px row is the whole pitch. */
+/* Baseline `.xflow-pv-lib-list`: two cards per row, 8px apart. The grouped
+ * wrapper keeps the DOM "header + its items" while the list itself is the grid. */
 .xflow-editor-node-list {
-  gap: 0;
+  gap: var(--xflow-space-2);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-/* Baseline `.xflow-pv-lib-item`: a flat row, icon block left, name over hint.
- * 6px block padding around the 28px tile and the two 20px text lines is 52px. */
+/* Baseline `.xflow-pv-lib-item`: a bordered 44px card on the field surface, icon
+ * block hard against the left gutter, name over a one-line hint. */
 .xflow-editor-node-tile {
   align-items: center;
-  background: transparent;
-  border: 0;
+  background: var(--xflow-field);
+  border: 1px solid var(--xflow-border);
   border-radius: var(--xflow-radius-sm);
   color: var(--xflow-text);
   cursor: grab;
   display: flex;
-  font-size: var(--xflow-font-md);
+  font-size: var(--xflow-font-xs);
   font-weight: var(--xflow-font-weight-regular);
-  gap: var(--xflow-space-2-5);
-  padding: var(--xflow-space-1-5) var(--xflow-space-2);
+  gap: var(--xflow-space-1-5);
+  /* Baseline card: a 40px text block in the 34px content box (44 - 2 x 4px
+   * padding - 2 x 1px border) overflows by 3px on each side, exactly as it
+   * does inside the baseline's 44px AntD button. */
+  height: 44px;
+  min-width: 0;
+  padding: var(--xflow-space-1);
   text-align: start;
   transition:
     background-color var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard),
+    border-color var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard),
     color var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard);
   width: 100%;
 }
 
 .xflow-editor-node-tile:hover {
-  background: var(--xflow-surface-hover);
+  background: var(--xflow-hover);
+  border-color: var(--xflow-primary);
+}
+
+/* A runner-reported tile carries the "Runner" badge, which costs ~47px of a
+ * 108px card — the name would ellipsize to two characters. Give that rare card
+ * the whole row; server tiles keep the two-card grid. */
+.xflow-editor-node-tile[data-source="runner"] {
+  grid-column: 1 / -1;
 }
 
 .xflow-editor-node-tile:focus-visible {
@@ -3128,13 +3175,14 @@ button.xflow-editor-overview__run:hover {
   color: var(--xflow-info-fg);
 }
 
-/* Snug desktop (1281–1440, EL-02): both panes stay docked but each gives up
- * width, leaving the canvas ~57% at 1440 instead of ~51%. The tracks are set on
- * `.xflow-editor-main`, not the root: a container query cannot style its own
- * container, and the root's calc() is already resolved by the time it inherits. */
+/* Snug desktop (1281–1440, EL-02): both panes stay docked and the inspector
+ * gives up width, leaving the canvas ~57% at 1440 instead of ~51%. The left
+ * content is 240 at every width (W2), so only the right track changes here.
+ * The tracks are set on `.xflow-editor-main`, not the root: a container query
+ * cannot style its own container, and the root's calc() is already resolved by
+ * the time it inherits. */
 @container xflow-editor (width <= 1440px) {
   .xflow-editor-main {
-    --xflow-editor-panel-left-width: calc(var(--xflow-editor-panel-rail-width) + 240px);
     --xflow-editor-panel-right-width: 320px;
   }
 }

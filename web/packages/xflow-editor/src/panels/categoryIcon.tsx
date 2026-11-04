@@ -97,11 +97,13 @@ export function categoryGlyphFor(type: string | undefined, declared?: string): R
 }
 
 /**
- * The category block of the left column's rows (28px in the library, 20px
- * `sm` in the outline): `-14%` tint of the category colour behind a glyph in that
- * colour -- the canvas card's header block at the dense size. The category and
- * its colour come from core's table; `data-cat` exposes which one was resolved.
- * The glyph is the node type's own, falling back to the category's.
+ * The category block of the left column's rows (28px base, 20px `sm` in the
+ * outline): a 14% tint of the category colour behind a glyph in that colour --
+ * the canvas card's header block at the dense size. The node-library card
+ * redraws it at 24px with a 15% tint (`.xflow-editor-node-tile` in
+ * styles.css). The category and its colour come from core's table; `data-cat`
+ * exposes which one was resolved. The glyph is the node type's own, falling
+ * back to the category's.
  */
 export function NodeCategoryIcon({
   type,
@@ -110,7 +112,7 @@ export function NodeCategoryIcon({
 }: {
   type: string | undefined;
   category?: string;
-  /** `md` is the 28px library block; `sm` the 20px outline one. */
+  /** `md` is the 28px base block (the node-library card takes it to 24); `sm` the 20px outline one. */
   size?: "md" | "sm";
 }): React.ReactElement {
   const key = categoryOf(type, category);

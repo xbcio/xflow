@@ -542,6 +542,11 @@ describe("dual-zone left column (§6.0.1)", () => {
     const wrapper = dialog.closest(".xflow-editor-compact-drawer__wrapper");
     expect(wrapper?.classList.contains("xflow-editor-compact-drawer__wrapper--start")).toBe(true);
     expect(wrapper?.classList.contains("xflow-editor-compact-drawer__wrapper--end")).toBe(false);
+    // AntD 6.5 renders `size` as the content wrapper's inline width. 240 is the
+    // docked content width (--xflow-editor-panel-left-content-width) and the
+    // baseline drawer's width, so a card is the same size in both presentations.
+    expect(wrapper).not.toBeNull();
+    expect((wrapper as HTMLElement).style.width).toBe("240px");
   });
 
   it("hands focus back to the 节点与大纲 key when Escape closes the compact left drawer", async () => {

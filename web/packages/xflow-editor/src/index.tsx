@@ -6140,7 +6140,9 @@ export function XFlowEditor({
             rootClassName="xflow-editor-compact-drawer"
             closable={false}
             rootStyle={{ left: 60, position: "absolute" }}
-            size={280}
+            // Same 240 as the docked content width and the baseline drawer, so a
+            // library card is the same size in the drawer and while docked.
+            size={240}
             onClose={() => setCompactDrawer(undefined)}
           >
             {leftDrawerSection === "executions" ? (
