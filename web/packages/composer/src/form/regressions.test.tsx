@@ -474,3 +474,77 @@ for (const kernel of kernels) {
     });
   });
 }
+
+// ------------------------------------------- section header status (opt-in)
+
+for (const kernel of kernels) {
+  describe(`section header status with ${kernel.name}`, () => {
+    const headerSpec = (headerStatus: "errors" | "validity") =>
+      formSpec(
+        {
+          g: { type: "FieldGroup", props: { title: "连接", collapsible: true, headerStatus }, children: ["url"] },
+          url: {
+            type: "Input",
+            props: { label: "URL", value: { $bindState: "/url" } },
+            checks: [{ type: "required", message: "必填" }]
+          }
+        },
+        ["g"]
+      );
+
+    it('keeps the count while open under "errors", and only locates the first error', async () => {
+      const m = mountComposer({ kernel, registry, spec: headerSpec("errors"), value: {} });
+      await m.flush();
+      const group = fieldOf(m.container, "g");
+      const toggle = within(group).getByRole("button", { name: /连接/ });
+      expect(toggle.getAttribute("aria-expanded")).toBe("true");
+      const badge = one<HTMLButtonElement>(group, ".xflow-composer-section-badge");
+      expect(badge.textContent).toBe("1 个错误");
+      expect(toggle.getAttribute("aria-describedby")).toBe(badge.id);
+      expect(badge.getAttribute("aria-label")).toBe("定位第一个错误");
+
+      const scrollIntoView = vi.fn();
+      const original = Element.prototype.scrollIntoView;
+      Element.prototype.scrollIntoView = scrollIntoView;
+      try {
+        fireEvent.click(badge);
+        await m.flush();
+        // Open already: locating the error must not toggle the section shut.
+        expect(toggle.getAttribute("aria-expanded")).toBe("true");
+        expect(fieldOf(m.container, "url").contains(document.activeElement)).toBe(true);
+        expect(scrollIntoView).toHaveBeenCalled();
+      } finally {
+        Element.prototype.scrollIntoView = original;
+      }
+    });
+
+    it('shows 有效 under "validity" only while there are no errors', async () => {
+      const m = mountComposer({ kernel, registry, spec: headerSpec("validity"), value: {} });
+      await m.flush();
+      const group = fieldOf(m.container, "g");
+      // The first frame may render 有效 before the fields report; once the
+      // effect flushes, the count must replace it.
+      expect(group.querySelector(".xflow-composer-section-valid")).toBeNull();
+      expect(one<HTMLElement>(group, ".xflow-composer-section-badge").textContent).toBe("1 个错误");
+
+      change(within(group).getByLabelText("URL"), "https://example.test");
+      await m.flush();
+      const valid = one<HTMLElement>(group, ".xflow-composer-section-valid");
+      expect(valid.textContent).toBe("有效");
+      expect(valid.querySelector("svg")).not.toBeNull();
+      expect(valid.querySelector("[aria-hidden='true']")).not.toBeNull();
+      expect(group.querySelector(".xflow-composer-section-badge")).toBeNull();
+
+      change(within(group).getByLabelText("URL"), "");
+      await m.flush();
+      expect(group.querySelector(".xflow-composer-section-valid")).toBeNull();
+      expect(one<HTMLElement>(group, ".xflow-composer-section-badge").textContent).toBe("1 个错误");
+
+      // Fixing it again restores the marker.
+      change(within(group).getByLabelText("URL"), "https://example.test");
+      await m.flush();
+      expect(one<HTMLElement>(group, ".xflow-composer-section-valid").textContent).toBe("有效");
+      expect(group.querySelector(".xflow-composer-section-badge")).toBeNull();
+    });
+  });
+}

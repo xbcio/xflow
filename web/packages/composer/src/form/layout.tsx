@@ -1,6 +1,6 @@
 // Structural components: Form, FieldGroup, ObjectGroup.
 
-import { DownIcon, WarnIcon } from "@xflow/icons";
+import { CheckIcon, DownIcon, WarnIcon } from "@xflow/icons";
 import { Button } from "antd";
 import { useCallback, useContext, useId, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { z } from "zod";
@@ -73,6 +73,8 @@ export const Form: ComposerComponent<FormProps> = {
 
 // ------------------------------------------------------------- sections
 
+export type SectionHeaderStatus = "errors" | "validity";
+
 export interface SectionProps {
   className: string;
   nodeId: string;
@@ -82,6 +84,13 @@ export interface SectionProps {
   summary?: string;
   collapsible?: boolean;
   defaultCollapsed?: boolean;
+  /**
+   * Opt-in header status. Unset keeps the original behaviour: the error count
+   * shows only while the section is collapsed.
+   * - "errors": show the count whether open or collapsed.
+   * - "validity": "errors", plus a static 有效 marker while there are no errors.
+   */
+  headerStatus?: SectionHeaderStatus;
   issues: readonly Issue[];
   actions?: ReactNode;
   children: ReactNode;
@@ -170,11 +179,23 @@ export function Section(props: SectionProps) {
   const badgeId = `${base}badge`;
   const status = worstSeverity(props.issues);
   const open = !props.collapsible || !collapsed;
-  const badge = !open && hiddenErrors > 0;
+  const errors = hiddenErrors > 0;
+  // Opted-in sections announce their errors open or closed; by default only a
+  // collapsed section hides them.
+  const badge = errors && (props.headerStatus !== undefined || !open);
+  // "validity" claims only "no errors right now": before the frames report
+  // their first count the marker is briefly visible, then the count replaces it.
+  const valid = props.headerStatus === "validity" && !errors;
   return (
     <section
       ref={sectionRef}
-      className={cx("xflow-composer-section", props.className, status && `is-${status}`, !open && "is-collapsed", badge && "has-hidden-errors")}
+      className={cx(
+        "xflow-composer-section",
+        props.className,
+        status && `is-${status}`,
+        !open && "is-collapsed",
+        !open && errors && "has-hidden-errors"
+      )}
       data-composer-node={props.nodeId}
       data-composer-path={path}
       aria-labelledby={props.title ? titleId : undefined}
@@ -197,21 +218,29 @@ export function Section(props: SectionProps) {
               </span>
             </button>
           ) : (
-            <h3 id={titleId} className="xflow-composer-section-title">
+            <h3 id={titleId} className="xflow-composer-section-title" aria-describedby={badge ? badgeId : undefined}>
               {props.title}
             </h3>
           )}
           {props.summary ? <span className="xflow-composer-section-summary">{props.summary}</span> : null}
+          {valid ? (
+            <span className="xflow-composer-section-valid">
+              <CheckIcon aria-hidden className="xflow-composer-section-valid-icon" />
+              有效
+            </span>
+          ) : null}
           {badge ? (
             <button
               type="button"
               id={badgeId}
               className="xflow-composer-section-badge"
-              aria-label="展开并定位第一个错误"
+              aria-label={open ? "定位第一个错误" : "展开并定位第一个错误"}
               onClick={() => {
+                // Open: the errors are already in place, so the badge only
+                // locates the first one; collapsed: expand and locate.
                 const target = firstErrorPath();
                 if (target) reveal?.reveal(target);
-                setCollapsed(false);
+                if (!open) setCollapsed(false);
               }}
             >
               <WarnIcon aria-hidden className="xflow-composer-section-badge-icon" />
@@ -235,7 +264,8 @@ const sectionShape = {
   description: z.string().optional(),
   summary: z.string().optional(),
   collapsible: z.boolean().optional(),
-  defaultCollapsed: z.boolean().optional()
+  defaultCollapsed: z.boolean().optional(),
+  headerStatus: z.enum(["errors", "validity"]).optional()
 };
 
 export interface FieldGroupProps {
@@ -245,6 +275,8 @@ export interface FieldGroupProps {
   summary?: string;
   collapsible?: boolean;
   defaultCollapsed?: boolean;
+  /** Opt-in header status; see SectionProps.headerStatus. */
+  headerStatus?: SectionHeaderStatus;
 }
 
 export const FieldGroup: ComposerComponent<FieldGroupProps> = {
@@ -303,6 +335,7 @@ function ObjectGroupView({
       summary={props.summary}
       collapsible={props.collapsible}
       defaultCollapsed={props.defaultCollapsed}
+      headerStatus={props.headerStatus}
       issues={issues}
       actions={
         canClear ? (

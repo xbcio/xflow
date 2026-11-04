@@ -175,6 +175,30 @@
   font-size: var(--xflow-font-sm, 12px);
 }
 
+/* A group that contains required fields, with none of them failing
+ * (headerStatus="validity"): a static success marker, same box as the error
+ * badge so the header does not jump when the state flips. */
+.xflow-composer-section-valid {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  height: 20px;
+  margin-left: auto;
+  padding: 0 8px;
+  border: 1px solid var(--xflow-success-border, color-mix(in srgb, #12855a 40%, transparent));
+  border-radius: var(--xflow-radius-pill, 9999px);
+  background: var(--xflow-success-bg-subtle, color-mix(in srgb, #12855a 12%, transparent));
+  color: var(--xflow-success-fg, color-mix(in srgb, #12855a 70%, #16191d));
+  font-size: var(--xflow-font-xs, 11px);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.xflow-composer-section-valid-icon {
+  font-size: var(--xflow-font-sm, 12px);
+}
+
 /* The frame and the group's inner inset. The default is the baseline inset
  * (10px block, 12px inline), so a bare composer looks as it always did. The
  * knob lets a host that already pads the header and body itself (the editor)
