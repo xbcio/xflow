@@ -228,6 +228,7 @@ export const wbWorkflow = {
   name: '客户同步',
   id: 'customer-sync',
   version: 'v1.2.0',
+  specVersion: '1.0',
   unsaved: true,
 };
 
@@ -947,7 +948,7 @@ export interface FieldSpec {
   label: string;
   value?: string;
   /** `select` / `expr` render the display control's own affordances. */
-  control?: 'text' | 'select' | 'multi' | 'expr' | 'area' | 'number' | 'seg' | 'switch' | 'slider';
+  control?: 'text' | 'select' | 'multi' | 'expr' | 'area' | 'number' | 'seg' | 'switch' | 'slider' | 'pair';
   /** `select` / `seg` choices; a `multi` control takes the selected tags from here. */
   options?: string[];
   mono?: boolean;
@@ -975,6 +976,14 @@ export interface FieldSpec {
   switchOn?: boolean;
   /** Field spans the full row (the workflow description). */
   wide?: boolean;
+  /**
+   * `side` (default) puts the label in the left column and the control in the
+   * right one; `top` is the full-row exception (§6.4): label above, control on
+   * the whole width. `area` and `expr` default to `top`.
+   */
+  layout?: 'side' | 'top';
+  /** `pair` control: two numeric bounds side by side, each with its own prefix; the unit goes in `hint`. */
+  pair?: { prefix: string; value: string }[];
   /** Field-level message; `tone` picks the `--xflow-warning` / `--xflow-danger` pair. */
   error?: { tone: 'warning' | 'danger'; text: string };
 }
@@ -1095,7 +1104,7 @@ export const wfSettings = {
     { label: '标识', value: 'customer-sync', mono: true },
     { label: '版本', value: '1.2.0', mono: true },
     { label: '时区', value: 'Asia/Shanghai', control: 'select' },
-    { label: '描述', value: '这个工作流做什么', control: 'area', placeholder: true, wide: true, rows: 2 },
+    { label: '描述', value: '这个工作流做什么', control: 'area', placeholder: true, wide: true, layout: 'top', rows: 2 },
   ] as FieldSpec[],
   entry: [{ id: 'e1', port: 'main', to: '客户回调 · Webhook' }] as PortRowSpec[],
   concurrency: [
@@ -1310,7 +1319,7 @@ export const composerSelects = {
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   approvers: ['ops-lead', 'finance-mgr'],
   timezones: ['Asia/Shanghai', 'UTC', 'America/New_York'],
-  modes: ['任一通过', '全部通过'],
+  modes: ['任一', '全部', '依次'],
 };
 
 /** One cell of the composer wall: a caption plus the fields it samples. */
@@ -1318,6 +1327,8 @@ export interface ComposerCard {
   id: string;
   caption: string;
   fields: FieldSpec[];
+  /** ~260px cell: inside the `@container` breakpoint, so side fields fall back to top. */
+  narrow?: boolean;
 }
 
 export const composerCards: ComposerCard[] = [
@@ -1368,22 +1379,43 @@ export const composerCards: ComposerCard[] = [
       { label: '失败后继续', control: 'switch' },
       { label: '禁用此节点', control: 'switch', switchOn: false },
       { label: '采样率', value: '30', control: 'slider', min: 0, max: 100, unit: '%' },
+      {
+        label: '拉取字节数',
+        control: 'pair',
+        hint: '单位：字节',
+        pair: [
+          { prefix: '最小', value: '512' },
+          { prefix: '最大', value: '4096' },
+        ],
+      },
     ],
   },
   {
     id: 'expr',
     caption: 'Expression / 参数 JSON',
     fields: [
-      { label: '条件', value: '{{ $json.tier }}', control: 'expr', required: true },
+      { label: '条件', value: '{{ $json.tier }}', control: 'expr', required: true, layout: 'top' },
       {
         label: '参数（JSON）',
         /* Three lines in a `rows={3}` box: the fixture must not scroll, or the
          * last line renders half cut and reads as a layout bug. */
         value: '{"limit": 20,\n "sort":\n}',
         control: 'area',
+        layout: 'top',
         mono: true,
         error: { tone: 'danger', text: 'JSON 无效，未保存：第 2 行缺少值' },
       },
+    ],
+  },
+  {
+    id: 'narrow',
+    caption: '窄容器（<300px）回落上下布局',
+    narrow: true,
+    fields: [
+      { label: '节点名称', value: 'fetch_profile', required: true },
+      { label: '方法', value: 'POST', control: 'select', options: composerSelects.methods },
+      { label: '超时（秒）', value: '30', control: 'number', unit: '秒' },
+      { label: '失败后继续', control: 'switch' },
     ],
   },
 ];

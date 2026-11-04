@@ -18,7 +18,7 @@ import { RunBarSection } from './sections/runbar';
 import { RunsSection } from './sections/runs';
 import { StatesSection } from './sections/states';
 import { WorkbenchSection } from './sections/wb';
-import { themeConfig } from './tokens';
+import { themeConfig, workbenchDensityTheme } from './tokens';
 import './ui-preview.css';
 
 interface PreviewSection {
@@ -38,7 +38,12 @@ const sections: PreviewSection[] = [
     title: '1 · 工作台（运行中，选中「拉取客户档案」，诊断台展开）',
     caption:
       '顶栏一个主操作；执行状态只在运行条一处，按钮全部由状态表生成。左栏节点与大纲可收起，右栏属性面板收起后画布右上出现恢复入口；画布内容整体让出浮动行的高度。',
-    render: () => <WorkbenchSection />,
+    // 密度档只罩工作台节（D9，2026-10-30）：28 / 22 控件高，其余节保持 32 / 24。
+    render: () => (
+      <ConfigProvider theme={workbenchDensityTheme}>
+        <WorkbenchSection />
+      </ConfigProvider>
+    ),
   },
   {
     id: 'runbar',

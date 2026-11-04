@@ -12,8 +12,9 @@ function toNumber(value: string | undefined, placeholder: boolean | undefined): 
 }
 
 /**
- * Renders one `FieldSpec` with real AntD controls (§6.4): label on top with the
- * required mark, the control itself, then the hint and the field-level message.
+ * Renders one `FieldSpec` with real AntD controls (§6.4): label in the left
+ * column with the required mark, the control in the right one, then the hint and
+ * the field-level message under the control (`layout: 'top'` stacks them).
  * The message is `.xflow-pv-err` with a `data-tone`, so both severities come from
  * the token pair (`--xflow-warning` / `--xflow-danger`) instead of two styles.
  *
@@ -71,32 +72,50 @@ export function SpecControl({ field }: { field: FieldSpec }) {
       );
     case 'seg':
       return (
-        <Segmented
-          aria-label={field.label}
-          className="xflow-pv-spec-control"
-          size="small"
-          block
-          value={field.value}
-          options={field.options ?? (field.value ? [field.value] : [])}
-        />
+        <span className="xflow-pv-ctl-line">
+          <Segmented
+            aria-label={field.label}
+            className="xflow-pv-spec-control"
+            size="small"
+            block
+            value={field.value}
+            options={field.options ?? (field.value ? [field.value] : [])}
+          />
+        </span>
       );
     case 'slider':
       return (
-        <span className="xflow-pv-slider-row">
+        <span className="xflow-pv-ctl-line">
           <Slider className="xflow-pv-slider" min={field.min} max={field.max} defaultValue={toNumber(field.value, false)} />
-          <span className="xflow-pv-slider-value">
-            {field.value}
-            {field.unit ? ` ${field.unit}` : ''}
-          </span>
+          <InputNumber
+            className="xflow-pv-spec-control xflow-pv-slider-num"
+            aria-label={field.label}
+            min={field.min}
+            max={field.max}
+            suffix={field.unit}
+            defaultValue={toNumber(field.value, false)}
+          />
         </span>
       );
     case 'switch':
       return (
-        <span className="xflow-pv-switch-row">
-          <Switch size="small" defaultChecked={field.switchOn ?? true} />
-          <span className={cx('xflow-pv-switch-label', field.switchOn === false && 'xflow-pv-switch-label--off')}>
-            {field.label}
-          </span>
+        <span className="xflow-pv-ctl-line">
+          <Switch size="small" aria-label={field.label} defaultChecked={field.switchOn ?? true} />
+        </span>
+      );
+    case 'pair':
+      return (
+        <span className="xflow-pv-pair">
+          {(field.pair ?? []).map((bound) => (
+            <InputNumber
+              key={bound.prefix}
+              className="xflow-pv-spec-control"
+              aria-label={`${field.label}${bound.prefix}`}
+              status={status}
+              prefix={bound.prefix}
+              defaultValue={toNumber(bound.value, false)}
+            />
+          ))}
         </span>
       );
     case 'area':
@@ -142,18 +161,24 @@ export function SpecControl({ field }: { field: FieldSpec }) {
   }
 }
 
-/** Label + control + hint + message, the whole vertical field (§6.4). */
-export function SpecField({ field, suffix }: { field: FieldSpec; suffix?: ReactNode }) {
-  // A switch labels itself on the right; every other control labels on top.
-  if (field.control === 'switch') {
-    return (
-      <div className="xflow-pv-field">
-        <SpecControl field={field} />
-      </div>
-    );
-  }
+/**
+ * Label + control + hint + message, the whole field (§6.4). `side` (default) puts
+ * the label in the left column and everything else in the right one, so every
+ * control in a panel shares one left edge; `top` is the full-row exception. A
+ * field's own `layout` wins over the prop.
+ */
+export function SpecField({
+  field,
+  suffix,
+  layout = 'side',
+}: {
+  field: FieldSpec;
+  suffix?: ReactNode;
+  layout?: 'side' | 'top';
+}) {
+  const side = (field.layout ?? layout) === 'side';
   return (
-    <div className="xflow-pv-field" data-wide={field.wide ? 'true' : undefined}>
+    <div className={cx('xflow-pv-field', side && 'xflow-pv-field--side')} data-wide={field.wide ? 'true' : undefined}>
       <span className="xflow-pv-field-label">
         {field.label}
         {field.required ? (

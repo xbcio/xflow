@@ -56,3 +56,11 @@ export function themeConfig(appearance: Appearance): ThemeConfig {
     },
   };
 }
+
+/**
+ * 编辑器密度档（D9，2026-10-30）：只罩住工作台节，演示 28 / 22 控件高；正式落地
+ * 走编辑器自己的嵌套 ConfigProvider（计划 §2.5，W4 之后），core token 保持不动。
+ */
+export const workbenchDensityTheme: ThemeConfig = {
+  token: { controlHeight: 28, controlHeightSM: 22 },
+};

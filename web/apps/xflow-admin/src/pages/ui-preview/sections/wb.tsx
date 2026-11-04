@@ -1,10 +1,12 @@
 import {
-  BackIcon,
   CheckIcon,
+  ConnectIcon,
   CopyIcon,
+  CursorIcon,
   DockDownIcon,
   DockMaxIcon,
   DownIcon,
+  FitIcon,
   GridIcon,
   HelpIcon,
   HistoryIcon,
@@ -19,6 +21,7 @@ import {
   ShieldIcon,
   SideLeftIcon,
   SideRightIcon,
+  SkipIcon,
   SlidersIcon,
   ThemeIcon,
   UndoIcon,
@@ -125,9 +128,9 @@ function Frame({ frame }: { frame: PreviewFrame }) {
   );
 }
 
-function Field({ label, children }: { label: ReactNode; children: ReactNode }) {
+function Field({ label, children, layout = 'side' }: { label: ReactNode; children: ReactNode; layout?: 'side' | 'top' }) {
   return (
-    <div className="xflow-pv-field">
+    <div className={cx('xflow-pv-field', layout === 'side' && 'xflow-pv-field--side')}>
       <span className="xflow-pv-field-label">{label}</span>
       {children}
     </div>
@@ -151,11 +154,13 @@ function InspectorConfig() {
       items={[
         {
           key: 'base',
+          className: 'xflow-pv-sec-card',
           label: <SectionLabel title="基础信息" extra="拉取客户档案 · 无模板" />,
           children: null,
         },
         {
           key: 'request',
+          className: 'xflow-pv-sec-card',
           label: (
             <span className="xflow-pv-sec-label">
               <span className="xflow-pv-sec-title">请求</span>
@@ -174,10 +179,11 @@ function InspectorConfig() {
                   ]}
                 />
               </Field>
-              <Field label="URL">
+              {/* Template-mode long text stays a full row; awaiting user ruling (D2). */}
+              <Field label="URL" layout="top">
                 <div className="flex gap-1.5">
                   <div className="xflow-pv-ctl xflow-pv-ctl--focus xflow-pv-ctl--expr">
-                    <span className="xflow-pv-ctl-text">https://crm.example.test/api/customers/</span>
+                    <span className="xflow-pv-ctl-text">https://crm.example.test/api/customers</span>
                     <span className="xflow-pv-var">{'{{ $json.id }}'}</span>
                   </div>
                   <Button className="xflow-pv-fx" aria-pressed data-active="true">
@@ -199,6 +205,7 @@ function InspectorConfig() {
         },
         {
           key: 'headers',
+          className: 'xflow-pv-sec-card',
           label: (
             <span className="xflow-pv-sec-label">
               <span className="xflow-pv-sec-title">请求头与查询</span>
@@ -209,6 +216,7 @@ function InspectorConfig() {
         },
         {
           key: 'errors',
+          className: 'xflow-pv-sec-card',
           label: <SectionLabel title="错误与重试" extra="继承工作流 · 重试 2 次" />,
           children: null,
         },
@@ -412,43 +420,65 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
       data-right={rightDocked ? undefined : rightOpen ? 'drawer' : 'collapsed'}
     >
       <header className="xflow-pv-top">
-        <Button type="text" className="xflow-pv-icon-btn" aria-label="返回工作流列表" icon={<BackIcon />} />
-        <div className="xflow-pv-title">
-          <strong title={`${wbWorkflow.id} · ${wbWorkflow.version}`}>{wbWorkflow.name}</strong>
-          {/* 未保存数 = 草稿差异数组的长度，与发布对话框的差异行数是同一份（S10）。 */}
-          <StatusChip
-            tone="warning"
-            icon={<WarnIcon />}
-            label={`未保存 ${wbPendingChanges.length} 处 · 基于 ${wbWorkflow.version}`}
-          />
+        <div className="xflow-pv-top-id">
+          {/* 早期稿：logo 取代返回箭头（2026-10-30 用户指示），点击仍回列表。 */}
+          <Button type="text" className="xflow-pv-logo" aria-label="返回工作流列表">
+            X
+          </Button>
+          <div className="xflow-pv-top-title">
+            <div className="xflow-pv-title">
+              <strong title={`${wbWorkflow.id} · ${wbWorkflow.version}`}>{wbWorkflow.name}</strong>
+              <span className="xflow-pv-chip" data-tone="neutral">spec {wbWorkflow.specVersion}</span>
+              <span className="xflow-pv-chip" data-tone="info">{wbWorkflow.version}</span>
+              {/* 未保存数 = 草稿差异数组的长度，与发布对话框的差异行数是同一份（S10）。 */}
+              <StatusChip
+                tone="warning"
+                icon={<WarnIcon />}
+                label={`未保存 ${wbPendingChanges.length} 处 · 基于 ${wbWorkflow.version}`}
+              />
+            </div>
+            <p className="xflow-pv-subtitle">
+              {wbWorkflow.id} / {wbGraphStats.nodes} nodes / Asia/Shanghai / timeout 168h
+            </p>
+          </div>
         </div>
         {/*
-         * The marker tags the whole segmented control. Hung off the option's
-         * label instead, the badge is clipped away: AntD wraps that label in an
-         * `overflow: hidden` box, and the badge sits outside it.
+         * 居中带边框的画布工具组（早期稿，2026-10-30 用户指示）：撤销 / 重做搬进
+         * 这里，与选择、添加、连线、适应、执行、运行同一组。紧凑宽度下整组隐藏，
+         * 次要操作由右端 ⋯ 收纳（§6.0.1）。
          */}
-        <span className="mx-auto">
-          <Todo label="需新字段">
-            <Segmented
-              aria-label="视图模式"
-              value="edit"
-              options={[{ value: 'edit', label: '编辑' }, { value: 'runs', label: '运行记录' }]}
-            />
-          </Todo>
-        </span>
+        {compactLeft ? null : (
+          <div className="xflow-pv-top-tools" role="toolbar" aria-label="画布工具">
+            <IconButton small label="撤销" icon={<UndoIcon />} />
+            <IconButton small label="重做" icon={<RedoIcon />} />
+            <VerticalSep />
+            <IconButton small label="选择" icon={<CursorIcon />} active />
+            <IconButton small label="添加节点" icon={<PlusIcon />} />
+            <IconButton small label="连线" icon={<ConnectIcon />} />
+            <IconButton small label="适应视图" icon={<FitIcon />} />
+            <VerticalSep />
+            <IconButton small label="执行选中节点" icon={<SkipIcon />} />
+            <IconButton small label="运行工作流" icon={<PlayIcon />} />
+          </div>
+        )}
         <div className="xflow-pv-top-right">
           {/*
-           * Compact (§6.0.1): 撤销 / 重做 / 校验 / 主题 collapse into one menu
-           * button, and 保存 / 运行 stay — they are the two the operator needs on
-           * a narrow screen. The title keeps its 160px minimum either way.
+           * 编辑 / 预览分段（早期稿，2026-10-30 用户指示）。运行记录模式仍由
+           * runs 节演示，工作台顶栏不再保留它的入口。
+           */}
+          <Segmented
+            aria-label="视图模式"
+            value="edit"
+            options={[{ value: 'edit', label: '编辑' }, { value: 'preview', label: '预览' }]}
+          />
+          {/*
+           * Compact (§6.0.1): 校验 / 主题 collapse into one menu button; 保存 /
+           * 发布 stay — they are the two the operator needs on a narrow screen.
            */}
           {compactLeft ? (
             <IconButton label="更多操作" icon={<MoreIcon />} />
           ) : (
             <>
-              <IconButton label="撤销" icon={<UndoIcon />} />
-              <IconButton label="重做" icon={<RedoIcon />} />
-              <VerticalSep />
               <Button type="text" className="xflow-pv-top-text" icon={<ShieldIcon />}>
                 校验
               </Button>
@@ -465,19 +495,8 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
           <Button className="xflow-pv-top-text">
             保存 <Kbd>⌘S</Kbd>
           </Button>
-          <span className="xflow-pv-split">
-            <Button type="primary" className="xflow-pv-split-btn" icon={<PlayIcon />}>
-              运行
-            </Button>
-            <Button
-              type="primary"
-              className="xflow-pv-split-btn"
-              aria-label="运行选项"
-              icon={<DownIcon />}
-            />
-          </span>
           <Todo label="待接入">
-            <Button className="xflow-pv-top-text">发布</Button>
+            <Button type="primary">发布</Button>
           </Todo>
         </div>
       </header>
@@ -536,7 +555,7 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
                 <Fragment key={group.id}>
                   <div className="xflow-pv-lib-group">
                     <span>{group.label}</span>
-                    <span className="xflow-pv-faint">{group.count}</span>
+                    <span className="xflow-pv-lib-count">{group.count}</span>
                   </div>
                   {group.items.map((item) => (
                     <Button
@@ -546,7 +565,7 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
                       className="xflow-pv-lib-item"
                     >
                       <CategoryIcon category={item.category} icon={item.icon} />
-                      <span className="flex min-w-0 flex-col items-start">
+                      <span className="xflow-pv-lib-text">
                         <span className="xflow-pv-lib-name">{item.label}</span>
                         <span className="xflow-pv-lib-hint">{item.hint}</span>
                       </span>

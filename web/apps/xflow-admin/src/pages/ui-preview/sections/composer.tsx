@@ -1,6 +1,7 @@
 import { CheckIcon, DownIcon, PlusIcon, TrashIcon, WarnIcon } from '@xflow/icons';
 import { Button, Collapse, Input } from 'antd';
 
+import { cx } from '../components/cx';
 import { SectionLabel, StatusChip } from '../components/primitives';
 import { SpecField } from '../components/SpecField';
 import { composerCards, composerCollapsed, composerHeaders } from '../data';
@@ -77,7 +78,7 @@ export function ComposerSection() {
   return (
     <div className="xflow-pv-composer">
       {composerCards.map((card) => (
-        <div className="xflow-pv-cell" key={card.id}>
+        <div className={cx('xflow-pv-cell', card.narrow && 'xflow-pv-cell--narrow')} key={card.id}>
           <span className="xflow-pv-cell-cap">{card.caption}</span>
           {card.fields.map((field) => (
             <SpecField key={field.label} field={field} />

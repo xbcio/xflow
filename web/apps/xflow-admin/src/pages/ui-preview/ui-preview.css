@@ -56,6 +56,8 @@
 
   /* ===================== page shell ===================== */
   .xflow-pv {
+    /* The only label-column width in the page: every `--side` field reads it (§6.4). */
+    --xflow-pv-label-width: 96px;
     min-height: 100dvh;
     background: var(--xflow-app);
     color: var(--xflow-text);
@@ -339,8 +341,28 @@
 
   /* ===================== workbench shell ===================== */
   .xflow-pv-wb {
-    --xflow-pv-left: 280px;
-    --xflow-pv-right: 360px;
+    /* 面板总宽 = 轨道 60 + 内容 240（左 300）/ 右 320（D8，2026-10-30）。 */
+    --xflow-pv-left: 240px;
+    --xflow-pv-right: 320px;
+    /*
+     * 编辑器密度档（D9，2026-10-30）：只在本节收紧。变量留作 W1–W4 的起始值，
+     * 字段间距 8、节内 gap 6、卡片头 4/10、卡片身 2/10/6、控件高 28 / SM 22、
+     * 节点库图标 24、库卡片 44（均为实测前的起始值，见 §2.5）。
+     */
+    --xflow-pv-density-field-gap: var(--xflow-space-2);
+    --xflow-pv-density-sec-gap: var(--xflow-space-1-5);
+    --xflow-pv-density-sec-head-y: var(--xflow-space-1);
+    --xflow-pv-density-sec-head-x: var(--xflow-space-2-5);
+    --xflow-pv-density-sec-body-y: var(--xflow-space-0-5);
+    --xflow-pv-density-sec-body-x: var(--xflow-space-2-5);
+    --xflow-pv-density-sec-body-b: var(--xflow-space-1-5);
+    --xflow-pv-density-control-h: 28px;
+    --xflow-pv-density-control-h-sm: 22px;
+    --xflow-pv-density-icon: 24px;
+    --xflow-pv-density-lib-card: 44px;
+    --xflow-pv-density-lib-gap: var(--xflow-space-2);
+    --xflow-control-height: var(--xflow-pv-density-control-h);
+    --xflow-control-height-sm: var(--xflow-pv-density-control-h-sm);
     /* The rail track, named because the compact drawers are offset by it. */
     --xflow-pv-rail: 60px;
     height: 880px;
@@ -362,36 +384,73 @@
   }
   .xflow-pv-wb[data-left='collapsed'] { --xflow-pv-left: 0px; }
   .xflow-pv-wb[data-right='collapsed'] { --xflow-pv-right: 0px; }
+  /*
+   * Topbar (早期稿, 2026-10-30 用户指示): logo + title/spec/version/draft chips +
+   * metadata subtitle on the left, a bordered canvas-tool group exactly in the
+   * middle, and 编辑/预览 + 校验/保存/发布 on the right. The three equal grid
+   * tracks are what keep the tool group centred when the sides differ in width.
+   */
   .xflow-pv-top {
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
     align-items: center;
-    gap: var(--xflow-space-2);
+    gap: var(--xflow-space-3);
     padding: 0 var(--xflow-space-3);
     background: var(--xflow-panel);
     border-bottom: 1px solid var(--xflow-border-subtle);
     min-width: 0;
   }
-  .xflow-pv-title { display: flex; align-items: center; gap: var(--xflow-space-2); min-width: 160px; }
+  .xflow-pv-top-id { grid-column: 1; display: flex; align-items: center; gap: var(--xflow-space-2); min-width: 0; }
+  /* 中列：运行记录模式的视图切换（工作台用的是画布工具栏）。 */
+  .xflow-pv-top-center { grid-column: 2; display: flex; align-items: center; justify-content: center; min-width: 0; }
+  .xflow-pv-logo {
+    width: 28px;
+    height: 28px;
+    min-width: 28px;
+    padding: 0;
+    border: 1px solid var(--xflow-border-strong);
+    border-radius: var(--xflow-radius-sm);
+    background: var(--xflow-panel-raised);
+    color: var(--xflow-primary);
+    font-size: var(--xflow-font-lg);
+    font-weight: var(--xflow-font-weight-semibold);
+  }
+  .xflow-pv-top-title { min-width: 0; }
+  .xflow-pv-title { display: flex; align-items: center; gap: var(--xflow-space-2); min-width: 0; }
   .xflow-pv-title strong {
-    font-size: var(--xflow-font-xl);
+    font-size: var(--xflow-font-lg);
     font-weight: var(--xflow-font-weight-semibold);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .xflow-pv-top-right { display: flex; align-items: center; gap: var(--xflow-space-2); }
+  .xflow-pv-subtitle {
+    margin: 0;
+    font-size: var(--xflow-font-xs);
+    color: var(--xflow-text-tertiary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .xflow-pv-top-tools {
+    grid-column: 2;
+    display: flex;
+    align-items: center;
+    gap: var(--xflow-space-0-5);
+    padding: var(--xflow-space-1);
+    border: 1px solid var(--xflow-border);
+    border-radius: var(--xflow-radius-md);
+    background: var(--xflow-field);
+  }
+  .xflow-pv-top-right {
+    grid-column: 3;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--xflow-space-2);
+    min-width: 0;
+  }
   .xflow-pv-top-text { color: var(--xflow-text); font-weight: var(--xflow-font-weight-medium); }
-  .xflow-pv-split { display: inline-flex; }
-  .xflow-pv-split-btn:first-child {
-    border-start-end-radius: 0;
-    border-end-end-radius: 0;
-  }
-  .xflow-pv-split-btn:last-child {
-    border-start-start-radius: 0;
-    border-end-start-radius: 0;
-    border-inline-start: 1px solid color-mix(in srgb, var(--xflow-on-primary) 30%, transparent);
-    padding-inline: var(--xflow-space-2);
-  }
   .xflow-pv-wb-body {
     position: relative;
     display: grid;
@@ -420,7 +479,7 @@
     position: absolute;
     inset-block: 0;
     left: var(--xflow-pv-rail);
-    width: 280px;
+    width: 240px;
     z-index: 6;
     border-right: 1px solid var(--xflow-border-subtle);
     box-shadow: var(--xflow-elev-4);
@@ -429,7 +488,7 @@
     position: absolute;
     inset-block: 0;
     right: 0;
-    width: 360px;
+    width: 320px;
     z-index: 6;
     border-left: 1px solid var(--xflow-border-subtle);
     box-shadow: var(--xflow-elev-4);
@@ -463,41 +522,94 @@
     background: var(--xflow-panel);
     border-right: 1px solid var(--xflow-border-subtle);
     min-height: 0;
+    min-width: 0;
   }
-  .xflow-pv-lib-pane { display: flex; flex-direction: column; min-height: 0; }
-  .xflow-pv-lib-pane + .xflow-pv-lib-pane { border-top: 1px solid var(--xflow-border-subtle); }
-  .xflow-pv-lib-list { overflow: auto; padding: var(--xflow-space-2); min-height: 0; }
+  .xflow-pv-lib-pane { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+  /*
+   * 大纲标题挂了「分组需要新字段」角标，角标悬在标题栏上方 18px（.xflow-pv-todo）。
+   * 不给这 18px 留空，角标会正好盖住节点库列表最后两行的卡片（1280/1600 实测）；
+   * 留出 space-5 的顶部空带，角标只落在分隔线与标题栏之间的空白上。
+   */
+  .xflow-pv-lib-pane + .xflow-pv-lib-pane { padding-top: var(--xflow-space-5); border-top: 1px solid var(--xflow-border-subtle); }
+  /*
+   * Node library (§6.1): two cards per row, each a bordered tile with a 24px
+   * category block, name and one-line hint. The group header spans the row so
+   * the DOM stays "header + its items" without a wrapper per group.
+   */
+  .xflow-pv-lib-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-content: start;
+    gap: var(--xflow-pv-density-lib-gap, var(--xflow-space-2));
+    overflow: auto;
+    padding: var(--xflow-space-2);
+    min-height: 0;
+    min-width: 0;
+  }
   .xflow-pv-lib-group {
+    grid-column: 1 / -1;
     display: flex;
     justify-content: space-between;
-    margin: var(--xflow-space-2) var(--xflow-space-1) var(--xflow-space-1);
+    margin: var(--xflow-space-1) var(--xflow-space-1) 0;
     font-size: var(--xflow-font-sm);
     font-weight: var(--xflow-font-weight-semibold);
     color: var(--xflow-text-secondary);
   }
+  .xflow-pv-lib-count { font-weight: var(--xflow-font-weight-regular); color: var(--xflow-text-tertiary); }
   /*
-   * Node library rows (§6.1 library): icon hard against the left gutter, then
-   * title + hint. AntD's Button centres its content, so the alignment is reset
-   * here rather than left to the component default.
+   * Card tile (§6.1, 2026-10-30 用户指示回到早期稿): icon hard against the left
+   * gutter, then name + hint. AntD's Button centres its content, so the
+   * alignment is reset here rather than left to the component default.
    */
   .xflow-pv-lib-item {
     display: flex;
     align-items: center;
     justify-content: flex-start;
-    gap: var(--xflow-space-2-5);
+    gap: var(--xflow-space-1-5);
     height: auto;
-    /* Matches the mockup: 8px list gutter + 8px row gutter = a 16px icon inset. */
-    padding: var(--xflow-space-2);
+    min-height: var(--xflow-pv-density-lib-card, 44px);
+    padding: var(--xflow-space-1);
+    border: 1px solid var(--xflow-border);
     border-radius: var(--xflow-radius-sm);
-    font-size: var(--xflow-font-md);
+    background: var(--xflow-field);
+    font-size: var(--xflow-font-xs);
     font-weight: var(--xflow-font-weight-regular);
     color: var(--xflow-text);
     text-align: start;
     cursor: grab;
+    min-width: 0;
   }
-  .xflow-pv-lib-item:hover { background: var(--xflow-hover); }
-  .xflow-pv-lib-name { font-weight: var(--xflow-font-weight-medium); }
-  .xflow-pv-lib-hint { font-size: var(--xflow-font-xs); color: var(--xflow-text-tertiary); }
+  .xflow-pv-lib-item:hover {
+    border-color: var(--xflow-primary);
+    background: var(--xflow-hover);
+  }
+  .xflow-pv-lib-item .xflow-pv-cat {
+    width: var(--xflow-pv-density-icon, 28px);
+    height: var(--xflow-pv-density-icon, 28px);
+    font-size: var(--xflow-font-sm);
+    background: color-mix(in srgb, var(--xflow-pv-c) 15%, transparent);
+  }
+  .xflow-pv-lib-text {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    min-width: 0;
+  }
+  .xflow-pv-lib-name {
+    max-width: 100%;
+    font-weight: var(--xflow-font-weight-medium);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .xflow-pv-lib-hint {
+    max-width: 100%;
+    font-size: var(--xflow-font-xs);
+    color: var(--xflow-text-tertiary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   /*
    * 20px of head room: this pane scrolls (`overflow: auto`), and its first row
    * is a section header carrying a 需新字段 badge, which paints 18px above its
@@ -1094,10 +1206,38 @@
     border-radius: var(--xflow-radius-md);
   }
   .xflow-pv-sec-body { background: var(--xflow-panel-raised); border: 1px solid var(--xflow-border); border-top: 0; border-radius: 0 0 var(--xflow-radius-md) var(--xflow-radius-md); min-width: 0; overflow: hidden; }
+  /*
+   * Card shell (W0, 2026-10-30 用户指示)：Collapse item 本体承担 1px 边框 + 浅阴影，
+   * 头/身两半不再各画边框，否则中间会出现一条接缝阴影。只有工作台的节加这个类。
+   */
+  .xflow-pv-sec-card {
+    background: var(--xflow-panel-raised);
+    border: 1px solid var(--xflow-border);
+    border-radius: var(--xflow-radius-md);
+    box-shadow: var(--xflow-elev-1);
+    overflow: hidden;
+  }
+  .xflow-pv-sec-card .xflow-pv-sec-head {
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+  }
+  .xflow-pv-sec-card .xflow-pv-sec-body {
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+  }
   .xflow-pv-sec-label { display: inline-flex; align-items: center; gap: var(--xflow-space-1-5); min-width: 0; }
   .xflow-pv-sec-title { font-size: var(--xflow-font-md); font-weight: var(--xflow-font-weight-semibold); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .xflow-pv-sec-extra { font-size: var(--xflow-font-xs); font-weight: var(--xflow-font-weight-regular); color: var(--xflow-text-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .xflow-pv-sec-fields { display: flex; flex-direction: column; gap: var(--xflow-space-2); padding: var(--xflow-space-0-5) var(--xflow-space-3) var(--xflow-space-2); min-width: 0; }
+  /* 密度档只在本节生效：值来自 .xflow-pv-wb 的 --xflow-pv-density-*（D9）。 */
+  .xflow-pv-wb .xflow-pv-secs { gap: var(--xflow-pv-density-sec-gap); }
+  .xflow-pv-wb .xflow-pv-sec-head { padding: var(--xflow-pv-density-sec-head-y) var(--xflow-pv-density-sec-head-x); }
+  .xflow-pv-wb .xflow-pv-sec-fields {
+    gap: var(--xflow-pv-density-field-gap);
+    padding: var(--xflow-pv-density-sec-body-y) var(--xflow-pv-density-sec-body-x) var(--xflow-pv-density-sec-body-b);
+  }
   .xflow-pv-field { display: flex; flex-direction: column; min-width: 0; }
   .xflow-pv-field > * { min-width: 0; max-width: 100%; }
   .xflow-pv-field-label {
@@ -1108,6 +1248,52 @@
     font-size: var(--xflow-font-sm);
     font-weight: var(--xflow-font-weight-medium);
     color: var(--xflow-text-secondary);
+  }
+  /*
+   * Horizontal field (§6.4, user ruling 2026-10-30): label column on the left,
+   * control column on the right, so every control in a panel shares one left
+   * edge. Unmodified `.xflow-pv-field` stays the vertical stack (key/value rows,
+   * the approval and publish dialogs); `layout: 'top'` fields simply omit the
+   * modifier. The label's top padding centres one line of text on a 32px control
+   * and keeps the first line centred when the label wraps to two.
+   */
+  .xflow-pv-field--side {
+    display: grid;
+    grid-template-columns: var(--xflow-pv-label-width) minmax(0, 1fr);
+    column-gap: var(--xflow-space-3);
+    align-items: start;
+  }
+  .xflow-pv-field--side > * { grid-column: 2; }
+  .xflow-pv-field--side > .xflow-pv-field-label {
+    display: block;
+    grid-column: 1;
+    margin-bottom: 0;
+    padding-top: calc((var(--xflow-control-height) - var(--xflow-line-height-xs)) / 2);
+    line-height: var(--xflow-line-height-xs);
+    overflow-wrap: anywhere;
+  }
+  /* One line of non-32px controls (Switch, Slider, Segmented) centred on the label. */
+  .xflow-pv-ctl-line {
+    display: flex;
+    align-items: center;
+    gap: var(--xflow-space-3);
+    min-height: var(--xflow-control-height);
+    min-width: 0;
+  }
+  .xflow-pv-ctl-line > .xflow-pv-spec-control { flex: 1; min-width: 0; }
+  /*
+   * Containers that hold fields. Below 260px of content width the label column
+   * would leave the control under ~150px, so side fields fall back to the stack.
+   * 右栏收到 320 后（D8）卡片的内容盒是 274px，仍在阈值之上；S2 实测后定稿。
+   */
+  .xflow-pv-sec-fields,
+  .xflow-pv-composer .xflow-pv-cell { container: xflow-pv-fields / inline-size; }
+  @container xflow-pv-fields (max-width: 259.98px) {
+    .xflow-pv-field--side { display: flex; flex-direction: column; }
+    .xflow-pv-field--side > .xflow-pv-field-label {
+      margin-bottom: var(--xflow-space-0-5);
+      padding-top: 0;
+    }
   }
   .xflow-pv-ctl {
     flex: 1;
@@ -1492,8 +1678,8 @@
     overflow: auto;
   }
   /* Only the workflow-settings panel stacks fields in a row. */
-  .xflow-pv-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--xflow-space-2); min-width: 0; }
-  .xflow-pv-field-grid .xflow-pv-field[data-wide] { grid-column: 1 / -1; }
+  /* Workflow settings: one column now, two label+control pairs do not fit in 336px (§6.4). */
+  .xflow-pv-field-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--xflow-space-2); min-width: 0; }
 
   /* ===================== 2b · card summary gallery ===================== */
   .xflow-pv-card-gallery {
@@ -1510,9 +1696,14 @@
   }
 
   /* ===================== 3 · composer ===================== */
+  /*
+   * 344px = 310px of content (the right pane's 360px minus the group padding,
+   * an estimate) + the cell's 16px padding and 1px border on each side, so a
+   * side field here has the width it would have in the real panel.
+   */
   .xflow-pv-composer {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    grid-template-columns: repeat(auto-fill, 344px);
     gap: var(--xflow-space-5);
     align-items: start;
   }
@@ -1524,25 +1715,18 @@
     background: var(--xflow-panel);
     min-width: 0;
   }
+  /* The container-query demo: a ~260px cell, 226px of content, under the 259.98px breakpoint. */
+  .xflow-pv-composer .xflow-pv-cell--narrow { max-width: 260px; }
   .xflow-pv-spec-control { min-width: 0; }
   .xflow-pv-req { color: var(--xflow-danger-fg); }
   .xflow-pv-ctl-row { display: flex; align-items: center; gap: var(--xflow-space-1-5); min-width: 0; }
   .xflow-pv-ctl-row > :first-child { flex: 1; min-width: 0; }
   .xflow-pv-num { display: flex; align-items: center; gap: var(--xflow-space-1-5); min-width: 0; }
   .xflow-pv-num-unit { flex: none; font-size: var(--xflow-font-sm); color: var(--xflow-text-tertiary); }
-  .xflow-pv-switch-row { display: flex; align-items: center; gap: var(--xflow-space-2); min-height: var(--xflow-control-height-sm); }
-  .xflow-pv-switch-label { font-size: var(--xflow-font-md); }
-  .xflow-pv-switch-label--off { color: var(--xflow-text-tertiary); }
-  .xflow-pv-slider-row { display: flex; align-items: center; gap: var(--xflow-space-3); min-width: 0; }
   .xflow-pv-slider { flex: 1; min-width: 0; margin: 0; }
-  .xflow-pv-slider-value {
-    flex: none;
-    min-width: 44px;
-    text-align: end;
-    font-size: var(--xflow-font-sm);
-    font-variant-numeric: tabular-nums;
-    color: var(--xflow-text-secondary);
-  }
+  .xflow-pv-ctl-line > .xflow-pv-slider-num { flex: none; width: 88px; }
+  .xflow-pv-pair { display: flex; align-items: center; gap: var(--xflow-space-1-5); min-width: 0; }
+  .xflow-pv-pair > .xflow-pv-spec-control { flex: 1; min-width: 0; }
   /* The expression field: the whole box is the expression, variables are chips. */
   .xflow-pv-expr-box { display: flex; min-width: 0; }
   .xflow-pv-expr-box > span { flex: 1; min-width: 0; }

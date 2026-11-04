@@ -344,16 +344,18 @@ export function RunsSection() {
   return (
     <div className="xflow-pv-wb xflow-pv-wb--runs">
       <header className="xflow-pv-top">
-        <Button type="text" className="xflow-pv-icon-btn" aria-label="返回工作流列表" icon={<BackIcon />} />
-        <div className="xflow-pv-title">
-          <strong title={`${wbWorkflow.id} · ${wbWorkflow.version}`}>{wbWorkflow.name}</strong>
-          <StatusChip tone="neutral" icon={<ClockIcon />} label={`运行版本 ${wbRunReplay.version}`} />
+        <div className="xflow-pv-top-id">
+          <Button type="text" className="xflow-pv-icon-btn" aria-label="返回工作流列表" icon={<BackIcon />} />
+          <div className="xflow-pv-title">
+            <strong title={`${wbWorkflow.id} · ${wbWorkflow.version}`}>{wbWorkflow.name}</strong>
+            <StatusChip tone="neutral" icon={<ClockIcon />} label={`运行版本 ${wbRunReplay.version}`} />
+          </div>
         </div>
-        <span className="mx-auto">
+        <div className="xflow-pv-top-center">
           <Todo label="需新字段">
             <Segmented aria-label="视图模式" value="runs" options={[{ value: 'edit', label: '编辑' }, { value: 'runs', label: '运行记录' }]} />
           </Todo>
-        </span>
+        </div>
         <div className="xflow-pv-top-right">
           <span className="xflow-pv-mono xflow-pv-faint">{wbRunReplay.execId}</span>
           <StatusChip
