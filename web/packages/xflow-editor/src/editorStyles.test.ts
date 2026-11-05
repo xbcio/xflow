@@ -152,6 +152,12 @@ describe("xflow.editor top bar (§6.3)", () => {
     // normal flex row pinned to its end.
     expect(css).toMatch(/\.xflow-editor-toolbar-left\s*\{[^}]*overflow:\s*hidden\s*;/);
     expect(css).toMatch(/\.xflow-editor-toolbar-right\s*\{[^}]*justify-content:\s*flex-end\s*;/);
+    // Each cluster names its track: with no canvas tools (run-record and
+    // read-only modes) implicit placement dragged the right cluster into
+    // column 2 instead of leaving it end-aligned in column 3.
+    expect(css).toMatch(/\.xflow-editor-toolbar-left\s*\{[^}]*grid-column:\s*1\s*;/);
+    expect(css).toMatch(/\.xflow-editor-canvas-tools\s*\{[^}]*grid-column:\s*2\s*;/);
+    expect(css).toMatch(/\.xflow-editor-toolbar-right\s*\{[^}]*grid-column:\s*3\s*;/);
   });
 
   it("keeps one nowrap 52px bar at compact width and lets the title track ellipsize", () => {
