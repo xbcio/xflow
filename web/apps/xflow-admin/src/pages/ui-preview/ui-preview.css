@@ -1273,6 +1273,9 @@
   .xflow-pv-sec-head .xflow-pv-sec-label { display: flex; width: 100%; gap: var(--xflow-space-2); }
   .xflow-pv-sec-right { display: inline-flex; align-items: center; gap: var(--xflow-space-2); min-width: 0; }
   .xflow-pv-sec-head .xflow-pv-sec-right { margin-left: auto; }
+  /* AntD 6 把 label 包在 `.ant-collapse-title` 里（5 及以前叫 header-text）：让它吃掉剩余宽度，
+     否则 label 的 100% 只是自身内容的宽度，贴右无从谈起。 */
+  .xflow-pv-sec-head .ant-collapse-title,
   .xflow-pv-sec-head .ant-collapse-header-text { flex: 1; min-width: 0; }
   .xflow-pv-sec-title { font-size: var(--xflow-font-md); font-weight: var(--xflow-font-weight-semibold); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .xflow-pv-sec-extra { font-size: var(--xflow-font-sm); font-weight: var(--xflow-font-weight-regular); color: var(--xflow-text-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

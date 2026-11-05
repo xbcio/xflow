@@ -239,10 +239,9 @@ function InspectorConfig() {
           key: 'request',
           className: 'xflow-pv-sec-card',
           label: (
-            <span className="xflow-pv-sec-label">
-              <span className="xflow-pv-sec-title">请求</span>
+            <SectionLabel title="请求">
               <StatusChip tone="success" icon={<CheckIcon />} label="有效" />
-            </span>
+            </SectionLabel>
           ),
           children: (
             <div className="xflow-pv-sec-fields">
