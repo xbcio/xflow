@@ -77,7 +77,7 @@ const wbRun = wbRunVariant;
  */
 function ThemeContrastIcon() {
   return (
-    <svg aria-hidden="true" viewBox="0 0 24 24">
+    <svg aria-hidden="true" className="xflow-pv-theme-glyph" viewBox="0 0 24 24">
       <circle cx="12" cy="12" r="8.5" />
       <path d="M12 3.5v17a8.5 8.5 0 0 0 0-17z" fill="currentColor" />
     </svg>

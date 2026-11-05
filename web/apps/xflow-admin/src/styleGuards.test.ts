@@ -232,6 +232,19 @@ describe("copy-id buttons' 24px hit targets (WCAG 2.5.8)", () => {
   });
 });
 
+// The ui-preview theme trigger is hand-written SVG, not an AntD icon, so it has
+// no `1em` width/height of its own; the editor sizes its twin through
+// `.xflow-editor-theme-glyph`. Without the matching rule the SVG renders 0×0.
+describe("ui-preview theme glyph", () => {
+  it("sizes the hand-written theme SVG from the font scale, like the editor", () => {
+    const glyph = ruleBody("pages/ui-preview/ui-preview.css", ".xflow-pv-theme-glyph");
+    expect(glyph).toMatch(/width:\s*var\(--xflow-font-xl\)/);
+    expect(glyph).toMatch(/height:\s*var\(--xflow-font-xl\)/);
+    expect(glyph).toMatch(/fill:\s*none/);
+    expect(glyph).toMatch(/stroke:\s*currentColor/);
+  });
+});
+
 describe("style guard detection", () => {
   it("flags bare px sizes, loose font shorthands and calc with a literal", () => {
     const bad = [

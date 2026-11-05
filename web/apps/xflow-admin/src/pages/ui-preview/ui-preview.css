@@ -463,6 +463,20 @@
   .xflow-pv-top-tools .xflow-pv-tool { width: 28px; height: 28px; }
   .xflow-pv-top-run { height: 28px; padding: 0 var(--xflow-space-2-5); font-weight: var(--xflow-font-weight-medium); }
   /*
+   * 主题触发器与编辑器 `.xflow-editor-theme-glyph` 同画法同尺寸：手写 svg 没有
+   * AntD 图标的 1em 宽高，不显式定尺寸就会渲染成 0×0。
+   */
+  .xflow-pv-theme-glyph {
+    display: block;
+    width: var(--xflow-font-xl);
+    height: var(--xflow-font-xl);
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.75;
+  }
+  /*
    * 分段项图标（§6.3）：Tailwind 的 preflight 把 svg 设为 block，AntD 的
    * `.ant-segmented-item-icon` 又是 inline，block 子元素会把图标和文字拆成两行。
    * 图标容器改 inline-flex 即可让它们回到一行。
