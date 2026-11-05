@@ -1,4 +1,5 @@
 import {
+  BanIcon,
   CheckIcon,
   CodeIcon,
   CopyIcon,
@@ -486,7 +487,7 @@ export function InspectorSection() {
               sub={`${inspSwitch.nodeName} · ${inspSwitch.type} · v1`}
               category={inspSwitch.category}
               icon={inspSwitch.icon}
-              chip={<StatusChip tone="neutral" icon={<OutlineIcon />} label="已禁用" />}
+              chip={<StatusChip tone="neutral" icon={<BanIcon />} label="已禁用" />}
             />
           }
           body={
