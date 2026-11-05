@@ -11,7 +11,6 @@
 // - Doc C §3.2 shape guard: a value that is neither an expression string
 //   nor of the `expect` shape is shown read-only with "请在 JSON 页签修改".
 
-import { VarIcon } from "@xflow/icons";
 import { Button, Input as AntInput } from "antd";
 import { useState } from "react";
 import { z } from "zod";
@@ -58,14 +57,15 @@ function ExpressionField({ node, props, value, onChange, defaultHint, issues, re
   const toggle = toggleable && content !== "raw" ? (
     <Button
       size="small"
-      type={fx ? "primary" : "default"}
+      type="default"
       className={cx(`${NODEFORM}-fx`, fx && "is-active")}
-      icon={<VarIcon aria-hidden />}
       aria-pressed={fx}
       aria-label={fx ? `${props.label ?? "字段"}：切换为普通值` : `${props.label ?? "字段"}：切换为表达式`}
       title={fx ? "切换为普通值" : "切换为表达式"}
       onClick={() => setFxChoice(!fx)}
-    />
+    >
+      fx
+    </Button>
   ) : null;
 
   return (

@@ -314,10 +314,17 @@ for (const kernel of kernels) {
         await m.flush();
         const field = fieldOf(m.container, "f");
         expect(input(field).value).toBe("5");
+        // §6.4 (2026-11-05): the toggle reads "fx" in mono, not a brace icon,
+        // and the pressed state is an accent wash rather than a primary fill.
+        const fx = one<HTMLElement>(field, ".xflow-editor-nodeform-fx");
+        expect(fx.textContent).toBe("fx");
+        expect(fx.querySelector("svg")).toBeNull();
+        expect(fx.className).not.toContain("ant-btn-color-primary");
         clickButton(field, /切换为表达式$/);
         await m.flush();
         expect(field.querySelector("textarea")).not.toBeNull();
         expect(field.textContent).toContain("输入表达式后会替换它");
+        expect(one<HTMLElement>(field, ".xflow-editor-nodeform-fx").className).toContain("is-active");
         clickButton(field, /切换为普通值$/);
         await m.flush();
         expect(input(field).value).toBe("5");

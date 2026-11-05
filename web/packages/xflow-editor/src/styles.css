@@ -3732,6 +3732,11 @@ button.xflow-editor-overview__run:hover {
  * ------------------------------------------------------------------------ */
 .xflow-editor {
   --xflow-editor-nodeform-fx-size: var(--xflow-control-height);
+  /* The baseline fx toggle's pressed state: an accent wash rather than the
+   * primary solid button, which would compete with 运行. */
+  --xflow-editor-nodeform-fx-active-bg: color-mix(in srgb, var(--xflow-accent) 14%, transparent);
+  --xflow-editor-nodeform-fx-active-border: color-mix(in srgb, var(--xflow-accent) 50%, transparent);
+  --xflow-editor-nodeform-fx-active-fg: var(--xflow-accent);
 }
 
 /* Keep the editor's own node-form text controls on the shared control height;
@@ -3767,12 +3772,26 @@ button.xflow-editor-overview__run:hover {
 
 .xflow-editor .xflow-editor-nodeform-fx {
   flex: 0 0 auto;
+  font-family: var(--xflow-font-mono);
+  font-size: var(--xflow-font-sm);
+  font-style: italic;
+  font-weight: var(--xflow-font-weight-semibold);
   height: var(--xflow-editor-nodeform-fx-size);
   width: var(--xflow-editor-nodeform-fx-size);
 }
 
 .xflow-editor .xflow-editor-nodeform-fx:not(.is-active) {
   color: var(--xflow-text-tertiary);
+}
+
+/* Pressed: accent wash, 50% accent border and accent text, held across hover
+ * and focus so AntD's default-button hover never takes it back to primary. */
+.xflow-editor .xflow-editor-nodeform-fx.is-active,
+.xflow-editor .xflow-editor-nodeform-fx.is-active:hover,
+.xflow-editor .xflow-editor-nodeform-fx.is-active:focus-visible {
+  background: var(--xflow-editor-nodeform-fx-active-bg);
+  border-color: var(--xflow-editor-nodeform-fx-active-border);
+  color: var(--xflow-editor-nodeform-fx-active-fg);
 }
 
 /* The literal control keeps its label as its accessible name only; the
