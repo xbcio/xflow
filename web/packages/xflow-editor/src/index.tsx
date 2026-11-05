@@ -159,7 +159,7 @@ import {
   type WorkflowUpdater
 } from "./panels/shared";
 import { operationStatusFromRuntime } from "./operationStatus";
-import { versionChipState } from "./unsavedChanges";
+import { draftChipContent, versionChipContent, versionChipState } from "./unsavedChanges";
 import { workflowChanges } from "./workflowChanges";
 import {
   bareVersion,
@@ -2612,6 +2612,20 @@ export function XFlowEditor({
   // version comes from the baseline, not the draft: editing the version field
   // must not make the chip claim the edit is based on the new, unsaved value.
   const versionChip = versionChipState({
+    persisted: Boolean(baselineWorkflow.id),
+    version: baselineWorkflow.version,
+    changes: unsavedChanges,
+    historicalVersion
+  });
+  // §6.3: the bar splits the old single chip in two — the version the bar names
+  // and the unsaved count. `versionChip` above stays the diagnostics label and
+  // the clean-state predicate; these two drive what is actually drawn.
+  const versionChipView = versionChipContent({
+    persisted: Boolean(baselineWorkflow.id),
+    version: baselineWorkflow.version,
+    historicalVersion
+  });
+  const draftChipView = draftChipContent({
     persisted: Boolean(baselineWorkflow.id),
     version: baselineWorkflow.version,
     changes: unsavedChanges,
@@ -5465,43 +5479,64 @@ export function XFlowEditor({
                   : "-"}
               </span>
             </span>
-          ) : onLoadVersions ? (
-            <Popover
-              classNames={{
-                container: "xflow-editor-version-popover__container",
-                root: "xflow-editor-version-popover",
-                content: "xflow-editor-version-popover__content"
-              }}
-              content={
-                <VersionHistory
-                  blocked={blockedVersions}
-                  error={versionsState.error}
-                  loading={versionsState.loading}
-                  rollingBackVersion={rollingBackVersion}
-                  versions={versionsState.data}
-                  onReload={() => setVersionLoadNonce((nonce) => nonce + 1)}
-                  onRollback={onRollback && canWriteWorkflow ? (version) => void rollbackToVersion(version) : undefined}
-                  onViewVersion={onViewVersion ? viewVersion : undefined}
-                />
-              }
-              open={versionsOpen}
-              placement="bottomLeft"
-              trigger="click"
-              onOpenChange={setVersionsOpen}
-            >
-              <button
-                aria-label="版本历史"
-                className="xflow-editor-chip xflow-editor-title-chip xflow-editor-version-chip"
-                data-tone={versionChip.tone}
-                type="button"
-              >
-                <span>{versionChip.label}</span>
-              </button>
-            </Popover>
           ) : (
-            <span className="xflow-editor-chip xflow-editor-title-chip" data-tone={versionChip.tone}>
-              <span>{versionChip.label}</span>
-            </span>
+            <>
+              {versionChipView ? (
+                onLoadVersions ? (
+                  <Popover
+                    classNames={{
+                      container: "xflow-editor-version-popover__container",
+                      root: "xflow-editor-version-popover",
+                      content: "xflow-editor-version-popover__content"
+                    }}
+                    content={
+                      <VersionHistory
+                        blocked={blockedVersions}
+                        error={versionsState.error}
+                        loading={versionsState.loading}
+                        rollingBackVersion={rollingBackVersion}
+                        versions={versionsState.data}
+                        onReload={() => setVersionLoadNonce((nonce) => nonce + 1)}
+                        onRollback={onRollback && canWriteWorkflow ? (version) => void rollbackToVersion(version) : undefined}
+                        onViewVersion={onViewVersion ? viewVersion : undefined}
+                      />
+                    }
+                    open={versionsOpen}
+                    placement="bottomLeft"
+                    trigger="click"
+                    onOpenChange={setVersionsOpen}
+                  >
+                    <button
+                      aria-label="版本历史"
+                      className="xflow-editor-chip xflow-editor-chip--action xflow-editor-title-chip xflow-editor-version-chip"
+                      data-tone={versionChipView.tone}
+                      type="button"
+                    >
+                      <span>{versionChipView.label}</span>
+                      <DownIcon className="xflow-editor-version-chip__caret" />
+                    </button>
+                  </Popover>
+                ) : (
+                  <span
+                    className="xflow-editor-chip xflow-editor-title-chip xflow-editor-version-chip"
+                    data-tone={versionChipView.tone}
+                  >
+                    <span>{versionChipView.label}</span>
+                  </span>
+                )
+              ) : null}
+              {draftChipView ? (
+                <span
+                  className="xflow-editor-chip xflow-editor-title-chip xflow-editor-draft-chip"
+                  data-tone={draftChipView.tone}
+                >
+                  <span aria-hidden="true" className="xflow-editor-chip__icon">
+                    <WarnIcon />
+                  </span>
+                  <span>{draftChipView.label}</span>
+                </span>
+              ) : null}
+            </>
           )}
             </div>
             {toolbarFold < 2 && subtitle ? (

@@ -109,9 +109,11 @@
 }
 
 .xflow-editor-toolbar-left {
-  /* The title pays for a long name; the logo and the chips never shrink. */
+  /* The title pays for a long name; the logo and the chips never shrink.
+   * `clip` horizontally only: `hidden` would also cut the 24px hit targets
+   * that the 20px chips grow with ::after. */
   grid-column: 1;
-  overflow: hidden;
+  overflow-x: clip;
 }
 
 .xflow-editor-toolbar-right {
@@ -382,7 +384,9 @@
 }
 
 .xflow-editor-chip[data-tone="info"] {
-  --xflow-editor-chip-fg: var(--xflow-info);
+  /* Raw info is 3.7:1 on the chip's own 12% tint; the -fg mix clears AA and
+   * is the tone the baseline's version chip uses. */
+  --xflow-editor-chip-fg: var(--xflow-info-fg);
   --xflow-editor-chip-tone: var(--xflow-info);
 }
 
@@ -5769,9 +5773,28 @@ button.xflow-editor-overview__run:hover {
   position: absolute;
 }
 
-/* The version chip is the history trigger; 24px matches the 2.5.8 minimum. */
+/* The version chip keeps its 20px pill; a transparent ::after grows the
+ * pointer target to control-height-sm (24) vertically without moving the
+ * visual box. min() keeps a taller chip from losing reachable target. */
 .xflow-editor .xflow-editor-version-chip {
-  height: 24px;
+  position: relative;
+}
+
+.xflow-editor .xflow-editor-version-chip::after {
+  content: "";
+  inset: min(0px, calc((100% - var(--xflow-control-height-sm)) / 2)) 0;
+  position: absolute;
+}
+
+/* The baseline's .xflow-pv-chip--action: the 12px trailing caret owns the
+ * tighter right padding. */
+.xflow-editor .xflow-editor-chip--action {
+  padding-right: var(--xflow-space-1-5);
+}
+
+.xflow-editor .xflow-editor-version-chip__caret {
+  height: var(--xflow-font-sm);
+  width: var(--xflow-font-sm);
 }
 
 /* The select's clear affordance only exists once a value is set; AntD's `clear`

@@ -32,7 +32,8 @@ const bannerWith = (strong: string): HTMLElement => {
   if (!found) throw new Error(`banner ${strong} not shown`);
   return found;
 };
-const chipText = () => document.querySelector(".xflow-editor-title-chip")?.textContent;
+const chipText = () => document.querySelector(".xflow-editor-draft-chip")?.textContent;
+const versionChipText = () => document.querySelector(".xflow-editor-version-chip")?.textContent;
 /** A settled save: the button has left its loading state (it may stay disabled once the draft is clean). */
 const saveSettled = () => expect(screen.getByRole("button", { name: "保存" }).className).not.toContain("ant-btn-loading");
 
@@ -184,10 +185,12 @@ describe("save conflict banner", () => {
 
   it("draws the clean version chip as plain text, like the baseline top-bar chip", () => {
     render(<XFlowEditor value={workflow} />);
-    const chip = document.querySelector(".xflow-editor-title .xflow-editor-title-chip");
-    expect(chip?.textContent).toBe("线上 v1.0.0");
-    expect(chip?.getAttribute("data-tone")).toBe("success");
+    const chip = document.querySelector(".xflow-editor-title .xflow-editor-version-chip");
+    expect(chip?.textContent).toBe("v1.0.0");
+    expect(chip?.getAttribute("data-tone")).toBe("info");
     expect(chip?.querySelector(".xflow-editor-chip__icon")).toBeNull();
+    // Clean means no draft chip at all, not a zero-count one.
+    expect(document.querySelector(".xflow-editor-draft-chip")).toBeNull();
   });
 
   it("keeps the local edits and the unsaved count while the banner is up", async () => {
@@ -289,7 +292,7 @@ describe("save conflict banner", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
     await waitFor(() => expect(banners()).toHaveLength(0));
-    expect(chipText()).toBe("线上 v1.0.0");
+    expect(versionChipText()).toBe("v1.0.0");
   });
 
   it("goes away when the host replaces the definition (重新加载)", async () => {

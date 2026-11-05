@@ -517,8 +517,9 @@ describe("summary column (§6.5)", () => {
     expect(dd("节点").querySelectorAll(".xflow-editor-kvlist__mix")).toHaveLength(3);
     expect(dd("连线").textContent).toBe("2");
     expect(dd("凭证").textContent).toBe("crm_token");
-    expect(dd("版本").textContent).toBe(document.querySelector(".xflow-editor-title-chip")?.textContent);
+    // The drawer keeps the full wording; the bar's version chip only names vX.
     expect(dd("版本").textContent).toBe("线上 v1.2.0");
+    expect(document.querySelector(".xflow-editor-version-chip")?.textContent).toBe("v1.2.0");
   });
 
   it("draws a dash where there is no data source, and the running node when there is one", () => {

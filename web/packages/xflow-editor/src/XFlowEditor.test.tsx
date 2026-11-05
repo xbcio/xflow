@@ -366,7 +366,7 @@ describe("XFlowEditor", () => {
   it("marks a definition without an id as unsaved until its first save", () => {
     render(<XFlowEditor value={{ name: "未命名工作流", spec: "1.0", nodes: [], connections: {} }} />);
 
-    const chip = document.querySelector(".xflow-editor-title-chip");
+    const chip = document.querySelector(".xflow-editor-draft-chip");
     expect(chip?.textContent).toBe("未保存");
     expect(chip?.getAttribute("data-tone")).toBe("warning");
     // §6.3: 保存 keeps the quiet default appearance; dirty never turns it solid primary.
@@ -396,32 +396,35 @@ describe("XFlowEditor", () => {
     await waitFor(() => expect(save().disabled).toBe(true));
   });
 
-  it("reports the persisted version on the chip and keeps 已保存 without one", () => {
+  it("names the baseline version on the version chip and 未发布 without one", () => {
     const { rerender } = render(<XFlowEditor value={{ ...workflow, version: "2.1.0" }} />);
-    const chip = () => document.querySelector(".xflow-editor-title-chip") as HTMLElement;
-    expect(chip().textContent).toBe("线上 v2.1.0");
-    expect(chip().getAttribute("data-tone")).toBe("success");
+    const version = () => document.querySelector(".xflow-editor-version-chip") as HTMLElement;
+    expect(version().textContent).toBe("v2.1.0");
+    expect(version().getAttribute("data-tone")).toBe("info");
+    expect(document.querySelector(".xflow-editor-draft-chip")).toBeNull();
 
     rerender(<XFlowEditor value={{ ...workflow }} />);
-    expect(chip().textContent).toBe("已保存");
-    expect(chip().getAttribute("data-tone")).toBe("success");
+    expect(version().textContent).toBe("未发布");
+    expect(version().getAttribute("data-tone")).toBe("info");
   });
 
-  it("counts edits against the saved version and returns to success after undo", () => {
+  it("counts edits on the draft chip and drops it after undo", () => {
     render(<XFlowEditor value={{ ...workflow, version: "2.1.0" }} onSave={vi.fn(async (next) => next)} />);
-    const chip = () => document.querySelector(".xflow-editor-title-chip") as HTMLElement;
-    expect(chip().textContent).toBe("线上 v2.1.0");
+    const version = () => document.querySelector(".xflow-editor-version-chip") as HTMLElement;
+    const draft = () => document.querySelector(".xflow-editor-draft-chip") as HTMLElement | null;
+    expect(version().textContent).toBe("v2.1.0");
+    expect(draft()).toBeNull();
 
     const inspector = workflowSettings();
     fireEvent.change(within(inspector).getByLabelText("工作流名称"), {
       target: { value: "Renamed workflow" }
     });
-    expect(chip().textContent).toBe("未保存 1 处 · 基于 v2.1.0");
-    expect(chip().getAttribute("data-tone")).toBe("warning");
+    expect(draft()?.textContent).toBe("未保存 1 处 · 基于 v2.1.0");
+    expect(draft()?.getAttribute("data-tone")).toBe("warning");
 
     fireEvent.click(within(screen.getByRole("toolbar", { name: "画布工具" })).getByRole("button", { name: "撤销" }));
-    expect(chip().textContent).toBe("线上 v2.1.0");
-    expect(chip().getAttribute("data-tone")).toBe("success");
+    expect(version().textContent).toBe("v2.1.0");
+    expect(draft()).toBeNull();
   });
 
   it("names the baseline version, not an edited version field, in the dirty chip", () => {
@@ -431,7 +434,7 @@ describe("XFlowEditor", () => {
       target: { value: "3.0.0" }
     });
 
-    const chip = document.querySelector(".xflow-editor-title-chip") as HTMLElement;
+    const chip = document.querySelector(".xflow-editor-draft-chip") as HTMLElement;
     expect(chip.textContent).toBe("未保存 1 处 · 基于 v2.1.0");
     expect(chip.getAttribute("data-tone")).toBe("warning");
   });
@@ -440,13 +443,15 @@ describe("XFlowEditor", () => {
     const draft = { name: "未命名工作流", spec: "1.0", nodes: [], connections: {} };
     const handleSave = vi.fn(async (next: typeof draft) => ({ ...next, id: "wf-new", version: "1.0.0" }));
     render(<XFlowEditor value={draft} onSave={handleSave} />);
-    const chip = () => document.querySelector(".xflow-editor-title-chip") as HTMLElement;
-    expect(chip().textContent).toBe("未保存");
+    const version = () => document.querySelector(".xflow-editor-version-chip") as HTMLElement;
+    const dirty = () => document.querySelector(".xflow-editor-draft-chip") as HTMLElement | null;
+    expect(dirty()?.textContent).toBe("未保存");
 
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
-    await waitFor(() => expect(chip().textContent).toBe("线上 v1.0.0"));
-    expect(chip().getAttribute("data-tone")).toBe("success");
+    await waitFor(() => expect(version().textContent).toBe("v1.0.0"));
+    expect(version().getAttribute("data-tone")).toBe("info");
+    expect(dirty()).toBeNull();
   });
 
   it("adopts a persisted definition the host swaps in with the same content", () => {
@@ -460,20 +465,21 @@ describe("XFlowEditor", () => {
         }}
       />
     );
-    const chip = () => document.querySelector(".xflow-editor-title-chip") as HTMLElement;
-    expect(chip().textContent).toBe("线上 v2.1.0");
+    const version = () => document.querySelector(".xflow-editor-version-chip") as HTMLElement;
+    const dirty = () => document.querySelector(".xflow-editor-draft-chip") as HTMLElement | null;
+    expect(version().textContent).toBe("v2.1.0");
 
     fireEvent.change(within(workflowSettings()).getByLabelText("工作流名称"), {
       target: { value: "Renamed before run" }
     });
-    expect(chip().textContent).toBe("未保存 1 处 · 基于 v2.1.0");
+    expect(dirty()?.textContent).toBe("未保存 1 处 · 基于 v2.1.0");
 
     // Save-then-run: the host persists the draft and hands the persisted copy
     // back, without `onSave`. Content is equal but the object is new, so this
-    // is the new baseline and the chip returns to the saved state.
+    // is the new baseline and the draft chip disappears.
     rerender(<XFlowEditor value={{ ...draft! }} />);
-    expect(chip().textContent).toBe("线上 v2.1.0");
-    expect(chip().getAttribute("data-tone")).toBe("success");
+    expect(version().textContent).toBe("v2.1.0");
+    expect(dirty()).toBeNull();
   });
 
   it("keeps the draft dirty when the host echoes the onChange payload back as value", () => {
@@ -486,7 +492,7 @@ describe("XFlowEditor", () => {
       return <XFlowEditor value={state} onChange={setState} />;
     };
     render(<Controlled />);
-    const chip = () => document.querySelector(".xflow-editor-title-chip") as HTMLElement;
+    const chip = () => document.querySelector(".xflow-editor-draft-chip") as HTMLElement;
 
     fireEvent.change(within(workflowSettings()).getByLabelText("工作流名称"), {
       target: { value: "Renamed in a controlled host" }
@@ -504,7 +510,7 @@ describe("XFlowEditor", () => {
     const handleSave = vi.fn(() => pendingSave);
     const versioned = { ...workflow, version: "1.0.0" };
     render(<XFlowEditor value={versioned} onChange={vi.fn()} onSave={handleSave} />);
-    const chip = () => document.querySelector(".xflow-editor-title-chip") as HTMLElement;
+    const chip = () => document.querySelector(".xflow-editor-draft-chip") as HTMLElement;
 
     // A clean draft cannot be saved (baseline clean state); dirty it first.
     const saved = { ...versioned, name: "Saved before pending" };
@@ -1015,11 +1021,11 @@ describe("XFlowEditor", () => {
     // 撤销 / 重做 really act from the middle group, at the docked width.
     const settings = workflowSettings();
     fireEvent.change(within(settings).getByLabelText("工作流名称"), { target: { value: "Narrow edit" } });
-    expect(document.querySelector(".xflow-editor-title-chip")?.textContent).toBe("未保存 1 处");
+    expect(document.querySelector(".xflow-editor-draft-chip")?.textContent).toBe("未保存 1 处");
     fireEvent.click(within(tools).getByRole("button", { name: "撤销" }));
-    expect(document.querySelector(".xflow-editor-title-chip")?.textContent).toBe("已保存");
+    expect(document.querySelector(".xflow-editor-draft-chip")).toBeNull();
     fireEvent.click(within(tools).getByRole("button", { name: "重做" }));
-    expect(document.querySelector(".xflow-editor-title-chip")?.textContent).toBe("未保存 1 处");
+    expect(document.querySelector(".xflow-editor-draft-chip")?.textContent).toBe("未保存 1 处");
 
     // Tier 1 (header 1280): 校验 / 主题 leave the bar; 撤销 / 重做 stay put.
     act(() => container.setWidth(1280));
@@ -1674,7 +1680,8 @@ describe("XFlowEditor", () => {
     await waitFor(() => {
       expect(handleSave).toHaveBeenCalledWith(saved);
     });
-    expect(await screen.findByText("已保存", { selector: ".xflow-editor-chip span" })).toBeTruthy();
+    await waitFor(() => expect(document.querySelector(".xflow-editor-draft-chip")).toBeNull());
+    expect(document.querySelector(".xflow-editor-version-chip")?.textContent).toBe("未发布");
 
     fireEvent.click(screen.getByRole("button", { name: "运行工作流" }));
 
@@ -2107,7 +2114,7 @@ describe("XFlowEditor", () => {
       connections: {}
     });
     // The fresh draft is its own baseline: nothing to compare, so no count (§6.3).
-    expect(document.querySelector(".xflow-editor-title-chip")?.textContent).toBe("未保存");
+    expect(document.querySelector(".xflow-editor-draft-chip")?.textContent).toBe("未保存");
     // §6.2 empty canvas: the trigger card replaces the preview's default note.
     expect(screen.getByRole("heading", { name: "添加触发器开始" })).toBeTruthy();
     expect(screen.queryByText("No nodes to preview")).toBeNull();

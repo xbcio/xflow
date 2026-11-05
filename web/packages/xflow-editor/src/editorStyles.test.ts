@@ -150,7 +150,7 @@ describe("xflow.editor top bar (§6.3)", () => {
     expect(css).toMatch(/\.xflow-editor-chip\s*\{[^}]*flex:\s*none\s*;/);
     // The left cluster owns the bar's negative space; the right cluster is a
     // normal flex row pinned to its end.
-    expect(css).toMatch(/\.xflow-editor-toolbar-left\s*\{[^}]*overflow:\s*hidden\s*;/);
+    expect(css).toMatch(/\.xflow-editor-toolbar-left\s*\{[^}]*overflow-x:\s*clip\s*;/);
     expect(css).toMatch(/\.xflow-editor-toolbar-right\s*\{[^}]*justify-content:\s*flex-end\s*;/);
     // Each cluster names its track: with no canvas tools (run-record and
     // read-only modes) implicit placement dragged the right cluster into
@@ -965,6 +965,10 @@ describe("xflow.editor small-text tones, hit targets and forced colours", () => 
       );
     }
     expect(block(".xflow-editor-error")).toMatch(/color:\s*var\(--xflow-danger-fg\)\s*;/);
+    // The version chip reads the AA -fg mix, not raw info (3.7:1 on its tint).
+    expect(block('.xflow-editor-chip[data-tone="info"]')).toMatch(
+      /--xflow-editor-chip-fg:\s*var\(--xflow-info-fg\)\s*;/
+    );
   });
 
   it("grows the sub-24px hit targets with a transparent ::after, leaving the visual size alone", () => {
@@ -983,6 +987,25 @@ describe("xflow.editor small-text tones, hit targets and forced colours", () => 
     // The visible box stays 20px / 14px.
     expect(block(".xflow-editor-connection-delete")).toMatch(/height:\s*20px\s*;[\s\S]*width:\s*20px\s*;/);
     expect(block(".xflow-editor .xflow-editor-hint__help")).toMatch(/height:\s*14px\s*;[\s\S]*width:\s*14px\s*;/);
+  });
+
+  it("grows the version chip's 20px pill to a 24px target without moving the pill", () => {
+    const chip = ".xflow-editor .xflow-editor-version-chip";
+    // Two rules mention the chip; the anchoring one is the later block.
+    expect(css, "the chip anchors its target").toMatch(
+      /\.xflow-editor \.xflow-editor-version-chip\s*\{[^}]*position:\s*relative\s*;/
+    );
+    expect(block(chip)).not.toMatch(/height:\s*24px\s*;/);
+    const after = block(`${chip}::after`);
+    expect(after).toMatch(/content:\s*""\s*;/);
+    expect(after).toMatch(/position:\s*absolute\s*;/);
+    expect(after).toMatch(/inset:\s*min\(0px, calc\(\(100% - var\(--xflow-control-height-sm\)\) \/ 2\)\) 0\s*;/);
+    // 20 (the pill's visual height) is what the bar still measures.
+    expect(block(".xflow-editor-chip")).toMatch(/height:\s*20px\s*;/);
+    // The caret is the 12px step, not the icon package's 16.
+    const caret = block(".xflow-editor .xflow-editor-version-chip__caret");
+    expect(caret).toMatch(/height:\s*var\(--xflow-font-sm\)\s*;/);
+    expect(caret).toMatch(/width:\s*var\(--xflow-font-sm\)\s*;/);
   });
 
   it("grows the library group heading to the control step through a token-sized ::after", () => {

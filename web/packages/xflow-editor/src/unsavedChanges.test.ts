@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { WorkflowDef } from "@xflow/core";
-import { countUnsavedChanges, versionChipState, workflowChanges } from "./unsavedChanges";
+import { countUnsavedChanges, draftChipContent, versionChipContent, versionChipState, workflowChanges } from "./unsavedChanges";
 
 const baseline: WorkflowDef = {
   id: "wf-1",
@@ -158,6 +158,65 @@ describe("workflowChanges", () => {
     const edited: WorkflowDef = { ...baseline, name: "Orders v2", settings: { timezone: "Asia/Shanghai" } };
     expect(workflowChanges(baseline, edited)).toHaveLength(countUnsavedChanges(baseline, edited));
     expect(workflowChanges(baseline, edited).map((change) => change.target)).toEqual(["name", "settings"]);
+  });
+});
+
+describe("versionChipContent", () => {
+  it("draws nothing until the definition has an id", () => {
+    expect(versionChipContent({ persisted: false })).toBeUndefined();
+    expect(versionChipContent({ persisted: false, version: "1.2.0" })).toBeUndefined();
+  });
+
+  it("reads an id without a version as info 未发布", () => {
+    expect(versionChipContent({ persisted: true })).toEqual({ tone: "info", label: "未发布" });
+  });
+
+  it("names the baseline version as info vX", () => {
+    expect(versionChipContent({ persisted: true, version: "1.2.0" })).toEqual({
+      tone: "info",
+      label: "v1.2.0"
+    });
+    expect(versionChipContent({ persisted: true, version: "v1.2.0" }).label).toBe("v1.2.0");
+  });
+
+  it("is neutral 历史 while replaying an archived version, id or not", () => {
+    expect(versionChipContent({ persisted: true, version: "1.1.4", historicalVersion: "1.1.4" })).toEqual({
+      tone: "neutral",
+      label: "v1.1.4 · 历史"
+    });
+    expect(versionChipContent({ persisted: false, historicalVersion: "v1.1.4" })).toEqual({
+      tone: "neutral",
+      label: "v1.1.4 · 历史"
+    });
+  });
+});
+
+describe("draftChipContent", () => {
+  it("keeps 未保存 for a definition that was never persisted, at zero changes", () => {
+    expect(draftChipContent({ persisted: false, changes: 0 })).toEqual({ tone: "warning", label: "未保存" });
+  });
+
+  it("counts changes without a version clause when there is no version yet", () => {
+    expect(draftChipContent({ persisted: false, changes: 2 })).toEqual({
+      tone: "warning",
+      label: "未保存 2 处"
+    });
+  });
+
+  it("draws nothing for a clean persisted definition", () => {
+    expect(draftChipContent({ persisted: true, version: "1.2.0", changes: 0 })).toBeUndefined();
+    expect(draftChipContent({ persisted: true, changes: 0 })).toBeUndefined();
+  });
+
+  it("counts changes against the baseline version", () => {
+    expect(draftChipContent({ persisted: true, version: "1.2.0", changes: 3 })).toEqual({
+      tone: "warning",
+      label: "未保存 3 处 · 基于 v1.2.0"
+    });
+  });
+
+  it("draws nothing while replaying an archived version", () => {
+    expect(draftChipContent({ persisted: true, version: "1.2.0", changes: 4, historicalVersion: "1.2.0" })).toBeUndefined();
   });
 });
 

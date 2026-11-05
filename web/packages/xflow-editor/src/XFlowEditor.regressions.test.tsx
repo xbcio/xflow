@@ -70,7 +70,8 @@ describe("US-001 save in-flight guard", () => {
 
     await act(async () => resolveSave?.());
     await waitFor(() => expect(save.className).not.toContain("ant-btn-loading"));
-    expect(screen.getByText("已保存", { selector: ".xflow-editor-chip span" })).toBeTruthy();
+    expect(document.querySelector(".xflow-editor-draft-chip")).toBeNull();
+    expect(document.querySelector(".xflow-editor-version-chip")?.textContent).toBe("未发布");
 
     // Settled clean: the shortcut is a no-op, as on the disabled baseline key.
     fireEvent.keyDown(document.body, { key: "s", metaKey: true });
