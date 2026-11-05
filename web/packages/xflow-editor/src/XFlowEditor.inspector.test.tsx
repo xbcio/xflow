@@ -164,6 +164,13 @@ describe("inspector header (§6.4)", () => {
     fireEvent.click(within(inspector()).getByRole("button", { name: "更多操作" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "禁用" }));
     expect(lastWorkflow(handleChange).nodes?.[1]?.disabled).toBe(true);
+    // §6.4: the neutral chip carries the same BanIcon the canvas uses, at the
+    // chip-icon size (12px) rather than the chip's own 11px font.
+    const disabledChip = inspector().querySelector(".xflow-editor-inspector-head__disabled");
+    expect(disabledChip?.textContent).toBe("已禁用");
+    const disabledIcon = disabledChip?.querySelector(".xflow-editor-chip__icon");
+    expect(disabledIcon?.getAttribute("aria-hidden")).toBe("true");
+    expect(disabledIcon?.querySelector("svg[data-xflow-icon='ban']")).not.toBeNull();
 
     fireEvent.click(within(inspector()).getByRole("button", { name: "更多操作" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "启用" }));

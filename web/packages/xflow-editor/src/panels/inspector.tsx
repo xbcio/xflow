@@ -1,5 +1,6 @@
 import * as React from "react";
 import {
+  BanIcon,
   CodeIcon,
   CopyIcon,
   FormatPainterIcon,
@@ -1046,6 +1047,9 @@ function NodeHeader({
           {/* §2.1: the 禁用 switch lives in 执行策略 now, so the head says so. */}
           {node.disabled ? (
             <span className="xflow-editor-chip xflow-editor-inspector-head__disabled" data-tone="neutral">
+              <span aria-hidden="true" className="xflow-editor-chip__icon">
+                <BanIcon />
+              </span>
               已禁用
             </span>
           ) : null}
