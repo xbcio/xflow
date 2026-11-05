@@ -998,10 +998,11 @@ function NodeHeader({
   const declaredCategory =
     node.type && nodeCategories && Object.hasOwn(nodeCategories, node.type) ? nodeCategories[node.type] : undefined;
   const identity = nodeIdentity(node, index);
-  // §2.1: the type line always reads 节点名 · 类型 · vN; the display name leads
-  // the row above it, so the technical name has to appear here even when the
-  // two are equal.
-  const typeParts = [identity.name, node.type ?? "unknown"];
+  // §6.4: the type line omits the node name when the display name repeats it
+  // (an unset display name counts as the same), so the same word does not
+  // appear on the row above and this one.
+  const typeParts = identity.distinct ? [identity.name] : [];
+  typeParts.push(node.type ?? "unknown");
   if (version !== undefined) typeParts.push(`v${version}`);
   const typeLine = typeParts.join(" · ");
   const snapshot = runtimeForNode(runtime, node);

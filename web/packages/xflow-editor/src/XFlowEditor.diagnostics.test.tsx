@@ -224,7 +224,7 @@ describe("issue list (§6.5)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "定位节点 worker" }));
     expect(
-      within(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).getByText("worker · xflow.function", {
+      within(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).getByText("xflow.function", {
         selector: ".xflow-editor-inspector-head__type"
       })
     ).toBeTruthy();
@@ -338,7 +338,7 @@ describe("node-form findings in the issue list (WB-13)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "定位字段 api /parameters/url" }));
     await waitFor(() => {
-      expect(within(inspectorRoot()).getByText(/^api · xflow\.http/, { selector: ".xflow-editor-inspector-head__type" })).toBeTruthy();
+      expect(within(inspectorRoot()).getByText(/^xflow\.http/, { selector: ".xflow-editor-inspector-head__type" })).toBeTruthy();
       expect(within(inspectorRoot()).getByRole("tab", { name: "配置" }).getAttribute("aria-selected")).toBe("true");
       expect(field()?.contains(document.activeElement)).toBe(true);
     });
@@ -1394,7 +1394,7 @@ describe("定位节点 (E4b)", () => {
     expect(inspected()).toContain("start");
 
     fireEvent.click(screen.getByRole("button", { name: "定位节点 worker" }));
-    expect(inspected()).toBe("worker · xflow.function");
+    expect(inspected()).toBe("xflow.function");
     expect(preview.handle.fitNode).toHaveBeenCalledTimes(1);
     // The preview names nodes by id (falling back to name), not by the finding's name.
     expect(preview.handle.fitNode).toHaveBeenCalledWith("node-worker");
@@ -1420,7 +1420,7 @@ describe("定位节点 (E4b)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "定位节点 worker" }));
     expect(dockState()).toBe("docked");
-    expect(inspected()).toBe("worker · xflow.function");
+    expect(inspected()).toBe("xflow.function");
   });
 
   it("does not reopen a collapsed inspector", () => {

@@ -254,7 +254,7 @@ describe("node form: the patch reducer (Doc C §6.1)", () => {
     expect((within(inspector()).getByLabelText(/^节点名称/) as HTMLInputElement).value).toBe("hold");
     // The header follows the rename: the display name and the type badge.
     expect(within(inspector()).getByText("hold", { selector: ".xflow-editor-inspector-head__name" })).toBeTruthy();
-    expect(within(inspector()).getByText("hold · xflow.wait · v1", { selector: ".xflow-editor-inspector-head__type" })).toBeTruthy();
+    expect(within(inspector()).getByText("xflow.wait · v1", { selector: ".xflow-editor-inspector-head__type" })).toBeTruthy();
   });
 });
 
@@ -490,7 +490,7 @@ describe("node form: the JSON tab (Doc C §6.2)", () => {
     expect((within(root).getByLabelText("参数 JSON") as HTMLTextAreaElement).value).toBe("{ broken");
     // The header names the node the JSON view belongs to.
     expect(within(root).getByText("api", { selector: ".xflow-editor-inspector-head__name" })).toBeTruthy();
-    expect(within(root).getByText("api · xflow.http · v1", { selector: ".xflow-editor-inspector-head__type" })).toBeTruthy();
+    expect(within(root).getByText("xflow.http · v1", { selector: ".xflow-editor-inspector-head__type" })).toBeTruthy();
   });
 
   it("keeps drafts across a real unmount: panel collapse and the compact drawer", async () => {

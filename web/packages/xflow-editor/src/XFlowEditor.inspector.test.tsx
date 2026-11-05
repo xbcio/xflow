@@ -47,8 +47,8 @@ describe("inspector header (§6.4)", () => {
     expect(chip?.getAttribute("data-tone")).toBe("danger");
 
     const typeLine = panel.querySelector(".xflow-editor-inspector-head__type");
-    // §2.1: the type line always reads 节点名 · 类型 · vN.
-    expect(typeLine?.textContent).toBe("api · xflow.http");
+    // §6.4: the name is omitted when the display name already repeats it.
+    expect(typeLine?.textContent).toBe("xflow.http");
     expect(typeLine?.querySelector("code, em")).toBeNull();
   });
 
@@ -492,7 +492,7 @@ describe("node display name and header identity (IN-01 / C03)", () => {
     const { unmount } = render(<XFlowEditor value={echoed} />);
     let panel = selectNode("api");
     expect(within(head(panel)).getAllByText("api")).toHaveLength(1);
-    expect(panel.querySelector(".xflow-editor-inspector-head__type")?.textContent).toBe("api · xflow.http");
+    expect(panel.querySelector(".xflow-editor-inspector-head__type")?.textContent).toBe("xflow.http");
     unmount();
 
     // An empty label falls back to the name, still exactly once.
@@ -506,7 +506,16 @@ describe("node display name and header identity (IN-01 / C03)", () => {
     );
     panel = selectNode("api");
     expect(within(head(panel)).getAllByText("api")).toHaveLength(1);
-    expect(panel.querySelector(".xflow-editor-inspector-head__type")?.textContent).toBe("api · xflow.http");
+    expect(panel.querySelector(".xflow-editor-inspector-head__type")?.textContent).toBe("xflow.http");
+  });
+
+  it("keeps the node name in the type line when the display name differs", () => {
+    render(<XFlowEditor value={labelled} />);
+    const panel = selectNode("fetch_profile");
+    // The two rows carry different words: the display name leads, the
+    // technical name stays on the type line.
+    expect(within(panel).getByText("拉取客户档案", { selector: ".xflow-editor-inspector-head__name" })).toBeTruthy();
+    expect(panel.querySelector(".xflow-editor-inspector-head__type")?.textContent).toBe("fetch_profile · xflow.http");
   });
 
   it("shows a distinct label as the primary line and the name as the secondary one", () => {
@@ -579,7 +588,7 @@ describe("node template field (IN-02 / §6.4)", () => {
     expect("type" in (next.nodes?.[1] ?? {})).toBe(false);
     const updatedPanel = inspector();
     expect(selectedLabel(updatedPanel)).toBe("tpl_a");
-    expect(updatedPanel.querySelector(".xflow-editor-inspector-head__type")?.textContent).toBe("api · unknown");
+    expect(updatedPanel.querySelector(".xflow-editor-inspector-head__type")?.textContent).toBe("unknown");
     expect(within(updatedPanel).getByText("参数由模板提供，切换模板会改变表单。")).toBeTruthy();
 
     // One undo entry puts both fields back.
