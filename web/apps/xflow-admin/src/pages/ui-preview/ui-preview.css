@@ -1219,8 +1219,9 @@
   /*
    * Section cards: collapse is AntD; the card look is ours (§6.4). The stack is
    * tuned so the workflow-settings panel — five sections, the last two collapsed
-   * — shows all five headers in a 640px panel without scrolling; each step is
-   * 2–4px, none of them changes a control's size.
+   * — shows all five headers without scrolling at the height the real editor has
+   * at 1280×800 (719px, see the gallery rule); each step is 2–4px, none of them
+   * changes a control's size.
    */
   .xflow-pv-secs { display: flex; flex-direction: column; gap: var(--xflow-space-2); min-width: 0; }
   .xflow-pv-sec-head {
@@ -1652,6 +1653,16 @@
     height: 640px;
     border: 1px solid var(--xflow-border);
     border-radius: var(--xflow-radius-lg);
+  }
+  /*
+   * The workflow settings sample matches the workflow settings panel of the real
+   * editor at 1280×800, measured on 2026-11-06: the compact drawer root is 719px
+   * = a 40px header bar + 679px of content. With the field grid switched to one
+   * column the five sections are 660px tall, so 640px pushes the last two out of
+   * view; 719px is what fits all five on one screen.
+   */
+  .xflow-pv-gallery .xflow-pv-figure--wf-settings .xflow-pv-insp {
+    height: 719px;
   }
 
   .xflow-pv-port-row {

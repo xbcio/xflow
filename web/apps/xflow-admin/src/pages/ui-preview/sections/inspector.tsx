@@ -505,7 +505,7 @@ export function InspectorSection() {
         <figcaption>禁用态：名字旁显示 neutral「已禁用」；禁用开关在配置页的执行策略卡里</figcaption>
       </figure>
 
-      <figure className="xflow-pv-figure">
+      <figure className="xflow-pv-figure xflow-pv-figure--wf-settings">
         <InspPanel
           title="工作流设置"
           titleCount="未选中节点"
