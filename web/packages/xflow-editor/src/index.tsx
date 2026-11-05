@@ -891,6 +891,13 @@ function useEditorWidth(
 }
 
 /**
+ * The save tooltip's default copy. It already names the shortcut, so fold 4's
+ * short `（⌘S）` suffix must not be appended to it — the other states carry no
+ * shortcut and do get the suffix (see the save button's Tooltip).
+ */
+const DEFAULT_SAVE_TOOLTIP = "保存工作流（⌘ / Ctrl + S）";
+
+/**
  * Top bar fold thresholds (§6.3, 2026-11-04): measured in a real browser on the
  * header itself, not copied from the baseline. The bar is
  * `minmax(0, 1fr) auto minmax(0, 1fr)`, so both side tracks are equal and the
@@ -3258,7 +3265,7 @@ export function XFlowEditor({
         ? validationMode === "enforce"
           ? `${formIssueSummary.errors} 个参数错误（server 为 enforce 模式），修正后才能保存`
           : `${formIssueSummary.errors} 个参数问题（server 为 ${validationMode} 模式，不阻止保存）`
-        : "保存工作流（⌘ / Ctrl + S）";
+        : DEFAULT_SAVE_TOOLTIP;
 
   /**
    * Save/run gate. Flushes parseable JSON drafts first, then blocks while any
@@ -5777,7 +5784,15 @@ export function XFlowEditor({
             <>
             <Tooltip
               classNames={editorTooltipClassNames}
-              title={toolbarFold >= 4 ? `${saveTooltip}（⌘S）` : saveTooltip}
+              title={
+                // F14: fold 4 trades the keycap for a short suffix. The default
+                // copy already names the shortcut, so only the shortcut-free
+                // states take the suffix; comparing against the constant (not
+                // the text shape) keeps the two from drifting apart.
+                toolbarFold >= 4 && saveTooltip !== DEFAULT_SAVE_TOOLTIP
+                  ? `${saveTooltip}（⌘S）`
+                  : saveTooltip
+              }
             >
               <span>
                 <Button

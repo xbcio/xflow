@@ -294,4 +294,51 @@ describe("top bar folding (§6.3)", () => {
     expect(screen.queryByText("⌘S")).toBeNull();
     expect(within(toolbar).getByRole("button", { name: "保存" })).toBeTruthy();
   });
+
+  /** Text of every tooltip currently visible (closed ones stay mounted hidden). */
+  const openTooltipText = (): (string | null)[] =>
+    [...document.querySelectorAll(".ant-tooltip")]
+      .filter((element) => !element.classList.contains("ant-tooltip-hidden"))
+      .map((element) => element.textContent);
+
+  it("names the save shortcut once in the fold-4 tooltip", async () => {
+    const onSave = vi.fn(async (next: WorkflowDef) => next);
+    render(<XFlowEditor value={workflow} onSave={onSave} />);
+    const toolbar = screen.getByRole("toolbar", { name: "编辑器工具栏" });
+
+    // Dirty the draft while the settings panel is reachable; the fold only
+    // changes how the tooltip names the shortcut, not the save state.
+    // The start node opens selected; Esc returns the Inspector to the
+    // workflow settings, whose name field is the simplest real draft edit.
+    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.change(
+      within(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).getByLabelText("工作流名称"),
+      { target: { value: "Toolbar workflow edited" } }
+    );
+    setWidth(900);
+    expect(toolbar.getAttribute("data-fold")).toBe("4");
+
+    const save = within(toolbar).getByRole("button", { name: "保存" });
+    fireEvent.mouseEnter(save.parentElement as HTMLElement);
+    await waitFor(() => expect(openTooltipText()).toContain("保存工作流（⌘ / Ctrl + S）"));
+    // The default copy already names the shortcut, so the fold-4 suffix must
+    // not append a second one.
+    const tip = openTooltipText().find((text) => text?.includes("保存工作流"));
+    expect((tip?.match(/⌘/g) ?? []).length).toBe(1);
+    fireEvent.mouseLeave(save.parentElement as HTMLElement);
+  });
+
+  it("adds the short shortcut to the clean-state tooltip at fold 4", async () => {
+    const onSave = vi.fn(async (next: WorkflowDef) => next);
+    render(<XFlowEditor value={workflow} onSave={onSave} />);
+    const toolbar = screen.getByRole("toolbar", { name: "编辑器工具栏" });
+
+    setWidth(900);
+    expect(toolbar.getAttribute("data-fold")).toBe("4");
+    const save = within(toolbar).getByRole("button", { name: "保存" }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+
+    fireEvent.mouseEnter(save.parentElement as HTMLElement);
+    await waitFor(() => expect(openTooltipText()).toContain("没有未保存的修改（⌘S）"));
+  });
 });
