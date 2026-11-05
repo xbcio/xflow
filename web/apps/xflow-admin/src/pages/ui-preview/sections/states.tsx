@@ -109,7 +109,11 @@ export function StatesSection() {
               <StatusChip tone={meta.tone} icon={meta.icon} label={meta.label} />
               <span className="xflow-pv-wf-ops">
                 可用操作：
-                {meta.ops.length > 0 ? meta.ops.join(' · ') : '无（等在途任务提交）'}
+                {meta.ops.length > 0
+                  ? meta.ops.join(' · ')
+                  : status === 'canceling'
+                    ? '无（等在途任务提交）'
+                    : '无'}
               </span>
             </div>
           );
