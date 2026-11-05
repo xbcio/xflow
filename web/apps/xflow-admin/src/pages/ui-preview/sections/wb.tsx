@@ -87,22 +87,36 @@ function ThemeContrastIcon() {
 /**
  * Topbar fold thresholds (§6.3, 2026-11-04 ruling), measured on the header
  * itself rather than the window. The two side tracks are equal 1fr, so the
- * right cluster's natural width sets both: header = 24 padding + 24 gaps +
- * tools + 2 × right. Measured at 1600 the full right cluster is 530, at 1280
- * the folded one is 403. At 1280 the header is 1230, so it sits in tier 1
- * (matching the spec's estimate); 1600 (1550) stays at tier 0.
+ * wider of the two clusters sets every threshold: header = 24 padding + 24
+ * gaps + tools + 2 × side. Every tier's floor follows one rule:
  *
- *   tier 0 fits: 48 + tools 298 + 2 × right 530 = 1406
- *   tier 1 fits: 48 + tools 298 + 2 × right 403 = 1152
- *   tier 2 hides subtitle/spec for title room. It changes neither the right
- *   cluster nor the tools, so it cannot widen the right track; 1200 is the
- *   last collision-free band above the 1152 fit boundary. Below 1152 the
- *   8-button group stops fitting and tier 3 takes over.
- *   tier 3 fits down to: 48 + tools 139 + 2 × right 403 = 993
+ *   floor = 48 + that tier's tools + 2 × max(right natural, left width)
+ *
+ * Measured 2026-11-05 on the density theme:
+ *
+ *   right natural: 512.36 (tier 0) / 391.36 (tier 1–3) / 276 (tier 4, the
+ *   mode switch is icon-only and the ⌘S keycap is gone)
+ *   left width = logo 28 + gap 8 + title row, sample name 客户同步, dirty
+ *   (version chip + unsaved chip). The subtitle ellipsizes, so it is excluded:
+ *   396.19 at tier 0–1 (spec chip still shown) / 327.78 at tier 2–4
+ *
+ *   tier 0: 48 + 298 + 2 × 512.36 = 1370.72 → 1371
+ *   tier 1: 48 + 298 + 2 × 396.19 = 1138.38 → 1139 (the left cluster decides;
+ *   right alone would be 1128.72)
+ *   tier 2 hides the subtitle and spec chip: 48 + 298 + 2 × 391.36 =
+ *   1128.72 → 1129. TOP_FOLD_2 is tier 1's floor rounded up to the next 50px
+ *   band: 1150.
+ *   tier 3 folds the canvas extras into ⋯: 48 + 139 + 2 × 391.36 = 969.72 →
+ *   970, so tier 4 starts there.
+ *   tier 4 makes the mode switch icon-only (names move to tooltips) and drops
+ *   the ⌘S keycap: 48 + 139 + 2 × 327.78 = 842.56 → 843 is the bottom of the
+ *   supported range (the left cluster decides; right alone would be 739).
+ *   Below it the right cluster is squeezed, and there is no further fold step.
  */
-const TOP_FOLD_1 = 1406;
-const TOP_FOLD_2 = 1200;
-const TOP_FOLD_3 = 1152;
+const TOP_FOLD_1 = 1371;
+const TOP_FOLD_2 = 1150;
+const TOP_FOLD_3 = 1129;
+const TOP_FOLD_4 = 970;
 
 function RailButton({
   icon,
@@ -550,7 +564,9 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
       ? 1
       : topWidth >= TOP_FOLD_3
         ? 2
-        : 3;
+        : topWidth >= TOP_FOLD_4
+          ? 3
+          : 4;
   const leftDocked = leftOpen && !compactLeft;
   const rightDocked = rightOpen && !compactRight;
   /**
@@ -654,8 +670,20 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
             aria-label="视图模式"
             value="edit"
             options={[
-              { value: 'edit', label: '编辑', icon: <EditIcon /> },
-              { value: 'runs', label: '运行记录', icon: <HistoryIcon /> },
+              // 第 4 档：分段只留图标，名字与快捷键进 tooltip；sr-only 文本
+              // 保住 radio 无障碍名。
+              {
+                value: 'edit',
+                label: fold >= 4 ? <span className="sr-only">编辑</span> : '编辑',
+                icon: <EditIcon />,
+                ...(fold >= 4 ? { tooltip: '编辑' } : {}),
+              },
+              {
+                value: 'runs',
+                label: fold >= 4 ? <span className="sr-only">运行记录</span> : '运行记录',
+                icon: <HistoryIcon />,
+                ...(fold >= 4 ? { tooltip: '运行记录' } : {}),
+              },
             ]}
           />
           {/*
@@ -672,9 +700,11 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
           ) : null}
           <IconButton label="更多操作" icon={<MoreIcon />} />
           <VerticalSep />
-          <Button className="xflow-pv-top-text">
-            保存 <Kbd>⌘S</Kbd>
-          </Button>
+          <Tooltip title={fold >= 4 ? '保存（⌘S）' : '保存'}>
+            <Button className="xflow-pv-top-text">
+              保存 {fold < 4 ? <Kbd>⌘S</Kbd> : null}
+            </Button>
+          </Tooltip>
           <Button className="xflow-pv-top-text" icon={<UploadIcon />}>
             发布
           </Button>
