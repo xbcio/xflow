@@ -387,7 +387,7 @@
   /*
    * Topbar (早期稿, 2026-10-30 用户指示): logo + title/spec/version/draft chips +
    * metadata subtitle on the left, a bordered canvas-tool group exactly in the
-   * middle, and 编辑/预览 + 校验/保存/发布 on the right. The three equal grid
+   * middle, and 编辑/运行记录 + 校验/保存/发布 on the right. The three equal grid
    * tracks are what keep the tool group centred when the sides differ in width.
    */
   .xflow-pv-top {
@@ -425,6 +425,7 @@
   .xflow-pv-subtitle {
     margin: 0;
     font-size: var(--xflow-font-xs);
+    line-height: var(--xflow-line-height-sm);
     color: var(--xflow-text-tertiary);
     white-space: nowrap;
     overflow: hidden;
@@ -448,7 +449,7 @@
     gap: var(--xflow-space-2);
     min-width: 0;
   }
-  .xflow-pv-top-text { color: var(--xflow-text); font-weight: var(--xflow-font-weight-medium); }
+  .xflow-pv-top-text { padding-inline: var(--xflow-space-3); color: var(--xflow-text); font-weight: var(--xflow-font-weight-medium); }
   /* 版本 chip 是按钮（§6.3）：沿用 chip 的视觉，只去掉按钮的默认外观。 */
   .xflow-pv-chip--action {
     padding-right: var(--xflow-space-1-5);
@@ -460,7 +461,7 @@
   .xflow-pv-chip--action svg { width: 12px; height: 12px; }
   /* 中间组图标按钮 28px（§6.3）；运行是其中唯一带文字、唯一 primary 的按钮。 */
   .xflow-pv-top-tools .xflow-pv-tool { width: 28px; height: 28px; }
-  .xflow-pv-top-run { height: 28px; padding: 0 var(--xflow-space-2-5); }
+  .xflow-pv-top-run { height: 28px; padding: 0 var(--xflow-space-2-5); font-weight: var(--xflow-font-weight-medium); }
   /*
    * 分段项图标（§6.3）：Tailwind 的 preflight 把 svg 设为 block，AntD 的
    * `.ant-segmented-item-icon` 又是 inline，block 子元素会把图标和文字拆成两行。
