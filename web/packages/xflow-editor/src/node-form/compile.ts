@@ -291,15 +291,34 @@ interface Target {
 }
 
 type HeaderStatus = "errors" | "validity";
-type GroupStatusFor = (key: string, hasRequiredField: boolean) => HeaderStatus | undefined;
+/** What a group's fields demand: an always-required field, and/or conditional ones. */
+interface GroupRequired {
+  unconditional: boolean;
+  /** Compiled `required_when` conditions of the group's emitted fields. */
+  conditional: Cond[];
+}
+/**
+ * A `headerStatus` value. The `$cond` form is a prop value expression
+ * (composer's `$cond`), not a {@link Cond}: composer evaluates props before
+ * the FieldGroup's props schema sees the enum.
+ */
+type HeaderStatusValue = HeaderStatus | { $cond: Cond; then: HeaderStatus; else: HeaderStatus };
+type GroupStatusFor = (key: string, required: GroupRequired) => HeaderStatusValue | undefined;
 
 /**
- * Type schemas: a group holding an emitted `required: true` field claims
- * 「有效」 when clean; any other group only speaks up on errors. A
- * conditionally required field (`required_when`) does not opt the card into
- * the validity claim: away from its condition the claim would be vacuous.
+ * Type schemas: a group holding an unconditionally `required: true` field
+ * claims 「有效」 when clean. A group whose required fields are all
+ * conditionally required (`required_when`) carries a `$cond` instead:
+ * composer resolves it against the current values before the card reads
+ * `headerStatus`, so the claim holds exactly while one of those conditions
+ * holds. Any other group only speaks up on errors.
  */
-const defaultGroupStatus: GroupStatusFor = (_key, hasRequiredField) => (hasRequiredField ? "validity" : "errors");
+const defaultGroupStatus: GroupStatusFor = (_key, required) => {
+  if (required.unconditional) return "validity";
+  if (required.conditional.length === 0) return "errors";
+  const cond: Cond = required.conditional.length === 1 ? required.conditional[0] : { $or: required.conditional };
+  return { $cond: cond, then: "validity", else: "errors" };
+};
 /** Common groups: 基础信息 stays quiet; 执行策略 and 备注 only report errors. */
 const commonGroupStatus: GroupStatusFor = (key) => (key === "identity" ? undefined : "errors");
 
@@ -741,12 +760,21 @@ class Compiler {
     const emit = (key: string, title: string, fields: NodeFormField[], extra: { description?: string; collapsed?: boolean }) => {
       if (!include(key)) return;
       const children: string[] = [];
-      let hasRequiredField = false;
+      const required: GroupRequired = { unconditional: false, conditional: [] };
       for (const field of sortFields(fields)) {
         const fieldScope: Scope = field.path.startsWith("/parameters/") ? scope : { kind: "absolute", base: "", segs: [], idBase: "f" };
         const out = this.field(field, fieldScope, target);
         if (out.length === 0) hidden.add(field.name);
-        else if (field.required === true) hasRequiredField = true;
+        else if (field.required === true) required.unconditional = true;
+        else if (field.required_when) {
+          // Compiled again on purpose: the card's status needs the same
+          // condition the field's own `required` check used.
+          required.conditional.push(
+            compileCondition(field.required_when, fieldScope, (message) =>
+              this.warn(`${target.nodeType}:${fieldPointer(field, fieldScope)}: ${message}`)
+            )
+          );
+        }
         children.push(...out);
       }
       if (children.length === 0) return;
@@ -758,7 +786,7 @@ class Compiler {
         return;
       }
       const props: Record<string, unknown> = { title, collapsible: true };
-      const headerStatus = statusFor(key, hasRequiredField);
+      const headerStatus = statusFor(key, required);
       if (headerStatus) props.headerStatus = headerStatus;
       if (extra.description) props.description = extra.description;
       if (extra.collapsed) props.defaultCollapsed = true;

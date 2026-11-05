@@ -702,13 +702,45 @@ describe("headerStatus (Inspector card badges §2.2)", () => {
       fields: [{ name: "a", path: "/parameters/a", type: "string", required: true }]
     }).spec;
     expect(required.elements["g.type.default"].props).toMatchObject({ title: "参数", headerStatus: "validity" });
-    // required_when is conditional, so it does not opt the card into 有效.
+    // A conditionally required field makes the claim conditional: the card
+    // carries a $cond that composer resolves against the current values.
     const conditional = compile({
       ...waitSchema,
       groups: [],
       fields: [{ name: "a", path: "/parameters/a", type: "string", required_when: { param: "b", eq: "x" } }]
     }).spec;
-    expect(conditional.elements["g.type.default"].props).toMatchObject({ title: "参数", headerStatus: "errors" });
+    expect(conditional.elements["g.type.default"].props).toMatchObject({
+      title: "参数",
+      headerStatus: { $cond: { $state: "/parameters/b", eq: "x" }, then: "validity", else: "errors" }
+    });
+  });
+
+  it("ors several conditional required fields and lets an unconditional one win", () => {
+    const conditional = compile({
+      ...waitSchema,
+      groups: [{ key: "main", display_name: "主" }],
+      fields: [
+        { name: "a", path: "/parameters/a", type: "string", required_when: { param: "b", eq: "x" }, group: "main" },
+        { name: "c", path: "/parameters/c", type: "string", required_when: { param: "b", eq: "y" }, group: "main" }
+      ],
+      one_of: []
+    }).spec;
+    expect(conditional.elements["g.type.main"].props.headerStatus).toEqual({
+      $cond: { $or: [{ $state: "/parameters/b", eq: "x" }, { $state: "/parameters/b", eq: "y" }] },
+      then: "validity",
+      else: "errors"
+    });
+
+    const mixed = compile({
+      ...waitSchema,
+      groups: [{ key: "main", display_name: "主" }],
+      fields: [
+        { name: "a", path: "/parameters/a", type: "string", required: true, group: "main" },
+        { name: "c", path: "/parameters/c", type: "string", required_when: { param: "b", eq: "y" }, group: "main" }
+      ],
+      one_of: []
+    }).spec;
+    expect(mixed.elements["g.type.main"].props).toMatchObject({ headerStatus: "validity" });
   });
 });
 

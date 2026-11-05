@@ -258,6 +258,46 @@ describe("node form: the patch reducer (Doc C §6.1)", () => {
   });
 });
 
+// ------------------- (b2) conditional required fields and the card status
+
+describe("node form: conditional required fields claim card validity (§6.4)", () => {
+  const waitWorkflow: WorkflowDef = {
+    id: "wf-conditional-required",
+    name: "conditional",
+    nodes: [
+      { name: "start", type: "xflow.start", kind: "trigger" },
+      { name: "pause", type: "xflow.wait", parameters: { mode: "timer", duration: "5m" } }
+    ],
+    connections: { start: { main: [{ node: "pause" }] } }
+  };
+
+  /** The 等待 card of the wait node's parameters. */
+  const waitCard = (): HTMLElement => {
+    const title = within(inspector()).getByText("等待", { selector: ".xflow-composer-section-title" });
+    const section = title.closest(".xflow-composer-section");
+    if (!(section instanceof HTMLElement)) throw new Error("等待 card not found");
+    return section;
+  };
+
+  it("shows 有效 in timer mode and drops the claim in signal mode", async () => {
+    const handleChange = vi.fn();
+    const { container } = render(<XFlowEditor value={waitWorkflow} nodeTypes={nodeTypes} onChange={handleChange} />);
+    selectNode("pause");
+    await settle();
+
+    // 时长/截止时间 are required_when timer mode holds, so the card claims 有效.
+    expect(waitCard().querySelector(".xflow-composer-section-valid")?.textContent).toBe("有效");
+
+    pickOption(fieldOf(container, "f.parameters.mode:control"), "信号");
+    await settle();
+    expect(lastWorkflow(handleChange).nodes?.[1]?.parameters).toMatchObject({ mode: "signal" });
+
+    // Signal mode drops the conditional requirement; no errors means no badge.
+    expect(waitCard().querySelector(".xflow-composer-section-valid")).toBeNull();
+    expect(waitCard().querySelector(".xflow-composer-section-badge")).toBeNull();
+  });
+});
+
 // ------------------------------------------- (f) warn vs enforce blocking
 
 describe("node form: validation mode (Doc C §1 rule 3)", () => {

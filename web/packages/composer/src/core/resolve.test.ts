@@ -96,6 +96,29 @@ describe("resolve: props, bindings, slots", () => {
   });
 });
 
+describe("resolve: $cond props are evaluated before props parsing", () => {
+  const badge = zodProps(z.object({ status: z.enum(["errors", "validity"]).optional() }));
+
+  it("feeds the props schema the resolved branch, not the $cond object", () => {
+    const s = spec({
+      form: { type: "Form", children: ["badge"] },
+      badge: {
+        type: "Badge",
+        props: { status: { $cond: { $state: "/p/on", truthy: true }, then: "validity", else: "errors" } }
+      }
+    });
+    const tree = run(s, { p: { on: true } }, { schemas: { ...schemas, Badge: badge } });
+    const node = find(tree, "badge")!;
+    expect(node.error).toBeUndefined();
+    expect(node.props.status).toBe("validity");
+    expect(tree.specErrors).toEqual([]);
+  });
+
+  it("rejects the same object if it reaches the props schema unresolved", () => {
+    expect(badge.parse({ status: { $cond: true, then: "validity", else: "errors" } }).ok).toBe(false);
+  });
+});
+
 describe("resolve: visibility", () => {
   const s = spec({
     form: { type: "Form", children: ["mode", "signal", "bad"] },

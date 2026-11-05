@@ -7249,7 +7249,38 @@ exports[`A6-generated node-types fixture > xflow.wait@1 snapshot 1`] = `
         ],
         "props": {
           "collapsible": true,
-          "headerStatus": "errors",
+          "headerStatus": {
+            "$cond": {
+              "$or": [
+                {
+                  "$and": [
+                    {
+                      "$state": "/parameters/mode",
+                      "eq": "timer",
+                    },
+                    {
+                      "$state": "/parameters/until",
+                      "truthy": false,
+                    },
+                  ],
+                },
+                {
+                  "$and": [
+                    {
+                      "$state": "/parameters/mode",
+                      "eq": "timer",
+                    },
+                    {
+                      "$state": "/parameters/duration",
+                      "truthy": false,
+                    },
+                  ],
+                },
+              ],
+            },
+            "else": "errors",
+            "then": "validity",
+          },
           "title": "Wait",
         },
         "type": "FieldGroup",

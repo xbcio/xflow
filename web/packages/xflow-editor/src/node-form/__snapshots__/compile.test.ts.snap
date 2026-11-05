@@ -4481,7 +4481,38 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.wait sn
         ],
         "props": {
           "collapsible": true,
-          "headerStatus": "errors",
+          "headerStatus": {
+            "$cond": {
+              "$or": [
+                {
+                  "$and": [
+                    {
+                      "$state": "/parameters/mode",
+                      "eq": "timer",
+                    },
+                    {
+                      "$state": "/parameters/until",
+                      "truthy": false,
+                    },
+                  ],
+                },
+                {
+                  "$and": [
+                    {
+                      "$state": "/parameters/mode",
+                      "eq": "timer",
+                    },
+                    {
+                      "$state": "/parameters/duration",
+                      "truthy": false,
+                    },
+                  ],
+                },
+              ],
+            },
+            "else": "errors",
+            "then": "validity",
+          },
           "title": "参数",
         },
         "type": "FieldGroup",
