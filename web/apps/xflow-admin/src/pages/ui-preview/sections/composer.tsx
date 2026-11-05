@@ -1,4 +1,4 @@
-import { CheckIcon, DownIcon, PlusIcon, TrashIcon, WarnIcon } from '@xflow/icons';
+import { DownIcon, PlusIcon, TrashIcon, WarnIcon } from '@xflow/icons';
 import { Button, Collapse, Input } from 'antd';
 
 import { cx } from '../components/cx';
@@ -51,17 +51,12 @@ function CollapsedWithCounts() {
         classNames={{ header: 'xflow-pv-sec-head' }}
         items={composerCollapsed.map((section) => ({
           key: section.id,
-          label: <SectionLabel title={section.label} />,
+          label: <SectionLabel title={section.label} extra={section.summary} />,
           children: null,
-          // The icon has to match the message: a warning triangle over 已配置
-          // claims a problem the chip's own text denies.
-          extra: (
-            <StatusChip
-              tone={section.chip.tone}
-              icon={section.chip.tone === 'danger' ? <WarnIcon /> : <CheckIcon />}
-              label={section.chip.label}
-            />
-          ),
+          // Only a real status gets a chip; a summary is plain header text.
+          extra: section.chip ? (
+            <StatusChip tone={section.chip.tone} icon={<WarnIcon />} label={section.chip.label} />
+          ) : undefined,
         }))}
       />
       <span className="xflow-pv-hint">折叠时错误数必须仍在标题栏可见，展开后逐项显示。</span>

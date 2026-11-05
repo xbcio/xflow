@@ -1430,10 +1430,20 @@ export const composerHeaders = [
   { id: 'h2', key: 'Accept', value: 'text/html', error: '键重复，未保存' },
 ];
 
-/** A collapsed section whose error count has to stay visible (§6.4). */
-export const composerCollapsed = [
-  { id: 'advanced', label: '高级设置', chip: { tone: 'danger' as Tone, label: '2 个错误' } },
-  { id: 'retry', label: '重试策略', chip: { tone: 'neutral' as Tone, label: '已配置' } },
+/**
+ * A collapsed section whose hidden error count has to stay visible (§6.4).
+ * `chip` is for a real status only; a mere summary is plain `summary` text.
+ */
+export interface ComposerCollapsedSection {
+  id: string;
+  label: string;
+  chip?: { tone: Tone; label: string };
+  summary?: string;
+}
+
+export const composerCollapsed: ComposerCollapsedSection[] = [
+  { id: 'advanced', label: '高级设置', chip: { tone: 'danger', label: '2 个错误' } },
+  { id: 'retry', label: '重试策略', summary: '已配置' },
 ];
 
 /* ===================== 7 · 运行记录模式（§6.8） ===================== */
