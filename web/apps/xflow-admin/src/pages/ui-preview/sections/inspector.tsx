@@ -154,7 +154,7 @@ function InspPanel({
           className="xflow-pv-insp-tabs"
           defaultActiveKey={activeTab}
           // 三个 tab（§2.1，2026-11-04 用户裁定）：设置并入配置页的执行策略卡。
-          tabBarExtraContent={<IconButton small label="以 JSON 编辑" icon={<CodeIcon />} />}
+          tabBarExtraContent={<IconButton small label="以 JSON 编辑参数" icon={<CodeIcon />} />}
           classNames={{
             header: 'xflow-pv-insp-tabs-head',
             body: 'xflow-pv-insp-tabs-body',

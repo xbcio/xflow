@@ -1006,8 +1006,8 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
             size="small"
             className="xflow-pv-insp-tabs"
             defaultActiveKey="config"
-            // 「以 JSON 编辑」从参数卡头搬进 tab 栏右端（§2.1 / §6.1）。
-            tabBarExtraContent={<IconButton small label="以 JSON 编辑" icon={<CodeIcon />} />}
+            // 「以 JSON 编辑参数」从参数卡头搬进 tab 栏右端（§2.1 / §6.1）。
+            tabBarExtraContent={<IconButton small label="以 JSON 编辑参数" icon={<CodeIcon />} />}
             classNames={{
               header: 'xflow-pv-insp-tabs-head',
               body: 'xflow-pv-insp-tabs-body',

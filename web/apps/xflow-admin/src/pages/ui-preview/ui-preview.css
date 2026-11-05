@@ -1263,7 +1263,7 @@
    * AntD 仍给卡头留 pointer 光标；改回默认，卡头不再看起来能点。
    */
   .xflow-pv-sec-fixed .ant-collapse-header { cursor: default; }
-  /* tab 栏右端的「以 JSON 编辑」按钮与 tab 基线对齐（§2.1）。 */
+  /* tab 栏右端的「以 JSON 编辑参数」按钮与 tab 基线对齐（§2.1）。 */
   .xflow-pv-insp-tabs-head .ant-tabs-extra-content { display: flex; align-items: center; }
   /*
    * 卡头右端贴右（§6.4，2026-11-05）：折叠摘要和状态徽标是一组，先摘要后徽标，
