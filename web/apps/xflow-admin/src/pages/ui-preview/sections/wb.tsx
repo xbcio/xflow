@@ -285,7 +285,6 @@ function InspectorConfig() {
                   defaultValue="crm_token"
                   options={[{ value: 'crm_token', label: 'crm_token' }]}
                 />
-                <span className="xflow-pv-hint">来自工作流变量 crm_token，运行时由宿主注入</span>
               </Field>
               {/* §2.3：http 主卡里 method/url/auth/body 同屏；body 只在 json 模式出现。 */}
               <Field label="请求体" layout="top">
