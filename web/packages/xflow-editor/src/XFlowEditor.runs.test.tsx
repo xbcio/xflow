@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import * as React from "react";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { foundationTokens } from "@xflow/core";
 import type { RuntimeSnapshot, WorkflowDef, XFlowEditorCapabilities } from "@xflow/core";
 import type { XFlowPreview as RealXFlowPreview } from "@xflow/preview";
 
@@ -170,6 +171,24 @@ describe("运行记录 mode (§6.8)", () => {
     expect(screen.getByText("只读回放")).toBeTruthy();
     expect(onLoadExecutions).toHaveBeenCalledTimes(1);
     expect(onLoadExecutions.mock.calls[0][0]).toMatchObject({ page: 1 });
+  });
+
+  it("keeps the cancel confirm's buttons on the foundation step under the dense bar", async () => {
+    const running: XFlowExecution = { executionId: "exec-runs-live", status: "running", workflowId: "wf-runs", nodes: [] };
+    render(<XFlowEditor {...runsProps} onExecutionAction={vi.fn()} selectedExecution={running} />);
+
+    const top = screen.getByRole("region", { name: "Runs 编辑器" });
+    fireEvent.click(within(top).getByRole("button", { name: "取消" }));
+
+    // AntD sizes the confirm's footer buttons by hand (`size="small"`), so the
+    // header's 22px density step would pull them below the 24px foundation
+    // small control. They render beside the title, outside any content slot a
+    // ConfigProvider could wrap, so the pins live on the button props. The
+    // trigger stays on the bar's own 28px step.
+    const confirmOk = await screen.findByRole("button", { name: "取消执行" });
+    expect(confirmOk.style.height).toBe(foundationTokens.controlHeightSm);
+    expect(screen.getByRole("button", { name: "返回" }).style.height).toBe(foundationTokens.controlHeightSm);
+    expect(within(top).getByRole("button", { name: "取消" }).style.height).toBe("");
   });
 
   it("drops the editing actions from the top bar while replaying, and restores them in 编辑", () => {

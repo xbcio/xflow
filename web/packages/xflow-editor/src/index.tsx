@@ -75,6 +75,7 @@ import {
   declaredOutputPorts,
   executionOpLabel,
   formatNodeTimeout,
+  foundationTokens,
   isSupplyNode,
   isTextEntryTarget,
   missingCapabilityScopes,
@@ -896,6 +897,16 @@ function useEditorWidth(
  * shortcut and do get the suffix (see the save button's Tooltip).
  */
 const DEFAULT_SAVE_TOOLTIP = "保存工作流（⌘ / Ctrl + S）";
+
+/**
+ * Popconfirm hardcodes both footer buttons to `size="small"`
+ * (antd/es/popconfirm/PurePanel), so the header's 28px density step would pull
+ * them down to 22. They render beside the title, outside any content slot a
+ * ConfigProvider could wrap, and theming the whole Popconfirm would take the
+ * trigger button off the header step too. Pin only the buttons, to the
+ * foundation small control height.
+ */
+const CONFIRM_BUTTON_STYLE = { height: foundationTokens.controlHeightSm } as const;
 
 /**
  * Top bar fold thresholds (§6.3, 2026-11-04): measured in a real browser on the
@@ -5368,12 +5379,13 @@ export function XFlowEditor({
             op === "cancel" ? (
               <Popconfirm
                 key={op}
+                cancelButtonProps={{ style: CONFIRM_BUTTON_STYLE }}
                 cancelText="返回"
                 classNames={{ root: "xflow-editor-confirm" }}
                 description="在途节点提交后停止，已完成的结果保留。"
                 disabled={!onExecutionAction}
                 getPopupContainer={() => editorRootRef.current ?? document.body}
-                okButtonProps={{ danger: true }}
+                okButtonProps={{ danger: true, style: CONFIRM_BUTTON_STYLE }}
                 okText="取消执行"
                 onConfirm={() => void runExecutionAction(selectedExecution.executionId, "cancel")}
                 title={`取消执行 ${selectedExecution.executionId}？`}
