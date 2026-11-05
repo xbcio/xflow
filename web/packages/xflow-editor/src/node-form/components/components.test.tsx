@@ -572,7 +572,7 @@ for (const kernel of kernels) {
         });
         await m.flush();
         const field = fieldOf(m.container, "f");
-        expect(field.textContent).toContain("不在工作流凭据中：gone");
+        expect(field.textContent).toContain("不在工作流凭证中：gone");
         expect(field.querySelector('input[type="password"]')).toBeNull(); // no plaintext entry
         pickOption(field, "db");
         await m.flush();

@@ -107,8 +107,8 @@ const messages: Record<string, string> = {
   "DB operation: \"select\"/\"insert\"/\"update\"/\"delete\"/\"insert_many\"": "数据库操作：\"select\"/\"insert\"/\"update\"/\"delete\"/\"insert_many\"",
   "Table": "表",
   "Target table name": "目标表名",
-  "Credential": "凭据",
-  "Credential reference name for the DB connection": "数据库连接使用的凭据名称",
+  "Credential": "凭证",
+  "Credential reference name for the DB connection": "数据库连接使用的凭证名称",
   "Where": "查询条件",
   "Filter conditions (key-value pairs)": "过滤条件（键值对）",
   "Data": "数据",
@@ -149,7 +149,7 @@ const messages: Record<string, string> = {
   "Raw": "原始字节",
   "Body in and out as base64 bytes; every status is a result": "body 收发均为 base64 字节；任何状态码都作为结果",
   "Authentication": "认证",
-  "Credential reference name": "凭据名称",
+  "Credential reference name": "凭证名称",
   "Body": "请求体",
   "Request body, marshalled to JSON. Ignored when mode=raw": "请求体，序列化为 JSON。mode=raw 时忽略",
   "Encoding Mode": "编码模式",
@@ -224,8 +224,8 @@ const messages: Record<string, string> = {
   "Artifact File Path": "制品文件路径",
   "SDK build-time placeholder for Script.File(); rewritten to artifact_digest before the workflow runs and never reaches Execute":
     "SDK 构建期 Script.File() 的占位参数；工作流运行前改写为 artifact_digest，不会传到 Execute",
-  "Credentials": "凭据",
-  "Declared credential names injected as $credentials": "以 $credentials 注入的已声明凭据名",
+  "Credentials": "凭证",
+  "Declared credential names injected as $credentials": "以 $credentials 注入的已声明凭证名",
   "Roots": "数据根",
   "Expression roots the script reads; omit to send the whole environment": "脚本读取的表达式根；不设置则传入完整环境",
 
@@ -406,7 +406,7 @@ const messages: Record<string, string> = {
   // ---------------------------------------------------------- trigger.redis
   "Address": "地址",
   "Redis server address, host:port. Credentials are not params: attach a supply with username/password to the node.":
-    "Redis 服务地址 host:port。凭据不是参数：请给节点挂一个带 username/password 的供应。",
+    "Redis 服务地址 host:port。凭证不是参数：请给节点挂一个带 username/password 的供应。",
   "Consume a Redis Stream through a consumer group": "通过消费组消费 Redis Stream",
   "Subscribe to a Pub/Sub channel (one active replica)": "订阅 Pub/Sub 频道（只有一个活跃副本）",
   "Stream-mode knobs: db (0), consumer (defaults to the node name), start_id (\"$\", i.e. only entries added after the group is created), payload_field (unset means the whole entry is JSON-encoded into the event payload), claim_min_idle (\"1m\"), dial_timeout (\"10s\"). Durations are strings. claim_min_idle is how long an unacknowledged entry must sit before another consumer takes it over, so it must exceed the slowest workflow this stream drives or entries will be delivered twice.":

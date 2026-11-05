@@ -121,11 +121,11 @@ export const CredentialSelect: ComposerComponent<CredentialSelectProps> = {
       {...p}
       choice={{
         className: `${NODEFORM}-credential-select`,
-        expected: p.props.multiple ? "凭据名列表" : "凭据名",
+        expected: p.props.multiple ? "凭证名列表" : "凭证名",
         multiple: p.props.multiple,
         options: [...new Set(p.props.credentials ?? [])].map((name) => ({ value: name, label: name })),
-        emptyText: "工作流未声明凭据",
-        missingNote: (names) => `不在工作流凭据中：${names.join("、")}`
+        emptyText: "工作流未声明凭证",
+        missingNote: (names) => `不在工作流凭证中：${names.join("、")}`
       }}
     />
   )

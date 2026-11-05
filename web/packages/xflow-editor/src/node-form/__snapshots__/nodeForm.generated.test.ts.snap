@@ -1611,7 +1611,7 @@ exports[`A6-generated node-types fixture > xflow.http@1 snapshot 1`] = `
       "f.parameters.headers": {
         "checks": [
           {
-            "message": "值看起来像凭据，请改用凭据引用",
+            "message": "值看起来像凭证，请改用凭证引用",
             "severity": "warning",
             "type": "secretLike",
           },
@@ -1771,7 +1771,7 @@ exports[`A6-generated node-types fixture > xflow.http@1 snapshot 1`] = `
       "f.parameters.query": {
         "checks": [
           {
-            "message": "值看起来像凭据，请改用凭据引用",
+            "message": "值看起来像凭证，请改用凭证引用",
             "severity": "warning",
             "type": "secretLike",
           },
@@ -2963,7 +2963,7 @@ exports[`A6-generated node-types fixture > xflow.subworkflow@1 snapshot 1`] = `
       "f.parameters.input:control": {
         "checks": [
           {
-            "message": "值看起来像凭据，请改用凭据引用",
+            "message": "值看起来像凭证，请改用凭证引用",
             "severity": "warning",
             "type": "secretLike",
           },
@@ -3001,7 +3001,7 @@ exports[`A6-generated node-types fixture > xflow.subworkflow@1 snapshot 1`] = `
       "f.parameters.output:control": {
         "checks": [
           {
-            "message": "值看起来像凭据，请改用凭据引用",
+            "message": "值看起来像凭证，请改用凭证引用",
             "severity": "warning",
             "type": "secretLike",
           },
@@ -4004,7 +4004,7 @@ exports[`A6-generated node-types fixture > xflow.transform.rename@1 snapshot 1`]
             "type": "required",
           },
           {
-            "message": "值看起来像凭据，请改用凭据引用",
+            "message": "值看起来像凭证，请改用凭证引用",
             "severity": "warning",
             "type": "secretLike",
           },
@@ -4094,7 +4094,7 @@ exports[`A6-generated node-types fixture > xflow.transform.set@1 snapshot 1`] = 
       "f.parameters.expressions:control": {
         "checks": [
           {
-            "message": "值看起来像凭据，请改用凭据引用",
+            "message": "值看起来像凭证，请改用凭证引用",
             "severity": "warning",
             "type": "secretLike",
           },

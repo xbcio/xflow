@@ -121,7 +121,7 @@ const MSG = {
   requiredWhen: "当前配置下必填",
   notEvaluated: "此参数不会被求值，其中的 ${{ }} 会按原文使用",
   noTemplateInCode: "代码中的 ${{ }} 不会被渲染",
-  secretLike: "值看起来像凭据，请改用凭据引用",
+  secretLike: "值看起来像凭证，请改用凭证引用",
   unregistered: "该节点类型未在 server 注册，参数按 JSON 编辑",
   template: "该节点引用节点模板：编译时先展开 node_templates，表单只显示节点自身覆盖的参数"
 } as const;

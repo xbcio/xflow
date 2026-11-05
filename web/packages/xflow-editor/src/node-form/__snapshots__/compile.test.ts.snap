@@ -353,7 +353,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > commonSchema 
       "f.runner_selector.match_labels:control": {
         "checks": [
           {
-            "message": "值看起来像凭据，请改用凭据引用",
+            "message": "值看起来像凭证，请改用凭证引用",
             "severity": "warning",
             "type": "secretLike",
           },
@@ -995,7 +995,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
       "f.parameters.headers": {
         "checks": [
           {
-            "message": "值看起来像凭据，请改用凭据引用",
+            "message": "值看起来像凭证，请改用凭证引用",
             "severity": "warning",
             "type": "secretLike",
           },
@@ -1154,7 +1154,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
       "f.parameters.query": {
         "checks": [
           {
-            "message": "值看起来像凭据，请改用凭据引用",
+            "message": "值看起来像凭证，请改用凭证引用",
             "severity": "warning",
             "type": "secretLike",
           },
