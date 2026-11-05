@@ -5749,7 +5749,7 @@ export function XFlowEditor({
             <Button
               aria-label="校验"
               className="xflow-editor-validate-button"
-              icon={<ShieldIcon className="xflow-editor-toolbar-icon" />}
+              icon={<ShieldIcon />}
               type="text"
               onClick={validateCurrentWorkflow}
             >
@@ -5839,7 +5839,7 @@ export function XFlowEditor({
                   aria-label="发布"
                   className="xflow-editor-publish-button"
                   disabled={!onPublish}
-                  icon={<UploadIcon className="xflow-editor-toolbar-icon" />}
+                  icon={<UploadIcon />}
                   onClick={openPublishDialog}
                 >
                   发布

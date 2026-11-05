@@ -722,10 +722,14 @@ describe("xflow.editor browser-measured baseline fixes (E6)", () => {
     return match?.[1] ?? "";
   };
 
-  it("keeps the 32px top-bar buttons at the 6px radius step, with a 6px gap in 保存", () => {
+  it("keeps the 32px top-bar buttons at the 6px radius step with AntD's label gap", () => {
     expect(rule(".xflow-editor-icon-button")).toMatch(/border-radius:\s*var\(--xflow-radius-sm\)\s*;/);
     expect(rule(".xflow-editor .xflow-editor-theme-trigger")).toMatch(/border-radius:\s*var\(--xflow-radius-sm\)\s*;/);
-    expect(rule(".xflow-editor-save-button")).toMatch(/gap:\s*var\(--xflow-space-1-5\)\s*;/);
+    // The baseline's 校验 / 保存 / 发布 keep AntD's 8px icon gap and its 1em
+    // glyph; a 6px gap + 16px glyph had put the right cluster 1-2px wide.
+    for (const hook of ["validate", "save", "publish"]) {
+      expect(css, hook).not.toMatch(new RegExp(`\\.xflow-editor-${hook}-button\\s*\\{[^}]*gap\\s*:`));
+    }
   });
 
   it("makes the right column 320px wide (D8)", () => {

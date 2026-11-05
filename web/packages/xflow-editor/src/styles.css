@@ -235,16 +235,11 @@
   color: var(--xflow-text);
 }
 
-/* The baseline's `.btn` (12px side padding, 6px icon gap, 16px glyph); AntD's
- * middle size pads 15px and sizes the glyph with the 13px label. */
-.xflow-editor-toolbar-icon {
-  font-size: var(--xflow-font-xl);
-}
-
+/* The baseline's `.btn` (12px side padding); the icon gap and glyph size stay
+ * AntD's own, so the label and the 1em glyph track the 13px control type. */
 .xflow-editor-validate-button,
 .xflow-editor-save-button,
 .xflow-editor-publish-button {
-  gap: var(--xflow-space-1-5);
   padding-inline: var(--xflow-space-3);
 }
 
@@ -263,10 +258,6 @@
 .xflow-editor-save-button:hover,
 .xflow-editor-publish-button:hover {
   color: var(--xflow-text);
-}
-
-.xflow-editor-save-button {
-  gap: var(--xflow-space-1-5);
 }
 
 .xflow-editor-save-button__icon {
@@ -3482,7 +3473,6 @@ button.xflow-editor-overview__run:hover {
 
 .xflow-editor .xflow-editor-mode-segmented__label {
   font-weight: var(--xflow-font-weight-medium);
-  padding-inline: var(--xflow-space-3);
 }
 
 /* Ant Design wraps a segmented glyph in its own span. Under Tailwind preflight
