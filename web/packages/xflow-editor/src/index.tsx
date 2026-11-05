@@ -5643,9 +5643,11 @@ export function XFlowEditor({
                 </Tooltip>
                 {/* Baseline truth: 测试此节点 and 运行 sit in their own
                     segments, so the run key reads apart from the partial run. */}
-                <Divider className="xflow-editor-sep" orientation="vertical" />
               </>
             ) : null}
+            {/* The divider before 运行 belongs to the expanded bar, not to
+                onRunNode: without 测试此节点 the four tools still need it. */}
+            <Divider className="xflow-editor-sep" orientation="vertical" />
               </>
             ) : null}
             <Tooltip classNames={editorTooltipClassNames} title={onRun ? "运行工作流（⌘ / Ctrl + Enter）" : hostCapabilityCopy.run}>

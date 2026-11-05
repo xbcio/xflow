@@ -125,6 +125,18 @@ describe("top bar canvas tools (§6.3, 2026-11-04)", () => {
     expect(screen.queryByRole("button", { name: "运行选项" })).toBeNull();
   });
 
+  it("keeps the separator before 运行 whether or not 测试此节点 is present", () => {
+    const view = render(
+      <XFlowEditor value={workflow} onRunNode={vi.fn(async () => ({ status: "success" }) as RuntimeSnapshot)} />
+    );
+    expect(within(canvasTools()).getAllByRole("separator")).toHaveLength(3);
+
+    view.unmount();
+    render(<XFlowEditor value={workflow} />);
+    // 1–2 │ 3–6 │ 8: the run key still reads as its own segment.
+    expect(within(canvasTools()).getAllByRole("separator")).toHaveLength(2);
+  });
+
   it("gives 发布 the upload glyph", () => {
     render(<XFlowEditor value={workflow} onPublish={async (next) => next} />);
 
@@ -204,6 +216,8 @@ describe("top bar folding (§6.3)", () => {
     setWidth(1000);
     expect(toolbar.getAttribute("data-fold")).toBe("3");
     expect(toolNames()).toEqual(["撤销", "重做", "运行工作流"]);
+    // 1 · 2 · 8: no groups left to separate, so no rule is drawn.
+    expect(within(canvasTools()).queryAllByRole("separator")).toHaveLength(0);
     menu = await openMenu();
     expect(menuLabels(menu)).toEqual([
       "选择",
