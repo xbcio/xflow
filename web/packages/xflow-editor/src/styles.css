@@ -3186,7 +3186,6 @@ button.xflow-editor-overview__run:hover {
   .xflow-editor-toolbar {
     align-items: center;
     flex: 0 0 var(--xflow-editor-toolbar-height);
-    gap: var(--xflow-space-2);
     padding: 0 var(--xflow-space-3);
   }
 
@@ -3336,7 +3335,6 @@ button.xflow-editor-overview__run:hover {
   align-items: center;
   flex: 0 0 var(--xflow-editor-toolbar-height);
   flex-wrap: nowrap;
-  gap: var(--xflow-space-2);
   min-height: 52px;
   padding: 0 var(--xflow-space-3);
 }

@@ -187,6 +187,23 @@ describe("xflow.editor top bar (§6.3)", () => {
     expect(css).not.toContain(".xflow-editor-toolbar-actions");
   });
 
+  it("keeps the top bar's 12px column gap at compact width", () => {
+    // The baseline bar keeps one gutter at every width; only the height and
+    // padding step down. A compact override here narrows the two gutters that
+    // sit between the side clusters and the centred canvas tools, which pulls
+    // the tools off the bar's centre line.
+    const compact = css.match(/@container xflow-editor \(width <= 1280px\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
+    const toolbarRule = compact.match(/\.xflow-editor-toolbar\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(toolbarRule).not.toBe("");
+    expect(toolbarRule).not.toMatch(/(?:^|;|\n)\s*gap\s*:/);
+    // The compact layout's own bar rule applies at the same breakpoint.
+    const layoutRule =
+      css.match(/\.xflow-editor\[data-layout="c"\] \.xflow-editor-toolbar\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(layoutRule).not.toBe("");
+    expect(layoutRule).not.toMatch(/(?:^|;|\n)\s*gap\s*:/);
+    expect(css).toMatch(/\.xflow-editor-toolbar\s*\{[^}]*gap:\s*var\(--xflow-space-3\)\s*;/);
+  });
+
   it("keeps top-bar icon buttons secondary until hover and save/publish at weight 500", () => {
     // The disabled guard is what lets AntD paint disabled buttons: this sheet
     // is in a later cascade layer, so an unguarded colour would win there too.
