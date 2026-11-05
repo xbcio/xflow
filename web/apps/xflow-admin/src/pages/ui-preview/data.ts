@@ -349,7 +349,7 @@ export const wbNodes: PreviewNode[] = [
     y: 0,
     status: 'success',
     handles: 'in',
-    summary: [{ label: '条件', value: { kind: 'expr', text: '$json.tier == "vip"' } }],
+    summary: [{ label: '条件', value: { kind: 'expr', text: '$input.tier == "vip"' } }],
     ports: ['true', 'false'],
   },
   {
@@ -612,7 +612,7 @@ export const wbPendingChanges: PendingChange[] = [
     kind: 'mod',
     nodeId: 'is_vip',
     field: '条件表达式',
-    before: '$json.tier == "gold"',
+    before: '$input.tier == "gold"',
     afterSource: { kind: 'nodeSummary', nodeId: 'is_vip', row: '条件' },
     visibleIn: {
       section: 'wb',
@@ -1250,7 +1250,7 @@ export const cardGallery: CardSample[] = [
     { label: '主键', value: { kind: 'mono', text: 'customer_id' } },
   ], { id: 'archive_customer', label: '归档客户' }),
   card('if', 'If：条件表达式', 'xflow.if', 'control', 'branch', [
-    { label: '条件', value: { kind: 'expr', text: '$json.tier == "vip"' } },
+    { label: '条件', value: { kind: 'expr', text: '$input.tier == "vip"' } },
   ], { id: 'is_vip', label: '是否 VIP', ports: ['true', 'false'] }),
   card('switch', 'Switch：规则数 + 依据字段，规则详情在端口', 'xflow.switch', 'control', 'branch', [
     { label: '规则', value: { kind: 'plain', text: '3 条 + 默认' } },
@@ -1394,7 +1394,7 @@ export const composerCards: ComposerCard[] = [
     id: 'expr',
     caption: 'Expression / 参数 JSON',
     fields: [
-      { label: '条件', value: '{{ $json.tier }}', control: 'expr', required: true, layout: 'top' },
+      { label: '条件', value: '$input.tier', control: 'expr', required: true, layout: 'top' },
       {
         label: '参数（JSON）',
         /* Three lines in a `rows={3}` box: the fixture must not scroll, or the

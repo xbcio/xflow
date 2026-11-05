@@ -2443,7 +2443,7 @@
   .xflow-pv-field-head .xflow-pv-field-label { margin-bottom: 0; }
   .xflow-pv-field-head + .xflow-pv-diff { margin-top: var(--xflow-space-1); }
   /* 「改前 → 改后」：箭头两侧的值都是 mono，左边的淡一档。值比对话框宽时在里面折行，
-     不让「$json.tier == "vip"」这种长 token 撑破面板（C1 / C4）。 */
+     不让「$input.tier == "vip"」这种长 token 撑破面板（C1 / C4）。 */
   .xflow-pv-diff-values {
     display: flex;
     align-items: center;

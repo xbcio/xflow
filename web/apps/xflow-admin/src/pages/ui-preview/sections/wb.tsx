@@ -271,13 +271,13 @@ function InspectorConfig() {
                 <div className="flex gap-1.5">
                   <div className="xflow-pv-ctl xflow-pv-ctl--focus xflow-pv-ctl--expr">
                     <span className="xflow-pv-ctl-text">https://crm.example.test/api/customers</span>
-                    <span className="xflow-pv-var">{'{{ $json.id }}'}</span>
+                    <span className="xflow-pv-var">{'{{ $input.id }}'}</span>
                   </div>
                   <Button className="xflow-pv-fx" aria-pressed data-active="true">
                     fx
                   </Button>
                 </div>
-                <span className="xflow-pv-hint">可用变量：$json · $node · $vars</span>
+                <span className="xflow-pv-hint">可用变量：$input · $nodes · $vars · $params</span>
               </Field>
               <Field label="认证">
                 <Select

@@ -79,7 +79,7 @@ export function FoundationSection({ appearance }: { appearance: Appearance }) {
         </div>
         <div className="xflow-pv-token-row">
           <span className="xflow-pv-mono" style={{ fontFamily: `var(${cssVarName('fontMono')})` }}>
-            {'JetBrains Mono · xflow.http · {{ $json.id }}'}
+            {'JetBrains Mono · xflow.http · {{ $input.id }}'}
           </span>
           <code className="xflow-pv-token-value">
             {cssVarName('fontMono')} · {foundationTokens.fontMono}
