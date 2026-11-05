@@ -213,9 +213,13 @@ export function SectionCard({
         <span className="xflow-editor-section-card__title">
           {icon}
           <strong>{title}</strong>
-          {meta !== undefined ? <em>{meta}</em> : null}
         </span>
-        {actions ? <span className="xflow-editor-section-card__actions">{actions}</span> : null}
+        {meta !== undefined || actions ? (
+          <span className="xflow-editor-section-card__trailing">
+            {meta !== undefined ? <span className="xflow-editor-section-card__meta">{meta}</span> : null}
+            {actions ? <span className="xflow-editor-section-card__actions">{actions}</span> : null}
+          </span>
+        ) : null}
       </header>
       <div className="xflow-editor-section-card__body">{children}</div>
     </div>

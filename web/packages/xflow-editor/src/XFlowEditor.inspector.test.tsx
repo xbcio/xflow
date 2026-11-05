@@ -874,7 +874,7 @@ describe("connections tab groups (C02)", () => {
   const connectionGroup = (name: string): HTMLElement =>
     within(inspector()).getByRole("group", { name });
   const groupCount = (name: string): string | undefined =>
-    connectionGroup(name).querySelector(".xflow-editor-section-card__title em")?.textContent?.trim() ?? undefined;
+    connectionGroup(name).querySelector(".xflow-editor-section-card__meta")?.textContent?.trim() ?? undefined;
   const withNode = (node: WorkflowNode): WorkflowDef => ({
     ...workflow,
     nodes: [...(workflow.nodes ?? []), node]

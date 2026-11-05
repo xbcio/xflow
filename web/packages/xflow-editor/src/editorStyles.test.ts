@@ -1004,11 +1004,15 @@ describe("round-2 visual audit fixes", () => {
     // D9 deletes the sunken-well overrides so the base field + 1px frame shows:
     // the count chip, the run code block and the connection wells may not
     // re-declare an inspector-scoped background of their own.
-    expect(css).not.toMatch(/\.xflow-editor \.xflow-editor-inspector \.xflow-editor-section-card__title em\s*\{/);
+    expect(css).not.toMatch(/\.xflow-editor \.xflow-editor-inspector \.xflow-editor-section-card__meta\s*\{/);
     expect(css).not.toMatch(/\.xflow-editor \.xflow-editor-inspector \.xflow-editor-run-code\s*\{/);
     expect(css).not.toMatch(
       /\.xflow-editor \.xflow-editor-connection-actions,\s*\.xflow-editor \.xflow-editor-connection-row\s*\{/
     );
+    // The meta is a plain text summary (§6.4, 2026-11-06): no chip shell.
+    const meta = rule(".xflow-editor-section-card__meta");
+    expect(meta).not.toMatch(/border/);
+    expect(meta).not.toMatch(/background/);
     // The overview's stat tiles sat on the app ground as frameless white tiles;
     // on the panel ground they take the same shell or vanish into it.
     const stat = rule(".xflow-editor-overview__stat");

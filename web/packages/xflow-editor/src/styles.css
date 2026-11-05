@@ -4130,15 +4130,26 @@ button.xflow-editor-overview__run:hover {
   font-weight: var(--xflow-font-weight-semibold);
 }
 
-.xflow-editor-section-card__title em {
-  background: var(--xflow-field);
-  border: 1px solid var(--xflow-border);
-  border-radius: var(--xflow-radius-full);
+/* The header's right end: the trailing summary, then the actions, 8px apart and
+ * pinned right as one group (§6.4, 2026-11-06). */
+.xflow-editor-section-card__trailing {
+  align-items: center;
+  display: inline-flex;
+  gap: var(--xflow-space-2);
+  min-width: 0;
+}
+
+/* A plain-text summary, never a chip: chip is reserved for status (§6.4). */
+.xflow-editor-section-card__meta {
   color: var(--xflow-text-tertiary);
-  font-size: var(--xflow-font-xs);
-  font-style: normal;
-  line-height: 14px;
-  padding: 0 calc(var(--xflow-space-1-5) - 1px);
+  flex: 0 1 auto;
+  font-size: var(--xflow-font-sm);
+  font-weight: var(--xflow-font-weight-regular);
+  line-height: var(--xflow-line-height-sm);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .xflow-editor-section-card__actions {
