@@ -956,21 +956,21 @@ describe("XFlowEditor", () => {
     expect(toolbar.querySelector(".xflow-editor-spec-chip")?.textContent).toBe("spec 1.0");
     expect(within(tools).getByRole("button", { name: "适应视图" })).toBeTruthy();
 
-    // Tier 1 (fits 1327): 校验 / 主题 move into ⋯; the middle group stays whole.
+    // Tier 1 (fits 1150): 校验 / 主题 move into ⋯; the middle group stays whole.
     act(() => container.setWidth(1280));
     expect(toolbar.getAttribute("data-fold")).toBe("1");
     expect(within(toolbar).queryByRole("button", { name: "校验" })).toBeNull();
     expect(within(toolbar).queryByRole("button", { name: "主题设置" })).toBeNull();
     expect(within(tools).getByRole("button", { name: "适应视图" })).toBeTruthy();
 
-    // Tier 2 (fits 1083): the subtitle and the spec chip give way.
-    act(() => container.setWidth(1090));
+    // Tier 2 (fits 1129): the subtitle and the spec chip give way.
+    act(() => container.setWidth(1140));
     expect(toolbar.getAttribute("data-fold")).toBe("2");
     expect(toolbar.querySelector(".xflow-editor-subtitle")).toBeNull();
     expect(toolbar.querySelector(".xflow-editor-spec-chip")).toBeNull();
     expect(within(tools).getByRole("button", { name: "适应视图" })).toBeTruthy();
 
-    // Tier 3 (fits 924): the middle group keeps 撤销 / 重做 / 运行 only.
+    // Tier 3 (fits 970): the middle group keeps 撤销 / 重做 / 运行 only.
     act(() => container.setWidth(1000));
     expect(toolbar.getAttribute("data-fold")).toBe("3");
     expect(within(tools).getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual([

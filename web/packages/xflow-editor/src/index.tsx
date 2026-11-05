@@ -909,41 +909,53 @@ const DEFAULT_SAVE_TOOLTIP = "保存工作流（⌘ / Ctrl + S）";
 const CONFIRM_BUTTON_STYLE = { height: foundationTokens.controlHeightSm } as const;
 
 /**
- * Top bar fold thresholds (§6.3, 2026-11-04): measured in a real browser on the
+ * Top bar fold thresholds (§6.3, re-measured 2026-11-05 after the 28px density
+ * step and the compact column-gap fix): measured in a real browser on the
  * header itself, not copied from the baseline. The bar is
- * `minmax(0, 1fr) auto minmax(0, 1fr)`, so both side tracks are equal and the
- * right cluster's natural width sets both. Widths below are border-box (the
- * unit `useEditorWidth(toolbarRef, "border")` reports). Per tier:
+ * `minmax(0, 1fr) auto minmax(0, 1fr)`, so both side tracks are equal and
+ * whichever cluster is wider sets both. Widths below are border-box (the unit
+ * `useEditorWidth(toolbarRef, "border")` reports). Per tier:
  *
- *   header = 24px padding + two 8px gaps + tools + 2 × side
- *          = 40 + tools + 2 × max(right natural, left floor)
+ *   header = 24px padding + two 12px column gaps + tools + 2 × max(right, left)
+ *          = 48 + tools + 2 × max(right natural, left width)
  *
- * Measured on the real 52px bar (headless Chromium, full left cluster):
- *   tools 298 (8 keys, same as the ui-preview baseline) / 262 (7, no onRunNode)
+ * The column gap is the same 12px at every width (§6.3): the compact
+ * `@container` rule no longer rewrites it, so 48 is a constant, not a stair.
+ *
+ * Left is the logo plus the title row's natural width; the title ellipsizes and
+ * the subtitle is not counted, so these are floors. Measured on the real 52px
+ * bar (headless Chromium, name 客户同步, dirty after one node drag so the
+ * version and draft chips are both present):
+ *   tools 298 (8 keys, same as the ui-preview baseline) / 265 (7, no onRunNode)
  *         / 139 (3 at tier 3+)
- *   right 494 (tier 0) / 372 (tier 1, 校验 + 主题 folded into ⋯)
- *         259 (tier 4, mode switch icon-only, ⌘S keycap hidden)
- *   left natural 319 (tier 0) / 201 (tier 2); the title ellipsizes, so 201 is
- *   the removable floor here — below the right cluster in every tier, which
- *   therefore decides all thresholds.
+ *   right 512.36 (tier 0) / 391.36 (tiers 1–3, 校验 + 主题 folded into ⋯)
+ *         / 276 (tier 4, mode switch icon-only, ⌘S keycap hidden). The cluster's
+ *         screen-reader span is absolutely positioned and not counted.
+ *   left 394.08 (tiers 0–1, spec chip present) / 325.67 (tier 2+). The left
+ *   cluster is 2.72px wider than the right one in tier 1, so it decides that
+ *   threshold; the right cluster decides the rest.
  *
- *   tier 0 fits: 40 + 298 + 2 × 494.36 = 1326.72 → 1327
- *   tier 1 fits: 40 + 298 + 2 × 372.36 = 1082.72 → 1083
- *   tier 2 hides the subtitle and the spec chip for title room. It changes
- *   neither the right cluster nor the tools, so it cannot widen a side track;
- *   1100 is the last collision-free 50px band above the 1083 fit boundary (the
- *   same rounding the baseline used: its 1152 fit became 1200).
- *   tier 3 folds the canvas extras into ⋯; it fits down to
- *   40 + 139 + 2 × 372.36 = 923.72 → 924, so that is where tier 4 starts.
+ *   tier 0 fits: 48 + 298 + 2 × 512.36 = 1370.72 → 1371
+ *   tier 1 fits: 48 + 298 + 2 × 394.08 = 1134.16 → 1150 (rounded up to the next
+ *   50px band, as the baseline's TOP_FOLD_2 is). The band that rounding gives
+ *   back is the start of tier 2.
+ *   tier 2 hides the subtitle and the spec chip; neither the right cluster nor
+ *   the tools change, so 48 + 298 + 2 × 391.36 = 1128.72 → 1129.
+ *   tier 3 folds the canvas extras into ⋯:
+ *   48 + 139 + 2 × 391.36 = 969.72 → 970.
  *   tier 4 makes the mode switch icon-only (names move to tooltips) and drops
- *   the ⌘S keycap: 40 + 139 + 2 × 259 = 697 is the bottom of the supported
- *   range; below it the right cluster itself is squeezed, and there is no
- *   further fold step.
+ *   the ⌘S keycap. The left cluster is again the wider one, so
+ *   48 + 139 + 2 × 325.67 = 838.34 → 839 is the bottom of the supported range;
+ *   below it the title chips themselves are squeezed, and there is no further
+ *   fold step. The draft chip carries the change count, so the left width and
+ *   this bottom follow its copy: the fixture's 「未保存 1 处」 gives 839, the
+ *   baseline's 「未保存 4 处」 gives 843. The four thresholds above are the same
+ *   either way.
  *
  * 1280 (the §6.3 hard case) sits in tier 1: all 8 keys stay on the bar,
  * centred, with 校验 / 主题 in ⋯. 1600 stays at tier 0.
  */
-const TOOLBAR_FOLD_STEPS = [1327, 1100, 1083, 924] as const;
+const TOOLBAR_FOLD_STEPS = [1371, 1150, 1129, 970] as const;
 
 /** 0 while unmeasured, so the first paint shows everything the bar can hold. */
 function toolbarFoldLevel(width: number): number {

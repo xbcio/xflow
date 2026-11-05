@@ -41,7 +41,7 @@ class MockResizeObserver {
   }
 }
 
-/** Fold tiers (§6.3): 1327 / 1100 / 1083 / 924, measured on the real bar. */
+/** Fold tiers (§6.3): 1371 / 1150 / 1129 / 970, measured on the real bar. */
 function setWidth(width: number): void {
   act(() => {
     for (const observer of [...observed]) {
@@ -196,7 +196,7 @@ describe("top bar folding (§6.3)", () => {
     expect(menu.queryByRole("menuitem", { name: "撤销" })).toBeNull();
     await closeMenu();
 
-    // Tier 1 (fits 1327): 校验 and the theme radio group join ⋯. 1280 is the
+    // Tier 1 (fits 1150): 校验 and the theme radio group join ⋯. 1280 is the
     // §6.3 hard case, so the tier is exercised at its real width.
     setWidth(1280);
     expect(toolbar.getAttribute("data-fold")).toBe("1");
@@ -213,15 +213,15 @@ describe("top bar folding (§6.3)", () => {
     ]);
     await closeMenu();
 
-    // Tier 2 (fits 1083): the subtitle and the spec chip give way. The menu is
+    // Tier 2 (fits 1129): the subtitle and the spec chip give way. The menu is
     // the same; nothing else folds yet.
-    setWidth(1090);
+    setWidth(1140);
     expect(toolbar.getAttribute("data-fold")).toBe("2");
     expect(toolbar.querySelector(".xflow-editor-subtitle")).toBeNull();
     expect(toolbar.querySelector(".xflow-editor-spec-chip")).toBeNull();
     expect(toolNames()).toEqual(["撤销", "重做", "选择", "连线", "添加节点", "适应视图", "运行工作流"]);
 
-    // Tier 3 (fits 924): the canvas extras join ⋯; 撤销 / 重做 never do.
+    // Tier 3 (fits 970): the canvas extras join ⋯; 撤销 / 重做 never do.
     setWidth(1000);
     expect(toolbar.getAttribute("data-fold")).toBe("3");
     expect(toolNames()).toEqual(["撤销", "重做", "运行工作流"]);
@@ -266,7 +266,7 @@ describe("top bar folding (§6.3)", () => {
     expect(onBar.getAttribute("data-fold")).toBe("1");
     expect(toolNames()).toHaveLength(8);
     // Tier 2 folds only the subtitle / spec chip, so the tools stay whole.
-    setWidth(1090);
+    setWidth(1140);
     expect(onBar.getAttribute("data-fold")).toBe("2");
     expect(toolNames()).toHaveLength(8);
     expect(within(canvasTools()).getByRole("button", { name: "适应视图" })).toBeTruthy();
