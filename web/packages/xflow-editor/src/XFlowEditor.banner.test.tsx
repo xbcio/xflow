@@ -309,7 +309,11 @@ describe("save conflict banner", () => {
 
 describe("read-only banner", () => {
   const reason = "你在当前命名空间只有查看权限。可以查看定义与运行，不能保存或发布。";
-  const handlers = { onSave: vi.fn(async (next: WorkflowDef) => next), onRun: vi.fn(async () => ({ status: "success" as const })) };
+  const handlers = {
+    onSave: vi.fn(async (next: WorkflowDef) => next),
+    onRun: vi.fn(async () => ({ status: "success" as const })),
+    onPublish: vi.fn(async (next: WorkflowDef) => next)
+  };
 
   it("is neutral, a status, and carries the host's reason", () => {
     render(<XFlowEditor value={workflow} readOnlyReason={reason} {...handlers} />);
@@ -436,7 +440,8 @@ describe("archived-view banner", () => {
 describe("capability-gated read-only", () => {
   const handlers = {
     onSave: vi.fn(async (next: WorkflowDef) => next),
-    onRun: vi.fn(async () => ({ status: "success" as const }))
+    onRun: vi.fn(async () => ({ status: "success" as const })),
+    onPublish: vi.fn(async (next: WorkflowDef) => next)
   };
   const all = { workflow: true, execution: true, executionControl: true, executionRerun: true };
 

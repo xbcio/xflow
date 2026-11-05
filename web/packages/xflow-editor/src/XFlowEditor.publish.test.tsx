@@ -382,10 +382,10 @@ describe("VersionHistory (§6.10)", () => {
 });
 
 describe("XFlowEditor publish wiring (§6.10)", () => {
-  it("keeps 发布 disabled without onPublish, and hides it for a credential without workflow", () => {
+  it("hides 发布 without onPublish, and for a credential without workflow", () => {
     const { unmount } = render(<XFlowEditor capabilities={allCapabilities} value={workflow} />);
-    const button = screen.getByRole("button", { name: "发布" }) as HTMLButtonElement;
-    expect(button.disabled).toBe(true);
+    expect(screen.queryByRole("button", { name: "发布" })).toBeNull();
+    expect(document.querySelector(".xflow-editor-toolbar-right")?.textContent).toContain("当前环境不支持发布");
     unmount();
 
     render(

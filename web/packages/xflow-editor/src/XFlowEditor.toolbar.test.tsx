@@ -72,7 +72,8 @@ const toolNames = () => within(canvasTools()).getAllByRole("button").map((button
 describe("top bar canvas tools (§6.3, 2026-11-04)", () => {
   it("draws the eight tools in order and makes 选择 / 连线 mutually exclusive", () => {
     const onRunNode = vi.fn(async () => ({ status: "success" }) as RuntimeSnapshot);
-    render(<XFlowEditor value={workflow} onRunNode={onRunNode} />);
+    const onRun = vi.fn(async () => ({ status: "success" }) as RuntimeSnapshot);
+    render(<XFlowEditor value={workflow} onRunNode={onRunNode} onRun={onRun} />);
 
     expect(toolNames()).toEqual([
       "撤销",
@@ -107,9 +108,37 @@ describe("top bar canvas tools (§6.3, 2026-11-04)", () => {
   });
 
   it("drops 测试此节点 when the host supplies no onRunNode", () => {
-    render(<XFlowEditor value={workflow} />);
+    render(<XFlowEditor value={workflow} onRun={vi.fn(async () => ({ status: "success" }) as RuntimeSnapshot)} />);
 
     expect(toolNames()).toEqual(["撤销", "重做", "选择", "连线", "添加节点", "适应视图", "运行工作流"]);
+  });
+
+  it("draws no run key, and no trailing rule, when the host supplies no onRun", () => {
+    render(<XFlowEditor value={workflow} />);
+
+    expect(toolNames()).toEqual(["撤销", "重做", "选择", "连线", "添加节点", "适应视图"]);
+    // 1–2 │ 3–6: the tools end at 适应视图, so only the one inner rule remains.
+    expect(within(canvasTools()).getAllByRole("separator")).toHaveLength(1);
+  });
+
+  it("renders only the actions the host wired, and no orphan rules", () => {
+    const view = render(<XFlowEditor value={workflow} onSave={vi.fn(async (next: WorkflowDef) => next)} />);
+    const toolbar = screen.getByRole("toolbar", { name: "编辑器工具栏" });
+
+    expect(within(canvasTools()).queryByRole("button", { name: "运行工作流" })).toBeNull();
+    expect(within(canvasTools()).getAllByRole("separator")).toHaveLength(1);
+    expect(within(toolbar).getByRole("button", { name: "保存" })).toBeTruthy();
+    expect(within(toolbar).queryByRole("button", { name: "发布" })).toBeNull();
+    // The save group's opening rule survives for the one action it opens.
+    expect(document.querySelectorAll(".xflow-editor-toolbar-right .xflow-editor-sep")).toHaveLength(1);
+
+    view.unmount();
+    // Neither 保存 nor 发布: the group does not exist, so neither does its rule.
+    render(<XFlowEditor value={workflow} />);
+    expect(document.querySelectorAll(".xflow-editor-toolbar-right .xflow-editor-sep")).toHaveLength(0);
+    const notices = document.querySelector(".xflow-editor-toolbar-right")?.textContent ?? "";
+    expect(notices).toContain("当前环境不支持保存");
+    expect(notices).toContain("当前环境不支持发布");
   });
 
   it("keeps 运行 as the bar's only primary button and drops the 运行选项 split", () => {
@@ -135,13 +164,18 @@ describe("top bar canvas tools (§6.3, 2026-11-04)", () => {
   });
 
   it("keeps the separator before 运行 whether or not 测试此节点 is present", () => {
+    const onRun = vi.fn(async () => ({ status: "success" }) as RuntimeSnapshot);
     const view = render(
-      <XFlowEditor value={workflow} onRunNode={vi.fn(async () => ({ status: "success" }) as RuntimeSnapshot)} />
+      <XFlowEditor
+        value={workflow}
+        onRun={onRun}
+        onRunNode={vi.fn(async () => ({ status: "success" }) as RuntimeSnapshot)}
+      />
     );
     expect(within(canvasTools()).getAllByRole("separator")).toHaveLength(3);
 
     view.unmount();
-    render(<XFlowEditor value={workflow} />);
+    render(<XFlowEditor value={workflow} onRun={onRun} />);
     // 1–2 │ 3–6 │ 8: the run key still reads as its own segment.
     expect(within(canvasTools()).getAllByRole("separator")).toHaveLength(2);
   });
@@ -181,7 +215,7 @@ describe("top bar folding (§6.3)", () => {
     menu.getAllByRole("menuitem").map((item) => item.textContent);
 
   it("moves 校验 / 主题, then the subtitle, then the canvas extras as the header narrows", async () => {
-    render(<XFlowEditor value={workflow} />);
+    render(<XFlowEditor value={workflow} onRun={vi.fn(async () => ({ status: "success" }) as RuntimeSnapshot)} />);
     const toolbar = screen.getByRole("toolbar", { name: "编辑器工具栏" });
 
     // Tier 0: the menu carries only the view-level entries.
@@ -257,7 +291,8 @@ describe("top bar folding (§6.3)", () => {
 
   it("keeps all eight tools on the bar at a 1280 header", () => {
     const onRunNode = vi.fn(async () => ({ status: "success" }) as RuntimeSnapshot);
-    render(<XFlowEditor value={workflow} onRunNode={onRunNode} />);
+    const onRun = vi.fn(async () => ({ status: "success" }) as RuntimeSnapshot);
+    render(<XFlowEditor value={workflow} onRunNode={onRunNode} onRun={onRun} />);
     const onBar = screen.getByRole("toolbar", { name: "编辑器工具栏" });
 
     // The §6.3 hard requirement: at 1280 the middle group is complete. The bar
@@ -273,7 +308,7 @@ describe("top bar folding (§6.3)", () => {
   });
 
   it("folds the view switch to icons and drops the ⌘S keycap at fold 4", () => {
-    render(<XFlowEditor value={workflow} />);
+    render(<XFlowEditor value={workflow} onSave={vi.fn(async (next: WorkflowDef) => next)} />);
     const toolbar = screen.getByRole("toolbar", { name: "编辑器工具栏" });
 
     setWidth(900);

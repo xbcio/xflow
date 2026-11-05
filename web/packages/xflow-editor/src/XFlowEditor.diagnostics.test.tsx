@@ -300,7 +300,7 @@ describe("node-form findings in the issue list (WB-13)", () => {
   };
 
   it("lists a missing required parameter with its node and path, counted once", () => {
-    render(<XFlowEditor nodeTypes={formTypes} value={formWorkflow} />);
+    render(<XFlowEditor nodeTypes={formTypes} value={formWorkflow} onSave={async (next) => next} />);
 
     // The strip and the save button agree with the one row the drawer shows.
     expect(strip().textContent).toContain("1 错误");

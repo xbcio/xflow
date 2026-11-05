@@ -210,7 +210,7 @@ describe("inspector header (§6.4)", () => {
 
 describe("top bar copy", () => {
   it("writes two-character button labels without the AntD inserted space", () => {
-    render(<XFlowEditor value={workflow} />);
+    render(<XFlowEditor value={workflow} onPublish={async (next) => next} />);
     expect(screen.getByRole("button", { name: "发布" }).textContent).toBe("发布");
   });
 });

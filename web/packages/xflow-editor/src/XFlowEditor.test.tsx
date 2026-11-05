@@ -196,7 +196,8 @@ describe("XFlowEditor", () => {
 
   it("drives the canvas tool from the middle group and shortcuts, and keeps history there too", () => {
     const handleChange = vi.fn();
-    render(<XFlowEditor value={workflow} onChange={handleChange} />);
+    const handleRun = vi.fn(async () => ({ status: "success" as const, nodes: {} }));
+    render(<XFlowEditor value={workflow} onChange={handleChange} onRun={handleRun} />);
 
     const editor = screen.getByRole("region", { name: "Purchase approval 编辑器" });
     const tools = screen.getByRole("toolbar", { name: "画布工具" });
@@ -364,7 +365,12 @@ describe("XFlowEditor", () => {
   });
 
   it("marks a definition without an id as unsaved until its first save", () => {
-    render(<XFlowEditor value={{ name: "未命名工作流", spec: "1.0", nodes: [], connections: {} }} />);
+    render(
+      <XFlowEditor
+        value={{ name: "未命名工作流", spec: "1.0", nodes: [], connections: {} }}
+        onSave={vi.fn(async (next: WorkflowDef) => next)}
+      />
+    );
 
     const chip = document.querySelector(".xflow-editor-draft-chip");
     expect(chip?.textContent).toBe("未保存");
@@ -943,7 +949,8 @@ describe("XFlowEditor", () => {
   it("folds the bar by its own measured width, not by the layout tier", () => {
     mockSystemColorScheme(false);
     const container = mockEditorWidth();
-    render(<XFlowEditor value={{ ...workflow, spec: "1.0" }} />);
+    const handleRun = vi.fn(async () => ({ status: "success" as const, nodes: {} }));
+    render(<XFlowEditor value={{ ...workflow, spec: "1.0" }} onRun={handleRun} />);
     const toolbar = screen.getByRole("toolbar", { name: "编辑器工具栏" });
     const tools = within(toolbar).getByRole("toolbar", { name: "画布工具" });
 
@@ -1758,14 +1765,11 @@ describe("XFlowEditor", () => {
     expect(screen.queryByText("已保存")).toBeNull();
   });
 
-  it("disables run instead of synthesizing a successful runtime without onRun", () => {
+  it("draws no run button without onRun, and reports the missing capability", () => {
     render(<XFlowEditor value={workflow} />);
 
-    const runButton = screen.getByRole("button", { name: "运行工作流" }) as HTMLButtonElement;
-    expect(runButton.disabled).toBe(true);
-
-    fireEvent.click(runButton);
-
+    expect(screen.queryByRole("button", { name: "运行工作流" })).toBeNull();
+    expect(document.querySelector(".xflow-editor-toolbar-right")?.textContent).toContain("当前环境不支持运行");
     expect(screen.queryByText("运行完成")).toBeNull();
     expect(screen.queryByText("success")).toBeNull();
   });

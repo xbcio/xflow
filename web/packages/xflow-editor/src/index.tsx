@@ -535,6 +535,9 @@ export interface XFlowEditorProps {
    * The optional second argument carries editor-owned canvas state the host
    * must persist beside the definition (see `XFlowEditorSaveContext`); it is
    * present when sections are in force or when the editor changed them.
+   *
+   * Omit and the header draws no 保存 button (an unwired capability is never
+   * shown as a disabled control); ⌘S then reports 当前环境不支持保存.
    */
   onSave?: (
     value: WorkflowDef,
@@ -547,6 +550,9 @@ export interface XFlowEditorProps {
    * A workflow without declared params runs at once and `options` is
    * `undefined`. A rejection from a dialog-initiated run is shown in the
    * dialog (which stays open), not only in the dock.
+   *
+   * Omit and the header draws no 运行 button; ⌘↵ then reports
+   * 当前环境不支持运行.
    */
   onRun?: (value: WorkflowDef, options?: XFlowRunOptions) => Promise<RuntimeSnapshot> | RuntimeSnapshot;
   /**
@@ -617,9 +623,10 @@ export interface XFlowEditorProps {
   /**
    * Publishes the draft under a new version label (§6.10): the host PUTs
    * `value` — whose `version` the publish dialog set — and resolves like
-   * `onSave`. Omit and 发布 stays disabled; `capabilities.workflow === false`
-   * hides it with the rest of the write actions. The second argument is the
-   * same optional save context `onSave` receives.
+   * `onSave`. Omit and the header draws no 发布 button;
+   * `capabilities.workflow === false` hides it with the rest of the write
+   * actions. The second argument is the same optional save context `onSave`
+   * receives.
    */
   onPublish?: (
     value: WorkflowDef,
@@ -3276,10 +3283,8 @@ export function XFlowEditor({
     && invalidWorkflowJsonFields.length === 0;
   const saveBlocked = invalidDraftCount > 0 || invalidWorkflowJsonFields.length > 0
     || (validationMode === "enforce" && formIssueSummary.errors > 0);
-  const saveTooltip = !onSave
-    ? hostCapabilityCopy.save
-    : saveClean
-      ? "没有未保存的修改"
+  const saveTooltip = saveClean
+    ? "没有未保存的修改"
     : invalidDraftCount > 0
       ? `${invalidDraftCount} 个节点的参数 JSON 未通过解析，修正后才能保存`
       : invalidWorkflowJsonFields.length > 0
@@ -5694,16 +5699,19 @@ export function XFlowEditor({
               </>
             ) : null}
             {/* The divider before 运行 belongs to the expanded bar, not to
-                onRunNode: without 测试此节点 the four tools still need it. */}
-            <Divider className="xflow-editor-sep" orientation="vertical" />
+                onRunNode: without 测试此节点 the four tools still need it.
+                A host without onRun draws no run key, so the tools then end
+                at 适应视图 with no trailing rule. */}
+            {onRun ? <Divider className="xflow-editor-sep" orientation="vertical" /> : null}
               </>
             ) : null}
-            <Tooltip classNames={editorTooltipClassNames} title={onRun ? "运行工作流（⌘ / Ctrl + Enter）" : hostCapabilityCopy.run}>
+            {onRun ? (
+            <Tooltip classNames={editorTooltipClassNames} title="运行工作流（⌘ / Ctrl + Enter）">
               <span>
                 <Button
                   aria-label="运行工作流"
                   className="xflow-editor-run-button"
-                  disabled={running || !onRun}
+                  disabled={running}
                   icon={<PlayIcon />}
                   loading={running}
                   size="small"
@@ -5714,6 +5722,7 @@ export function XFlowEditor({
                 </Button>
               </span>
             </Tooltip>
+            ) : null}
           </div>
         ) : null}
         <div className="xflow-editor-toolbar-right">
@@ -5799,13 +5808,18 @@ export function XFlowEditor({
                 </>
               ) : null}
               {moreMenuButton}
-              <Divider className="xflow-editor-sep" orientation="vertical" />
+              {/* The rule opens the save/publish group; with neither wired the
+                  group does not exist, so the rule does not either. */}
+              {editMode && (onSave || onPublish) ? (
+                <Divider className="xflow-editor-sep" orientation="vertical" />
+              ) : null}
             </>
           )}
           {/* §6.5.1 / §6.8 / §6.10: a read-only viewer and the run-record replay
               both drop the editing actions instead of showing disabled copies. */}
           {editMode ? (
             <>
+            {onSave ? (
             <Tooltip
               classNames={editorTooltipClassNames}
               title={
@@ -5823,7 +5837,7 @@ export function XFlowEditor({
                   aria-label="保存"
                   className="xflow-editor-save-button"
                   data-blocked={saveBlocked || undefined}
-                  disabled={!onSave || saveClean}
+                  disabled={saveClean}
                   icon={saveBlocked ? <WarnIcon className="xflow-editor-save-button__icon" /> : undefined}
                   loading={saving}
                   onClick={() => void saveWorkflow()}
@@ -5840,17 +5854,16 @@ export function XFlowEditor({
                 </Button>
               </span>
             </Tooltip>
+            ) : null}
+            {onPublish ? (
             <Tooltip
               classNames={editorTooltipClassNames}
-              title={onPublish
-                ? "发布新版本：归档当前线上版本，此后新触发的执行使用新版本"
-                : hostCapabilityCopy.publish}
+              title="发布新版本：归档当前线上版本，此后新触发的执行使用新版本"
             >
               <span>
                 <Button
                   aria-label="发布"
                   className="xflow-editor-publish-button"
-                  disabled={!onPublish}
                   icon={<UploadIcon />}
                   onClick={openPublishDialog}
                 >
@@ -5858,6 +5871,7 @@ export function XFlowEditor({
                 </Button>
               </span>
             </Tooltip>
+            ) : null}
             </>
           ) : null}
           <span aria-live="polite" className="xflow-editor-sr-only" role="status">
