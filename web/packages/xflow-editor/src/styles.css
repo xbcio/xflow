@@ -17,7 +17,7 @@
   --xflow-editor-panel-rail-width: 60px;
   --xflow-editor-panel-left-content-width: 240px;
   --xflow-editor-panel-left-width: calc(var(--xflow-editor-panel-rail-width) + var(--xflow-editor-panel-left-content-width));
-  --xflow-editor-panel-right-width: 360px;
+  --xflow-editor-panel-right-width: 320px;
   /* §6.0: every panel title bar, docked or inside a compact drawer. */
   --xflow-editor-panel-title-height: 40px;
   /* §6.5: status bar 28 + this drawer (280, spec §3.2); b/c tiers clamp it below. */
@@ -1691,9 +1691,10 @@
 }
 
 .xflow-editor-overview__stat {
-  /* E-B: a raised tile on the app ground, no outline (EL-09). */
-  background: var(--xflow-surface-raised);
-  border: 0;
+  /* 2026-10-30 用户指示（D9）: the baseline `.xflow-pv-sec-card` shell —
+   * panel-raised with its own 1px frame (reverses E-B's EL-09 tile). */
+  background: var(--xflow-panel-raised);
+  border: 1px solid var(--xflow-border);
   border-radius: var(--xflow-radius-sm);
   box-shadow: var(--xflow-elev-1);
   display: flex;
@@ -1896,9 +1897,10 @@ button.xflow-editor-overview__run:hover {
 
 .xflow-editor .xflow-editor-inspector > .xflow-editor-panel__body,
 .xflow-editor .xflow-editor-inspector__body {
-  /* E-B (EL-08/EL-09): the inspector body is the app ground so its raised
-   * cards read by surface, not by nested 1px frames. */
-  background: var(--xflow-surface-app);
+  /* 2026-10-30 用户指示（D9）: the panel ground, aligned with the baseline
+   * `.xflow-pv-insp` (reverses E-B's EL-08/EL-09), so the cards below read as
+   * raised surfaces with their own 1px frame. */
+  background: var(--xflow-panel);
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
@@ -1907,48 +1909,30 @@ button.xflow-editor-overview__run:hover {
   padding: 0;
 }
 
-/* E-B (EL-09): one frame per panel, not per card. The inspector's cards are
- * raised on the app ground with a single elevation step; the count chip is a
- * sunken well, and the composer cards directly on the tab body follow the same
- * rule. Nested FieldGroups inside the parameters card stay flush (the
- * `.xflow-editor-config > .xflow-editor-section-card` flattening above). */
+/* 2026-10-30 用户指示（D9）: restore the baseline `.xflow-pv-sec-card` shell —
+ * one 1px frame plus elev-1 on the card itself, the header and body halves
+ * drawing no border of their own (reverses E-B's EL-08/EL-09). */
 .xflow-editor .xflow-editor-inspector .xflow-editor-section-card {
-  background: var(--xflow-surface-raised);
-  border: 0;
+  background: var(--xflow-panel-raised);
+  border: 1px solid var(--xflow-border);
   box-shadow: var(--xflow-elev-1);
-}
-
-.xflow-editor .xflow-editor-inspector .xflow-editor-section-card__title em {
-  background: var(--xflow-surface-sunken);
-  border: 0;
 }
 
 .xflow-editor .xflow-editor-inspector .xflow-editor-config__settings .xflow-composer-form > .xflow-composer-field-group,
-.xflow-editor .xflow-editor-inspector .xflow-editor-run-panel > .xflow-composer-field-group {
-  background: var(--xflow-surface-raised);
-  border: 0;
+.xflow-editor .xflow-editor-inspector .xflow-editor-run-panel > .xflow-composer-field-group,
+.xflow-editor .xflow-editor-inspector .xflow-editor-config__notes > .xflow-editor-node-form > .xflow-composer-form > .xflow-composer-field-group {
+  background: var(--xflow-panel-raised);
+  border: 1px solid var(--xflow-border);
   box-shadow: var(--xflow-elev-1);
 }
 
-/* Inside a card the header/body divider is spacing, not a line. */
+/* Inside a card the header/body divider is spacing, not a line — including the
+ * per-group parameter cards, which are top-level now. */
 .xflow-editor .xflow-editor-inspector .xflow-editor-config__settings .xflow-composer-form > .xflow-composer-field-group > .xflow-composer-section-header,
-.xflow-editor .xflow-editor-inspector .xflow-editor-run-panel > .xflow-composer-field-group > .xflow-composer-section-header {
+.xflow-editor .xflow-editor-inspector .xflow-editor-run-panel > .xflow-composer-field-group > .xflow-composer-section-header,
+.xflow-editor .xflow-editor-inspector .xflow-editor-config__params > .xflow-editor-node-form > .xflow-composer-form > .xflow-composer-field-group > .xflow-composer-section-header,
+.xflow-editor .xflow-editor-inspector .xflow-editor-config__notes > .xflow-editor-node-form > .xflow-composer-form > .xflow-composer-field-group > .xflow-composer-section-header {
   border-bottom: 0;
-}
-
-/* The run body's code block is the one inner box: a sunken well inside the
- * raised card, with no border of its own (EL-09's 输出 example). */
-.xflow-editor .xflow-editor-inspector .xflow-editor-run-code {
-  background: var(--xflow-surface-sunken);
-  border: 0;
-}
-
-/* Connection lists: the row and the add-connection group are sunken wells, not
- * outlined boxes; the AntD controls inside keep their own frames. */
-.xflow-editor .xflow-editor-connection-actions,
-.xflow-editor .xflow-editor-connection-row {
-  background: var(--xflow-surface-sunken);
-  border: 0;
 }
 
 .xflow-editor-inspector-header-actions {
@@ -3175,18 +3159,6 @@ button.xflow-editor-overview__run:hover {
   color: var(--xflow-info-fg);
 }
 
-/* Snug desktop (1281–1440, EL-02): both panes stay docked and the inspector
- * gives up width, leaving the canvas ~57% at 1440 instead of ~51%. The left
- * content is 240 at every width (W2), so only the right track changes here.
- * The tracks are set on `.xflow-editor-main`, not the root: a container query
- * cannot style its own container, and the root's calc() is already resolved by
- * the time it inherits. */
-@container xflow-editor (width <= 1440px) {
-  .xflow-editor-main {
-    --xflow-editor-panel-right-width: 320px;
-  }
-}
-
 /* Compact workspace (xflow-core breakpoints.compact): the toolbar wraps and the
  * desktop columns give way before they can force the editor wider. The query
  * reads the editor's own container width, the same box the JS layout tier
@@ -3715,16 +3687,6 @@ button.xflow-editor-overview__run:hover {
   position: relative;
 }
 
-.xflow-editor .xflow-editor-compact-drawer__header {
-  background: var(--xflow-surface-sunken);
-  border-bottom-color: var(--xflow-border);
-}
-
-.xflow-editor .xflow-editor-compact-drawer__title,
-.xflow-editor .xflow-editor-compact-drawer__close {
-  color: var(--xflow-text);
-}
-
 .xflow-editor .xflow-editor-compact-drawer__body {
   min-height: 0;
   overflow: hidden;
@@ -4185,7 +4147,7 @@ button.xflow-editor-overview__run:hover {
  * 2/12/8 body. The shared card keeps its own values for the other panels; only
  * its variables and header/body padding change under this root. */
 .xflow-editor-workflow-settings {
-  --xflow-editor-section-card-bg: var(--xflow-surface-raised);
+  --xflow-editor-section-card-bg: var(--xflow-panel-raised);
   --xflow-editor-section-card-header-bg: var(--xflow-surface-raised);
   --xflow-editor-section-card-radius: var(--xflow-radius-md);
 
@@ -5856,8 +5818,8 @@ button.xflow-editor-overview__run:hover {
 }
 
 .xflow-editor .xflow-editor-config__params > .xflow-editor-node-form > .xflow-composer-form > .xflow-composer-field-group {
-  background: var(--xflow-surface-raised);
-  border: 0;
+  background: var(--xflow-panel-raised);
+  border: 1px solid var(--xflow-border);
   box-shadow: var(--xflow-elev-1);
 }
 
@@ -5868,7 +5830,8 @@ button.xflow-editor-overview__run:hover {
 
 /* The JSON source view replaces the parameter cards and takes the same frame. */
 .xflow-editor .xflow-editor-config__params > .xflow-editor-param-source {
-  background: var(--xflow-surface-raised);
+  background: var(--xflow-panel-raised);
+  border: 1px solid var(--xflow-border);
   border-radius: var(--xflow-radius-md);
   box-shadow: var(--xflow-elev-1);
   padding: var(--xflow-space-3);

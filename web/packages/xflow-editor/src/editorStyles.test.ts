@@ -240,11 +240,11 @@ describe("xflow.editor responsive rules (§7.1 breakpoints)", () => {
     // Two compact blocks read xflow-core's breakpoints.compact (the locate
     // panel removed the third), so a single drift back to the old 1120 turns
     // this red; 560 is an editor-only density tier retained from the viewport
-    // rules, and 1440 is the snug desktop tier that narrows both columns.
-    expect(thresholds).toEqual([560, breakpoints.compact, breakpoints.compact, 1440]);
+    // rules. D8 removed the 1440 snug tier: the inspector is 320 everywhere.
+    expect(thresholds).toEqual([560, breakpoints.compact, breakpoints.compact]);
     // Every tier is inclusive: the JS layout tier uses `<= compact`, so 1280 is
-    // compact in CSS and in JS alike. 560 keeps the `max-width` semantics it
-    // replaced, and 1440 is an upper bound.
+    // compact in CSS and in JS alike, and 560 keeps the `max-width` semantics
+    // it replaced.
     for (const [, operator, value] of queries) {
       expect(operator, value).toBe("<=");
     }
@@ -671,19 +671,24 @@ describe("xflow.editor browser-measured baseline fixes (E6)", () => {
     expect(rule(".xflow-editor-save-button")).toMatch(/gap:\s*var\(--xflow-space-1-5\)\s*;/);
   });
 
-  it("makes the right column 360px wide", () => {
-    expect(css).toMatch(/--xflow-editor-panel-right-width:\s*360px\s*;/);
+  it("makes the right column 320px wide (D8)", () => {
+    expect(css).toMatch(/--xflow-editor-panel-right-width:\s*320px\s*;/);
   });
 
-  it("keeps the left column at 240 and narrows only the inspector at snug widths (EL-02)", () => {
+  it("keeps the left column at 240 and the right at 320 with no snug override (D8)", () => {
     // W2: the left content is 240 at every width, so rail + content is 300.
     expect(css).toMatch(/--xflow-editor-panel-left-content-width:\s*240px\s*;/);
-    // 1440: the snug tier now only takes 40px off the right inspector. The
-    // override lives on `.xflow-editor-main`: a container query cannot style its
-    // own container, and the root's calc() is already resolved when it inherits.
-    const snug = css.match(/@container xflow-editor \(width <= 1440px\)\s*\{\s*\.xflow-editor-main\s*\{([^}]*)\}/)?.[1] ?? "";
-    expect(snug).not.toMatch(/--xflow-editor-panel-left-width/);
-    expect(snug).toMatch(/--xflow-editor-panel-right-width:\s*320px\s*;/);
+    expect(css).toMatch(
+      /--xflow-editor-panel-left-width:\s*calc\(var\(--xflow-editor-panel-rail-width\) \+ var\(--xflow-editor-panel-left-content-width\)\)\s*;/
+    );
+    expect(css).toMatch(/--xflow-editor-panel-right-width:\s*320px\s*;/);
+    // D8: the 1440 snug tier is gone — the right track is one value at every
+    // docked width, so no container query may re-declare either track.
+    expect(css).not.toMatch(
+      /@container xflow-editor \(width <= 1440px\)\s*\{[^@]*--xflow-editor-panel-(?:left|right)-width/
+    );
+    expect(css.match(/--xflow-editor-panel-left-width:/g) ?? []).toHaveLength(1);
+    expect(css.match(/--xflow-editor-panel-right-width:/g) ?? []).toHaveLength(1);
   });
 
   it("lays the library out as the baseline two-card grid", () => {
@@ -811,7 +816,7 @@ describe("xflow.editor browser-measured baseline fixes (E6)", () => {
   it("draws the workflow-settings stack at the baseline figure 6 values", () => {
     const root = rule(".xflow-editor-workflow-settings");
     expect(root).toMatch(/--xflow-editor-section-card-radius:\s*var\(--xflow-radius-md\)\s*;/);
-    expect(root).toMatch(/--xflow-editor-section-card-bg:\s*var\(--xflow-surface-raised\)\s*;/);
+    expect(root).toMatch(/--xflow-editor-section-card-bg:\s*var\(--xflow-panel-raised\)\s*;/);
     expect(root).toMatch(/gap:\s*var\(--xflow-space-2\)\s*;/);
     const head = rule(".xflow-editor-workflow-settings .xflow-editor-section-card__header");
     // The baseline head is 35px tall at every width of content (an action key
@@ -876,9 +881,62 @@ describe("round-2 visual audit fixes", () => {
     expect(css).toMatch(/--xflow-editor-control-ring:\s*color-mix\(in srgb, var\(--xflow-primary\) 18%, transparent\)\s*;/);
   });
 
-  it("draws the section-card stack at the baseline 12px gap on the raised surface", () => {
+  it("draws the inspector cards as baseline shells on the panel ground (D9)", () => {
     expect(rule(".xflow-editor .xflow-editor-config")).toMatch(/gap:\s*var\(--xflow-space-3\)\s*;/);
-    expect(css).toMatch(/--xflow-editor-section-card-bg:\s*var\(--xflow-surface-raised\)\s*;/);
+    // The card owns one 1px frame and elev-1; its header/body halves draw none.
+    const card = rule(".xflow-editor .xflow-editor-inspector .xflow-editor-section-card");
+    expect(card).toMatch(/background:\s*var\(--xflow-panel-raised\)\s*;/);
+    expect(card).toMatch(/border:\s*1px solid var\(--xflow-border\)\s*;/);
+    expect(card).toMatch(/box-shadow:\s*var\(--xflow-elev-1\)\s*;/);
+    // The composer cards directly on the tab body take the same shell. The
+    // three-selector list is one rule: settings, run and 备注 (a FieldGroup
+    // under .xflow-editor-node-form, like the parameter cards).
+    const notesSelector =
+      ".xflow-editor .xflow-editor-inspector .xflow-editor-config__notes > .xflow-editor-node-form > .xflow-composer-form > .xflow-composer-field-group";
+    const shellRule = css.match(
+      /(\.xflow-editor \.xflow-editor-inspector \.xflow-editor-config__settings \.xflow-composer-form > \.xflow-composer-field-group[\s\S]*?)\{([^}]*)\}/
+    );
+    const shellSelectors = shellRule?.[1] ?? "";
+    const settingsRun = shellRule?.[2] ?? "";
+    expect(shellSelectors).toContain(notesSelector);
+    for (const shell of [
+      settingsRun,
+      rule(".xflow-editor .xflow-editor-config__params > .xflow-editor-node-form > .xflow-composer-form > .xflow-composer-field-group"),
+      rule(".xflow-editor .xflow-editor-config__params > .xflow-editor-param-source")
+    ]) {
+      expect(shell).toMatch(/background:\s*var\(--xflow-panel-raised\)\s*;/);
+      expect(shell).toMatch(/border:\s*1px solid var\(--xflow-border\)\s*;/);
+      expect(shell).toMatch(/box-shadow:\s*var\(--xflow-elev-1\)\s*;/);
+    }
+    // The 备注 card keeps its header/body divider as spacing too.
+    const dividerRule = css.match(
+      /(\.xflow-editor \.xflow-editor-inspector \.xflow-editor-config__settings \.xflow-composer-form > \.xflow-composer-field-group > \.xflow-composer-section-header[\s\S]*?)\{([^}]*)\}/
+    );
+    expect(dividerRule?.[1] ?? "").toContain(`${notesSelector} > .xflow-composer-section-header`);
+    expect(dividerRule?.[1] ?? "").toContain(
+      ".xflow-editor .xflow-editor-inspector .xflow-editor-config__params > .xflow-editor-node-form > .xflow-composer-form > .xflow-composer-field-group > .xflow-composer-section-header"
+    );
+    expect(dividerRule?.[2] ?? "").toMatch(/border-bottom:\s*0\s*;/);
+    // The body is the panel ground, not the app ground.
+    const body = css.match(
+      /\.xflow-editor \.xflow-editor-inspector > \.xflow-editor-panel__body,\s*\.xflow-editor \.xflow-editor-inspector__body \{([^}]*)\}/
+    )?.[1] ?? "";
+    expect(body).toMatch(/background:\s*var\(--xflow-panel\)\s*;/);
+    // D9 deletes the sunken-well overrides so the base field + 1px frame shows:
+    // the count chip, the run code block and the connection wells may not
+    // re-declare an inspector-scoped background of their own.
+    expect(css).not.toMatch(/\.xflow-editor \.xflow-editor-inspector \.xflow-editor-section-card__title em\s*\{/);
+    expect(css).not.toMatch(/\.xflow-editor \.xflow-editor-inspector \.xflow-editor-run-code\s*\{/);
+    expect(css).not.toMatch(
+      /\.xflow-editor \.xflow-editor-connection-actions,\s*\.xflow-editor \.xflow-editor-connection-row\s*\{/
+    );
+    // The overview's stat tiles sat on the app ground as frameless white tiles;
+    // on the panel ground they take the same shell or vanish into it.
+    const stat = rule(".xflow-editor-overview__stat");
+    expect(stat).toMatch(/background:\s*var\(--xflow-panel-raised\)\s*;/);
+    expect(stat).toMatch(/border:\s*1px solid var\(--xflow-border\)\s*;/);
+    // xflow-04's badge layout hook must survive the shell change.
+    expect(rule(".xflow-editor-section-card__actions")).toMatch(/display:\s*inline-flex\s*;/);
   });
 });
 

@@ -582,16 +582,35 @@ describe("dual-zone left column (§6.0.1)", () => {
     expect(document.activeElement).toBe(key);
   });
 
-  it("names the compact right drawer close button 关闭", async () => {
+  it("closes the compact right drawer from its own title bar and returns focus to the rail", async () => {
     const container = mockEditorWidth();
     render(<XFlowEditor value={workflow} />);
+    act(() => container.setWidth(1279));
+
+    const key = within(screen.getByRole("complementary", { name: "紧凑导航" })).getByRole("button", { name: "属性面板" });
+    key.focus();
+    fireEvent.click(key);
+    const dialog = await screen.findByRole("dialog", { name: "属性" });
+    // Both drawers are closable={false}: no AntD header, no 55px empty strip.
+    expect(document.querySelector(".xflow-editor-compact-drawer__header")).toBeNull();
+    expect(document.querySelector(".xflow-editor-compact-drawer__close")).toBeNull();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "收起属性面板" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "属性" })).toBeNull());
+    expect(document.activeElement).toBe(key);
+  });
+
+  it("keeps the collapse entry in the compact right drawer's preview notice", async () => {
+    const container = mockEditorWidth();
+    render(<XFlowEditor value={workflow} readOnlyReason="没有写权限" />);
     act(() => container.setWidth(1279));
 
     fireEvent.click(within(screen.getByRole("complementary", { name: "紧凑导航" })).getByRole("button", { name: "属性面板" }));
 
     const dialog = await screen.findByRole("dialog", { name: "属性" });
-    expect(within(dialog).getByRole("button", { name: "关闭" })).toBeTruthy();
-    expect(within(dialog).queryByRole("button", { name: "Close" })).toBeNull();
+    expect(within(dialog).getByRole("region", { name: "预览模式说明" })).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "收起属性面板" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "属性" })).toBeNull());
   });
 
   it("draws the compact right drawer inside the workbench body too, so both start under the top bar", async () => {
@@ -604,6 +623,12 @@ describe("dual-zone left column (§6.0.1)", () => {
     const dialog = await screen.findByRole("dialog", { name: "属性" });
     expect(dialog.closest(".xflow-editor-main")).not.toBeNull();
     expect(dialog.closest("header")).toBeNull();
+    // D8: the drawer is the docked inspector's 320, so the inspector reads the
+    // same in both presentations (AntD 6.5 puts `size` on the wrapper inline).
+    const wrapper = dialog.closest(".xflow-editor-compact-drawer__wrapper");
+    expect(wrapper).not.toBeNull();
+    expect(wrapper?.classList.contains("xflow-editor-compact-drawer__wrapper--end")).toBe(true);
+    expect((wrapper as HTMLElement).style.width).toBe("320px");
   });
 
   it("draws the library group head label, then the chevron, then the count last", () => {

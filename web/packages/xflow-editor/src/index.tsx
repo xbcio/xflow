@@ -5101,7 +5101,7 @@ export function XFlowEditor({
       />
     </aside>
   );
-  const collapseRightAction = layout === "a" ? (
+  const collapseRightAction = (
     <Tooltip classNames={editorTooltipClassNames} title="收起属性面板 ⌥⌘B">
       <Button
         aria-expanded
@@ -5111,10 +5111,22 @@ export function XFlowEditor({
         icon={<SideRightIcon />}
         size="small"
         variant="text"
-        onClick={() => setRightCollapsed(true)}
+        onClick={() => (layout === "c" ? setCompactDrawer(undefined) : setRightCollapsed(true))}
       />
     </Tooltip>
-  ) : undefined;
+  );
+  // §6.0: the preview notice keeps the panel title bar — in the docked column
+  // and in the compact drawer alike — so the collapse entry is always present.
+  const previewInspectorElement = (
+    <section className="xflow-editor-preview-inspector" aria-label="预览模式说明">
+      <div className="xflow-editor-preview-inspector__header">
+        <EyeIcon />
+        <strong>{readOnly ? "只读" : "预览模式"}</strong>
+        {collapseRightAction}
+      </div>
+      <p>{readOnly ? "画布、节点属性和工作流定义均保持只读。" : "画布、节点属性和工作流定义均保持只读。切换到编辑模式后可继续修改。"}</p>
+    </section>
+  );
   // §6.0: a double-click on a node is the "edit this node" gesture; a single
   // click only selects, so a collapsed inspector stays out of the way.
   const handleCanvasDoubleClick = React.useCallback((event: React.MouseEvent<HTMLDivElement>) => {
@@ -6104,16 +6116,7 @@ export function XFlowEditor({
             {desktopRightCollapsed ? null : editMode || runsMode ? (
               inspectorElement
             ) : (
-              <section className="xflow-editor-preview-inspector" aria-label="预览模式说明">
-                {/* §6.0: the collapse entry lives in the panel title bar in
-                    every mode, so the preview notice keeps one too. */}
-                <div className="xflow-editor-preview-inspector__header">
-                  <EyeIcon />
-                  <strong>{readOnly ? "只读" : "预览模式"}</strong>
-                  {collapseRightAction}
-                </div>
-                <p>{readOnly ? "画布、节点属性和工作流定义均保持只读。" : "画布、节点属性和工作流定义均保持只读。切换到编辑模式后可继续修改。"}</p>
-              </section>
+              previewInspectorElement
             )}
           </aside>
         ) : null}
@@ -6180,17 +6183,14 @@ export function XFlowEditor({
             classNames={editorCompactDrawerClassNamesEnd}
             rootClassName="xflow-editor-compact-drawer"
             rootStyle={{ position: "absolute" }}
-            size={360}
+            closable={false}
+            size={320}
             onClose={() => setCompactDrawer(undefined)}
           >
             {editMode || runsMode ? (
               inspectorElement
             ) : (
-              <section className="xflow-editor-preview-inspector" aria-label="预览模式说明">
-                <EyeIcon />
-                <strong>{readOnly ? "只读" : "预览模式"}</strong>
-                <p>{readOnly ? "画布、节点属性和工作流定义均保持只读。" : "画布、节点属性和工作流定义均保持只读。切换到编辑模式后可继续修改。"}</p>
-              </section>
+              previewInspectorElement
             )}
           </Drawer>
         ) : null}
