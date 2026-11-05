@@ -431,7 +431,7 @@ const messages: Record<string, string> = {
   "Name of the external signal to wait for (signal mode)": "要等待的外部信号名（signal 模式）",
   "Signal Names": "信号名列表",
   "List of signal names to wait for (multi-signal mode)": "要等待的信号名列表（多信号模式）",
-  "Quorum": "法定数量",
+  "Quorum": "所需信号数",
   "Number of signals required to proceed; 0 or unset means all (multi-signal mode)": "继续执行所需的信号数；0 或不设置表示全部（多信号模式）",
   "Maximum wait duration before routing to timeout port (e.g. \"48h\")": "转到 timeout 端口前的最长等待时间（如 \"48h\"）",
   "Wait Timeout": "等待超时",
