@@ -5755,6 +5755,7 @@ export function XFlowEditor({
                   aria-label="发布"
                   className="xflow-editor-publish-button"
                   disabled={!onPublish}
+                  icon={<UploadIcon className="xflow-editor-toolbar-icon" />}
                   onClick={openPublishDialog}
                 >
                   发布

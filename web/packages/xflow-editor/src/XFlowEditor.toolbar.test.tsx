@@ -125,6 +125,13 @@ describe("top bar canvas tools (§6.3, 2026-11-04)", () => {
     expect(screen.queryByRole("button", { name: "运行选项" })).toBeNull();
   });
 
+  it("gives 发布 the upload glyph", () => {
+    render(<XFlowEditor value={workflow} onPublish={async (next) => next} />);
+
+    const publish = screen.getByRole("button", { name: "发布" });
+    expect(publish.querySelector('svg[data-xflow-icon="upload"]')).not.toBeNull();
+  });
+
   it("puts an icon in each 编辑 | 运行记录 option and no tools while replaying", () => {
     render(<XFlowEditor value={workflow} mode="runs" />);
 
