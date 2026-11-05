@@ -1265,9 +1265,17 @@
   .xflow-pv-sec-fixed .ant-collapse-header { cursor: default; }
   /* tab 栏右端的「以 JSON 编辑」按钮与 tab 基线对齐（§2.1）。 */
   .xflow-pv-insp-tabs-head .ant-tabs-extra-content { display: flex; align-items: center; }
+  /*
+   * 卡头右端贴右（§6.4，2026-11-05）：折叠摘要和状态徽标是一组，先摘要后徽标，
+   * 间距 8，一起贴右；标题吃掉剩下的宽度，不会被两个 auto 拆到中间。
+   */
   .xflow-pv-sec-label { display: inline-flex; align-items: center; gap: var(--xflow-space-1-5); min-width: 0; }
+  .xflow-pv-sec-head .xflow-pv-sec-label { display: flex; width: 100%; gap: var(--xflow-space-2); }
+  .xflow-pv-sec-right { display: inline-flex; align-items: center; gap: var(--xflow-space-2); min-width: 0; }
+  .xflow-pv-sec-head .xflow-pv-sec-right { margin-left: auto; }
+  .xflow-pv-sec-head .ant-collapse-header-text { flex: 1; min-width: 0; }
   .xflow-pv-sec-title { font-size: var(--xflow-font-md); font-weight: var(--xflow-font-weight-semibold); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .xflow-pv-sec-extra { font-size: var(--xflow-font-xs); font-weight: var(--xflow-font-weight-regular); color: var(--xflow-text-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .xflow-pv-sec-extra { font-size: var(--xflow-font-sm); font-weight: var(--xflow-font-weight-regular); color: var(--xflow-text-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .xflow-pv-sec-fields { display: flex; flex-direction: column; gap: var(--xflow-space-2); padding: var(--xflow-space-0-5) var(--xflow-space-3) var(--xflow-space-2); min-width: 0; }
   /* 密度档只在本节生效：值来自 .xflow-pv-wb 的 --xflow-pv-density-*（D9）。 */
   .xflow-pv-wb .xflow-pv-secs { gap: var(--xflow-pv-density-sec-gap); }

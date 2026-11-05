@@ -297,9 +297,7 @@ function InspectorConfig() {
           key: 'headers',
           className: 'xflow-pv-sec-card',
           label: (
-            <SectionLabel title="请求头与查询">
-              <StatusChip tone="neutral" icon={<OutlineIcon />} label="已填 2 项" />
-            </SectionLabel>
+            <SectionLabel title="请求头与查询" extra="已填 2 项" />
           ),
           children: (
             <div className="xflow-pv-sec-fields">
@@ -316,9 +314,7 @@ function InspectorConfig() {
           key: 'advanced',
           className: 'xflow-pv-sec-card',
           label: (
-            <SectionLabel title="高级">
-              <StatusChip tone="neutral" icon={<OutlineIcon />} label="未设置" />
-            </SectionLabel>
+            <SectionLabel title="高级" extra="未设置" />
           ),
           children: (
             <div className="xflow-pv-sec-fields">

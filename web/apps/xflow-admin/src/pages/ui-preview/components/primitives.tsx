@@ -154,8 +154,12 @@ export function SectionLabel({
   return (
     <span className="xflow-pv-sec-label">
       <span className="xflow-pv-sec-title">{title}</span>
-      {extra ? <span className="xflow-pv-sec-extra">{extra}</span> : null}
-      {children}
+      {extra || children ? (
+        <span className="xflow-pv-sec-right">
+          {extra ? <span className="xflow-pv-sec-extra">{extra}</span> : null}
+          {children}
+        </span>
+      ) : null}
     </span>
   );
 }
