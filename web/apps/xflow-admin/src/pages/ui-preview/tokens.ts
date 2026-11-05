@@ -25,7 +25,11 @@ export function themeConfig(appearance: Appearance): ThemeConfig {
       borderRadiusXS: radiusPx(foundation.radiusXs),
       controlHeight: 32,
       controlHeightSM: 24,
-      colorPrimary: p.primary,
+      // Solid fills and text both take the AA variant; the raw `primary` stays
+      // the accent for decorative bars, matching @xflow/core's buildAntdTheme.
+      colorPrimary: p.primarySolid,
+      colorPrimaryHover: p.primarySolidHover,
+      colorPrimaryActive: p.primarySolidActive,
       colorInfo: p.info,
       colorSuccess: p.success,
       colorWarning: p.warning,
