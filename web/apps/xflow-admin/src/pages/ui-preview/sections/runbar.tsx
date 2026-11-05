@@ -25,7 +25,12 @@ export function RunBarSection() {
               </div>
             </div>
             <span className="xflow-pv-runwall-ops">
-              可用操作：{status.ops.length > 0 ? status.ops.join(' · ') : '无（等在途任务提交）'}
+              可用操作：
+              {status.ops.length > 0
+                ? status.ops.join(' · ')
+                : variant.status === 'canceling'
+                  ? '无（等在途任务提交）'
+                  : '无'}
             </span>
           </div>
         );
