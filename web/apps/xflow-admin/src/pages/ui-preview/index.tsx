@@ -38,7 +38,8 @@ const sections: PreviewSection[] = [
     title: '1 · 工作台（运行中，选中「拉取客户档案」，诊断台展开）',
     caption:
       '顶栏一个主操作；执行状态只在运行条一处，按钮全部由状态表生成。左栏节点与大纲可收起，右栏属性面板收起后画布右上出现恢复入口；画布内容整体让出浮动行的高度。',
-    // 密度档只罩工作台节（D9，2026-10-30）：28 / 22 控件高，其余节保持 32 / 24。
+    // 密度档罩工作台与运行记录两节（D9，2026-10-30）：28 / 22 控件高，其余节保持
+    // 32 / 24。运行记录顶栏是 2026-11-05 补进来的，两节共用同一档。
     render: () => (
       <ConfigProvider theme={workbenchDensityTheme}>
         <WorkbenchSection />
@@ -114,7 +115,11 @@ const sections: PreviewSection[] = [
     title: '7 · 运行记录模式（编辑 | 运行记录）',
     caption:
       '同一工作台切到只读回放：左栏换成执行列表，画布按所选执行的快照逐节点显示状态，属性面板落在运行 tab。执行 id 与节点名与工作台一致，状态栏的节点数与状态计数都从回放数组算出来。',
-    render: () => <RunsSection />,
+    render: () => (
+      <ConfigProvider theme={workbenchDensityTheme}>
+        <RunsSection />
+      </ConfigProvider>
+    ),
   },
   {
     id: 'approval',
