@@ -1085,7 +1085,7 @@ function ParameterSourceToggle({
       <Button
         aria-label="以 JSON 编辑参数"
         aria-pressed={pressed}
-        className={`xflow-editor-source-toggle ${pressed ? "is-active" : ""}`}
+        className={`xflow-editor-source-toggle xflow-editor-inspector-json-toggle ${pressed ? "is-active" : ""}`}
         disabled={readOnly}
         icon={<CodeIcon />}
         size="small"

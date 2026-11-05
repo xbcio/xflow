@@ -4423,6 +4423,19 @@ button.xflow-editor-overview__run:hover {
   color: var(--xflow-primary-fg);
 }
 
+/* The inspector tab bar's JSON toggle follows the baseline IconButton small
+   (`.xflow-pv-tool`): a 24px square with a 16px glyph in secondary text and the
+   6px control radius. The pressed state above keeps its primary palette. */
+.xflow-editor .xflow-editor-inspector-json-toggle {
+  border-radius: var(--xflow-radius-sm);
+  color: var(--xflow-text-secondary);
+  font-size: var(--xflow-font-xl);
+  height: var(--xflow-control-height-sm);
+  min-width: var(--xflow-control-height-sm);
+  padding: 0;
+  width: var(--xflow-control-height-sm);
+}
+
 .xflow-editor .xflow-editor-variable-add {
   background: transparent;
   border-color: var(--xflow-border-strong);
