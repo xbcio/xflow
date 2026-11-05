@@ -139,7 +139,7 @@ describe("xflow.editor top bar (§6.3)", () => {
   it("is a 52px bar with the baseline padding and gap", () => {
     expect(css).toMatch(/\.xflow-editor\s*\{[^}]*--xflow-editor-toolbar-height:\s*52px\s*;/);
     expect(css).toMatch(/\.xflow-editor-toolbar\s*\{[^}]*flex:\s*0 0 var\(--xflow-editor-toolbar-height\)\s*;/);
-    expect(css).toMatch(/\.xflow-editor-toolbar\s*\{[^}]*gap:\s*var\(--xflow-space-2\)\s*;/);
+    expect(css).toMatch(/\.xflow-editor-toolbar\s*\{[^}]*gap:\s*var\(--xflow-space-3\)\s*;/);
     expect(css).toMatch(/\.xflow-editor-toolbar\s*\{[^}]*padding:\s*0 var\(--xflow-space-3\)\s*;/);
     expect(css).toMatch(/\.xflow-editor-toolbar\s*\{[^}]*border-bottom:\s*1px solid var\(--xflow-border-subtle\)\s*;/);
   });
@@ -166,6 +166,16 @@ describe("xflow.editor top bar (§6.3)", () => {
     expect(css).toMatch(/\.xflow-editor-toolbar-right\s*\{[^}]*grid-column:\s*3\s*;/);
   });
 
+  it("draws the top-bar details the baseline does: raised logo, 8px trough, 14% press", () => {
+    expect(css).toMatch(/\.xflow-editor-logo-button\s*\{[^}]*background:\s*var\(--xflow-panel-raised\)\s*;/);
+    expect(css).toMatch(/\.xflow-editor-canvas-tools\s*\{[^}]*border-radius:\s*var\(--xflow-radius-md\)\s*;/);
+    expect(css).toMatch(
+      /\.xflow-editor-canvas-tools \.xflow-editor-icon-button\[aria-pressed="true"\]\s*\{[^}]*background:\s*color-mix\(in srgb, var\(--xflow-primary\) 14%,\s*transparent\)\s*;[^}]*color:\s*var\(--xflow-primary\)\s*;/
+    );
+    expect(css).toMatch(/\.xflow-editor-sep\s*\{[^}]*border-color:\s*var\(--xflow-border\)\s*;/);
+    expect(css).toMatch(/\.xflow-editor-run-button\s*\{[^}]*border-radius:\s*var\(--xflow-radius-sm\)\s*;/);
+  });
+
   it("keeps one nowrap 52px bar at compact width and lets the title track ellipsize", () => {
     // E0 legacy: the wrapped second row pushed 运行 outside the root at 802-925.
     const compact = css.match(/@container xflow-editor \(width <= 1280px\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
@@ -177,8 +187,16 @@ describe("xflow.editor top bar (§6.3)", () => {
     expect(css).not.toContain(".xflow-editor-toolbar-actions");
   });
 
-  it("keeps top-bar icon buttons in the body colour and save/publish at weight 500", () => {
-    expect(css).toMatch(/\.xflow-editor-icon-button\s*\{[^}]*color:\s*var\(--xflow-text\)\s*;/);
+  it("keeps top-bar icon buttons secondary until hover and save/publish at weight 500", () => {
+    // The disabled guard is what lets AntD paint disabled buttons: this sheet
+    // is in a later cascade layer, so an unguarded colour would win there too.
+    expect(css).toMatch(
+      /\.xflow-editor-icon-button:not\(:disabled\)\s*\{[^}]*color:\s*var\(--xflow-text-secondary\)\s*;/
+    );
+    expect(css).toMatch(
+      /\.xflow-editor-icon-button:hover:not\(:disabled\)\s*\{[^}]*color:\s*var\(--xflow-text\)\s*;/
+    );
+    expect(css).not.toMatch(/\.xflow-editor-icon-button\s*\{[^}]*color:/);
     expect(css).toMatch(/\.xflow-editor-save-button,\s*\.xflow-editor-publish-button\s*\{[^}]*font-weight:\s*var\(--xflow-font-weight-medium\)\s*;/);
   });
 

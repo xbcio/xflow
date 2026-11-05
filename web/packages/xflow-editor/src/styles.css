@@ -91,7 +91,7 @@
   border-bottom: 1px solid var(--xflow-border-subtle);
   display: grid;
   flex: 0 0 var(--xflow-editor-toolbar-height);
-  gap: var(--xflow-space-2);
+  gap: var(--xflow-space-3);
   /* §6.3 (2026-11-04): equal side tracks keep the canvas tools exactly in the
    * middle; the title ellipsizes instead of pushing them off centre. */
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
@@ -124,6 +124,7 @@
 /* §6.3: the 28px logo replaces the back arrow; the click still leaves for the
  * workflow list. */
 .xflow-editor-logo-button {
+  background: var(--xflow-panel-raised);
   border: 1px solid var(--xflow-border-strong);
   border-radius: var(--xflow-radius-sm);
   color: var(--xflow-primary);
@@ -160,7 +161,7 @@
   align-items: center;
   background: var(--xflow-field);
   border: 1px solid var(--xflow-border);
-  border-radius: var(--xflow-radius-sm);
+  border-radius: var(--xflow-radius-md);
   display: inline-flex;
   gap: var(--xflow-space-0-5);
   grid-column: 2;
@@ -179,8 +180,8 @@
 /* The active canvas tool (选择 / 连线) is a pressed icon button, as the
  * baseline's `.on` state draws it. */
 .xflow-editor-canvas-tools .xflow-editor-icon-button[aria-pressed="true"] {
-  background: color-mix(in srgb, var(--xflow-primary) 12%, transparent);
-  color: var(--xflow-primary-fg);
+  background: color-mix(in srgb, var(--xflow-primary) 14%, transparent);
+  color: var(--xflow-primary);
 }
 
 .xflow-editor-canvas-tools .xflow-editor-sep {
@@ -190,6 +191,7 @@
 }
 
 .xflow-editor-run-button {
+  border-radius: var(--xflow-radius-sm);
   font-weight: var(--xflow-font-weight-medium);
   /* No gap override: the baseline's `size="small"` primary keeps AntD's own
    * icon gap (8px) and 1em (13px) icon, which is what makes it 69px wide. */
@@ -207,11 +209,10 @@
 }
 
 /* The 32px top-bar icon button from the baseline: bare glyph, square hit area.
- * The baseline's ghost buttons inherit the body colour, not the secondary one. */
+ * The baseline's ghost icon buttons read as secondary until hovered. */
 .xflow-editor-icon-button {
   align-items: center;
   border-radius: var(--xflow-radius-sm);
-  color: var(--xflow-text);
   display: inline-flex;
   font-size: var(--xflow-font-xl);
   height: var(--xflow-control-height);
@@ -220,7 +221,14 @@
   padding-inline: 0;
 }
 
-.xflow-editor-icon-button:hover {
+/* :not(:disabled) keeps the disabled tone AntD's: this sheet sits in a later
+ * cascade layer, so an unguarded colour here would repaint disabled buttons
+ * with the enabled one. */
+.xflow-editor-icon-button:not(:disabled) {
+  color: var(--xflow-text-secondary);
+}
+
+.xflow-editor-icon-button:hover:not(:disabled) {
   color: var(--xflow-text);
 }
 
@@ -264,7 +272,7 @@
 }
 
 .xflow-editor-sep {
-  border-color: var(--xflow-border-subtle);
+  border-color: var(--xflow-border);
   height: 20px;
   margin: 0;
 }
