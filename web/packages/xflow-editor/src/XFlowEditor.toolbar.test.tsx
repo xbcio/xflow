@@ -125,6 +125,15 @@ describe("top bar canvas tools (§6.3, 2026-11-04)", () => {
     expect(screen.queryByRole("button", { name: "运行选项" })).toBeNull();
   });
 
+  it("hooks both segmented glyphs so preflight cannot drop them off the line", async () => {
+    render(<XFlowEditor value={workflow} />);
+    expect(document.querySelector(".xflow-editor-mode-segmented__icon svg")).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "主题设置" }));
+    await screen.findByText("颜色模式");
+    expect(document.querySelector(".xflow-editor-theme-segmented__icon svg")).not.toBeNull();
+  });
+
   it("keeps the separator before 运行 whether or not 测试此节点 is present", () => {
     const view = render(
       <XFlowEditor value={workflow} onRunNode={vi.fn(async () => ({ status: "success" }) as RuntimeSnapshot)} />

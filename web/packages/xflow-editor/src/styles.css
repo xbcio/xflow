@@ -3484,6 +3484,15 @@ button.xflow-editor-overview__run:hover {
   padding-inline: var(--xflow-space-3);
 }
 
+/* Ant Design wraps a segmented glyph in its own span. Under Tailwind preflight
+ * the svg becomes display:block and falls off the label's baseline; an inline
+ * flex box puts the glyph back on the text line and centres it vertically. */
+.xflow-editor .xflow-editor-mode-segmented__icon,
+.xflow-editor .xflow-editor-theme-segmented__icon {
+  align-items: center;
+  display: inline-flex;
+}
+
 /* The 32px top-bar theme trigger keeps the AntD button radius the baseline
  * shows; the title-bar actions share the same 6px step. */
 .xflow-editor .xflow-editor-theme-trigger {

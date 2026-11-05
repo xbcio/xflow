@@ -1004,6 +1004,7 @@ function ThemeSettings({
   onLayoutPolicyChange: (policy: LayoutPolicy) => void;
 }): React.ReactElement {
   const segmentedClassNames = {
+    icon: "xflow-editor-theme-segmented__icon",
     item: "xflow-editor-theme-segmented__item",
     label: "xflow-editor-theme-segmented__label",
     root: "xflow-editor-theme-segmented__root"
@@ -5673,6 +5674,7 @@ export function XFlowEditor({
             <Segmented
               aria-label="视图模式"
               classNames={{
+                icon: "xflow-editor-mode-segmented__icon",
                 item: "xflow-editor-mode-segmented__item",
                 label: "xflow-editor-mode-segmented__label",
                 root: "xflow-editor-mode-segmented__root"

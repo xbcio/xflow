@@ -82,6 +82,12 @@ describe("xflow.editor cascade frame", () => {
     }
   });
 
+  it("puts the segmented glyph back on the text line under preflight", () => {
+    expect(css).toMatch(
+      /\.xflow-editor \.xflow-editor-mode-segmented__icon,\s*\.xflow-editor \.xflow-editor-theme-segmented__icon\s*\{[^}]*align-items:\s*center\s*;[^}]*display:\s*inline-flex\s*;/
+    );
+  });
+
   it("sizes the panel-titlebar icon buttons from the shared 24px control height", () => {
     for (const hook of [
       "xflow-editor-variable-action",
