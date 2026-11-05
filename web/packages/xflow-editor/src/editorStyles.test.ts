@@ -170,7 +170,7 @@ describe("xflow.editor top bar (§6.3)", () => {
     expect(css).toMatch(/\.xflow-editor-logo-button\s*\{[^}]*background:\s*var\(--xflow-panel-raised\)\s*;/);
     expect(css).toMatch(/\.xflow-editor-canvas-tools\s*\{[^}]*border-radius:\s*var\(--xflow-radius-md\)\s*;/);
     expect(css).toMatch(
-      /\.xflow-editor-canvas-tools \.xflow-editor-icon-button\[aria-pressed="true"\]\s*\{[^}]*background:\s*color-mix\(in srgb, var\(--xflow-primary\) 14%,\s*transparent\)\s*;[^}]*color:\s*var\(--xflow-primary\)\s*;/
+      /\.xflow-editor-canvas-tools \.xflow-editor-icon-button\[aria-pressed="true"\]\:not\(:disabled\)\s*\{[^}]*background:\s*color-mix\(in srgb, var\(--xflow-primary\) 14%,\s*transparent\)\s*;[^}]*color:\s*var\(--xflow-primary\)\s*;/
     );
     expect(css).toMatch(/\.xflow-editor-sep\s*\{[^}]*border-color:\s*var\(--xflow-border\)\s*;/);
     expect(css).toMatch(/\.xflow-editor-run-button\s*\{[^}]*border-radius:\s*var\(--xflow-radius-sm\)\s*;/);
@@ -198,6 +198,16 @@ describe("xflow.editor top bar (§6.3)", () => {
     );
     expect(css).not.toMatch(/\.xflow-editor-icon-button\s*\{[^}]*color:/);
     expect(css).toMatch(/\.xflow-editor-save-button,\s*\.xflow-editor-publish-button\s*\{[^}]*font-weight:\s*var\(--xflow-font-weight-medium\)\s*;/);
+  });
+
+  it("keeps a pressed canvas tool primary while it is hovered", () => {
+    // The hover rule is (0,3,0) and sits later in the sheet. A pressed rule
+    // without the guard ties at (0,3,0) and loses, so the pressed glyph turned
+    // secondary under the pointer; `:not(:disabled)` lifts it to (0,4,0).
+    const pressed = '.xflow-editor-canvas-tools .xflow-editor-icon-button[aria-pressed="true"]:not(:disabled)';
+    expect(css).toContain(pressed);
+    expect(css).not.toMatch(/\.xflow-editor-canvas-tools \.xflow-editor-icon-button\[aria-pressed="true"\]\s*\{/);
+    expect(css).toContain(".xflow-editor-icon-button:hover:not(:disabled)");
   });
 
   it("draws the mode switch without the border that made it 34px", () => {

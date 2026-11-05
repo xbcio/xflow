@@ -178,8 +178,11 @@
 }
 
 /* The active canvas tool (选择 / 连线) is a pressed icon button, as the
- * baseline's `.on` state draws it. */
-.xflow-editor-canvas-tools .xflow-editor-icon-button[aria-pressed="true"] {
+ * baseline's `.on` state draws it. `:not(:disabled)` is load-bearing: without
+ * it this selector and `.xflow-editor-icon-button:hover:not(:disabled)` tie at
+ * (0,3,0), and the hover rule comes later in the sheet, so hovering a pressed
+ * tool would repaint the glyph with the secondary text colour. */
+.xflow-editor-canvas-tools .xflow-editor-icon-button[aria-pressed="true"]:not(:disabled) {
   background: color-mix(in srgb, var(--xflow-primary) 14%, transparent);
   color: var(--xflow-primary);
 }
