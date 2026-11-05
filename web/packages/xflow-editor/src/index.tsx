@@ -4924,10 +4924,14 @@ export function XFlowEditor({
           redoWorkflow();
           return;
         case "save":
-          if (onSave && editMode && !saveClean) void saveWorkflow();
+          // An unwired capability draws no button, so the shortcut is its only
+          // feedback: report it even when the draft is clean.
+          if (!editMode) return;
+          if (!onSave || !saveClean) void saveWorkflow();
           return;
         case "run":
-          if (onRun && editMode && !running) void runWorkflow();
+          if (!editMode) return;
+          if (!onRun || !running) void runWorkflow();
           return;
         case "duplicate":
           duplicateSelectedNodes();

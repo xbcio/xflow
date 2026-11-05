@@ -1139,6 +1139,51 @@ describe("dock states (E4b)", () => {
   });
 });
 
+describe("unwired capabilities answer their shortcuts (I5)", () => {
+  /** Dirty the draft without moving the inspector off the selected node. */
+  const disableSelected = async () => {
+    const inspectorRoot = screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
+    fireEvent.click(within(inspectorRoot).getByRole("button", { name: "更多操作" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "禁用" }));
+  };
+
+  it("reports 当前环境不支持保存 from ⌘S on a clean draft", async () => {
+    render(<XFlowEditor value={workflow} />);
+    expect(within(drawer()).queryByText("当前环境不支持保存")).toBeNull();
+
+    fireEvent.keyDown(window, { key: "s", code: "KeyS", metaKey: true });
+    expect(await within(drawer()).findByText("当前环境不支持保存")).toBeTruthy();
+    expect(dockState()).toBe("docked");
+  });
+
+  it("reports 当前环境不支持保存 from ⌘S on a dirty draft too", async () => {
+    render(<XFlowEditor value={workflow} />);
+    await disableSelected();
+
+    fireEvent.keyDown(window, { key: "s", code: "KeyS", metaKey: true });
+    expect(await within(drawer()).findByText("当前环境不支持保存")).toBeTruthy();
+    expect(dockState()).toBe("docked");
+  });
+
+  it("reports 当前环境不支持运行 from ⌘↵", async () => {
+    render(<XFlowEditor value={workflow} />);
+
+    fireEvent.keyDown(window, { key: "Enter", code: "Enter", metaKey: true });
+    expect(await within(drawer()).findByText("当前环境不支持运行")).toBeTruthy();
+    expect(dockState()).toBe("docked");
+  });
+
+  it("keeps ⌘S silent on a clean draft when the host did wire onSave", async () => {
+    const onSave = vi.fn(async (next: WorkflowDef) => next);
+    render(<XFlowEditor value={workflow} onSave={onSave} />);
+
+    fireEvent.keyDown(window, { key: "s", code: "KeyS", metaKey: true });
+    await Promise.resolve();
+    expect(onSave).not.toHaveBeenCalled();
+    expect(within(drawer()).queryByText("保存不可用")).toBeNull();
+  });
+});
+
 describe("auto-open points (E4b)", () => {
   it("opens a collapsed dock to docked on 校验 and never selects a node for the user", () => {
     render(<XFlowEditor value={broken} />);
