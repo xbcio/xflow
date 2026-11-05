@@ -114,6 +114,17 @@ describe("xflow.editor cascade frame", () => {
   it("leaves composer's scale to core instead of re-declaring it", () => {
     expect(css).not.toMatch(/--xflow-composer-(control-height|font-size|field-gap)\s*:/);
   });
+
+  it("stands the fx toggle apart from its control instead of fusing their edges", () => {
+    // The baseline puts fx beside the control, one 6px gap away, at the
+    // control's own height and radius. The old suffix treatment (row gap 0,
+    // squared adjoining corners, 26px width) must not come back.
+    expect(css).toMatch(/\.xflow-editor-nodeform-expression-row\s*\{[^}]*gap:\s*var\(--xflow-space-1-5\)\s*;/);
+    expect(css).toMatch(/\.xflow-editor-nodeform-fx\s*\{[^}]*width:\s*var\(--xflow-editor-nodeform-fx-size\)\s*;/);
+    expect(css).toMatch(/\.xflow-editor-nodeform-fx\s*\{[^}]*border-radius:\s*var\(--xflow-radius-sm\)\s*;/);
+    expect(css).not.toContain("border-end-end-radius: 0");
+    expect(css).not.toContain("border-start-start-radius: 0");
+  });
 });
 
 describe("xflow.editor panel title bar (§6.0)", () => {

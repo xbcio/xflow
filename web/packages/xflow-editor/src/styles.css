@@ -3771,6 +3771,9 @@ button.xflow-editor-overview__run:hover {
 }
 
 .xflow-editor .xflow-editor-nodeform-fx {
+  /* A standalone key beside the control, so it keeps the control's own 6px
+     radius instead of AntD's small-button 4px. */
+  border-radius: var(--xflow-radius-sm);
   flex: 0 0 auto;
   font-family: var(--xflow-font-mono);
   font-size: var(--xflow-font-sm);
@@ -4026,22 +4029,6 @@ button.xflow-editor-overview__run:hover {
 
 .xflow-editor .xflow-editor-node-form .xflow-composer-object-group > .xflow-composer-section-body {
   padding: var(--xflow-space-2-5) var(--xflow-space-2-5) var(--xflow-space-3);
-}
-
-/* The fx toggle rides on the control's trailing edge, like an input suffix. */
-.xflow-editor .xflow-editor-nodeform-expression-row {
-  gap: 0;
-}
-
-.xflow-editor .xflow-editor-nodeform-expression-body .xflow-composer-control {
-  border-end-end-radius: 0;
-  border-start-end-radius: 0;
-}
-
-.xflow-editor .xflow-editor-nodeform-expression-row .xflow-editor-nodeform-fx {
-  border-end-start-radius: 0;
-  border-start-start-radius: 0;
-  width: 26px;
 }
 
 .xflow-editor .xflow-editor-node-form__notice {
