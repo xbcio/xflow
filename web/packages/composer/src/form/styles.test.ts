@@ -140,6 +140,14 @@ describe("section card declarations", () => {
     expect(css).toMatch(/\.xflow-composer-section-badge:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--xflow-primary,/);
   });
 
+  it("keeps a status marker beside the summary it follows", () => {
+    // §6.4 卡头排布: summary and status chip are one right-aligned group. The
+    // summary owns the auto margin; a second one would strand it mid-header.
+    expect(css).toMatch(
+      /\.xflow-composer-section-summary \+ \.xflow-composer-section-valid,\s*\.xflow-composer-section-summary \+ \.xflow-composer-section-badge \{[^}]*margin-left: 0;/
+    );
+  });
+
   it("moves the field hint to the tertiary text colour", () => {
     expect(css).toMatch(/\.xflow-composer-field-hint\s*\{[^}]*color:\s*var\(--xflow-text-tertiary,/);
   });

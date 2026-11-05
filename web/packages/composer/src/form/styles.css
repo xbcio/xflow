@@ -108,6 +108,15 @@
   white-space: nowrap;
 }
 
+/* A status marker directly after the summary belongs to the same right-aligned
+ * group: only the summary keeps the auto margin, and the header's 8px gap
+ * separates the two. Two auto margins would split the free space and strand
+ * the summary mid-header. */
+.xflow-composer-section-summary + .xflow-composer-section-valid,
+.xflow-composer-section-summary + .xflow-composer-section-badge {
+  margin-left: 0;
+}
+
 .xflow-composer-section-toggle {
   display: inline-flex;
   align-items: center;
