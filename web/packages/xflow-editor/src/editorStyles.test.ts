@@ -88,6 +88,13 @@ describe("xflow.editor cascade frame", () => {
     );
   });
 
+  it("draws the mode switch labels at the regular weight", () => {
+    // The baseline's segmented items are regular weight. The bar's switch is
+    // the only segmented control in the header, so a medium override here puts
+    // it visibly heavier than the ui-preview it is measured against.
+    expect(css).not.toMatch(/\.xflow-editor-mode-segmented__label[^{}]*\{[^}]*font-weight\s*:/);
+  });
+
   it("sizes the panel-titlebar icon buttons from the shared 24px control height", () => {
     for (const hook of [
       "xflow-editor-variable-action",

@@ -3471,10 +3471,6 @@ button.xflow-editor-overview__run:hover {
   font-size: var(--xflow-font-md);
 }
 
-.xflow-editor .xflow-editor-mode-segmented__label {
-  font-weight: var(--xflow-font-weight-medium);
-}
-
 /* Ant Design wraps a segmented glyph in its own span. Under Tailwind preflight
  * the svg becomes display:block and falls off the label's baseline; an inline
  * flex box puts the glyph back on the text line and centres it vertically. */
