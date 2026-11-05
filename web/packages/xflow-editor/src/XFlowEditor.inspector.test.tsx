@@ -716,6 +716,19 @@ describe("inspector tabs (§6.4, AntD Tabs)", () => {
     expect(tab("连接").getAttribute("aria-selected")).toBe("false");
   });
 
+  it("gives the parameters JSON toggle a tooltip identical to its name", async () => {
+    render(<XFlowEditor value={workflow} />);
+    const panel = selectNode("api");
+    const toggle = within(panel).getByRole("button", { name: "以 JSON 编辑参数" });
+
+    fireEvent.mouseEnter(toggle);
+    const tips = await screen.findAllByText("以 JSON 编辑参数", {
+      selector: ".ant-tooltip-container, .ant-tooltip-inner, .ant-tooltip *"
+    });
+    expect(tips.length).toBeGreaterThan(0);
+    expect(screen.queryByText("以 JSON 源码编辑参数")).toBeNull();
+  });
+
   it("mounts only the active panel, with the execution settings inside 配置", () => {
     render(<XFlowEditor value={workflow} />);
     selectNode("api");

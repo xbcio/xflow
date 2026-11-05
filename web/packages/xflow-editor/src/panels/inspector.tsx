@@ -1081,7 +1081,7 @@ function ParameterSourceToggle({
   onToggle: () => void;
 }): React.ReactElement {
   return (
-    <Tooltip classNames={editorTooltipClassNames} title="以 JSON 源码编辑参数">
+    <Tooltip classNames={editorTooltipClassNames} title="以 JSON 编辑参数">
       <Button
         aria-label="以 JSON 编辑参数"
         aria-pressed={pressed}
