@@ -451,6 +451,52 @@ for (const kernel of kernels) {
       });
     });
 
+    describe("ExpressionInput expression-roots hint", () => {
+      const pureSpec = (checks?: ElementDef["checks"]) =>
+        formSpec({
+          f: {
+            type: "ExpressionInput",
+            props: { label: "Quorum", value: { $bindState: "/v" }, mode: "pure" },
+            ...(checks ? { checks } : {})
+          }
+        });
+      const HINT = "可用变量：$input · $nodes · $vars · $params";
+
+      it("shows the roots only while the expression editor holds focus", async () => {
+        const m = mountComposer({ kernel, registry, spec: pureSpec(), value: { v: "abc" } });
+        await m.flush();
+        const field = fieldOf(m.container, "f");
+        const area = textarea(field);
+        expect(field.textContent).not.toContain(HINT);
+
+        fireEvent.focus(area);
+        await m.flush();
+        expect(field.textContent).toContain(HINT);
+        const hint = one<HTMLElement>(field, ".xflow-composer-field-hint");
+        expect(area.getAttribute("aria-describedby")?.split(" ")).toContain(hint.id);
+
+        fireEvent.blur(area);
+        await m.flush();
+        expect(field.textContent).not.toContain(HINT);
+      });
+
+      it("yields the hint row to a field issue", async () => {
+        const m = mountComposer({
+          kernel,
+          registry,
+          spec: pureSpec([{ type: "maxLength", args: { value: 2 }, message: "最多 2 个字符" }]),
+          value: { v: "abc" }
+        });
+        await m.flush();
+        const field = fieldOf(m.container, "f");
+        expect(field.textContent).toContain("最多 2 个字符");
+
+        fireEvent.focus(textarea(field));
+        await m.flush();
+        expect(field.textContent).not.toContain(HINT);
+      });
+    });
+
     describe("DurationInput display unit", () => {
       it("switching the unit re-expresses the value without writing; typing then uses the unit", async () => {
         const m = mountComposer({

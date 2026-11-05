@@ -30,6 +30,9 @@ export interface ExpressionInputProps extends ChromeProps {
 const DEFAULT_PLACEHOLDER = "${{ $input.value }}";
 // Pure params take a bare expr-lang expression, not a `${{ }}` template.
 const PURE_PLACEHOLDER = "$input.value";
+// The roots exprx actually exposes (exprx/exprx.go); n8n's `$json` / `$node`
+// do not evaluate here. Shown only while the expression editor holds focus.
+const EXPRESSION_ROOTS_HINT = "可用变量：$input · $nodes · $vars · $params";
 
 function ExpressionField({ node, props, value, onChange, defaultHint, issues, readOnly, slots }: ComposerComponentProps<ExpressionInputProps>) {
   const literal = slots[EXPRESSION_LITERAL_SLOT];
@@ -38,6 +41,7 @@ function ExpressionField({ node, props, value, onChange, defaultHint, issues, re
   // null: follow the value (an expression opens in the fx state); otherwise the user's choice.
   const [fxChoice, setFxChoice] = useState<boolean | null>(null);
   const fx = !toggleable || (fxChoice ?? expression);
+  const [focused, setFocused] = useState(false);
 
   const expect = props.expect;
   // The editor edits strings; a toggled field may also replace a literal from
@@ -77,7 +81,13 @@ function ExpressionField({ node, props, value, onChange, defaultHint, issues, re
       required={props.required}
       disabled={disabled}
       issues={issues}
-      hint={replacesLiteral ? "当前为普通值；输入表达式后会替换它" : undefined}
+      hint={
+        replacesLiteral
+          ? "当前为普通值；输入表达式后会替换它"
+          : content === "editor" && focused && issues.length === 0
+            ? EXPRESSION_ROOTS_HINT
+            : undefined
+      }
       labelMode={content === "editor" ? "control" : "group"}
       stateClassName={unset ? "is-unset" : undefined}
     >
@@ -104,6 +114,8 @@ function ExpressionField({ node, props, value, onChange, defaultHint, issues, re
             aria-describedby={ids.describedBy}
             aria-invalid={ids.invalid || undefined}
             aria-required={props.required || undefined}
+            onFocus={() => setFocused(true)}
+            onBlur={() => setFocused(false)}
             onChange={(event) => {
               if (fxChoice === null) setFxChoice(true); // keep the fx state while the text loses its template
               onChange?.(event.target.value);
