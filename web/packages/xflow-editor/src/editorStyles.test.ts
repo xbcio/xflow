@@ -1064,10 +1064,10 @@ describe("xflow.editor small-text tones, hit targets and forced colours", () => 
     expect(after).toMatch(/inset:\s*min\(0px, calc\(\(100% - var\(--xflow-control-height-sm\)\) \/ 2\)\) 0\s*;/);
     // 20 (the pill's visual height) is what the bar still measures.
     expect(block(".xflow-editor-chip")).toMatch(/height:\s*20px\s*;/);
-    // The caret is the 12px step, not the icon package's 16.
+    // The caret is the chip's 11px type step (1em), not the 12px small step.
     const caret = block(".xflow-editor .xflow-editor-version-chip__caret");
-    expect(caret).toMatch(/height:\s*var\(--xflow-font-sm\)\s*;/);
-    expect(caret).toMatch(/width:\s*var\(--xflow-font-sm\)\s*;/);
+    expect(caret).toMatch(/height:\s*var\(--xflow-font-xs\)\s*;/);
+    expect(caret).toMatch(/width:\s*var\(--xflow-font-xs\)\s*;/);
   });
 
   it("grows the library group heading to the control step through a token-sized ::after", () => {

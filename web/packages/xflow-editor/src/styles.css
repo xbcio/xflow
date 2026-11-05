@@ -5792,8 +5792,11 @@ button.xflow-editor-overview__run:hover {
 }
 
 .xflow-editor .xflow-editor-version-chip__caret {
-  height: var(--xflow-font-sm);
-  width: var(--xflow-font-sm);
+  /* The baseline's chip caret is 1em of the chip's 11px type, not the 12px
+   * small step: the 1px it added made the title row 1.11px narrower than the
+   * reference once the draft chip's text is accounted for. */
+  height: var(--xflow-font-xs);
+  width: var(--xflow-font-xs);
 }
 
 /* The select's clear affordance only exists once a value is set; AntD's `clear`
