@@ -54,7 +54,7 @@ export function themeConfig(appearance: Appearance): ThemeConfig {
       Modal: { borderRadiusLG: radiusPx(foundation.radiusLg), contentBg: p.panel, headerBg: p.panel, footerBg: p.panel },
       Form: { itemMarginBottom: 12, verticalLabelPadding: '0 0 4px', labelFontSize: 12, labelColor: p.textSecondary },
       Tabs: { horizontalItemGutter: 16, horizontalMargin: '0', itemColor: p.textSecondary },
-      Segmented: { itemSelectedBg: p.panel, trackBg: p.hover },
+      Segmented: { itemSelectedBg: p.panel, trackBg: p.hover, borderRadiusSM: radiusPx(foundation.radiusXs) },
       Table: { headerBg: p.panelRaised, headerColor: p.textSecondary, rowHoverBg: p.hover, cellPaddingBlock: 10 },
       Popover: { colorBgElevated: p.panel },
     },
