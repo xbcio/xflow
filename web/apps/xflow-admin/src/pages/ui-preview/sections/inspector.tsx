@@ -5,7 +5,6 @@ import {
   CopyIcon,
   DownIcon,
   MoreIcon,
-  OutlineIcon,
   PlusIcon,
   SearchIcon,
   SlidersIcon,
@@ -541,19 +540,16 @@ export function InspectorSection() {
                   children: <div className="xflow-pv-field-grid">{fields(wfSettings.concurrency)}</div>,
                 },
                 /*
-                 * The last two sections open collapsed, with the number of
-                 * fields they hold: the panel is 640px and five expanded
-                 * sections are taller than that, which left 错误与重试 and 高级
-                 * below the fold — the reader could not see that the panel has
-                 * five sections at all.
+                 * The last two sections open collapsed: five expanded sections
+                 * are taller than the panel, which left 错误与重试 and 高级 below
+                 * the fold — the reader could not see that the panel has five
+                 * sections at all.
                  */
                 {
                   key: 'retry',
                   defaultActive: false,
                   label: (
-                    <SectionLabel title="错误与重试" extra="节点默认继承">
-                      <StatusChip tone="neutral" icon={<OutlineIcon />} label={`${wfSettings.retry.length} 项`} />
-                    </SectionLabel>
+                    <SectionLabel title="错误与重试" extra="节点默认继承" />
                   ),
                   children: <div className="xflow-pv-field-grid">{fields(wfSettings.retry)}</div>,
                 },
@@ -561,9 +557,7 @@ export function InspectorSection() {
                   key: 'advanced',
                   defaultActive: false,
                   label: (
-                    <SectionLabel title="高级" extra="调度 · 实验">
-                      <StatusChip tone="neutral" icon={<OutlineIcon />} label={`${wfSettings.advanced.length} 项`} />
-                    </SectionLabel>
+                    <SectionLabel title="高级" extra="调度 · 实验" />
                   ),
                   children: <div className="xflow-pv-field-grid">{fields(wfSettings.advanced)}</div>,
                 },
@@ -572,7 +566,7 @@ export function InspectorSection() {
           }
         />
         <figcaption>
-          未选中节点：面板变成工作流设置（基本 / 入口 / 并发 / 错误与重试 / 高级），五节在一屏内看全，后两节折叠并带字段数
+          未选中节点：面板变成工作流设置（基本 / 入口 / 并发 / 错误与重试 / 高级），五节在一屏内看全，后两节折叠
         </figcaption>
       </figure>
 
