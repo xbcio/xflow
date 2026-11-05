@@ -310,6 +310,14 @@ describe("node search and workflow settings", () => {
     expect(handleChange).not.toHaveBeenCalled();
   });
 
+  it("summarises 高级 with the 调度 · 实验 note in plain text (§6.4)", () => {
+    render(<XFlowEditor value={workflow} />);
+    fireEvent.keyDown(window, { key: "Escape" });
+    const inspector = screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
+    const advanced = within(inspector).getByRole("group", { name: "高级" });
+    expect(advanced.querySelector(".xflow-editor-section-card__meta")?.textContent).toBe("调度 · 实验");
+  });
+
   it("keeps settings help to one line with a ? key and hides raw enums as secondary text (ED-18)", () => {
     render(<XFlowEditor value={workflow} />);
     fireEvent.keyDown(window, { key: "Escape" });

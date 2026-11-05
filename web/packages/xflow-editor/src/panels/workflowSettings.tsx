@@ -313,6 +313,7 @@ function CollapsibleCard({
   ariaLabel,
   expanded,
   icon,
+  meta,
   onToggle,
   title,
   children
@@ -321,6 +322,7 @@ function CollapsibleCard({
   ariaLabel: string;
   expanded: boolean;
   icon: React.ReactNode;
+  meta?: React.ReactNode;
   onToggle: () => void;
   title: React.ReactNode;
   children: React.ReactNode;
@@ -333,23 +335,26 @@ function CollapsibleCard({
           {icon}
           <strong>{title}</strong>
         </span>
-        <span className="xflow-editor-section-card__actions">
-          {actions}
-          <Button
-            aria-controls={expanded ? bodyId : undefined}
-            aria-expanded={expanded}
-            aria-label={expanded ? `收起${ariaLabel}` : `展开${ariaLabel}`}
-            className="xflow-editor-advanced-toggle"
-            icon={
-              <DownIcon
-                className="xflow-editor-advanced-toggle__chevron"
-                style={{ transform: expanded ? undefined : "rotate(-90deg)" }}
-              />
-            }
-            size="small"
-            type="text"
-            onClick={onToggle}
-          />
+        <span className="xflow-editor-section-card__trailing">
+          {meta !== undefined ? <span className="xflow-editor-section-card__meta">{meta}</span> : null}
+          <span className="xflow-editor-section-card__actions">
+            {actions}
+            <Button
+              aria-controls={expanded ? bodyId : undefined}
+              aria-expanded={expanded}
+              aria-label={expanded ? `收起${ariaLabel}` : `展开${ariaLabel}`}
+              className="xflow-editor-advanced-toggle"
+              icon={
+                <DownIcon
+                  className="xflow-editor-advanced-toggle__chevron"
+                  style={{ transform: expanded ? undefined : "rotate(-90deg)" }}
+                />
+              }
+              size="small"
+              type="text"
+              onClick={onToggle}
+            />
+          </span>
         </span>
       </header>
       {expanded ? (
@@ -729,6 +734,7 @@ export function WorkflowSettings({
         ariaLabel="高级"
         expanded={advancedExpanded}
         icon={<GearIcon />}
+        meta="调度 · 实验"
         title="高级"
         onToggle={() => setAdvancedOpen((open) => !open)}
       >
