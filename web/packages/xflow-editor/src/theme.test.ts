@@ -7,7 +7,7 @@ import {
 } from "@xflow/core";
 import { theme } from "antd";
 import { describe, expect, it } from "vitest";
-import { createEditorThemeConfig, type ResolvedXFlowEditorAppearance } from "./theme";
+import { createEditorThemeConfig, coreControlHeightTheme, editorDensityTheme, type ResolvedXFlowEditorAppearance } from "./theme";
 
 /**
  * The AntD ConfigProvider and the --xflow-* custom properties must show the
@@ -222,5 +222,18 @@ describe("createEditorThemeConfig", () => {
       walk("components", components);
       expect(strays, appearance).toEqual([]);
     }
+  });
+});
+
+describe("top bar density", () => {
+  it("steps the bar to 28/22 and hands its popups the foundation 32/24 back", () => {
+    // Other sessions import editorDensityTheme by name, so the step is a contract.
+    expect(editorDensityTheme.token).toMatchObject({ controlHeight: 28, controlHeightSM: 22 });
+    expect(coreControlHeightTheme.token).toMatchObject({
+      controlHeight: Number.parseInt(foundationTokens.controlHeight, 10),
+      controlHeightSM: Number.parseInt(foundationTokens.controlHeightSm, 10)
+    });
+    expect(coreControlHeightTheme.token?.controlHeight).toBe(32);
+    expect(coreControlHeightTheme.token?.controlHeightSM).toBe(24);
   });
 });

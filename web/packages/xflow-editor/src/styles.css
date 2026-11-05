@@ -199,11 +199,11 @@
   padding-inline: var(--xflow-space-2-5);
 }
 
-/* The run-record toolbar carries the baseline `.btn` (32px) even though the
- * AntD buttons are declared small for their text metrics. */
+/* The run-record toolbar shares the top bar's 28px density step: the nested
+ * ConfigProvider gives the middle size its 28, and the baseline's 12px side
+ * padding stays. */
 .xflow-editor .xflow-editor-run-action,
 .xflow-editor .xflow-editor-rerun-button {
-  height: var(--xflow-control-height);
   padding-inline: var(--xflow-space-3);
   border-radius: var(--xflow-radius-sm);
 }
@@ -3459,24 +3459,18 @@ button.xflow-editor-overview__run:hover {
   box-shadow: inset 0 1px 0 var(--xflow-highlight);
 }
 
-/* The top-bar switch (§6.3): 30px track, 26px items, 12px item padding —
- * the baseline `.seg` (188px there includes its 待接入 annotation marker; the
- * two labels alone measure 130px). */
+/* The top-bar switch (§6.3): the nested density ConfigProvider sizes the track
+ * (28) and its items (24); the sheet only removes the track chrome and the
+ * centring the standalone segmented would do. */
 .xflow-editor .xflow-editor-mode-segmented {
   border: 0;
-  height: 30px;
   /* The switch leads the right cluster, so it no longer centres itself. */
   margin-inline: 0;
-  min-height: 30px;
 }
 
 .xflow-editor .xflow-editor-theme-segmented__item,
 .xflow-editor .xflow-editor-mode-segmented__item {
   border-radius: var(--xflow-radius-xs);
-}
-
-.xflow-editor .xflow-editor-mode-segmented__item {
-  height: 26px;
 }
 
 .xflow-editor .xflow-editor-theme-segmented__label,
@@ -3487,8 +3481,6 @@ button.xflow-editor-overview__run:hover {
 
 .xflow-editor .xflow-editor-mode-segmented__label {
   font-weight: var(--xflow-font-weight-medium);
-  height: 26px;
-  line-height: 26px;
   padding-inline: var(--xflow-space-3);
 }
 
@@ -3673,6 +3665,9 @@ button.xflow-editor-overview__run:hover {
   box-shadow: var(--xflow-editor-popup-shadow);
   color: var(--xflow-text);
   font-size: var(--xflow-font-xs);
+  /* Tooltip roots inherit the header's 28px density step; the popup keeps the
+   * foundation control height the rest of the editor draws. */
+  min-height: var(--xflow-control-height);
   padding: calc(var(--xflow-space-1-5) - 1px) var(--xflow-space-2);
 }
 

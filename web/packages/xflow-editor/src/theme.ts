@@ -1,5 +1,6 @@
 import {
   buildAntdTheme,
+  foundationTokens,
   paletteTokens,
   type AntdThemeOptions,
   type Appearance
@@ -53,6 +54,33 @@ export function useReducedMotion(): boolean {
 
   return reduced;
 }
+
+/**
+ * The top bar's density step (§6.3): one 28px control step under the 32px
+ * foundation, with 22px small controls. It is nested inside the editor's own
+ * ConfigProvider, which merges these tokens over the inherited theme, so the
+ * palette, algorithm and components the editor already set stay in force.
+ * Every other surface keeps the foundation height; only the `<header>` is
+ * wrapped, so popups must restore this step where they need it.
+ */
+export const editorDensityTheme: ThemeConfig = {
+  token: { controlHeight: 28, controlHeightSM: 22 }
+};
+
+/**
+ * The foundation control step, for the popups that hang off the dense header.
+ * A header popup is a React descendant of the density provider, so its menu
+ * rows, segmented tracks and dialog buttons would all shrink with the bar;
+ * wrapping the popup body in this restores the 32 / 24 step the rest of the
+ * editor uses. Values come from `@xflow/core`'s foundation tokens, never a
+ * literal (the CSS guard reads the same source).
+ */
+export const coreControlHeightTheme: ThemeConfig = {
+  token: {
+    controlHeight: Number.parseInt(foundationTokens.controlHeight, 10),
+    controlHeightSM: Number.parseInt(foundationTokens.controlHeightSm, 10)
+  }
+};
 
 /**
  * The editor's AntD theme. Everything the console shares — palette, focus rings,

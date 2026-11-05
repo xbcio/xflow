@@ -169,7 +169,14 @@ import {
   versionLabel,
   versionUnavailableReason
 } from "./versioning";
-import { createEditorThemeConfig, useReducedMotion, type ResolvedXFlowEditorAppearance, type XFlowEditorAppearance } from "./theme";
+import {
+  coreControlHeightTheme,
+  createEditorThemeConfig,
+  editorDensityTheme,
+  useReducedMotion,
+  type ResolvedXFlowEditorAppearance,
+  type XFlowEditorAppearance
+} from "./theme";
 // Tokens declare the --xflow-* variables every stylesheet below reads. Both sheets are
 // layered — the composer's in `@layer xflow.composer`, this editor's in `@layer
 // xflow.editor`. The host declares the order (tailwind.css) with xflow.editor after
@@ -5240,20 +5247,28 @@ export function XFlowEditor({
   );
 
   const moreMenuButton = (
-    <Dropdown
-      classNames={{ root: "xflow-editor-more-menu" }}
-      menu={{ items: moreMenuItems, onClick: handleMoreMenuClick }}
-      placement="bottomRight"
-      trigger={["click"]}
-    >
-      <Button
-        aria-label="更多操作"
-        className="xflow-editor-icon-button"
-        icon={<MoreIcon />}
-        title="更多操作"
-        type="text"
-      />
-    </Dropdown>
+    // The Dropdown owns the popup root, so its component tokens (the menu's
+    // block padding among them) are computed where the Dropdown renders. A
+    // ConfigProvider inside popupRender would reach only the menu node and
+    // leave those root-level variables at the header's dense step. The trigger
+    // is the CSS-sized 32px icon button, so restoring the core step here
+    // changes nothing about it.
+    <ConfigProvider theme={coreControlHeightTheme}>
+      <Dropdown
+        classNames={{ root: "xflow-editor-more-menu" }}
+        menu={{ items: moreMenuItems, onClick: handleMoreMenuClick }}
+        placement="bottomRight"
+        trigger={["click"]}
+      >
+        <Button
+          aria-label="更多操作"
+          className="xflow-editor-icon-button"
+          icon={<MoreIcon />}
+          title="更多操作"
+          type="text"
+        />
+      </Dropdown>
+    </ConfigProvider>
   );
 
   // §6.8 top bar: execution id + status + lineage + the status table's control
@@ -5356,7 +5371,7 @@ export function XFlowEditor({
                 onConfirm={() => void runExecutionAction(selectedExecution.executionId, "cancel")}
                 title={`取消执行 ${selectedExecution.executionId}？`}
               >
-                <Button className="xflow-editor-run-action" danger disabled={!onExecutionAction} size="small">
+                <Button className="xflow-editor-run-action" danger disabled={!onExecutionAction}>
                   {executionOpLabel[op]}
                 </Button>
               </Popconfirm>
@@ -5365,7 +5380,6 @@ export function XFlowEditor({
                 className="xflow-editor-run-action"
                 disabled={!onExecutionAction}
                 key={op}
-                size="small"
                 onClick={() => void runExecutionAction(selectedExecution.executionId, op)}
               >
                 {executionOpLabel[op]}
@@ -5376,7 +5390,6 @@ export function XFlowEditor({
             <Button
               className="xflow-editor-rerun-button"
               icon={<SkipIcon />}
-              size="small"
               type="primary"
               onClick={() => openRerun(selectedExecution.executionId)}
             >
@@ -5440,6 +5453,7 @@ export function XFlowEditor({
         data-theme={resolvedAppearance}
         data-view-mode={viewMode}
       >
+      <ConfigProvider theme={editorDensityTheme}>
       <header
         className="xflow-editor-toolbar"
         data-fold={toolbarFold}
@@ -5491,16 +5505,18 @@ export function XFlowEditor({
                       content: "xflow-editor-version-popover__content"
                     }}
                     content={
-                      <VersionHistory
-                        blocked={blockedVersions}
-                        error={versionsState.error}
-                        loading={versionsState.loading}
-                        rollingBackVersion={rollingBackVersion}
-                        versions={versionsState.data}
-                        onReload={() => setVersionLoadNonce((nonce) => nonce + 1)}
-                        onRollback={onRollback && canWriteWorkflow ? (version) => void rollbackToVersion(version) : undefined}
-                        onViewVersion={onViewVersion ? viewVersion : undefined}
-                      />
+                      <ConfigProvider theme={coreControlHeightTheme}>
+                        <VersionHistory
+                          blocked={blockedVersions}
+                          error={versionsState.error}
+                          loading={versionsState.loading}
+                          rollingBackVersion={rollingBackVersion}
+                          versions={versionsState.data}
+                          onReload={() => setVersionLoadNonce((nonce) => nonce + 1)}
+                          onRollback={onRollback && canWriteWorkflow ? (version) => void rollbackToVersion(version) : undefined}
+                          onViewVersion={onViewVersion ? viewVersion : undefined}
+                        />
+                      </ConfigProvider>
                     }
                     open={versionsOpen}
                     placement="bottomLeft"
@@ -5729,12 +5745,14 @@ export function XFlowEditor({
               title: "xflow-editor-theme-popover__title"
             }}
             content={
-              <ThemeSettings
-                appearance={activeAppearance}
-                layoutPolicy={layoutPolicy}
-                onAppearanceChange={changeAppearance}
-                onLayoutPolicyChange={setLayoutPolicy}
-              />
+              <ConfigProvider theme={coreControlHeightTheme}>
+                <ThemeSettings
+                  appearance={activeAppearance}
+                  layoutPolicy={layoutPolicy}
+                  onAppearanceChange={changeAppearance}
+                  onLayoutPolicyChange={setLayoutPolicy}
+                />
+              </ConfigProvider>
             }
             placement="bottomRight"
             title="主题设置"
@@ -5809,6 +5827,7 @@ export function XFlowEditor({
           </span>
         </div>
       </header>
+      </ConfigProvider>
 
       {/* An expanded drawer is drawn over this whole region, so it leaves the tab
           order and the accessibility tree until the drawer is restored (§6.5). */}
