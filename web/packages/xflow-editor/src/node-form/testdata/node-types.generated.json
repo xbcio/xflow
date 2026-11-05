@@ -188,7 +188,7 @@
       "node_version": 1,
       "kind": "action",
       "display_name": "Browser Harvest (CDP)",
-      "description": "通过 Chrome DevTools 协议登录站点，按导航计划采集会话与凭据数据。",
+      "description": "通过 Chrome DevTools 协议登录站点，按导航计划采集会话与凭证数据。",
       "category": "action",
       "card_summary": [
         "entry_url",
@@ -1410,7 +1410,7 @@
       "node_version": 1,
       "kind": "action",
       "display_name": "Script",
-      "description": "运行 JavaScript 或 WebAssembly 脚本，可读取输入、变量与已声明的凭据。",
+      "description": "运行 JavaScript 或 WebAssembly 脚本，可读取输入、变量与已声明的凭证。",
       "category": "code",
       "card_summary": [
         "language+runtime",

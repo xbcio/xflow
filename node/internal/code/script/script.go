@@ -120,7 +120,7 @@ func (n *ScriptNode) Descriptor() types.Descriptor {
 	return types.Descriptor{
 		Type:        "xflow.script",
 		DisplayName: "Script",
-		Description: "运行 JavaScript 或 WebAssembly 脚本，可读取输入、变量与已声明的凭据。",
+		Description: "运行 JavaScript 或 WebAssembly 脚本，可读取输入、变量与已声明的凭证。",
 		Category:    "code",
 		Examples: []types.DescriptorExample{{
 			Name: "JavaScript 脚本",

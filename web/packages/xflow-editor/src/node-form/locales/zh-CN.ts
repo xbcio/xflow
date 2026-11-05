@@ -473,7 +473,7 @@ export const zhCN: NodeFormCatalog = {
     // (types.NodeDescriptor.Description is the editor-facing summary, not an
     // English key), so they are already in the target language.
     "等待人工审批，按任一、全部或顺序模式放行、拒绝或超时。",
-    "通过 Chrome DevTools 协议登录站点，按导航计划采集会话与凭据数据。",
+    "通过 Chrome DevTools 协议登录站点，按导航计划采集会话与凭证数据。",
     "对数据库执行 select/insert/update/delete 操作，更新与删除必须带条件。",
     "工作流出口，结束当前执行并汇总最终输出。",
     "执行已注册的 Go 函数或内联表达式，并把结果传给下游。",
@@ -483,7 +483,7 @@ export const zhCN: NodeFormCatalog = {
     "对数组逐项执行子图或表达式，返回结果数组。",
     "汇合多条上游分支，等待全部分支或只取最先到达的分支。",
     "发送通知的占位节点；当前执行返回未实现，请改用 HTTP 节点。",
-    "运行 JavaScript 或 WebAssembly 脚本，可读取输入、变量与已声明的凭据。",
+    "运行 JavaScript 或 WebAssembly 脚本，可读取输入、变量与已声明的凭证。",
     "工作流入口，接收触发或调用方提交的初始数据。",
     "在同一命名空间内调用另一个工作流，并映射其输入与输出。",
     "按规则或表达式结果选择输出端口，未命中时走默认端口。",

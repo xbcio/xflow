@@ -99,7 +99,7 @@ func (n *CDPNode) Descriptor() types.Descriptor {
 		Type:        browserCDPNodeType,
 		Kind:        types.NodeKindAction,
 		DisplayName: "Browser Harvest (CDP)",
-		Description: "通过 Chrome DevTools 协议登录站点，按导航计划采集会话与凭据数据。",
+		Description: "通过 Chrome DevTools 协议登录站点，按导航计划采集会话与凭证数据。",
 		Category:    "action",
 		Examples: []types.DescriptorExample{{
 			Name: "采集会话",
