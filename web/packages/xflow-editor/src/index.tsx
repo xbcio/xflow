@@ -270,8 +270,10 @@ function newSectionId(): string {
 
 /**
  * Which keystrokes survive focus landing in a text field. Canvas bindings defer
- * to the field — ⌘Z there means undo typing and V means the letter V — while
- * global ones still fire, because the browser's own ⌘S and ⌘Enter are no use to
+ * to the field — ⌘Z there means undo typing and V means the letter V — and so
+ * does any printable key without a primary modifier, whatever its scope (the
+ * `?` of the shortcut reference is the character the user typed). The modifier
+ * chords still fire, because the browser's own ⌘S and ⌘Enter are no use to
  * anyone editing a workflow.
  */
 type ShortcutScope = "global" | "canvas";
@@ -5021,8 +5023,13 @@ export function XFlowEditor({
         return !focus || focus === document.body || focus === document.documentElement || root.contains(focus);
       };
       const inTextEntry = isTextEntryTarget(event.target);
+      // A printable key without a primary modifier belongs to the field it was
+      // typed into, whatever the binding's scope: "?" must reach a textarea as
+      // text, never open the shortcut sheet that would take focus away (and
+      // with it the Enter that follows). Modifier chords stay live in fields.
+      const printableKey = event.key.length === 1 && !isPrimaryModifier(event);
       for (const shortcut of editorShortcuts) {
-        if (inTextEntry && shortcut.scope === "canvas") continue;
+        if (inTextEntry && (shortcut.scope === "canvas" || printableKey)) continue;
         if (!shortcut.match(event)) continue;
         if (shortcut.inEditorOnly && !editorOwnsEvent(event.target)) continue;
         // Esc inside a popup (menu, listbox, dialog) closes that popup only.

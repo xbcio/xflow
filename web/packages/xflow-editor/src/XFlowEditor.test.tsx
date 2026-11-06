@@ -2416,6 +2416,20 @@ describe("XFlowEditor", () => {
     });
   });
 
+  it("leaves a ? typed into a text field to the field", () => {
+    render(<XFlowEditor value={workflow} />);
+    const nameField = within(workflowSettings()).getByLabelText("工作流名称");
+
+    // A printable key belongs to the field: the shortcut sheet must not open
+    // and take focus, or the character (and the Enter after it) is lost.
+    expect(fireEvent.keyDown(nameField, { key: "?", shiftKey: true })).toBe(true);
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    // Outside a text field the same key still opens the reference.
+    fireEvent.keyDown(window, { key: "?", shiftKey: true });
+    expect(within(screen.getByRole("dialog")).getByText("复制选中节点")).toBeTruthy();
+  });
+
   it("collapses and restores the left panel from the keyboard", () => {
     render(<XFlowEditor value={workflow} />);
 
