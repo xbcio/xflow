@@ -116,6 +116,14 @@ describe("xflow.editor cascade frame", () => {
     expect(collapse).toMatch(/min-width:\s*var\(--xflow-control-height\)\s*;/);
     expect(collapse).toMatch(/border-radius:\s*var\(--xflow-radius-sm\)\s*;/);
     expect(collapse).toMatch(/padding-inline:\s*var\(--xflow-space-2\)\s*;/);
+    // The inspector head's copy / ⋯ are the baseline's 24×24 tool, not the
+    // density tier's 22px SM: the head keeps the title-bar step.
+    const headAction =
+      css.match(/\.xflow-editor button\.xflow-editor-inspector-head__action\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(headAction).toMatch(/height:\s*var\(--xflow-control-height-sm\)\s*;/);
+    expect(headAction).toMatch(/min-width:\s*var\(--xflow-control-height-sm\)\s*;/);
+    expect(headAction).toMatch(/padding:\s*0\s*;/);
+    expect(headAction).not.toMatch(/xflow-editor-density-control-h/);
   });
 
   it("scales composer only on the density root, through the density variables", () => {

@@ -2095,17 +2095,19 @@ button.xflow-editor-overview__run:hover {
   white-space: nowrap;
 }
 
-/* Copy / ⋯: the ghost chip at the panel's density step (§6.4, 2026-11-06). */
+/* Copy / ⋯: the baseline's 24×24 ghost tool (§6.4, 2026-11-06). The panel
+ * head keeps the foundation step like the title bar; the density tier's 22px
+ * SM applies only to the panel content below it. */
 .xflow-editor button.xflow-editor-inspector-head__action {
   align-items: center;
   border-radius: var(--xflow-radius-sm);
   color: var(--xflow-text);
   display: inline-flex;
   font-size: var(--xflow-font-xl);
-  height: var(--xflow-editor-density-control-h-sm);
+  height: var(--xflow-control-height-sm);
   justify-content: center;
-  min-width: var(--xflow-editor-density-control-h);
-  padding: 0 var(--xflow-space-2);
+  min-width: var(--xflow-control-height-sm);
+  padding: 0;
 }
 
 /* The parameters / settings cards (§6.4): the outer SectionCard owns the card
