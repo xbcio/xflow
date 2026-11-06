@@ -1629,7 +1629,9 @@ describe("XFlowEditor", () => {
           name: "http_1",
           type: "xflow.http",
           kind: "action",
-          position: { x: 620, y: 220 },
+          // D-1: no selection and no viewport in jsdom, so the node lands
+          // in the first free spot downstream of the fallback centre.
+          position: { x: 312, y: 0 },
           ui: { label: "HTTP" }
         }
       ],
@@ -1660,7 +1662,9 @@ describe("XFlowEditor", () => {
           name: "trigger_webhook_1",
           type: "xflow.trigger.webhook",
           kind: "trigger",
-          position: { x: 620, y: 220 },
+          // D-1: no selection and no viewport in jsdom, so the node lands
+          // in the first free spot downstream of the fallback centre.
+          position: { x: 312, y: 0 },
           ui: { label: "Webhook" }
         }
       ],
