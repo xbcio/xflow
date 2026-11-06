@@ -6988,6 +6988,29 @@ exports[`A6-generated node-types fixture > xflow.wait@1 snapshot 1`] = `
         "type": "Select",
       },
       "f.parameters.quorum": {
+        "checks": [
+          {
+            "args": {
+              "args": {
+                "value": 0,
+              },
+              "check": "min",
+            },
+            "message": "不能小于 0",
+            "type": "literalOnly",
+          },
+          {
+            "args": {
+              "args": {
+                "value": 0,
+              },
+              "check": "min",
+            },
+            "message": "不能小于 0",
+            "severity": "warning",
+            "type": "expressionOnly",
+          },
+        ],
         "props": {
           "description": "Number of signals required to proceed; 0 or unset means all (multi-signal mode)",
           "expect": {

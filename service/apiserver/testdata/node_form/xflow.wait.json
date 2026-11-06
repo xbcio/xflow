@@ -126,6 +126,12 @@
       "expression": {
         "mode": "template"
       },
+      "rules": [
+        {
+          "type": "min",
+          "value": 0
+        }
+      ],
       "visible_when": {
         "all_of": [
           {

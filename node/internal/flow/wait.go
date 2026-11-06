@@ -85,7 +85,8 @@ func (n *WaitNode) Descriptor() types.Descriptor {
 			{Name: "signals", DisplayName: "Signal Names", Type: types.ParamArray, Required: false, Description: "List of signal names to wait for (multi-signal mode)",
 				Group: "wait", Item: nodeinternal.StringItem(), VisibleWhen: nodeinternal.CondIn("mode", string(WaitModeSignal), nil)},
 			{Name: "quorum", DisplayName: "Quorum", Type: types.ParamNumber, Required: false, Description: "Number of signals required to proceed; 0 or unset means all (multi-signal mode)",
-				Group: "wait", VisibleWhen: nodeinternal.CondAll(nodeinternal.CondIn("mode", string(WaitModeSignal), nil), nodeinternal.CondTruthy("signals"))},
+				Group: "wait", VisibleWhen: nodeinternal.CondAll(nodeinternal.CondIn("mode", string(WaitModeSignal), nil), nodeinternal.CondTruthy("signals")),
+				Constraints: &types.Constraints{Min: nodeinternal.Float(0)}},
 			// Timer mode needs duration or until (prepareTimer); each is
 			// required while the other is unset.
 			{Name: "duration", DisplayName: "Duration", Type: types.ParamString, Required: false, Description: "Fixed wait duration (timer mode, e.g. \"5m\")",
