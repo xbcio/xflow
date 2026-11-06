@@ -2216,12 +2216,16 @@ describe("XFlowEditor", () => {
     expect(overview.textContent).toContain("成功");
   });
 
-  it("keeps the rulers off by default and turns them on from the zoom bar key", () => {
+  it("shows the rulers by default and turns them off and on from the zoom bar key", () => {
     render(<XFlowEditor value={workflow} />);
     const canvas = screen.getByRole("region", { name: "画布" });
     const toggle = within(canvas).getByRole("button", { name: "标尺 (⇧R)" });
 
-    // EL-10: the workbench opens without rulers; the key stays the local gate.
+    // §6.2: a canvas with nodes opens with both rulers; the key stays the local gate.
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+    expect(canvas.querySelectorAll(".xflow-preview-ruler")).toHaveLength(2);
+
+    fireEvent.click(toggle);
     expect(toggle.getAttribute("aria-pressed")).toBe("false");
     expect(canvas.querySelectorAll(".xflow-preview-ruler")).toHaveLength(0);
 

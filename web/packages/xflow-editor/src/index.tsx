@@ -6246,9 +6246,10 @@ export function XFlowEditor({
               // EL-14 hides the empty thumbnail frame. The zoom bar's
               // 显示缩略图 key and ⇧M stay the local override.
               minimap={(canvasWorkflow.nodes ?? []).length > 0}
-              // EL-10: rulers are off by default; the zoom bar's ⇧R keeps the
-              // toggle and its per-mount memory.
-              ruler={false}
+              // §6.2: rulers are on by default once there are nodes to measure;
+              // an empty canvas has nothing to measure and keeps them off. The
+              // zoom bar's ⇧R stays the local toggle with per-mount memory.
+              ruler={(canvasWorkflow.nodes ?? []).length > 0}
               // "" rather than undefined: an empty editor selection must not
               // fall back to the preview's own uncontrolled selection.
               selectedNodeId={selectedKey ?? ""}
