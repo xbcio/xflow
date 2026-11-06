@@ -965,6 +965,8 @@ export interface FieldSpec {
   /** Trailing `fx` toggle inside the control. */
   fx?: boolean;
   hint?: string;
+  /** Field description (D-3): moves behind the label's `?`; `hint` stays visible. */
+  help?: string;
   /** Trailing unit inside a numeric control (`个执行`, `分钟`). */
   unit?: string;
   /** Slider bounds (only for `control: 'slider'`). */
@@ -1023,9 +1025,9 @@ export const inspSwitch = {
       value: 'route_by_amount',
       mono: true,
       required: true,
-      hint: '引用名：连线和表达式靠它找到节点，改名会同步更新引用',
+      help: '引用名：连线和表达式靠它找到节点，改名会同步更新引用',
     },
-    { label: '显示名', value: '金额路由', hint: '只改画布上显示的文字，不影响引用；留空时显示节点名称' },
+    { label: '显示名', value: '金额路由', help: '只改画布上显示的文字，不影响引用；留空时显示节点名称' },
   ] as FieldSpec[],
   /** 路由卡首屏（§2.3）：先声明模式与端口，再写规则，最后是兜底输出。 */
   route: [

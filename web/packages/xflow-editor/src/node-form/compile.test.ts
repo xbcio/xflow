@@ -836,8 +836,8 @@ describe("section (Inspector 参数 / 设置 tabs)", () => {
     expect(compileNodeForm(waitSchema, { section: "all" })).toEqual(compileNodeForm(waitSchema));
   });
 
-  it("the root Form shows descriptions as tooltips", () => {
-    expect(compileNodeForm(waitSchema).spec.elements[ROOT_ID].props).toEqual({ layout: "horizontal", descriptionPlacement: "tooltip" });
+  it("the root Form keeps descriptions quiet until a field needs them", () => {
+    expect(compileNodeForm(waitSchema).spec.elements[ROOT_ID].props).toEqual({ layout: "horizontal", descriptionPlacement: "auto" });
   });
 });
 
@@ -875,9 +875,18 @@ describe("ArrayTable columns", () => {
     const { spec } = compile(switchSchema);
     const table = Object.values(spec.elements).find((element) => element.type === "ArrayTable");
     expect(table?.props?.columns).toEqual(["Condition", "Output"]);
+    expect(table?.props?.columnDescriptions).toEqual([
+      "Boolean expression; a rule with an empty condition is skipped",
+      "Output port taken when condition holds; a rule with an empty output is skipped"
+    ]);
     expect(table?.children).toHaveLength(2);
     const ops = Object.values(compile(aggregateSchema).spec.elements).find((element) => element.type === "ArrayTable");
     expect(ops?.props?.columns).toEqual(["Kind", "Field", "As"]);
+    expect(ops?.props?.columnDescriptions).toEqual([
+      "",
+      "Item field to sum or average",
+      "Output field name"
+    ]);
   });
 
   it("falls back to the humanized name and skips statically hidden sub-fields", () => {

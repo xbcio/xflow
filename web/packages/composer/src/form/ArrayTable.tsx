@@ -4,8 +4,8 @@
 // writing the whole array through its `value` binding. Removing the last
 // row writes [] which core turns into unset.
 
-import { DownIcon, PlusIcon, TrashIcon } from "@xflow/icons";
-import { Button } from "antd";
+import { DownIcon, HelpIcon, PlusIcon, TrashIcon } from "@xflow/icons";
+import { Button, Tooltip } from "antd";
 import { z } from "zod";
 import { zodProps } from "../core";
 import type { ComposerComponent, ComposerComponentProps } from "../react";
@@ -14,6 +14,11 @@ import { FieldFrame, FieldLayoutContext, fieldShape, FormLayoutContext, hintText
 export interface ArrayTableProps extends FieldProps {
   /** Column headers, in the order of the row elements. */
   columns?: string[];
+  /**
+   * One help text per column, aligned with `columns`. It appears once beside
+   * the header, never under every row (D-3); an empty string means no help.
+   */
+  columnDescriptions?: string[];
   addText?: string;
   emptyText?: string;
   /** JSON template of a new row; default {}. Deep-copied on every add. */
@@ -76,11 +81,25 @@ function ArrayTableField({ node, props, value, onChange, defaultHint, issues, re
             <div className="xflow-composer-array-grid" role="table" aria-rowcount={rows.length + (columns.length > 0 ? 1 : 0)}>
               {columns.length > 0 ? (
                 <div className="xflow-composer-array-row xflow-composer-array-head" role="row">
-                  {columns.map((column, index) => (
-                    <div key={index} className="xflow-composer-array-heading" role="columnheader">
-                      {column}
-                    </div>
-                  ))}
+                  {columns.map((column, index) => {
+                    const description = props.columnDescriptions?.[index];
+                    return (
+                      <div key={index} className="xflow-composer-array-heading" role="columnheader">
+                        <span className="xflow-composer-array-heading-text">{column}</span>
+                        {description ? (
+                          <Tooltip title={description} rootClassName="xflow-composer-array-help-tooltip">
+                            <button
+                              type="button"
+                              className="xflow-composer-array-help"
+                              aria-label={`查看说明：${column}`}
+                            >
+                              <HelpIcon aria-hidden="true" />
+                            </button>
+                          </Tooltip>
+                        ) : null}
+                      </div>
+                    );
+                  })}
                   {editable ? (
                     <div className="xflow-composer-array-heading xflow-composer-array-actions" role="columnheader">
                       <span className="xflow-composer-visually-hidden">操作</span>
@@ -157,6 +176,7 @@ export const ArrayTable: ComposerComponent<ArrayTableProps> = {
     z.strictObject({
       ...fieldShape,
       columns: z.array(z.string()).optional(),
+      columnDescriptions: z.array(z.string()).optional(),
       addText: z.string().optional(),
       emptyText: z.string().optional(),
       newRow: z.unknown().optional(),

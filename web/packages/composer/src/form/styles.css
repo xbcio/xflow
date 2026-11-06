@@ -98,6 +98,43 @@
   line-height: 20px;
 }
 
+/* The title and its help glyph travel together, so the summary / status group
+ * stays flush right. */
+.xflow-composer-section-heading {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* D-3: a section's description lives behind this glyph in the card header. */
+.xflow-composer-section-help {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  color: var(--xflow-text-tertiary, #616b79);
+  font-size: var(--xflow-font-sm, 12px);
+  line-height: 1;
+  background: none;
+  border: 0;
+  border-radius: var(--xflow-radius-pill, 9999px);
+  cursor: help;
+}
+
+.xflow-composer-section-help:hover {
+  color: var(--xflow-text-secondary, #464d5a);
+}
+
+.xflow-composer-section-help:focus-visible {
+  outline: 2px solid var(--xflow-primary, #2f7cff);
+  outline-offset: 1px;
+}
+
 /* The header's right-aligned status line (e.g. 继承工作流 · 重试 2 次). */
 .xflow-composer-section-summary {
   margin-left: auto;
@@ -418,6 +455,38 @@
 .xflow-composer-field-help:focus-visible {
   outline: 2px solid var(--xflow-primary, #2f7cff);
   outline-offset: 1px;
+}
+
+/* D-3: the help glyph is 12px even though the icon defaults to 16. */
+.xflow-composer-field-help svg,
+.xflow-composer-section-help svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* D-3: an "auto" description is visually hidden until its field is focused or
+ * has an error; it stays in the DOM the whole time for aria-describedby. */
+.xflow-composer-field-description--auto {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.xflow-composer-field:focus-within > .xflow-composer-field-body > .xflow-composer-field-description--auto,
+.xflow-composer-field.is-error > .xflow-composer-field-body > .xflow-composer-field-description--auto {
+  position: static;
+  width: auto;
+  height: auto;
+  margin: 0;
+  overflow: visible;
+  clip: auto;
+  white-space: normal;
 }
 
 .xflow-composer-field-body {
@@ -749,10 +818,53 @@
 }
 
 .xflow-composer-array-heading {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   color: var(--xflow-text-secondary, #464d5a);
   font-size: var(--xflow-font-sm, 12px);
   font-weight: 500;
   line-height: 20px;
+}
+
+.xflow-composer-array-heading-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* D-3: a column's help text lives once, in its header cell. */
+.xflow-composer-array-help {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  color: var(--xflow-text-tertiary, #616b79);
+  font-size: var(--xflow-font-sm, 12px);
+  line-height: 1;
+  background: none;
+  border: 0;
+  border-radius: var(--xflow-radius-pill, 9999px);
+  cursor: help;
+}
+
+.xflow-composer-array-help svg {
+  width: 12px;
+  height: 12px;
+}
+
+.xflow-composer-array-help:hover {
+  color: var(--xflow-text-secondary, #464d5a);
+}
+
+.xflow-composer-array-help:focus-visible {
+  outline: 2px solid var(--xflow-primary, #2f7cff);
+  outline-offset: 1px;
 }
 
 .xflow-composer-array-actions,

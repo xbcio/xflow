@@ -1,3 +1,4 @@
+import { HelpIcon } from '@xflow/icons';
 import { Button, Divider, Tooltip, type ButtonProps } from 'antd';
 import type { HTMLAttributes, ReactNode } from 'react';
 
@@ -166,6 +167,21 @@ export function SectionLabel({
 
 export function Kbd({ children }: { children: ReactNode }) {
   return <span className="xflow-pv-kbd">{children}</span>;
+}
+
+/**
+ * The `?` beside a field label (D-3): the description moves behind this button
+ * (hover or Tab focus) and the text under the control shows only while the
+ * field is focused or has an error. 12px glyph, tertiary colour.
+ */
+export function FieldHelp({ text, label }: { text: string; label: string }) {
+  return (
+    <Tooltip title={text} rootClassName="xflow-pv-field-help-tooltip">
+      <button type="button" className="xflow-pv-field-help" aria-label={`查看说明：${label}`}>
+        <HelpIcon aria-hidden="true" />
+      </button>
+    </Tooltip>
+  );
 }
 
 export function VerticalSep({ className }: { className?: string }) {

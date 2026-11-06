@@ -414,7 +414,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > commonSchema 
           "g.common.notes",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -857,7 +857,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.databas
           "g.type.default",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -1246,7 +1246,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
           "g.type.advanced",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -1476,7 +1476,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.map sna
           "g.type.default",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -1840,7 +1840,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
           "g.type.environment",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -2076,6 +2076,10 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.switch 
         ],
         "props": {
           "addText": "添加",
+          "columnDescriptions": [
+            "Boolean expression; a rule with an empty condition is skipped",
+            "Output port taken when condition holds; a rule with an empty output is skipped",
+          ],
           "columns": [
             "Condition",
             "Output",
@@ -2142,7 +2146,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.switch 
           "g.type.default",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -2234,6 +2238,11 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.transfo
         ],
         "props": {
           "addText": "添加",
+          "columnDescriptions": [
+            "",
+            "Item field to sum or average",
+            "Output field name",
+          ],
           "columns": [
             "Kind",
             "Field",
@@ -2383,7 +2392,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.transfo
           "g.type.default",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -3441,7 +3450,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
           "g.type.advanced",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -4051,7 +4060,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
           "g.type.advanced",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -4476,7 +4485,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.wait sn
           "g.type.default",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",

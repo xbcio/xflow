@@ -232,7 +232,7 @@ exports[`A6-generated node-types fixture > xflow.approval@1 snapshot 1`] = `
           "g.type.advanced",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -622,7 +622,7 @@ exports[`A6-generated node-types fixture > xflow.browser.cdp@1 snapshot 1`] = `
           "g.type.limits",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -1059,7 +1059,7 @@ exports[`A6-generated node-types fixture > xflow.database@1 snapshot 1`] = `
           "g.type.default",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -1097,7 +1097,7 @@ exports[`A6-generated node-types fixture > xflow.end@1 snapshot 1`] = `
       "form": {
         "children": [],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -1212,7 +1212,7 @@ exports[`A6-generated node-types fixture > xflow.function@1 snapshot 1`] = `
           "g.type.advanced",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -1471,7 +1471,7 @@ exports[`A6-generated node-types fixture > xflow.grpc@1 snapshot 1`] = `
           "g.type.advanced",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -1872,7 +1872,7 @@ exports[`A6-generated node-types fixture > xflow.http@1 snapshot 1`] = `
           "g.type.advanced",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -1958,7 +1958,7 @@ exports[`A6-generated node-types fixture > xflow.if@1 snapshot 1`] = `
           "g.type.default",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -2169,7 +2169,7 @@ exports[`A6-generated node-types fixture > xflow.map@1 snapshot 1`] = `
           "g.type.default",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -2304,7 +2304,7 @@ exports[`A6-generated node-types fixture > xflow.merge@1 snapshot 1`] = `
           "g.type.merge",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -2501,7 +2501,7 @@ exports[`A6-generated node-types fixture > xflow.notification@1 snapshot 1`] = `
           "g.type.default",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -2864,7 +2864,7 @@ exports[`A6-generated node-types fixture > xflow.script@1 snapshot 1`] = `
           "g.type.environment",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -2911,7 +2911,7 @@ exports[`A6-generated node-types fixture > xflow.start@1 snapshot 1`] = `
       "form": {
         "children": [],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -3105,7 +3105,7 @@ exports[`A6-generated node-types fixture > xflow.subworkflow@1 snapshot 1`] = `
           "g.type.default",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -3324,6 +3324,10 @@ exports[`A6-generated node-types fixture > xflow.switch@1 snapshot 1`] = `
         ],
         "props": {
           "addText": "添加",
+          "columnDescriptions": [
+            "Boolean expression; a rule with an empty condition is skipped",
+            "Output port taken when condition holds; a rule with an empty output is skipped",
+          ],
           "columns": [
             "Condition",
             "Output",
@@ -3390,7 +3394,7 @@ exports[`A6-generated node-types fixture > xflow.switch@1 snapshot 1`] = `
           "g.type.routing",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -3482,6 +3486,11 @@ exports[`A6-generated node-types fixture > xflow.transform.aggregate@1 snapshot 
         ],
         "props": {
           "addText": "添加",
+          "columnDescriptions": [
+            "",
+            "Item field to sum or average",
+            "Output field name",
+          ],
           "columns": [
             "Kind",
             "Field",
@@ -3631,7 +3640,7 @@ exports[`A6-generated node-types fixture > xflow.transform.aggregate@1 snapshot 
           "g.type.default",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -3710,7 +3719,7 @@ exports[`A6-generated node-types fixture > xflow.transform.filter@1 snapshot 1`]
           "g.type.default",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -3825,7 +3834,7 @@ exports[`A6-generated node-types fixture > xflow.transform.limit@1 snapshot 1`] 
           "g.type.default",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -3898,7 +3907,7 @@ exports[`A6-generated node-types fixture > xflow.transform.pick@1 snapshot 1`] =
           "g.type.default",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -3984,7 +3993,7 @@ exports[`A6-generated node-types fixture > xflow.transform.remove_duplicates@1 s
           "g.type.default",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -4063,7 +4072,7 @@ exports[`A6-generated node-types fixture > xflow.transform.rename@1 snapshot 1`]
           "g.type.default",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -4165,7 +4174,7 @@ exports[`A6-generated node-types fixture > xflow.transform.set@1 snapshot 1`] = 
           "g.type.default",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -4231,6 +4240,10 @@ exports[`A6-generated node-types fixture > xflow.transform.sort@1 snapshot 1`] =
         ],
         "props": {
           "addText": "添加",
+          "columnDescriptions": [
+            "Item field to compare",
+            "Sort in descending order",
+          ],
           "columns": [
             "Field",
             "Descending",
@@ -4331,7 +4344,7 @@ exports[`A6-generated node-types fixture > xflow.transform.sort@1 snapshot 1`] =
           "g.type.default",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -4624,7 +4637,7 @@ exports[`A6-generated node-types fixture > xflow.trigger.cron@1 snapshot 1`] = `
           "g.type.default",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -5938,7 +5951,7 @@ exports[`A6-generated node-types fixture > xflow.trigger.kafka@1 snapshot 1`] = 
           "g.type.advanced",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -6553,7 +6566,7 @@ exports[`A6-generated node-types fixture > xflow.trigger.redis@1 snapshot 1`] = 
           "g.type.advanced",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -6650,7 +6663,7 @@ exports[`A6-generated node-types fixture > xflow.trigger.timer@1 snapshot 1`] = 
           "g.type.default",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -6845,7 +6858,7 @@ exports[`A6-generated node-types fixture > xflow.trigger.webhook@1 snapshot 1`] 
           "g.type.default",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",
@@ -7280,7 +7293,7 @@ exports[`A6-generated node-types fixture > xflow.wait@1 snapshot 1`] = `
           "g.type.wait",
         ],
         "props": {
-          "descriptionPlacement": "tooltip",
+          "descriptionPlacement": "auto",
           "layout": "horizontal",
         },
         "type": "Form",

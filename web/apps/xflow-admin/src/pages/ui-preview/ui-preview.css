@@ -1374,6 +1374,26 @@
     line-height: var(--xflow-line-height-xs);
     overflow-wrap: anywhere;
   }
+  /* D-3: the `?` beside a label. 16px hit area, 12px glyph, tertiary. */
+  .xflow-pv-field-help {
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    margin-left: var(--xflow-space-0-5);
+    padding: 0;
+    color: var(--xflow-text-tertiary);
+    vertical-align: -3px;
+    background: none;
+    border: 0;
+    border-radius: 9999px;
+    cursor: help;
+  }
+  .xflow-pv-field-help:hover { color: var(--xflow-text-secondary); }
+  .xflow-pv-field-help:focus-visible { outline: 2px solid var(--xflow-accent); outline-offset: 1px; }
+  .xflow-pv-field-help svg { width: 12px; height: 12px; }
   /* One line of non-32px controls (Switch, Slider, Segmented) centred on the label. */
   .xflow-pv-ctl-line {
     display: flex;

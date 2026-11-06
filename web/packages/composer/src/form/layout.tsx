@@ -1,7 +1,7 @@
 // Structural components: Form, FieldGroup, ObjectGroup.
 
-import { CheckIcon, DownIcon, WarnIcon } from "@xflow/icons";
-import { Button } from "antd";
+import { CheckIcon, DownIcon, HelpIcon, WarnIcon } from "@xflow/icons";
+import { Button, Tooltip } from "antd";
 import { useCallback, useContext, useId, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { z } from "zod";
 import { zodProps, type Issue } from "../core";
@@ -30,8 +30,9 @@ export interface FormProps {
   /** Label column width (px) for the horizontal layout. */
   labelWidth?: number;
   /**
-   * Where field descriptions show: "below" the control (default) or
-   * "tooltip" behind a help icon next to the label.
+   * Where field descriptions show: "below" the control, "tooltip" behind a
+   * help icon next to the label, or "auto" (the icon by default; the text
+   * under the control while the field is focused or has an error).
    */
   descriptionPlacement?: DescriptionPlacement;
   /** Accessible name of the form region. */
@@ -44,7 +45,7 @@ export const Form: ComposerComponent<FormProps> = {
     z.strictObject({
       layout: z.enum(["horizontal", "vertical"]).optional(),
       labelWidth: z.number().positive().optional(),
-      descriptionPlacement: z.enum(["below", "tooltip"]).optional(),
+      descriptionPlacement: z.enum(["below", "tooltip", "auto"]).optional(),
       title: z.string().optional()
     })
   ),
@@ -61,7 +62,7 @@ export const Form: ComposerComponent<FormProps> = {
         aria-label={props.title}
         style={style}
       >
-        <DescriptionPlacementContext.Provider value={props.descriptionPlacement ?? "below"}>
+        <DescriptionPlacementContext.Provider value={props.descriptionPlacement ?? "auto"}>
           <FormLayoutContext.Provider value={layout}>
             <FieldLayoutContext.Provider value={layout}>
               {slots.header}
@@ -182,7 +183,10 @@ export function Section(props: SectionProps) {
   const titleId = `${base}title`;
   const bodyId = `${base}body`;
   const issuesId = `${base}issues`;
+  const descriptionId = `${base}description`;
   const badgeId = `${base}badge`;
+  const describedBy =
+    [props.description ? descriptionId : "", props.issues.length > 0 ? issuesId : ""].filter(Boolean).join(" ") || undefined;
   const status = worstSeverity(props.issues);
   const open = !props.collapsible || !collapsed;
   const errors = hiddenErrors > 0;
@@ -205,10 +209,11 @@ export function Section(props: SectionProps) {
       data-composer-node={props.nodeId}
       data-composer-path={path}
       aria-labelledby={props.title ? titleId : undefined}
-      aria-describedby={props.issues.length > 0 ? issuesId : undefined}
+      aria-describedby={describedBy}
     >
       {props.title || props.actions ? (
         <header className="xflow-composer-section-header">
+          <div className="xflow-composer-section-heading">
           {props.collapsible ? (
             <button
               type="button"
@@ -228,6 +233,18 @@ export function Section(props: SectionProps) {
               {props.title}
             </h3>
           )}
+          {props.description ? (
+            <Tooltip title={props.description} rootClassName="xflow-composer-section-help-tooltip">
+              <button
+                type="button"
+                className="xflow-composer-section-help"
+                aria-label={`查看说明：${props.title ?? "分区"}`}
+              >
+                <HelpIcon aria-hidden="true" />
+              </button>
+            </Tooltip>
+          ) : null}
+          </div>
           {props.summary ? <span className="xflow-composer-section-summary">{props.summary}</span> : null}
           {valid ? (
             <span className="xflow-composer-section-valid">
@@ -256,7 +273,11 @@ export function Section(props: SectionProps) {
           {props.actions ? <div className="xflow-composer-section-actions">{props.actions}</div> : null}
         </header>
       ) : null}
-      {props.description ? <p className="xflow-composer-section-description">{props.description}</p> : null}
+      {props.description ? (
+        <p id={descriptionId} className="xflow-composer-section-description xflow-composer-visually-hidden">
+          {props.description}
+        </p>
+      ) : null}
       <IssueList id={issuesId} issues={props.issues} />
       <div id={bodyId} className={cx("xflow-composer-section-body", props.bodyClassName)} hidden={!open}>
         <SectionIssuesContext.Provider value={report}>{props.children}</SectionIssuesContext.Provider>

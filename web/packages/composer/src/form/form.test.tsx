@@ -623,7 +623,8 @@ for (const kernel of kernels) {
         expect(within(m.container).getByRole("group", { name: "节点" })).toBe(form);
         // The section header carries a short right-aligned status line.
         expect(within(form).getByText("继承工作流 · 重试 2 次")).toBeTruthy();
-        const control = within(form).getByLabelText(/^Name/) as HTMLInputElement;
+        // The help button's aria-label also starts with "Name"; query by role.
+        const control = within(form).getByRole("textbox", { name: /^Name/ }) as HTMLInputElement;
         expect(control.tagName).toBe("INPUT");
         expect(fieldOf(m.container, "name").querySelector(".xflow-composer-field-required")).not.toBeNull();
         expect(control.getAttribute("aria-invalid")).toBe("true");
@@ -635,7 +636,51 @@ for (const kernel of kernels) {
         expect(one<HTMLElement>(fieldOf(m.container, "g"), ".xflow-composer-section-body").hidden).toBe(true);
       });
 
-      const describedSpec = (descriptionPlacement?: "below" | "tooltip") => ({
+      it("moves section and column descriptions behind header help icons (D-3)", async () => {
+        const m = mountComposer({
+          kernel,
+          registry,
+          spec: {
+            spec: "composer/v1",
+            root: "form",
+            elements: {
+              form: { type: "Form", props: {}, children: ["g"] },
+              g: { type: "FieldGroup", props: { title: "基础", description: "基础说明" }, children: ["table"] },
+              table: {
+                type: "ArrayTable",
+                props: {
+                  label: "规则",
+                  columns: ["条件"],
+                  columnDescriptions: ["条件说明"],
+                  value: { $bindState: "/rules" }
+                },
+                repeat: { statePath: "/rules" },
+                children: ["cond"]
+              },
+              cond: { type: "Input", props: { label: "条件", description: "列内说明", value: { $bindItem: "cond" } } }
+            }
+          },
+          value: { rules: [{ cond: "a" }] }
+        });
+        await m.flush();
+        const section = fieldOf(m.container, "g");
+        within(section).getByRole("button", { name: "查看说明：基础" });
+        // The description stays in the DOM for aria-describedby, not on screen.
+        const sectionDescription = one<HTMLElement>(section, ".xflow-composer-section-description");
+        expect(sectionDescription.classList.contains("xflow-composer-visually-hidden")).toBe(true);
+        expect((section.getAttribute("aria-describedby") ?? "").split(" ")).toContain(sectionDescription.id);
+        // The column help appears once in the header; rows keep a hidden copy.
+        const table = fieldOf(m.container, "table");
+        const columnHelp = within(table).getByRole("button", { name: "查看说明：条件" });
+        expect(one<HTMLElement>(table, ".xflow-composer-array-heading").contains(columnHelp)).toBe(true);
+        const rowDescription = one<HTMLElement>(table, ".xflow-composer-array-row[data-composer-row] .xflow-composer-field-description");
+        expect(rowDescription.classList.contains("xflow-composer-visually-hidden")).toBe(true);
+        fireEvent.mouseEnter(columnHelp);
+        await waitFor(() => expect(document.querySelector(".xflow-composer-array-help-tooltip")?.textContent).toBe("条件说明"));
+        m.unmount();
+      });
+
+      const describedSpec = (descriptionPlacement?: "below" | "tooltip" | "auto") => ({
         spec: "composer/v1" as const,
         root: "form",
         elements: {
@@ -646,16 +691,36 @@ for (const kernel of kernels) {
         }
       });
 
-      it('descriptionPlacement "below" (default) shows the description under the control', async () => {
-        for (const placement of [undefined, "below"] as const) {
+      it('descriptionPlacement "below" shows the description under the control', async () => {
+        const m = mountComposer({ kernel, registry, spec: describedSpec("below"), value: {} });
+        await m.flush();
+        const field = fieldOf(m.container, "f");
+        const description = one<HTMLElement>(field, ".xflow-composer-field-description");
+        expect(description.textContent).toBe("说明");
+        expect(description.classList.contains("xflow-composer-visually-hidden")).toBe(false);
+        expect(field.querySelector(".xflow-composer-field-help")).toBeNull();
+        expect(m.log).toEqual([]);
+        m.unmount();
+      });
+
+      it('the default "auto" keeps the description behind the help icon and reveals it on focus or error', async () => {
+        for (const placement of [undefined, "auto"] as const) {
           const m = mountComposer({ kernel, registry, spec: describedSpec(placement), value: {} });
           await m.flush();
           const field = fieldOf(m.container, "f");
+          const help = one<HTMLButtonElement>(field, ".xflow-composer-field-label-row > .xflow-composer-field-help");
+          expect(help.getAttribute("aria-label")).toBe("查看说明：Name");
           const description = one<HTMLElement>(field, ".xflow-composer-field-description");
-          expect(description.textContent).toBe("说明");
-          expect(description.classList.contains("xflow-composer-visually-hidden")).toBe(false);
-          expect(field.querySelector(".xflow-composer-field-help")).toBeNull();
-          expect(m.log).toEqual([]);
+          // Hidden by CSS until the field is focused or in error, but the
+          // accessibility link is live the whole time.
+          expect(description.classList.contains("xflow-composer-field-description--auto")).toBe(true);
+          const control = within(field).getByLabelText("Name");
+          const described = (control.getAttribute("aria-describedby") ?? "")
+            .split(" ")
+            .map((id) => document.getElementById(id)?.textContent);
+          expect(described).toEqual(["说明"]);
+          fireEvent.mouseEnter(help);
+          await waitFor(() => expect(document.querySelector(".xflow-composer-field-help-tooltip")?.textContent).toBe("说明"));
           m.unmount();
         }
       });
@@ -666,7 +731,7 @@ for (const kernel of kernels) {
         expect(m.log).toEqual([]);
         const field = fieldOf(m.container, "f");
         const help = one<HTMLButtonElement>(field, ".xflow-composer-field-label-row > .xflow-composer-field-help");
-        expect(help.getAttribute("aria-label")).toBe("Name说明");
+        expect(help.getAttribute("aria-label")).toBe("查看说明：Name");
         expect(help.type).toBe("button");
         // Not rendered visibly below the control, but still the control's description.
         const description = one<HTMLElement>(field, ".xflow-composer-field-description");

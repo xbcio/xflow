@@ -1,7 +1,7 @@
 import { XMarkIcon } from '@xflow/icons';
 import { Button, Input, Segmented, Select } from 'antd';
 import { NodeCard } from '../components/NodeCard';
-import { CategoryIcon, IconButton, SectionLabel, StatusChip } from '../components/primitives';
+import { CategoryIcon, FieldHelp, IconButton, SectionLabel, StatusChip } from '../components/primitives';
 import { Todo } from '../components/Todo';
 import { wbApproval, wbApprovalEntries, wbNodes } from '../data';
 import { typeIcon, type Tone } from '../meta';
@@ -141,9 +141,11 @@ function AddSignerDialog() {
           />
         </div>
         <div className="xflow-pv-field">
-          <span className="xflow-pv-field-label">位置</span>
+          <span className="xflow-pv-field-label">
+            位置
+            <FieldHelp text={wbApproval.addSigner.hint} label="位置" />
+          </span>
           <Segmented aria-label="加签位置" value={wbApproval.addSigner.positions[1]} options={wbApproval.addSigner.positions} />
-          <p className="xflow-pv-hint">{wbApproval.addSigner.hint}</p>
         </div>
         <div className="xflow-pv-field">
           <label className="xflow-pv-field-label" htmlFor="xflow-pv-signer-note">

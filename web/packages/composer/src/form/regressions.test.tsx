@@ -149,7 +149,7 @@ for (const kernel of kernels) {
       const m = mountComposer({ kernel, registry, spec, value: { a: "x" }, focusRequest: { path: "/a", nonce: 1 } });
       await m.flush();
       const field = fieldOf(m.container, "a");
-      const help = within(field).getByRole("button", { name: "A说明" });
+      const help = within(field).getByRole("button", { name: "查看说明：A" });
       const control = within(field).getByLabelText("A");
       // Guard the scenario: the help button really is the frame's first
       // focusable element, so the assertion below proves it was skipped.

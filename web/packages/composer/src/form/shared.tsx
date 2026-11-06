@@ -45,10 +45,12 @@ export function useFormLayout(): FieldLayout {
 
 /**
  * Where a field's `description` shows, from `Form.props.descriptionPlacement`:
- * "below" the control, or "tooltip" behind a help icon next to the label.
- * Fields with a hidden label (cell / inline layouts) always use "below".
+ * "below" the control, "tooltip" behind a help icon next to the label, or
+ * "auto" — the icon by default, and the text under the control only while the
+ * field is focused or has an error (D-3). Fields with a hidden label (cell /
+ * inline layouts) keep the text visually hidden and always use the icon.
  */
-export type DescriptionPlacement = "below" | "tooltip";
+export type DescriptionPlacement = "below" | "tooltip" | "auto";
 
 export const DescriptionPlacementContext = createContext<DescriptionPlacement>("below");
 
@@ -247,7 +249,14 @@ export function FieldFrame(props: FieldFrameProps) {
   const hiddenLabel = layout === "cell" || layout === "inline";
   // Tooltip mode needs a visible label to sit next to; the description then
   // stays in the DOM (visually hidden) so aria-describedby still reaches it.
-  const tooltipHelp = useContext(DescriptionPlacementContext) === "tooltip" && !hiddenLabel && Boolean(props.label);
+  // "auto" adds the reveal: the text also shows under the control while the
+  // field is focused or has an error (the CSS keys off :focus-within/.is-error).
+  const placementMode = useContext(DescriptionPlacementContext);
+  const tooltipHelp = (placementMode === "tooltip" || placementMode === "auto") && !hiddenLabel && Boolean(props.label);
+  const autoHelp = placementMode === "auto" && tooltipHelp;
+  // A cell never repeats the column's description on every row: the table's
+  // header carries it once (D-3), and this copy answers aria-describedby.
+  const quietDescription = hiddenLabel && placementMode !== "below" && Boolean(props.description);
 
   const labelContent = props.label ? (
     <>
@@ -281,7 +290,7 @@ export function FieldFrame(props: FieldFrameProps) {
       <div className="xflow-composer-field-label-row">
         {label}
         <Tooltip title={props.description} rootClassName="xflow-composer-field-help-tooltip">
-          <button type="button" className="xflow-composer-field-help" aria-label={`${props.label}说明`}>
+          <button type="button" className="xflow-composer-field-help" aria-label={`查看说明：${props.label}`}>
             <HelpIcon aria-hidden="true" />
           </button>
         </Tooltip>
@@ -334,7 +343,11 @@ export function FieldFrame(props: FieldFrameProps) {
         {props.description ? (
           <div
             id={descriptionId}
-            className={cx("xflow-composer-field-description", tooltipHelp && "xflow-composer-visually-hidden")}
+            className={cx(
+              "xflow-composer-field-description",
+              (tooltipHelp || quietDescription) && "xflow-composer-visually-hidden",
+              autoHelp && "xflow-composer-field-description--auto"
+            )}
           >
             {props.description}
           </div>

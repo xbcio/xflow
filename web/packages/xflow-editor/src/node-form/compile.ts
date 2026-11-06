@@ -691,14 +691,20 @@ class Compiler {
         const parentSegs = scope.kind === "absolute" ? pointerSegments(fieldPointer(field, scope)) : [...scope.segs, field.name];
         const row: Scope = { kind: "row", prefix: "", segs: [...parentSegs, "*"], idBase: `${idBase}[]` };
         // Row cells hide their labels, so the headers name the columns; a
-        // statically hidden sub-field has no cell and no column.
+        // statically hidden sub-field has no cell and no column. A column's
+        // help shows once beside its header, never under every row (D-3).
         const columns: string[] = [];
+        const columnDescriptions: string[] = [];
         element.children = sortFields(fields).flatMap((sub) => {
           const ids = this.field(sub, row, target);
-          if (ids.length > 0) columns.push(sub.label || humanize(sub.name));
+          if (ids.length > 0) {
+            columns.push(sub.label || humanize(sub.name));
+            columnDescriptions.push(sub.help ?? "");
+          }
           return ids;
         });
         props.columns = columns;
+        props.columnDescriptions = columnDescriptions;
         break;
       }
       default:
@@ -1070,11 +1076,11 @@ export function compileNodeForm(schema: NodeFormSchema | null | undefined, optio
     for (const [key, ids] of commonByGroup) if (key !== "identity") children.push(...ids);
   }
 
-  // 基础信息 shows its help as text under the field (§2.2); every other
-  // section keeps the editor's help-icon tooltips.
+  // D-3: no description is permanent. Every field keeps it behind the label's
+  // help glyph and shows it under the control only while focused or in error.
   const root: ElementDef = {
     type: "Form",
-    props: { layout: "horizontal", descriptionPlacement: section === "identity" ? "below" : "tooltip" },
+    props: { layout: "horizontal", descriptionPlacement: "auto" },
     children
   };
   if (rootChecks.length > 0) root.checks = rootChecks;

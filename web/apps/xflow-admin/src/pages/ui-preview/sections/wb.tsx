@@ -47,7 +47,7 @@ import {
 import { cx } from '../components/cx';
 import { Minimap } from '../components/Minimap';
 import { NodeCard } from '../components/NodeCard';
-import { CategoryIcon, Float, IconButton, Kbd, PanelTitle, SectionLabel, StatusChip, VerticalSep } from '../components/primitives';
+import { CategoryIcon, FieldHelp, Float, IconButton, Kbd, PanelTitle, SectionLabel, StatusChip, VerticalSep } from '../components/primitives';
 import { Ruler } from '../components/Ruler';
 import { RunBar } from '../components/RunBar';
 import { Todo } from '../components/Todo';
@@ -305,10 +305,24 @@ function Frame({ frame }: { frame: PreviewFrame }) {
   );
 }
 
-function Field({ label, children, layout = 'side' }: { label: ReactNode; children: ReactNode; layout?: 'side' | 'top' }) {
+function Field({
+  label,
+  help,
+  children,
+  layout = 'side',
+}: {
+  label: ReactNode;
+  /** Field description (D-3): behind the label's `?`, not a permanent line. */
+  help?: { label: string; text: string };
+  children: ReactNode;
+  layout?: 'side' | 'top';
+}) {
   return (
     <div className={cx('xflow-pv-field', layout === 'side' && 'xflow-pv-field--side')}>
-      <span className="xflow-pv-field-label">{label}</span>
+      <span className="xflow-pv-field-label">
+        {label}
+        {help ? <FieldHelp text={help.text} label={help.label} /> : null}
+      </span>
       {children}
     </div>
   );
@@ -343,6 +357,7 @@ function InspectorConfig() {
           children: (
             <div className="xflow-pv-sec-fields">
               <Field
+                help={{ label: '节点名称', text: '引用名：连线和表达式靠它找到节点，改名会同步更新引用' }}
                 label={
                   <>
                     节点名称
@@ -353,11 +368,12 @@ function InspectorConfig() {
                 }
               >
                 <Input defaultValue="fetch_profile" />
-                <span className="xflow-pv-hint">引用名：连线和表达式靠它找到节点，改名会同步更新引用</span>
               </Field>
-              <Field label="显示名">
+              <Field
+                label="显示名"
+                help={{ label: '显示名', text: '只改画布上显示的文字，不影响引用；留空时显示节点名称' }}
+              >
                 <Input defaultValue="拉取客户档案" placeholder="fetch_profile" />
-                <span className="xflow-pv-hint">只改画布上显示的文字，不影响引用；留空时显示节点名称</span>
               </Field>
             </div>
           ),
@@ -385,6 +401,7 @@ function InspectorConfig() {
               {/* D2/D3: only TextArea-style controls and pure expressions take
                   the whole row; a template field keeps the side label column. */}
               <Field
+                help={{ label: 'URL', text: '可用变量：$input · $nodes · $vars · $params' }}
                 label={
                   <>
                     URL
@@ -406,7 +423,6 @@ function InspectorConfig() {
                     fx
                   </Button>
                 </div>
-                <span className="xflow-pv-hint">可用变量：$input · $nodes · $vars · $params</span>
               </Field>
               <Field label="认证">
                 <Select

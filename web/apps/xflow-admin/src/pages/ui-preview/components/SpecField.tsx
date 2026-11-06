@@ -3,6 +3,7 @@ import { Button, Input, InputNumber, Segmented, Select, Slider, Switch, Tooltip 
 import type { ReactNode } from 'react';
 
 import { cx } from './cx';
+import { FieldHelp } from './primitives';
 import type { FieldSpec } from '../data';
 
 /** `10` → 10; anything else (`-`, `默认：30`, `1e3`) stays a placeholder. */
@@ -193,6 +194,7 @@ export function SpecField({
             *
           </span>
         ) : null}
+        {field.help ? <FieldHelp text={field.help} label={field.label} /> : null}
       </span>
       <SpecControl field={field} />
       {field.hint ? <span className="xflow-pv-hint">{field.hint}</span> : null}
