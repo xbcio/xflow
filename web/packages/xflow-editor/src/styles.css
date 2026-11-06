@@ -4587,30 +4587,69 @@ button.xflow-editor-overview__run:hover {
   padding: calc(var(--xflow-space-1-5) - 1px) calc(var(--xflow-space-2) - 1px);
 }
 
-/* A row is the baseline's `.xflow-pv-field` (figure 6): the label sits on top of
-   its control, not in a side column that has to size to the longest row name. */
+/* §6.4 D5 (2026-11-06): the workflow settings share the node parameters' side
+   label column. 描述 is a full-row field (`--top`), matching the baseline's
+   top-laid 描述 sample. */
 .xflow-editor-workflow-settings .xflow-editor-form-row--workflow {
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  align-items: stretch;
+  display: grid;
+  grid-template-columns: var(--xflow-composer-label-width, 96px) minmax(0, 1fr);
+  align-items: start;
+  column-gap: var(--xflow-space-3);
 }
 
-/* The baseline `.xflow-pv-field-label`: 12px / 500 in the secondary text colour. */
-.xflow-editor-workflow-settings .xflow-editor-form-row > span {
+.xflow-editor-workflow-settings .xflow-editor-form-row--workflow > :not(.xflow-editor-form-row__label) {
+  grid-column: 2;
+  min-width: 0;
+}
+
+/* The baseline `.xflow-pv-field-label`: 12px / 500 in the secondary text colour,
+   centred on the control's first line at the density control height. */
+.xflow-editor-workflow-settings .xflow-editor-form-row__label {
   align-items: center;
   color: var(--xflow-text-secondary);
   display: flex;
   font-size: var(--xflow-font-sm);
   font-weight: var(--xflow-font-weight-medium);
   gap: var(--xflow-space-1);
+  line-height: var(--xflow-line-height-md);
+  padding-top: calc((var(--xflow-editor-density-control-h) - var(--xflow-line-height-md)) / 2);
+}
+
+.xflow-editor-workflow-settings .xflow-editor-form-row--workflow.xflow-editor-form-row--top {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.xflow-editor-workflow-settings .xflow-editor-form-row--workflow.xflow-editor-form-row--top > .xflow-editor-form-row__label {
   margin-bottom: var(--xflow-space-0-5);
+  padding-top: 0;
 }
 
 /* A switch is a control, not a field: it keeps its own size at the start of
-   the value column instead of stretching to fill it. */
+   the value column, centred on the same first line as the label. */
 .xflow-editor-workflow-settings .xflow-editor-setting-switch {
-  align-self: flex-start;
+  align-self: start;
+  margin-top: calc((var(--xflow-editor-density-control-h) - var(--xflow-editor-density-control-h-sm)) / 2);
+}
+
+/* A numeric settings row shows its unit to the right of the control (§6.4 D5). */
+.xflow-editor .xflow-editor-number-field {
+  align-items: center;
+  display: flex;
+  gap: var(--xflow-space-1-5);
+  min-width: 0;
+}
+
+.xflow-editor .xflow-editor-number-field__control {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.xflow-editor .xflow-editor-number-field__unit {
+  color: var(--xflow-text-tertiary);
+  flex: none;
+  font-size: var(--xflow-font-sm);
 }
 
 /* AntD hard-codes the switch track to 100px; the design scale calls it pill. */

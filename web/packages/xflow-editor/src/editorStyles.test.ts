@@ -1007,15 +1007,24 @@ describe("xflow.editor browser-measured baseline fixes (E6)", () => {
     expect(rule(".xflow-editor-kvlist")).toMatch(/grid-template-columns:\s*62px\s+minmax\(0,\s*1fr\)\s*;/);
   });
 
-  it("stacks a workflow-settings row label-over-control with the baseline 12px/500 label", () => {
+  it("lays workflow-settings rows on the shared side label column (§6.4 D5)", () => {
     const row = rule(".xflow-editor-workflow-settings .xflow-editor-form-row--workflow");
-    expect(row).toMatch(/flex-direction:\s*column\s*;/);
-    expect(row).not.toMatch(/grid-template-columns/);
-    const label = rule(".xflow-editor-workflow-settings .xflow-editor-form-row > span");
+    expect(row).toMatch(/grid-template-columns:\s*var\(--xflow-composer-label-width,\s*96px\)\s*minmax\(0,\s*1fr\)\s*;/);
+    expect(row).not.toMatch(/flex-direction:\s*column/);
+    // The baseline `.xflow-pv-field-label`: 12px / 500 secondary, its first line
+    // centred on the density control, and no stacked-layout bottom margin.
+    const label = rule(".xflow-editor-workflow-settings .xflow-editor-form-row__label");
     expect(label).toMatch(/font-size:\s*var\(--xflow-font-sm\)\s*;/);
     expect(label).toMatch(/font-weight:\s*var\(--xflow-font-weight-medium\)\s*;/);
     expect(label).toMatch(/color:\s*var\(--xflow-text-secondary\)\s*;/);
-    expect(label).toMatch(/margin-bottom:\s*var\(--xflow-space-0-5\)\s*;/);
+    expect(label).toMatch(
+      /padding-top:\s*calc\(\(var\(--xflow-editor-density-control-h\) - var\(--xflow-line-height-md\)\)\s*\/\s*2\)\s*;/
+    );
+    expect(label).not.toMatch(/margin-bottom/);
+    // 描述 keeps the baseline's top-laid full-row form.
+    const top = rule(".xflow-editor-workflow-settings .xflow-editor-form-row--workflow.xflow-editor-form-row--top");
+    expect(top).toMatch(/display:\s*flex\s*;/);
+    expect(top).toMatch(/flex-direction:\s*column\s*;/);
   });
 
   it("draws the inspector head tile as the shared category block, with no private tone table", () => {

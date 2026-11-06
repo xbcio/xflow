@@ -158,6 +158,7 @@ function NumberField({
   integer = true,
   placeholder,
   readOnly,
+  unit,
   value,
   onChange
 }: {
@@ -166,21 +167,25 @@ function NumberField({
   integer?: boolean;
   placeholder: string;
   readOnly: boolean;
+  /** Unit shown to the right of the control (§6.4 D5), e.g. 个执行 / 分钟 / 次. */
+  unit?: string;
   value: number | undefined;
   onChange: (next: number | undefined) => void;
 }): React.ReactElement {
   return (
-    <InputNumber<number>
-      aria-label={ariaLabel}
-      className={className}
-      min={0}
-      placeholder={placeholder}
-      precision={integer ? 0 : undefined}
-      readOnly={readOnly}
-      style={{ width: "100%" }}
-      value={value}
-      onChange={(next) => onChange(next ?? undefined)}
-    />
+    <span className="xflow-editor-number-field">
+      <InputNumber<number>
+        aria-label={ariaLabel}
+        className={`${className} xflow-editor-number-field__control`}
+        min={0}
+        placeholder={placeholder}
+        precision={integer ? 0 : undefined}
+        readOnly={readOnly}
+        value={value}
+        onChange={(next) => onChange(next ?? undefined)}
+      />
+      {unit ? <span className="xflow-editor-number-field__unit">{unit}</span> : null}
+    </span>
   );
 }
 
@@ -282,11 +287,22 @@ function Hint({ help, text }: { help: string; text: string }): React.ReactElemen
   );
 }
 
-/** One labelled row of the settings cards. */
-function SettingRow({ label, children }: { label: string; children: React.ReactNode }): React.ReactElement {
+/** One labelled row of the settings cards. `top` puts the label above a
+ * long control (the baseline's full-row field, §6.4 D5). */
+function SettingRow({
+  label,
+  children,
+  top = false
+}: {
+  label: string;
+  children: React.ReactNode;
+  top?: boolean;
+}): React.ReactElement {
   return (
-    <label className="xflow-editor-form-row xflow-editor-form-row--workflow">
-      <span>{label}</span>
+    <label
+      className={`xflow-editor-form-row xflow-editor-form-row--workflow${top ? " xflow-editor-form-row--top" : ""}`}
+    >
+      <span className="xflow-editor-form-row__label">{label}</span>
       {children}
     </label>
   );
@@ -296,7 +312,7 @@ function SettingRow({ label, children }: { label: string; children: React.ReactN
 function StaticRow({ label, children }: { label: string; children: React.ReactNode }): React.ReactElement {
   return (
     <div className="xflow-editor-form-row xflow-editor-form-row--workflow">
-      <span>{label}</span>
+      <span className="xflow-editor-form-row__label">{label}</span>
       {children}
     </div>
   );
@@ -524,12 +540,12 @@ export function WorkflowSettings({
           help="到期后执行以超时终态结束，不走错误策略。"
           text="执行超时是整个执行的预算（整数纳秒，含排队与挂起等待），0 或留空为不限。"
         />
-        <SettingRow label="描述">
-          <Input
+        <SettingRow label="描述" top>
+          <Input.TextArea
             aria-label="工作流描述"
-            className="xflow-editor-field"
-            classNames={editorInputClassNames}
+            className="xflow-editor-textarea"
             readOnly={readOnly}
+            rows={2}
             value={workflow.description ?? ""}
             onChange={(event) => updateMeta({ description: event.target.value })}
           />
@@ -578,6 +594,7 @@ export function WorkflowSettings({
             className="xflow-editor-concurrency-limit"
             placeholder="0 = 不限"
             readOnly={settingsReadOnly}
+            unit="个执行"
             value={concurrency.limit}
             onChange={(next) => writeConcurrency({ limit: next })}
           />
@@ -609,13 +626,14 @@ export function WorkflowSettings({
                 onChange={(next) => writeConcurrency({ maxQueued: next })}
               />
             </SettingRow>
-            <SettingRow label="排队超时（分钟）">
+            <SettingRow label="排队超时">
               <NumberField
                 ariaLabel="排队超时（分钟）"
                 className="xflow-editor-concurrency-queue-timeout"
                 integer={false}
                 placeholder="0 = 不限"
                 readOnly={settingsReadOnly}
+                unit="分钟"
                 value={
                   concurrency.queueTimeoutNs === undefined ? undefined : concurrency.queueTimeoutNs / NANOS_PER_MINUTE
                 }
