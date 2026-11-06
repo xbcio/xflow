@@ -38,6 +38,9 @@
   --xflow-editor-density-head-height: 29px;
   --xflow-editor-density-control-h: 28px;
   --xflow-editor-density-control-h-sm: 22px;
+  /* ObjectGroup draws its own body padding below (§6.4 D2); the composer's
+   * outer padding would double the nested fields' inset. */
+  --xflow-editor-density-object-group-padding: 0;
   /*
    * The composer host knobs the density tier sets (§6.4, 2026-11-06). Composer
    * reads every one with a fallback and never declares it, so this root is the
@@ -53,6 +56,7 @@
   --xflow-composer-section-header-padding: var(--xflow-editor-density-sec-head-y) var(--xflow-editor-density-sec-head-x);
   --xflow-composer-section-body-gap: var(--xflow-editor-density-field-gap);
   --xflow-composer-section-body-padding: var(--xflow-editor-density-sec-body-y) var(--xflow-editor-density-sec-body-x) var(--xflow-editor-density-sec-body-b);
+  --xflow-composer-object-group-padding: var(--xflow-editor-density-object-group-padding);
   /* §6.5: status bar 28 + this drawer (280, spec §3.2); b/c tiers clamp it below. */
   --xflow-editor-drawer-height: 280px;
   /* The summary folded under the issue list at compact width. */
