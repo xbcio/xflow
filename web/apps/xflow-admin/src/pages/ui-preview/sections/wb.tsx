@@ -19,6 +19,7 @@ import {
   PlayIcon,
   PlusIcon,
   RedoIcon,
+  SaveIcon,
   SearchIcon,
   ShieldIcon,
   SideLeftIcon,
@@ -211,38 +212,38 @@ function ThemeContrastIcon() {
 }
 
 /**
- * Topbar fold thresholds (§6.3, 2026-11-04 ruling), measured on the header
- * itself rather than the window. The two side tracks are equal 1fr, so the
- * wider of the two clusters sets every threshold: header = 24 padding + 24
- * gaps + tools + 2 × side. Every tier's floor follows one rule:
+ * Topbar fold thresholds (§6.3), re-measured 2026-11-07 on this header in a
+ * real browser after the save key gained its icon. Measured on the header
+ * itself rather than the window; both side tracks are equal 1fr, so the wider
+ * cluster sets every threshold: header = 48 (24 padding + 2 × 12 gaps) + that
+ * tier's tools + 2 × max(right natural, left width).
  *
- *   floor = 48 + that tier's tools + 2 × max(right natural, left width)
- *
- * Measured 2026-11-05 on the density theme:
- *
- *   right natural: 512.36 (tier 0) / 391.36 (tier 1–3) / 276 (tier 4, the
- *   mode switch is icon-only and the ⌘S keycap is gone)
+ *   right natural: 533.36 (tier 0) / 412.36 (tier 1–3) / 297 (tier 4, the mode
+ *   switch is icon-only and the ⌘S keycap is gone). The save key is 110.36
+ *   with the icon (89.36 without) and 73 at tier 4, so the icon and its 8px gap
+ *   widened tiers 0–3 by 21px.
  *   left width = logo 28 + gap 8 + title row, sample name 客户同步, dirty
  *   (version chip + unsaved chip). The subtitle ellipsizes, so it is excluded:
- *   396.19 at tier 0–1 (spec chip still shown) / 327.78 at tier 2–4
+ *   396.19 at tier 0–1 (spec chip still shown) / 327.78 at tier 2–4.
+ *   tools: 298 / 139 (tier 3 folds the canvas extras into ⋯).
  *
- *   tier 0: 48 + 298 + 2 × 512.36 = 1370.72 → 1371
- *   tier 1: 48 + 298 + 2 × 396.19 = 1138.38 → 1139 (the left cluster decides;
- *   right alone would be 1128.72)
- *   tier 2 hides the subtitle and spec chip: 48 + 298 + 2 × 391.36 =
- *   1128.72 → 1129. TOP_FOLD_2 is tier 1's floor rounded up to the next 50px
- *   band: 1150.
- *   tier 3 folds the canvas extras into ⋯: 48 + 139 + 2 × 391.36 = 969.72 →
- *   970, so tier 4 starts there.
+ *   tier 0: 48 + 298 + 2 × 533.36 = 1412.72 → 1413 (the right cluster decides)
+ *   tier 1: 48 + 298 + 2 × 412.36 = 1170.72 → 1171 (right wins by 3.28px over
+ *   the 396.19 left; left alone would be 1138.38)
+ *   tier 2 hides the subtitle and spec chip, but the right and tools do not
+ *   change and the left was not deciding, so its fit stays 1170.72 → 1171.
+ *   Tiers 1 and 2 therefore share one boundary: fold 2 buys no width and is
+ *   never reported — below 1171 the bar goes straight to tier 3.
+ *   tier 3: 48 + 139 + 2 × 412.36 = 1011.72 → 1012, so tier 4 starts there.
  *   tier 4 makes the mode switch icon-only (names move to tooltips) and drops
  *   the ⌘S keycap: 48 + 139 + 2 × 327.78 = 842.56 → 843 is the bottom of the
- *   supported range (the left cluster decides; right alone would be 739).
- *   Below it the right cluster is squeezed, and there is no further fold step.
+ *   supported range (the left cluster decides; right alone would be 781).
+ *   Below it the title itself is squeezed, and there is no further fold step.
  */
-const TOP_FOLD_1 = 1371;
-const TOP_FOLD_2 = 1150;
-const TOP_FOLD_3 = 1129;
-const TOP_FOLD_4 = 970;
+const TOP_FOLD_1 = 1413;
+const TOP_FOLD_2 = 1171;
+const TOP_FOLD_3 = 1171;
+const TOP_FOLD_4 = 1012;
 
 function RailButton({
   icon,
@@ -900,7 +901,7 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
           <IconButton label="更多操作" icon={<MoreIcon />} />
           <VerticalSep />
           <Tooltip title={fold >= 4 ? '保存（⌘S）' : '保存'}>
-            <Button className="xflow-pv-top-text">
+            <Button className="xflow-pv-top-text" icon={<SaveIcon />}>
               保存 {fold < 4 ? <Kbd>⌘S</Kbd> : null}
             </Button>
           </Tooltip>
