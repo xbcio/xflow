@@ -77,7 +77,7 @@ import {
 } from '../data';
 import { COMPACT_LEFT, COMPACT_RIGHT, fitScale, FRAME_LABEL_OFFSET, RULER, canvasPanY } from '../metrics';
 import { nodeStatusMeta, typeIcon } from '../meta';
-import { clampPanelWidth, PANEL_WIDTHS, RAIL_WIDTH, CANVAS_MIN, readStoredWidth, RESIZE_STEP, storePanelWidth, type PanelSide } from './panel-resize';
+import { clampPanelWidth, fitPanelWidths, PANEL_WIDTHS, RAIL_WIDTH, CANVAS_MIN, readStoredWidth, RESIZE_STEP, storePanelWidth, type PanelSide } from './panel-resize';
 
 const wbRun = wbRunVariant;
 
@@ -706,25 +706,19 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
   useEffect(() => storePanelWidth('right', rightWidth), [rightWidth]);
 
   /**
-   * 画布至少保留 480：窗口变窄后已存的宽度可能放不下。按「先左后右」顺序夹取，
-   * 收右侧时用左栏刚算出的新值，只收不放，避免两边同时让位留下过大的画布。
+   * 窗口变窄、两侧存值放不下时（§6.0，2026-11-07，以真实编辑器为准）：先压
+   * 属性面板、再压左栏。`leftWidth` / `rightWidth` 始终是用户存的值，回缩只改
+   * 当前渲染宽度；窗口变宽后存值自然重新生效。
    */
-  useEffect(() => {
-    if (!shellWidth) return;
-    const room = shellWidth - 2 - RAIL_WIDTH - CANVAS_MIN;
-    let nextLeft = leftWidth;
-    let nextRight = rightWidth;
-    if (leftDocked) {
-      const maxLeft = Math.max(PANEL_WIDTHS.left.min, room - (rightDocked ? nextRight : 0));
-      if (nextLeft > maxLeft) nextLeft = maxLeft;
-    }
-    if (rightDocked) {
-      const maxRight = Math.max(PANEL_WIDTHS.right.min, room - (leftDocked ? nextLeft : 0));
-      if (nextRight > maxRight) nextRight = maxRight;
-    }
-    if (nextLeft !== leftWidth) setLeftWidth(nextLeft);
-    if (nextRight !== rightWidth) setRightWidth(nextRight);
-  }, [shellWidth, leftDocked, rightDocked, leftWidth, rightWidth]);
+  const fitted = fitPanelWidths({
+    room: shellWidth ? shellWidth - 2 - RAIL_WIDTH : 0,
+    left: leftWidth,
+    right: rightWidth,
+    leftDocked,
+    rightDocked,
+  });
+  const shownLeft = leftDocked ? fitted.left : leftWidth;
+  const shownRight = rightDocked ? fitted.right : rightWidth;
 
   /**
    * 画布始终保留 480：先压正在拖的这一侧，另一侧不动。`available` 是这一侧
@@ -732,7 +726,7 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
    */
   const panelLimit = (side: PanelSide) => {
     if (!shellWidth) return PANEL_WIDTHS[side].max;
-    const other = side === 'left' ? (rightDocked ? rightWidth : 0) : (leftDocked ? leftWidth : 0);
+    const other = side === 'left' ? (rightDocked ? shownRight : 0) : (leftDocked ? shownLeft : 0);
     return shellWidth - 2 - RAIL_WIDTH - other - CANVAS_MIN;
   };
   const resetWidth = (side: PanelSide) => {
@@ -791,8 +785,8 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
    * 变量置 0（内联样式会盖过样式表，这里不写才收得起来）。
    */
   const widthStyle = {
-    '--xflow-pv-left': leftDocked ? `${leftWidth}px` : undefined,
-    '--xflow-pv-right': rightDocked ? `${rightWidth}px` : undefined,
+    '--xflow-pv-left': leftDocked ? `${fitted.left}px` : undefined,
+    '--xflow-pv-right': rightDocked ? `${fitted.right}px` : undefined,
   } as CSSProperties;
 
   return (
@@ -1258,7 +1252,7 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
         {leftDocked ? (
           <PanelResizer
             side="left"
-            value={leftWidth}
+            value={shownLeft}
             limit={panelLimit('left')}
             onChange={setLeftWidth}
             onReset={() => resetWidth('left')}
@@ -1268,7 +1262,7 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
         {rightDocked ? (
           <PanelResizer
             side="right"
-            value={rightWidth}
+            value={shownRight}
             limit={panelLimit('right')}
             onChange={setRightWidth}
             onReset={() => resetWidth('right')}

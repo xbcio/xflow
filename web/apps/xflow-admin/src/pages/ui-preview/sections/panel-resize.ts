@@ -32,6 +32,40 @@ export function clampPanelWidth(side: PanelSide, desired: number, available: num
   return Math.max(min, Math.min(max, available, Math.round(desired)));
 }
 
+export interface PanelFitInput {
+  /** 面板可分配的总宽 = 外壳宽 − 2px 边框 − 左轨；≤0 表示尚未测量。 */
+  room: number;
+  left: number;
+  right: number;
+  leftDocked: boolean;
+  rightDocked: boolean;
+}
+
+/**
+ * 窗口变窄时的回缩（§6.0，2026-11-07，以真实编辑器为准）：先压属性面板，再压
+ * 左栏。这里只算当前该显示多宽 —— 入参是用户的存储偏好，函数不改写它们，窗口
+ * 变宽后自然回到偏好值。
+ */
+export function fitPanelWidths({ room, left, right, leftDocked, rightDocked }: PanelFitInput): { left: number; right: number } {
+  let nextLeft = left;
+  let nextRight = right;
+  if (room <= 0) return { left: nextLeft, right: nextRight };
+  const dockedTotal = (leftDocked ? nextLeft : 0) + (rightDocked ? nextRight : 0);
+  let overflow = dockedTotal + CANVAS_MIN - room;
+  if (overflow <= 0) return { left: nextLeft, right: nextRight };
+  if (rightDocked) {
+    const give = Math.min(overflow, Math.max(0, nextRight - PANEL_WIDTHS.right.min));
+    nextRight -= give;
+    overflow -= give;
+  }
+  if (leftDocked && overflow > 0) {
+    const give = Math.min(overflow, Math.max(0, nextLeft - PANEL_WIDTHS.left.min));
+    nextLeft -= give;
+    overflow -= give;
+  }
+  return { left: nextLeft, right: nextRight };
+}
+
 /** 从 localStorage 读宽度；缺省、越界或不可读时回到默认值与范围。 */
 export function readStoredWidth(side: PanelSide): number {
   const { min, max, fallback, storageKey } = PANEL_WIDTHS[side];
