@@ -242,6 +242,27 @@ describe("node search and workflow settings", () => {
     expect(handleChange).not.toHaveBeenCalled();
   });
 
+  it("puts every settings row on one side label column, with 描述 full-row", () => {
+    render(<XFlowEditor value={workflow} />);
+    fireEvent.keyDown(window, { key: "Escape" });
+    const inspector = screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
+    const rows = [...inspector.querySelectorAll<HTMLElement>(".xflow-editor-form-row--workflow")];
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect([...row.children].some((child) => child.classList.contains("xflow-editor-form-row__label")), row.textContent ?? "").toBe(
+        true
+      );
+    }
+    const description = rows.find((row) => row.textContent?.startsWith("描述"));
+    expect(description?.classList.contains("xflow-editor-form-row--top")).toBe(true);
+    expect(description?.querySelector("textarea")).toBeTruthy();
+    const limit = rows.find((row) => row.textContent?.startsWith("并发上限"));
+    expect(limit?.classList.contains("xflow-editor-form-row--top")).toBe(false);
+    expect(limit?.querySelector(".xflow-editor-number-field__unit")?.textContent).toBe("个执行");
+    const mode = rows.find((row) => row.textContent?.startsWith("超限时"));
+    expect([...mode!.children].some((child) => child.classList.contains("xflow-editor-form-row__label"))).toBe(true);
+  });
+
   it("lays the settings out in §6.4 order, with 标识 and 时区 under 基本", () => {
     const handleChange = vi.fn();
     render(

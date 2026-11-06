@@ -602,7 +602,7 @@ export function WorkflowSettings({
         {/* Not SettingRow: a radiogroup is not a labelable control, and
             wrapping it in <label> folds the row title into each radio name. */}
         <div className="xflow-editor-form-row xflow-editor-form-row--workflow">
-          <span>超限时</span>
+          <span className="xflow-editor-form-row__label">超限时</span>
           <Segmented
             aria-label="并发超限时"
             block
