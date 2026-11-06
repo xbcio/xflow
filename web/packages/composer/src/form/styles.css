@@ -912,7 +912,7 @@
     padding: 8px;
     border: 1px solid var(--xflow-border, #d8dbdf);
     border-radius: var(--xflow-radius-sm, 6px);
-    background: var(--xflow-field, #ffffff);
+    background: var(--xflow-field, #f6f7f9);
   }
 
   .xflow-composer-array-row + .xflow-composer-array-row {
