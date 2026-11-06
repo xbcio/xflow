@@ -111,8 +111,27 @@ describe("xflow.editor cascade frame", () => {
     expect(collapse).toMatch(/padding-inline:\s*var\(--xflow-space-2\)\s*;/);
   });
 
-  it("leaves composer's scale to core instead of re-declaring it", () => {
-    expect(css).not.toMatch(/--xflow-composer-(control-height|font-size|field-gap)\s*:/);
+  it("scales composer only on the density root, through the density variables", () => {
+    // §6.4 (2026-11-06): the inspector and the left column run at the editor
+    // density tier, so the editor is now a composer host. The root declares the
+    // knobs once and every value is a density reference — the editor still owns
+    // no second scale, and no other selector may declare them.
+    const declarations = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+      .filter(([, , body]) => /--xflow-composer-[\w-]+\s*:/.test(body))
+      .flatMap(([, selector, body]) =>
+        [...body.matchAll(/(--xflow-composer-[\w-]+)\s*:\s*([^;]+);/g)].map(([, name, value]) => ({
+          selector: selector.trim(),
+          name: name!,
+          value: value!.trim()
+        }))
+      );
+    expect(declarations.length).toBeGreaterThan(0);
+    for (const { selector, name, value } of declarations) {
+      expect(selector, `${name} is declared on the density root only`).toBe(".xflow-editor");
+      expect(value, `${name} reads a density variable`).toMatch(/var\(--xflow-editor-density-/);
+    }
+    // The density tier changes the box, not the type: font size stays core's.
+    expect(css).not.toMatch(/--xflow-composer-font-size\s*:/);
   });
 
   it("stands the fx toggle apart from its control instead of fusing their edges", () => {

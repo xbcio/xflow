@@ -20,6 +20,39 @@
   --xflow-editor-panel-right-width: 320px;
   /* §6.0: every panel title bar, docked or inside a compact drawer. */
   --xflow-editor-panel-title-height: 40px;
+  /*
+   * 编辑器密度档 (§6.4, D9, 2026-11-06): the baseline's compact step, applied
+   * to the inspector and the left column only. Card head 4/10, body 2/10/6,
+   * 6 between cards, 8 between fields; the head height is the baseline
+   * `.xflow-pv-wb .xflow-pv-sec-head` measurement (4 + 21 + 4 at 13px).
+   * Controls step 32/24 → 28/22 through the nested ConfigProvider; the core
+   * tokens are never re-declared here.
+   */
+  --xflow-editor-density-field-gap: var(--xflow-space-2);
+  --xflow-editor-density-sec-gap: var(--xflow-space-1-5);
+  --xflow-editor-density-sec-head-y: var(--xflow-space-1);
+  --xflow-editor-density-sec-head-x: var(--xflow-space-2-5);
+  --xflow-editor-density-sec-body-y: var(--xflow-space-0-5);
+  --xflow-editor-density-sec-body-x: var(--xflow-space-2-5);
+  --xflow-editor-density-sec-body-b: var(--xflow-space-1-5);
+  --xflow-editor-density-head-height: 29px;
+  --xflow-editor-density-control-h: 28px;
+  --xflow-editor-density-control-h-sm: 22px;
+  /*
+   * The composer host knobs the density tier sets (§6.4, 2026-11-06). Composer
+   * reads every one with a fallback and never declares it, so this root is the
+   * host side of that contract; the values stay density references, never a
+   * second scale. Declaring them here is the P1-c exception recorded in
+   * editorStyles.test.ts: outside this scope the editor still owns no composer
+   * scale of its own.
+   */
+  --xflow-composer-control-height: var(--xflow-editor-density-control-h);
+  --xflow-composer-switch-height: var(--xflow-editor-density-control-h-sm);
+  --xflow-composer-field-gap: var(--xflow-editor-density-field-gap);
+  --xflow-composer-section-gap: var(--xflow-editor-density-sec-gap);
+  --xflow-composer-section-header-padding: var(--xflow-editor-density-sec-head-y) var(--xflow-editor-density-sec-head-x);
+  --xflow-composer-section-body-gap: var(--xflow-editor-density-field-gap);
+  --xflow-composer-section-body-padding: var(--xflow-editor-density-sec-body-y) var(--xflow-editor-density-sec-body-x) var(--xflow-editor-density-sec-body-b);
   /* §6.5: status bar 28 + this drawer (280, spec §3.2); b/c tiers clamp it below. */
   --xflow-editor-drawer-height: 280px;
   /* The summary folded under the issue list at compact width. */
