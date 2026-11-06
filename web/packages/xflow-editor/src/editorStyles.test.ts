@@ -181,6 +181,47 @@ describe("xflow.editor cascade frame", () => {
       /\.xflow-editor \.xflow-composer-form \.xflow-editor-nodeform-expression-editor\s*\{[^}]*min-height:\s*var\(--xflow-editor-density-control-h\)\s*;/
     );
   });
+
+  it("clips a blurred expression to its real lines instead of soft-wrapping", () => {
+    // §6.4 (2026-11-06): one line per REAL newline (at most eight), each
+    // ellipsized; the textarea keeps the value and only hides its glyphs, so
+    // its focus, click and control semantics survive under the clip layer.
+    expect(css).toMatch(
+      /\.xflow-editor \.xflow-editor-nodeform-expression-editor-wrap\s*\{[^}]*position:\s*relative\s*;/
+    );
+    const clip = css.match(/\.xflow-editor \.xflow-editor-nodeform-expression-clip\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(clip).toMatch(/position:\s*absolute\s*;/);
+    expect(clip).toMatch(/inset:\s*0\s*;/);
+    expect(clip).toMatch(/pointer-events:\s*none\s*;/);
+    expect(clip).toMatch(
+      /padding:\s*var\(--xflow-editor-nodeform-expression-pad-y\) var\(--xflow-editor-nodeform-expression-pad-x\)\s*;/
+    );
+    const line = css.match(/\.xflow-editor \.xflow-editor-nodeform-expression-clip-line\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(line).toMatch(/overflow:\s*hidden\s*;/);
+    expect(line).toMatch(/text-overflow:\s*ellipsis\s*;/);
+    expect(line).toMatch(/white-space:\s*pre\s*;/);
+    const clipped =
+      css.match(/\.xflow-editor \.xflow-editor-nodeform-expression-editor-wrap\.is-clipped textarea\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(clipped).toMatch(/color:\s*transparent\s*;/);
+    expect(clipped).toMatch(/white-space:\s*pre\s*;/);
+    expect(clipped).toMatch(/overflow:\s*hidden\s*;/);
+    // The glyph swap must be immediate: AntD's `transition: all` would animate
+    // the blur height and fade the value through the clip layer. autoSize is
+    // off while blurred, so the native resize grip must stay pinned off too.
+    const chrome = [
+      ...css.matchAll(
+        /\.xflow-editor \.xflow-editor-nodeform-expression-editor,\s*\.xflow-editor \.xflow-editor-nodeform-expression-editor textarea\s*\{([^}]*)\}/g
+      )
+    ]
+      .map((match) => match[1] ?? "")
+      .find((body) => body.includes("transition-property")) ?? "";
+    expect(chrome).toMatch(/transition-property:\s*border-color,\s*box-shadow,\s*background-color\s*;/);
+    expect(chrome).toMatch(/resize:\s*none\s*;/);
+    // The line box and the control's vertical chrome turn a line count into a height.
+    expect(css).toMatch(/--xflow-editor-nodeform-expression-pad-y:\s*3px\s*;/);
+    expect(css).toMatch(/--xflow-editor-nodeform-expression-pad-x:\s*11px\s*;/);
+    expect(css).toMatch(/--xflow-editor-nodeform-expression-chrome:\s*8px\s*;/);
+  });
 });
 
 describe("xflow.editor panel title bar (§6.0)", () => {

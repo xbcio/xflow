@@ -3835,6 +3835,12 @@ button.xflow-editor-overview__run:hover {
   --xflow-editor-nodeform-fx-active-bg: color-mix(in srgb, var(--xflow-accent) 14%, transparent);
   --xflow-editor-nodeform-fx-active-border: color-mix(in srgb, var(--xflow-accent) 50%, transparent);
   --xflow-editor-nodeform-fx-active-fg: var(--xflow-accent);
+  /* The expression editor's text box: AntD's middle-size input padding, which
+   * the blurred clip layer repeats so both paint the same line box. The vertical
+   * chrome turns a real-line count into a control height (§6.4). */
+  --xflow-editor-nodeform-expression-pad-y: 3px;
+  --xflow-editor-nodeform-expression-pad-x: 11px;
+  --xflow-editor-nodeform-expression-chrome: 8px;
 }
 
 /* Keep the editor's own node-form text controls on the density control height;
@@ -3859,6 +3865,57 @@ button.xflow-editor-overview__run:hover {
   min-width: 0;
 }
 
+/* §6.4 (2026-11-06): blurred, the editor is a fixed-height clip — one line per
+ * REAL newline (at most eight), each ellipsized instead of soft-wrapping; at
+ * the inspector's 320px a normal expression otherwise folds into 2–3 rows.
+ * Focus restores the soft-wrapped, auto-growing textarea. */
+.xflow-editor .xflow-editor-nodeform-expression-editor-wrap {
+  min-width: 0;
+  position: relative;
+}
+
+.xflow-editor .xflow-editor-nodeform-expression-clip {
+  border: 1px solid transparent;
+  box-sizing: border-box;
+  color: var(--xflow-text);
+  font-family: var(--xflow-font-mono);
+  font-size: var(--xflow-font-sm);
+  inset: 0;
+  line-height: var(--xflow-line-height-md);
+  overflow: hidden;
+  padding: var(--xflow-editor-nodeform-expression-pad-y) var(--xflow-editor-nodeform-expression-pad-x);
+  pointer-events: none;
+  position: absolute;
+}
+
+.xflow-editor .xflow-editor-nodeform-expression-clip-line {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: pre;
+}
+
+.xflow-editor .xflow-editor-nodeform-expression-clip.is-placeholder {
+  color: var(--xflow-text-tertiary);
+}
+
+.xflow-editor .xflow-editor-nodeform-expression-clip.is-disabled {
+  color: var(--xflow-text-tertiary);
+}
+
+/* The clip paints the glyphs; the textarea underneath keeps the value and every
+ * control semantic (id, aria-*, status, placeholder, disabled). Hiding only its
+ * glyphs keeps the real control — and its focus, click and caret behavior. */
+.xflow-editor .xflow-editor-nodeform-expression-editor-wrap.is-clipped textarea {
+  color: transparent;
+  overflow: hidden;
+  padding: var(--xflow-editor-nodeform-expression-pad-y) var(--xflow-editor-nodeform-expression-pad-x);
+  white-space: pre;
+}
+
+.xflow-editor .xflow-editor-nodeform-expression-editor-wrap.is-clipped textarea::placeholder {
+  color: transparent;
+}
+
 .xflow-editor .xflow-editor-nodeform-expression-editor,
 .xflow-editor .xflow-editor-nodeform-expression-editor textarea {
   font-family: var(--xflow-font-mono);
@@ -3872,6 +3929,17 @@ button.xflow-editor-overview__run:hover {
 
 .xflow-editor .xflow-editor-nodeform-expression.is-expression .xflow-editor-nodeform-expression-editor {
   background: var(--xflow-field);
+}
+
+/* AntD carries `transition: all`, which would animate the autoSize height on
+ * every keystroke (rc measures px, the box catches up late) and fade the
+ * glyphs through the clipped layer on blur. Only the chrome states transition.
+ * rc-textarea pins `resize: none` only while autoSize runs, so the blurred
+ * state, which turns autoSize off, would show the native resize grip. */
+.xflow-editor .xflow-editor-nodeform-expression-editor,
+.xflow-editor .xflow-editor-nodeform-expression-editor textarea {
+  resize: none;
+  transition-property: border-color, box-shadow, background-color;
 }
 
 .xflow-editor .xflow-editor-nodeform-fx {

@@ -552,6 +552,62 @@ for (const kernel of kernels) {
       });
     });
 
+    describe("ExpressionInput blurred clip (§6.4)", () => {
+      const pureSpec = () =>
+        formSpec({ f: { type: "ExpressionInput", props: { label: "Condition", value: { $bindState: "/v" }, mode: "pure" } } });
+
+      it("shows one clipped line per real newline, with the textarea still holding the value", async () => {
+        const m = mountComposer({ kernel, registry, spec: pureSpec(), value: { v: "a\nb\n" } });
+        await m.flush();
+        const field = fieldOf(m.container, "f");
+        const clip = one<HTMLElement>(field, ".xflow-editor-nodeform-expression-clip");
+        expect(clip.getAttribute("aria-hidden")).toBe("true");
+        expect([...clip.children].map((line) => line.textContent)).toEqual(["a", "b", " "]);
+        expect(textarea(field).value).toBe("a\nb\n");
+        expect(m.log).toEqual([]);
+      });
+
+      it("caps the clip at the eight rows the focused editor grows to", async () => {
+        const m = mountComposer({
+          kernel,
+          registry,
+          spec: pureSpec(),
+          value: { v: Array.from({ length: 10 }, (_, index) => `l${index}`).join("\n") }
+        });
+        await m.flush();
+        const field = fieldOf(m.container, "f");
+        expect(field.querySelectorAll(".xflow-editor-nodeform-expression-clip-line")).toHaveLength(8);
+      });
+
+      it("drops the clip on focus and keeps the value in the real control", async () => {
+        const m = mountComposer({ kernel, registry, spec: pureSpec(), value: { v: "${{ $input.items }}" } });
+        await m.flush();
+        const field = fieldOf(m.container, "f");
+        const area = textarea(field);
+        expect(field.querySelector(".xflow-editor-nodeform-expression-clip")).not.toBeNull();
+
+        fireEvent.focus(area);
+        await m.flush();
+        expect(field.querySelector(".xflow-editor-nodeform-expression-clip")).toBeNull();
+        expect(area.value).toBe("${{ $input.items }}");
+        expect(area.readOnly).toBe(false);
+
+        fireEvent.blur(area);
+        await m.flush();
+        expect(field.querySelector(".xflow-editor-nodeform-expression-clip")).not.toBeNull();
+      });
+
+      it("clips the placeholder of an empty value and keeps the attribute", async () => {
+        const m = mountComposer({ kernel, registry, spec: pureSpec(), value: {} });
+        await m.flush();
+        const field = fieldOf(m.container, "f");
+        expect(textarea(field).getAttribute("placeholder")).toBe("$input.value");
+        const clip = one<HTMLElement>(field, ".xflow-editor-nodeform-expression-clip");
+        expect(clip.textContent).toBe("$input.value");
+        expect(clip.className).toContain("is-placeholder");
+      });
+    });
+
     describe("DurationInput display unit", () => {
       it("switching the unit re-expresses the value without writing; typing then uses the unit", async () => {
         const m = mountComposer({

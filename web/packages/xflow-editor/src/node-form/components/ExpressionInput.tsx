@@ -30,6 +30,8 @@ export interface ExpressionInputProps extends ChromeProps {
 const DEFAULT_PLACEHOLDER = "${{ $input.value }}";
 // Pure params take a bare expr-lang expression, not a `${{ }}` template.
 const PURE_PLACEHOLDER = "$input.value";
+// The same cap the focused editor grows to (§6.4).
+const EXPRESSION_MAX_ROWS = 8;
 // The roots exprx actually exposes (exprx/exprx.go); n8n's `$json` / `$node`
 // do not evaluate here. Shown only while the expression editor holds focus.
 const EXPRESSION_ROOTS_HINT = "可用变量：$input · $nodes · $vars · $params";
@@ -57,6 +59,21 @@ function ExpressionField({ node, props, value, onChange, defaultHint, issues, re
   const unset = value === undefined;
   const disabled = props.disabled;
   const replacesLiteral = fx && toggleable && value !== undefined && typeof value !== "string";
+
+  // §6.4 (2026-11-06): blurred, the editor shows one line per REAL newline (at
+  // most eight), each clipped with an ellipsis instead of soft-wrapping; the
+  // 320px inspector otherwise folds an ordinary expression into 2–3 rows.
+  // Focus restores the soft-wrapped, auto-growing textarea.
+  const text = typeof value === "string" ? value : "";
+  const placeholderText = unset && defaultHint !== undefined
+    ? hintText(defaultHint)
+    : (props.placeholder ?? (props.mode === "pure" ? PURE_PLACEHOLDER : DEFAULT_PLACEHOLDER));
+  const clipLines = focused ? [] : (text === "" ? [placeholderText] : text.split("\n").slice(0, EXPRESSION_MAX_ROWS));
+  // One 20px line box per row plus the control's own 8px vertical chrome
+  // (1px border + 3px padding, top and bottom), so one line is the 28px control.
+  const blurredHeight = clipLines.length === 0
+    ? undefined
+    : `calc(${clipLines.length} * var(--xflow-line-height-md) + var(--xflow-editor-nodeform-expression-chrome))`;
 
   const toggle = toggleable && content !== "raw" ? (
     <Button
@@ -99,32 +116,41 @@ function ExpressionField({ node, props, value, onChange, defaultHint, issues, re
         if (content === "raw") return <RawNotice value={value} reason="shape" />;
         const body =
           content === "editor" ? (
-          <AntInput.TextArea
-            id={ids.controlId}
-            rootClassName={`${NODEFORM}-expression-editor`}
-            value={typeof value === "string" ? value : ""}
-            placeholder={
-              unset && defaultHint !== undefined
-                ? hintText(defaultHint)
-                : (props.placeholder ?? (props.mode === "pure" ? PURE_PLACEHOLDER : DEFAULT_PLACEHOLDER))
-            }
-            readOnly={readOnly}
-            disabled={disabled}
-            status={ids.status}
-            spellCheck={false}
-            autoCapitalize="off"
-            autoCorrect="off"
-            autoSize={{ minRows: 1, maxRows: 8 }}
-            aria-describedby={ids.describedBy}
-            aria-invalid={ids.invalid || undefined}
-            aria-required={props.required || undefined}
-            onFocus={() => setFocused(true)}
-            onBlur={() => setFocused(false)}
-            onChange={(event) => {
-              if (fxChoice === null) setFxChoice(true); // keep the fx state while the text loses its template
-              onChange?.(event.target.value);
-            }}
-          />
+          <div className={cx(`${NODEFORM}-expression-editor-wrap`, focused ? "is-focused" : "is-clipped")}>
+            <AntInput.TextArea
+              id={ids.controlId}
+              rootClassName={`${NODEFORM}-expression-editor`}
+              value={text}
+              placeholder={placeholderText}
+              readOnly={readOnly}
+              disabled={disabled}
+              status={ids.status}
+              spellCheck={false}
+              autoCapitalize="off"
+              autoCorrect="off"
+              autoSize={focused ? { minRows: 1, maxRows: EXPRESSION_MAX_ROWS } : false}
+              style={blurredHeight === undefined ? undefined : { height: blurredHeight }}
+              aria-describedby={ids.describedBy}
+              aria-invalid={ids.invalid || undefined}
+              aria-required={props.required || undefined}
+              onFocus={() => setFocused(true)}
+              onBlur={() => setFocused(false)}
+              onChange={(event) => {
+                if (fxChoice === null) setFxChoice(true); // keep the fx state while the text loses its template
+                onChange?.(event.target.value);
+              }}
+            />
+            {focused ? null : (
+              /* The layer paints the clipped glyphs; the textarea underneath
+               * keeps the value and every control semantic (id, aria-*, status,
+               * disabled). It is invisible to assistive tech and to the pointer. */
+              <div className={cx(`${NODEFORM}-expression-clip`, text === "" && "is-placeholder", disabled && "is-disabled")} aria-hidden="true">
+                {clipLines.map((line, index) => (
+                  <div className={`${NODEFORM}-expression-clip-line`} key={index}>{line === "" ? " " : line}</div>
+                ))}
+              </div>
+            )}
+          </div>
         ) : (
           // The literal control shares this frame's label and cell: "inline"
           // keeps its label for assistive technology only and never makes it
