@@ -963,23 +963,27 @@ describe("XFlowEditor", () => {
     expect(toolbar.querySelector(".xflow-editor-spec-chip")?.textContent).toBe("spec 1.0");
     expect(within(tools).getByRole("button", { name: "适应视图" })).toBeTruthy();
 
-    // Tier 1 (fits 1200): 校验 / 主题 move into ⋯; the middle group stays whole.
+    // Tier 1 (fits 1171): 校验 / 主题 move into ⋯; the middle group stays whole.
     act(() => container.setWidth(1280));
     expect(toolbar.getAttribute("data-fold")).toBe("1");
     expect(within(toolbar).queryByRole("button", { name: "校验" })).toBeNull();
     expect(within(toolbar).queryByRole("button", { name: "主题设置" })).toBeNull();
     expect(within(tools).getByRole("button", { name: "适应视图" })).toBeTruthy();
 
-    // Tier 2 (fits 1171): the subtitle and the spec chip give way.
+    // Tier 2 shares tier 1's boundary: hiding the subtitle / spec chip buys no
+    // width, so 1180 is still tier 1 and both are still drawn.
     act(() => container.setWidth(1180));
-    expect(toolbar.getAttribute("data-fold")).toBe("2");
-    expect(toolbar.querySelector(".xflow-editor-subtitle")).toBeNull();
-    expect(toolbar.querySelector(".xflow-editor-spec-chip")).toBeNull();
+    expect(toolbar.getAttribute("data-fold")).toBe("1");
+    expect(toolbar.querySelector(".xflow-editor-subtitle")?.textContent).toBe("wf-purchase-approval · 3 个节点");
+    expect(toolbar.querySelector(".xflow-editor-spec-chip")?.textContent).toBe("spec 1.0");
     expect(within(tools).getByRole("button", { name: "适应视图" })).toBeTruthy();
 
-    // Tier 3 (fits 1012): the middle group keeps 撤销 / 重做 / 运行 only.
+    // Below 1171 the bar goes straight to fold 3: the subtitle gives way with
+    // the canvas extras, and the middle group keeps 撤销 / 重做 / 运行 only.
     act(() => container.setWidth(1050));
     expect(toolbar.getAttribute("data-fold")).toBe("3");
+    expect(toolbar.querySelector(".xflow-editor-subtitle")).toBeNull();
+    expect(toolbar.querySelector(".xflow-editor-spec-chip")).toBeNull();
     expect(within(tools).getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual([
       "撤销",
       "重做",

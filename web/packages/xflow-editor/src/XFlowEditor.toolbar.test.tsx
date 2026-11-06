@@ -41,7 +41,7 @@ class MockResizeObserver {
   }
 }
 
-/** Fold tiers (§6.3): 1413 / 1200 / 1171 / 1012, measured on the real bar. */
+/** Fold tiers (§6.3): 1413 / 1171 / 1171 / 1012, measured on the real bar. */
 function setWidth(width: number): void {
   act(() => {
     for (const observer of [...observed]) {
@@ -221,7 +221,7 @@ describe("top bar folding (§6.3)", () => {
   const menuLabels = (menu: ReturnType<typeof within>) =>
     menu.getAllByRole("menuitem").map((item) => item.textContent);
 
-  it("moves 校验 / 主题, then the subtitle, then the canvas extras as the header narrows", async () => {
+  it("moves 校验 / 主题, then hides the subtitle with the canvas extras as the header narrows", async () => {
     render(<XFlowEditor value={workflow} onRun={vi.fn(async () => ({ status: "success" }) as RuntimeSnapshot)} />);
     const toolbar = screen.getByRole("toolbar", { name: "编辑器工具栏" });
 
@@ -237,7 +237,7 @@ describe("top bar folding (§6.3)", () => {
     expect(menu.queryByRole("menuitem", { name: "撤销" })).toBeNull();
     await closeMenu();
 
-    // Tier 1 (fits 1200): 校验 and the theme radio group join ⋯. 1280 is the
+    // Tier 1 (fits 1171): 校验 and the theme radio group join ⋯. 1280 is the
     // §6.3 hard case, so the tier is exercised at its real width.
     setWidth(1280);
     expect(toolbar.getAttribute("data-fold")).toBe("1");
@@ -254,17 +254,20 @@ describe("top bar folding (§6.3)", () => {
     ]);
     await closeMenu();
 
-    // Tier 2 (fits 1171): the subtitle and the spec chip give way. The menu is
-    // the same; nothing else folds yet.
+    // Tier 2 shares tier 1's boundary: hiding the subtitle and the spec chip no
+    // longer narrows the bar, so 1180 is still tier 1 with both still drawn.
     setWidth(1180);
-    expect(toolbar.getAttribute("data-fold")).toBe("2");
-    expect(toolbar.querySelector(".xflow-editor-subtitle")).toBeNull();
-    expect(toolbar.querySelector(".xflow-editor-spec-chip")).toBeNull();
+    expect(toolbar.getAttribute("data-fold")).toBe("1");
+    expect(toolbar.querySelector(".xflow-editor-subtitle")?.textContent).toBe("wf-toolbar · 2 个节点");
+    expect(toolbar.querySelector(".xflow-editor-spec-chip")?.textContent).toBe("spec 1.0");
     expect(toolNames()).toEqual(["撤销", "重做", "选择", "连线", "添加节点", "适应视图", "运行工作流"]);
 
-    // Tier 3 (fits 1012): the canvas extras join ⋯; 撤销 / 重做 never do.
-    setWidth(1050);
+    // Below 1171 the bar goes straight to fold 3, which folds the canvas extras
+    // and hides the subtitle / spec chip on the way.
+    setWidth(1140);
     expect(toolbar.getAttribute("data-fold")).toBe("3");
+    expect(toolbar.querySelector(".xflow-editor-subtitle")).toBeNull();
+    expect(toolbar.querySelector(".xflow-editor-spec-chip")).toBeNull();
     expect(toolNames()).toEqual(["撤销", "重做", "运行工作流"]);
     // 1 · 2 · 8: no groups left to separate, so no rule is drawn.
     expect(within(canvasTools()).queryAllByRole("separator")).toHaveLength(0);
@@ -307,9 +310,10 @@ describe("top bar folding (§6.3)", () => {
     setWidth(1280);
     expect(onBar.getAttribute("data-fold")).toBe("1");
     expect(toolNames()).toHaveLength(8);
-    // Tier 2 folds only the subtitle / spec chip, so the tools stay whole.
+    // Tier 2 shares tier 1's boundary, so the tools stay whole down to 1171;
+    // at 1180 nothing else has folded yet.
     setWidth(1180);
-    expect(onBar.getAttribute("data-fold")).toBe("2");
+    expect(onBar.getAttribute("data-fold")).toBe("1");
     expect(toolNames()).toHaveLength(8);
     expect(within(canvasTools()).getByRole("button", { name: "适应视图" })).toBeTruthy();
   });

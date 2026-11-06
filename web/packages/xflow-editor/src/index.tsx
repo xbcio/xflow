@@ -944,8 +944,10 @@ const CONFIRM_BUTTON_STYLE = { height: foundationTokens.controlHeightSm } as con
  * The column gap is the same 12px at every width (§6.3): the compact
  * `@container` rule no longer rewrites it, so 48 is a constant, not a stair.
  *
- * Left is the logo plus the title row; the title ellipsizes and the subtitle is
- * not counted, so the chip row is its floor. Measured on the real 52px bar
+ * Left is the logo plus the 8px gap plus the title row's natural width (the
+ * strong name plus the chips); the subtitle ellipsizes and is not counted. The
+ * title only gives way below the supported minimum, so the whole title row is
+ * part of the measured width, not just the chips. Measured on the real 52px bar
  * (headless Chromium, name 客户同步, dirty after one node drag so the version
  * and draft chips are both present):
  *   tools 298 (8 keys, same as the ui-preview baseline) / 265 (7, no onRunNode)
@@ -955,31 +957,39 @@ const CONFIRM_BUTTON_STYLE = { height: foundationTokens.controlHeightSm } as con
  *         screen-reader span is absolutely positioned and not counted. The save
  *         key is 110.36 with the icon (89.36 without) and 73 at tier 4, so the
  *         icon and its 8px gap widened tiers 0–3 by 21px.
- *   left natural 409.08 (tiers 0–1, spec chip present) / 340.67 (tier 2+);
- *         floor 325.08 / 256.67. The right cluster is the wider one in every
- *         tier, so it decides all four thresholds.
+ *   left 409.08 (tiers 0–1, spec chip present) / 340.67 (tiers 2+; the chips
+ *         alone are 256.67, the 84px name is still counted). The right cluster
+ *         decides tiers 0–3; tier 4 is the one tier the left cluster decides.
  *
  *   tier 0 fits: 48 + 298 + 2 × 533.36 = 1412.72 → 1413
- *   tier 1 fits: 48 + 298 + 2 × 412.36 = 1170.72 → 1171, rounded up to the next
- *   50px band (as the baseline's TOP_FOLD_2 is), so 1200. The band that
- *   rounding gives back is the start of tier 2.
- *   tier 2 hides the subtitle and the spec chip; neither the right cluster nor
- *   the tools change, so the fit stays 1170.72 → 1171.
+ *   tier 1 fits: 48 + 298 + 2 × 412.36 = 1170.72 → 1171 (the right cluster wins
+ *   by 3.28px over the 409.08 left).
+ *   tier 2 hides the subtitle and the spec chip; the left drops to 340.67 but
+ *   the right and the tools do not change, so the fit stays 1170.72 → 1171.
+ *   Tiers 1 and 2 therefore share one boundary: fold 2 buys no width, and the
+ *   cumulative ladder never reports it (below 1171 the bar goes straight to
+ *   fold 3, which also hides the subtitle). The equal steps encode that.
  *   tier 3 folds the canvas extras into ⋯:
  *   48 + 139 + 2 × 412.36 = 1011.72 → 1012.
  *   tier 4 makes the mode switch icon-only (names move to tooltips) and drops
- *   the ⌘S keycap: 48 + 139 + 2 × 297 = 781 is the bottom of the supported
- *   range; below it the title chips themselves are squeezed, and there is no
- *   further fold step. The draft chip carries the change count; its copy moves
- *   the left floor (256.67 here, still below the right cluster), so the right
- *   cluster sets this bottom.
+ *   the ⌘S keycap. The left cluster is now the wider one (340.67 > 297), so
+ *   48 + 139 + 2 × 340.67 = 868.34 → 869 is the bottom of the supported range;
+ *   below it the title itself is squeezed, and there is no further fold step.
+ *   At 969 the left row is the 47.19 version chip + the 157.48 draft chip + the
+ *   84px name + two 8px row gaps + the 36px logo and its 8px gap = 340.67; the
+ *   spec chip is not rendered at this tier (it leaves at tier 2). The draft chip
+ *   carries the change count, so this bottom follows its copy.
  *
  * 1280 (the §6.3 hard case) sits in tier 1: all 8 keys stay on the bar,
  * centred, with 校验 / 主题 in ⋯. 1600 stays at tier 0.
  */
-const TOOLBAR_FOLD_STEPS = [1413, 1200, 1171, 1012] as const;
+const TOOLBAR_FOLD_STEPS = [1413, 1171, 1171, 1012] as const;
 
-/** 0 while unmeasured, so the first paint shows everything the bar can hold. */
+/**
+ * 0 while unmeasured, so the first paint shows everything the bar can hold.
+ * STEPS[1] === STEPS[2]: hiding the subtitle / spec chip buys no width, so the
+ * ladder returns fold 3 below 1171 and the fold-2 state is never reported.
+ */
 function toolbarFoldLevel(width: number): number {
   if (width <= 0) return 0;
   if (width >= TOOLBAR_FOLD_STEPS[0]) return 0;
