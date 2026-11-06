@@ -110,6 +110,18 @@ import { NodeSearch, type NodeSearchOption } from "./panels/nodeSearch";
 import { NodeCategoryIcon, categoryGlyphFor, nodeTypeGlyph } from "./panels/categoryIcon";
 import { OutlinePanel } from "./panels/outlinePanel";
 import { RailKey } from "./panels/rail";
+import { PanelResizeHandle } from "./panels/panelResizeHandle";
+import {
+  PANEL_RAIL_WIDTH,
+  PANEL_WIDTH_LIMITS,
+  clampPanelWidth,
+  fitPanelWidths,
+  panelWidthMax,
+  readPanelWidths,
+  writePanelWidths,
+  type PanelSide,
+  type PanelWidths
+} from "./panels/panelWidths";
 import { BannerStack, editorBanners, isWorkflowConflictError } from "./panels/banner";
 import { Inspector, type NodeFormHost } from "./panels/inspector";
 import { RunBar, type ExecutionControlAction, type XFlowExecution } from "./panels/runBar";
@@ -2574,6 +2586,11 @@ export function XFlowEditor({
   const widthTier = layoutTier(editorWidth);
   const [layoutPolicy, setLayoutPolicy] = React.useState<LayoutPolicy>("auto");
   const layout: EditorLayout = layoutPolicy === "compact" || widthTier === "compact" ? "c" : "a";
+  // §6.0「拖动调整宽度」(2026-11-06): the two docked columns are a user
+  // preference shared by every workflow, so the stored widths carry no id. The
+  // compact drawer keeps its default width; only the docked grid uses these.
+  const [storedPanelWidths, setStoredPanelWidths] = React.useState<PanelWidths>(readPanelWidths);
+  const [resizingPanel, setResizingPanel] = React.useState<PanelSide | undefined>();
   // §6.3 (2026-11-04): the top bar folds on its own measured width, not on the
   // layout tier. `compactToolbar` stays only for the panel/drawer decisions.
   const toolbarRef = React.useRef<HTMLElement | null>(null);
@@ -5078,6 +5095,36 @@ export function XFlowEditor({
   // persisted desktop preference never shrinks a compact pane.
   const desktopLeftCollapsed = layout === "a" && leftCollapsed;
   const desktopRightCollapsed = layout === "a" && rightCollapsed;
+  // §6.0「拖动调整宽度」: the grid uses the fitted widths so the 480px canvas
+  // floor also survives a window shrink after a wide preference was stored; the
+  // stored value itself is left alone and comes back when there is room again.
+  // A collapsed column occupies only the rail (left) or nothing (right), which
+  // is what the drag's own maximum is measured against.
+  const panelWidths = fitPanelWidths({
+    widths: storedPanelWidths,
+    editorWidth,
+    leftCollapsed: desktopLeftCollapsed,
+    rightCollapsed: desktopRightCollapsed
+  });
+  const leftPanelMax = panelWidthMax("left", editorWidth, desktopRightCollapsed ? 0 : panelWidths.right);
+  const rightPanelMax = panelWidthMax(
+    "right",
+    editorWidth,
+    PANEL_RAIL_WIDTH + (desktopLeftCollapsed ? 0 : panelWidths.left)
+  );
+  const resizePanel = React.useCallback((side: PanelSide, next: number) => {
+    setStoredPanelWidths((current) => {
+      const clamped = clampPanelWidth(side, next);
+      return current[side] === clamped ? current : { ...current, [side]: clamped };
+    });
+  }, []);
+  // Persist on settle, not per pointer frame: a drag would otherwise write
+  // localStorage ~60 times a second. Keyboard steps are outside a drag and land
+  // here immediately.
+  React.useEffect(() => {
+    if (resizingPanel) return;
+    writePanelWidths(storedPanelWidths);
+  }, [resizingPanel, storedPanelWidths]);
   // Collapsing the column unmounts whatever held focus inside it (the 收起左栏
   // key, a library row); the rail stays, so hand focus to its 节点 key when the
   // collapse started inside the panel (§6.0, 2026-11-06). A collapse started
@@ -5543,6 +5590,14 @@ export function XFlowEditor({
         data-layout-policy={layoutPolicy}
         data-theme={resolvedAppearance}
         data-view-mode={viewMode}
+        // §6.0: the docked columns read these two variables; everything else
+        // (rail 60, the left column's rail+content sum) stays stylesheet-owned.
+        style={
+          {
+            "--xflow-editor-panel-left-content-width": `${panelWidths.left}px`,
+            "--xflow-editor-panel-right-width": `${panelWidths.right}px`
+          } as React.CSSProperties
+        }
       >
       <ConfigProvider theme={editorDensityTheme}>
       <header
@@ -5942,6 +5997,7 @@ export function XFlowEditor({
       <div
         className="xflow-editor-main"
         data-left-collapsed={desktopLeftCollapsed}
+        data-panel-resizing={resizingPanel}
         data-right-collapsed={desktopRightCollapsed}
         inert={dock === "expanded"}
       >
@@ -6027,6 +6083,20 @@ export function XFlowEditor({
                 )}
                 </ConfigProvider>
               </div>
+            )}
+            {/* §6.0: docked only; a collapsed left column has no edge to drag. */}
+            {desktopLeftCollapsed ? null : (
+              <PanelResizeHandle
+                defaultValue={PANEL_WIDTH_LIMITS.left.defaultValue}
+                label="调整节点面板宽度"
+                max={leftPanelMax}
+                min={PANEL_WIDTH_LIMITS.left.min}
+                onChange={(next) => resizePanel("left", next)}
+                onResizeEnd={() => setResizingPanel((current) => (current === "left" ? undefined : current))}
+                onResizeStart={() => setResizingPanel("left")}
+                side="left"
+                value={panelWidths.left}
+              />
             )}
           </div>
         ) : (
@@ -6285,6 +6355,20 @@ export function XFlowEditor({
 
         {layout !== "c" ? (
           <aside className="xflow-editor-right" ref={rightPanelRef}>
+            {/* §6.0: the edge is the inspector's left border, docked only. */}
+            {desktopRightCollapsed ? null : (
+              <PanelResizeHandle
+                defaultValue={PANEL_WIDTH_LIMITS.right.defaultValue}
+                label="调整属性面板宽度"
+                max={rightPanelMax}
+                min={PANEL_WIDTH_LIMITS.right.min}
+                onChange={(next) => resizePanel("right", next)}
+                onResizeEnd={() => setResizingPanel((current) => (current === "right" ? undefined : current))}
+                onResizeStart={() => setResizingPanel("right")}
+                side="right"
+                value={panelWidths.right}
+              />
+            )}
             {desktopRightCollapsed ? null : editMode || runsMode ? (
               inspectorElement
             ) : (
@@ -6315,9 +6399,10 @@ export function XFlowEditor({
             rootClassName="xflow-editor-compact-drawer"
             closable={false}
             rootStyle={{ left: 60, position: "absolute" }}
-            // Same 240 as the docked content width and the baseline drawer, so a
-            // library card is the same size in the drawer and while docked.
-            size={240}
+            // §6.0: the compact drawer keeps the default content width (it has
+            // no resize handle), so a library card is the same size in the
+            // drawer and at the docked default.
+            size={PANEL_WIDTH_LIMITS.left.defaultValue}
             onClose={() => setCompactDrawer(undefined)}
           >
             {/* The drawer carries the same density tier as the docked column. */}
@@ -6359,7 +6444,8 @@ export function XFlowEditor({
             rootClassName="xflow-editor-compact-drawer"
             rootStyle={{ position: "absolute" }}
             closable={false}
-            size={320}
+            // §6.0: the compact drawer keeps the default width; no handle.
+            size={PANEL_WIDTH_LIMITS.right.defaultValue}
             onClose={() => setCompactDrawer(undefined)}
           >
             {editMode || runsMode ? (
