@@ -18,6 +18,14 @@ export function RulerIcon(props: XIconProps): React.ReactElement {
   );
 }
 
+export function SaveIcon(props: XIconProps): React.ReactElement {
+  return (
+    <XIconSvg name="save" {...props}>
+      <path d="M5 4h11l3 3v13H5zM8 4v5h7V4M8 20v-6h8v6" />
+    </XIconSvg>
+  );
+}
+
 export function SearchIcon(props: XIconProps): React.ReactElement {
   return (
     <XIconSvg name="search" {...props}>

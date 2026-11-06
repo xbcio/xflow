@@ -59,6 +59,7 @@ import {
 import {
   RedoIcon,
   RulerIcon,
+  SaveIcon,
   SearchIcon,
   ServerIcon,
   ShieldIcon,
@@ -150,6 +151,7 @@ export const xIconRegistry = {
   pulse: PulseIcon,
   redo: RedoIcon,
   ruler: RulerIcon,
+  save: SaveIcon,
   search: SearchIcon,
   server: ServerIcon,
   shield: ShieldIcon,

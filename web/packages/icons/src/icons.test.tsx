@@ -22,6 +22,8 @@ const mockupPath = path.resolve(here, "../../../../.claude/mockups/xflow-ui-v1-p
 
 /** The four ids with no sprite symbol; drawn for round 2 of the visual audit. */
 const DRAWN_FOR_ROUND_2 = ["edit", "eye", "format-painter", "node-index"];
+/** Drawn after round 2: the save icon (2026-11-06, §6.3). */
+const DRAWN_AFTER_ROUND_2 = ["save"];
 /** Registry entries backed by `@ant-design/icons` instead of sprite geometry. */
 const ANTD_FALLBACKS = Object.keys(xIconAntdFallbacks);
 /** Everything that must follow the sprite baseline contract (svg attributes). */
@@ -73,13 +75,13 @@ function renderIcon(
 const sprite = parseSymbols(readFileSync(fixturePath, "utf8"));
 
 describe("xflow icon package registry", () => {
-  it("covers every sprite symbol plus the four round-2 additions and the AntD fallbacks", () => {
+  it("covers every sprite symbol plus the drawn additions and the AntD fallbacks", () => {
     const ids = Object.keys(xIconRegistry);
-    expect(ids).toHaveLength(71);
-    expect(new Set(ids).size).toBe(71);
+    expect(ids).toHaveLength(72);
+    expect(new Set(ids).size).toBe(72);
     expect([...sprite.keys()]).toHaveLength(66);
     for (const id of sprite.keys()) expect(ids).toContain(id);
-    for (const id of DRAWN_FOR_ROUND_2) {
+    for (const id of [...DRAWN_FOR_ROUND_2, ...DRAWN_AFTER_ROUND_2]) {
       expect(ids).toContain(id);
       expect(sprite.has(id)).toBe(false);
     }
@@ -87,7 +89,9 @@ describe("xflow icon package registry", () => {
       expect(ids).toContain(id);
       expect(sprite.has(id)).toBe(false);
     }
-    expect(ids.filter((id) => !sprite.has(id)).sort()).toEqual([...DRAWN_FOR_ROUND_2, ...ANTD_FALLBACKS].sort());
+    expect(ids.filter((id) => !sprite.has(id)).sort()).toEqual(
+      [...DRAWN_FOR_ROUND_2, ...DRAWN_AFTER_ROUND_2, ...ANTD_FALLBACKS].sort()
+    );
   });
 
   it.each(SPRITE_ICON_NAMES)("renders %s on the shared baseline", (name) => {
