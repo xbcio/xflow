@@ -5949,10 +5949,9 @@ export function XFlowEditor({
                   className="xflow-editor-save-button"
                   data-blocked={saveBlocked || undefined}
                   disabled={saveClean}
-                  // §6.3: the save key carries the SaveIcon like the publish key
-                  // carries UploadIcon; a blocked save keeps the danger-colored
-                  // warning glyph next to the issue badge.
-                  icon={saveBlocked ? <WarnIcon className="xflow-editor-save-button__icon" /> : <SaveIcon />}
+                  // §6.3: the save key always carries the SaveIcon like the
+                  // publish key carries UploadIcon; errors add the count badge.
+                  icon={<SaveIcon />}
                   loading={saving}
                   onClick={() => void saveWorkflow()}
                 >

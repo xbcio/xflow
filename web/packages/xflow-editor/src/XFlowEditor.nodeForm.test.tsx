@@ -327,7 +327,10 @@ describe("node form: validation mode (Doc C §1 rule 3)", () => {
 
     const save = screen.getByRole("button", { name: /保存/ });
     expect(save.getAttribute("data-blocked")).toBe("true");
-    // §6.3: blocked swaps the icon to danger but keeps the quiet default button.
+    // §6.3: errors add the count badge; the key keeps its SaveIcon and the
+    // quiet default button, not a primary or danger variant.
+    expect(within(save).getByTestId("save-issue-count").textContent).toBe("1");
+    expect(save.querySelector('svg[data-xflow-icon="save"]')).not.toBeNull();
     expect(save.className).not.toContain("ant-btn-color-primary");
     expect(save.className).not.toContain("ant-btn-variant-solid");
     expect(save.className).not.toContain("ant-btn-color-dangerous");

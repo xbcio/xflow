@@ -300,11 +300,6 @@
   color: var(--xflow-text);
 }
 
-.xflow-editor-save-button__icon {
-  color: var(--xflow-danger);
-  font-size: var(--xflow-font-xl);
-}
-
 .xflow-editor-sep {
   border-color: var(--xflow-border);
   height: 20px;
