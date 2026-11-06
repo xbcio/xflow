@@ -931,6 +931,14 @@ describe("xflow.editor browser-measured baseline fixes (E6)", () => {
     expect(rule(".xflow-editor-save-button:hover,\n.xflow-editor-publish-button:hover")).toMatch(/color:\s*var\(--xflow-text\)\s*;/);
   });
 
+  it("turns only the save glyph danger when the save is blocked", () => {
+    // §9 accept-rd: the count badge alone is too quiet; the icon carries the
+    // state, while the button keeps its default look (no rule repaints the
+    // button's own text, border, or background when blocked).
+    expect(rule(".xflow-editor .xflow-editor-save-button[data-blocked] .xflow-icon")).toMatch(/color:\s*var\(--xflow-danger\)\s*;/);
+    expect(css).not.toMatch(/\.xflow-editor-save-button\[data-blocked\]\s*\{/);
+  });
+
   it("gives the theme trigger no focus ring of its own, so it takes the AntD 3px ring", () => {
     expect(css).not.toMatch(/\.xflow-editor-theme-trigger:focus-visible/);
   });

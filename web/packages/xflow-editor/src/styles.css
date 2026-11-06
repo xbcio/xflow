@@ -4304,6 +4304,13 @@ button.xflow-editor-overview__run:hover {
   color: var(--xflow-danger-fg);
 }
 
+/* §9 accept-rd: a 16px count badge alone is too quiet to say the save is
+ * blocked, so the glyph itself turns danger. Only the icon changes: the label,
+ * border, and background keep the default button look, and the count stays. */
+.xflow-editor .xflow-editor-save-button[data-blocked] .xflow-icon {
+  color: var(--xflow-danger);
+}
+
 /* ---- Left column: variables panel, section cards, node search ---------- */
 
 .xflow-editor .xflow-editor-variables__body,
