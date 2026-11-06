@@ -527,6 +527,10 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
   const canvasRef = useRef<HTMLDivElement>(null);
   const shellRef = useRef<HTMLDivElement>(null);
   const topRef = useRef<HTMLElement>(null);
+  const libRef = useRef<HTMLElement>(null);
+  const inspRef = useRef<HTMLElement>(null);
+  /** Which panel asked for focus back when it collapsed (§6.0, 2026-11-06). */
+  const focusReturn = useRef<'left' | 'right' | null>(null);
   /**
    * `null` means "follow the fitView"; a number is the user's manual zoom. The
    * mock opens fitted rather than at a fixed 62% (the mockup's value), because
@@ -570,13 +574,38 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
    * at a compact width shows the pane as an overlay instead of a column.
    */
   const autoCollapsed = useRef({ left: false, right: false });
+  /**
+   * §6.0 (2026-11-06): if the focus is inside the panel being collapsed it must
+   * land on the recovery entry, never on `body`; a click on the rail leaves the
+   * focus where the user put it because the rail button is outside the panel.
+   */
+  const collapseLeft = () => {
+    if (libRef.current?.contains(document.activeElement)) focusReturn.current = 'left';
+    setLeftOpen(false);
+  };
+  const collapseRight = () => {
+    if (inspRef.current?.contains(document.activeElement)) focusReturn.current = 'right';
+    setRightOpen(false);
+  };
+  useLayoutEffect(() => {
+    const pending = focusReturn.current;
+    if (pending === 'right' && !rightOpen) {
+      shellRef.current?.querySelector<HTMLButtonElement>('[aria-label="展开属性面板"]')?.focus();
+      focusReturn.current = null;
+    } else if (pending === 'left' && !leftOpen) {
+      shellRef.current?.querySelector<HTMLButtonElement>('.xflow-pv-rail-btn[aria-label="节点与大纲"]')?.focus();
+      focusReturn.current = null;
+    }
+  }, [leftOpen, rightOpen]);
   useLayoutEffect(() => {
     if (compactLeft && !autoCollapsed.current.left) {
       autoCollapsed.current.left = true;
+      if (libRef.current?.contains(document.activeElement)) focusReturn.current = 'left';
       setLeftOpen(false);
     }
     if (compactRight && !autoCollapsed.current.right) {
       autoCollapsed.current.right = true;
+      if (inspRef.current?.contains(document.activeElement)) focusReturn.current = 'right';
       setRightOpen(false);
     }
   }, [compactLeft, compactRight]);
@@ -731,7 +760,7 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
           <RailButton icon={<HelpIcon />} text="帮助" label="快捷键与帮助" />
         </nav>
 
-        <aside className="xflow-pv-lib" aria-label="节点与大纲">
+        <aside className="xflow-pv-lib" aria-label="节点与大纲" ref={libRef}>
           <section className="xflow-pv-lib-pane">
             <PanelTitle
               icon={<GridIcon />}
@@ -744,7 +773,7 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
                 label="收起左栏 ⌘B"
                 icon={<SideLeftIcon />}
                 active={leftOpen}
-                onClick={() => setLeftOpen(false)}
+                onClick={collapseLeft}
               />
             </PanelTitle>
             <div className="px-3 pb-2.5">
@@ -975,7 +1004,7 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
           ) : null}
         </main>
 
-        <aside className="xflow-pv-insp" aria-labelledby={`${idPrefix}-props`}>
+        <aside className="xflow-pv-insp" aria-labelledby={`${idPrefix}-props`} ref={inspRef}>
           <PanelTitle
             icon={<SlidersIcon />}
             title="属性"
@@ -987,7 +1016,7 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
               label="收起属性面板 ⌥⌘B"
               icon={<SideRightIcon />}
               active={rightOpen}
-              onClick={() => setRightOpen(false)}
+              onClick={collapseRight}
             />
           </PanelTitle>
           <div className="xflow-pv-insp-head">
