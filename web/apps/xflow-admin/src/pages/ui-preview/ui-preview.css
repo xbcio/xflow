@@ -1332,6 +1332,21 @@
   }
   .xflow-pv-ctl-line > .xflow-pv-spec-control { flex: 1; min-width: 0; }
   /*
+   * 卡内分段控件（§6.4，2026-11-06）：轨道用 field 色，因为它落在
+   * panel-raised 卡身上；顶栏分段在 panel 底上，保持原轨道不改。选中块仍是
+   * panel 色 + elev-1。`:has(input:checked)` 读的是 rc-segmented 自带的单选
+   * input，不引入 `.ant-*` 选择器。
+   */
+  .xflow-pv-sec-fields .xflow-pv-seg-card,
+  .xflow-pv-cell .xflow-pv-seg-card {
+    background: var(--xflow-field);
+  }
+  .xflow-pv-sec-fields .xflow-pv-seg-item:has(input:checked),
+  .xflow-pv-cell .xflow-pv-seg-item:has(input:checked) {
+    background: var(--xflow-panel);
+    box-shadow: var(--xflow-elev-1);
+  }
+  /*
    * Containers that hold fields. Below 260px of content width the label column
    * would leave the control under ~150px, so side fields fall back to the stack.
    * 右栏收到 320 后（D8）卡片的内容盒是 274px，仍在阈值之上；S2 实测后定稿。

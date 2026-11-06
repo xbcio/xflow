@@ -73,9 +73,16 @@ export function SpecControl({ field }: { field: FieldSpec }) {
     case 'seg':
       return (
         <span className="xflow-pv-ctl-line">
+          {/*
+           * Card-internal segmented (§6.4): the track takes the `field` colour
+           * because it sits on the panel-raised card body; the top bar's
+           * segmented stays on the hover track. Semantic hooks only — see
+           * `.xflow-pv-seg-card` in ui-preview.css.
+           */}
           <Segmented
             aria-label={field.label}
-            className="xflow-pv-spec-control"
+            className="xflow-pv-spec-control xflow-pv-seg-card"
+            classNames={{ item: 'xflow-pv-seg-item' }}
             size="small"
             block
             value={field.value}
