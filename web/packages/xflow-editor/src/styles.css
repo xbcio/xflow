@@ -2147,8 +2147,17 @@ button.xflow-editor-overview__run:hover {
 }
 
 .xflow-editor .xflow-editor-config__settings .xflow-composer-field-group > .xflow-composer-section-header {
-  min-height: 36px;
-  padding: var(--xflow-space-2) var(--xflow-space-3);
+  min-height: var(--xflow-editor-density-head-height);
+  padding: var(--xflow-editor-density-sec-head-y) var(--xflow-editor-density-sec-head-x);
+}
+
+/* 卡内分段控件 (§6.4, 2026-11-06): the track is the field ground, not the hover
+ * wash. On a raised card the hover track left the unselected label at 6.61:1
+ * in light, under §3.3; field clears 7:1 in both appearances. The selected
+ * block keeps the theme's panel + elev-1 tokens, and the top bar's view switch
+ * and the execution filter keep their own track. */
+.xflow-editor .xflow-editor-card-segmented {
+  background: var(--xflow-field);
 }
 
 .xflow-editor .xflow-editor-param-source {

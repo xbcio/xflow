@@ -589,7 +589,7 @@ export function WorkflowSettings({
           <Segmented
             aria-label="并发超限时"
             block
-            className="xflow-editor-concurrency-mode"
+            className="xflow-editor-concurrency-mode xflow-editor-card-segmented"
             classNames={concurrencyModeClassNames}
             disabled={settingsReadOnly}
             options={concurrencyModes}
