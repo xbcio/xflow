@@ -1299,6 +1299,13 @@
   }
 
   /* ---- Node card: error, suspended note, pin ---- */
+  /* D-4: unfilled required parameters are pending work, not an error. The
+     neutral tone is spelled out here so the badge is styled by this package
+     rather than relying on the base badge's inherited colour. */
+  .xflow-preview-node__pending {
+    color: var(--xflow-preview-text-secondary);
+  }
+
   /* CP-01: the node's own form findings, first in the badge strip. The fill is
      derived from the tone colour, so both appearances come from the semantic
      tokens and no value is hard-coded here. */
