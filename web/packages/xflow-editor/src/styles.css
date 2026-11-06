@@ -3816,7 +3816,9 @@ button.xflow-editor-overview__run:hover {
  * states stay with the nested ConfigProvider.
  * ------------------------------------------------------------------------ */
 .xflow-editor {
-  --xflow-editor-nodeform-fx-size: var(--xflow-control-height);
+  /* §6.4 (2026-11-06): the fx key is a control-height square, and the editor
+   * density step is 28 — the same box as the control it sits beside. */
+  --xflow-editor-nodeform-fx-size: var(--xflow-editor-density-control-h);
   /* The baseline fx toggle's pressed state: an accent wash rather than the
    * primary solid button, which would compete with 运行. */
   --xflow-editor-nodeform-fx-active-bg: color-mix(in srgb, var(--xflow-accent) 14%, transparent);
@@ -3824,13 +3826,13 @@ button.xflow-editor-overview__run:hover {
   --xflow-editor-nodeform-fx-active-fg: var(--xflow-accent);
 }
 
-/* Keep the editor's own node-form text controls on the shared control height;
- * composer controls fall back to the same core token. */
+/* Keep the editor's own node-form text controls on the density control height;
+ * composer controls read the host knob, which is the same value. */
 .xflow-editor .xflow-composer-form .xflow-editor-nodeform-node-name-control,
 .xflow-editor .xflow-composer-form .xflow-editor-nodeform-duration-text,
 .xflow-editor .xflow-composer-form .xflow-editor-nodeform-text-control,
 .xflow-editor .xflow-composer-form .xflow-editor-nodeform-expression-editor {
-  min-height: var(--xflow-control-height);
+  min-height: var(--xflow-editor-density-control-h);
 }
 
 /* ExpressionInput: control + fx toggle on one row. */

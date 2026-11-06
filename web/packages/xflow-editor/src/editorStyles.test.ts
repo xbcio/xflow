@@ -148,6 +148,15 @@ describe("xflow.editor cascade frame", () => {
     expect(css).toMatch(/\.xflow-editor-nodeform-expression-row\s*\{[^}]*gap:\s*var\(--xflow-space-1-5\)\s*;/);
     expect(css).toMatch(/\.xflow-editor-nodeform-fx\s*\{[^}]*width:\s*var\(--xflow-editor-nodeform-fx-size\)\s*;/);
     expect(css).toMatch(/\.xflow-editor-nodeform-fx\s*\{[^}]*border-radius:\s*var\(--xflow-radius-sm\)\s*;/);
+    // §6.4 (2026-11-06): the fx square follows the editor density control step
+    // (28), and the panel's own text controls take the same height. The top bar
+    // and the canvas keep the foundation 32.
+    expect(css).toMatch(
+      /--xflow-editor-nodeform-fx-size:\s*var\(--xflow-editor-density-control-h\)\s*;/
+    );
+    expect(css).toMatch(
+      /\.xflow-editor \.xflow-composer-form \.xflow-editor-nodeform-expression-editor\s*\{[^}]*min-height:\s*var\(--xflow-editor-density-control-h\)\s*;/
+    );
     expect(css).not.toContain("border-end-end-radius: 0");
     expect(css).not.toContain("border-start-start-radius: 0");
   });
