@@ -1373,38 +1373,13 @@
       padding-top: 0;
     }
   }
-  .xflow-pv-ctl {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    height: var(--xflow-control-height);
-    padding: 0 var(--xflow-space-2-5);
-    border: 1px solid var(--xflow-border);
-    border-radius: var(--xflow-radius-sm);
-    background: var(--xflow-field);
-    color: var(--xflow-text);
-    font-size: var(--xflow-font-md);
-  }
-  .xflow-pv-ctl--focus {
-    border-color: var(--xflow-primary);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--xflow-primary) 18%, transparent);
-  }
-  .xflow-pv-ctl--expr {
+  /* Expression state (the fx chip is pressed): the editor's literal slot keeps
+     the mono small step, so the sample does too — on the wrapper and on the
+     input AntD renders inside it. */
+  .xflow-pv-expr-control,
+  .xflow-pv-expr-control input {
     font-family: var(--xflow-font-mono);
     font-size: var(--xflow-font-sm);
-    white-space: nowrap;
-    overflow: hidden;
-  }
-  /* The URL is the one value longer than the control: it scrolls inside its own
-     box (scrollbar hidden so the mock keeps a stable height) and the variable
-     chip stays pinned to the right edge instead of being pushed out. */
-  .xflow-pv-ctl-text {
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow-x: auto;
-    scrollbar-width: none;
-    text-overflow: ellipsis;
   }
   .xflow-pv-var {
     flex: none;
@@ -1414,6 +1389,9 @@
     color: var(--xflow-accent);
   }
   .xflow-pv-fx {
+    /* §6.4 (2026-11-06): a standalone square beside the control, never the
+       shrinking tail of the row; any width keeps it 28×28, as mockup .fx. */
+    flex: none;
     width: var(--xflow-control-height);
     height: var(--xflow-control-height);
     padding: 0;

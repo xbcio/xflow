@@ -255,7 +255,8 @@ function InspectorConfig() {
                   ]}
                 />
               </Field>
-              {/* Template-mode long text stays a full row; awaiting user ruling (D2). */}
+              {/* D2/D3: only TextArea-style controls and pure expressions take
+                  the whole row; a template field keeps the side label column. */}
               <Field
                 label={
                   <>
@@ -265,13 +266,15 @@ function InspectorConfig() {
                     </span>
                   </>
                 }
-                layout="top"
               >
                 <div className="flex gap-1.5">
-                  <div className="xflow-pv-ctl xflow-pv-ctl--focus xflow-pv-ctl--expr">
-                    <span className="xflow-pv-ctl-text">https://crm.example.test/api/customers</span>
-                    <span className="xflow-pv-var">{'{{ $input.id }}'}</span>
-                  </div>
+                  {/* The side column cannot hold the URL and a variable chip: the
+                      editor renders this field as an input too, so the sample is
+                      the same ellipsized control rather than a 0-width text. */}
+                  <Input
+                    className="xflow-pv-expr-control xflow-pv-spec-control w-full xflow-pv-focus"
+                    defaultValue="https://crm.example.test/api/customers{{ $input.id }}"
+                  />
                   <Button className="xflow-pv-fx" aria-pressed data-active="true">
                     fx
                   </Button>
