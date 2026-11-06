@@ -415,7 +415,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > commonSchema 
         ],
         "props": {
           "descriptionPlacement": "tooltip",
-          "layout": "vertical",
+          "layout": "horizontal",
         },
         "type": "Form",
       },
@@ -856,7 +856,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.databas
         ],
         "props": {
           "descriptionPlacement": "tooltip",
-          "layout": "vertical",
+          "layout": "horizontal",
         },
         "type": "Form",
       },
@@ -1241,7 +1241,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
         ],
         "props": {
           "descriptionPlacement": "tooltip",
-          "layout": "vertical",
+          "layout": "horizontal",
         },
         "type": "Form",
       },
@@ -1471,7 +1471,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.map sna
         ],
         "props": {
           "descriptionPlacement": "tooltip",
-          "layout": "vertical",
+          "layout": "horizontal",
         },
         "type": "Form",
       },
@@ -1835,7 +1835,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.script 
         ],
         "props": {
           "descriptionPlacement": "tooltip",
-          "layout": "vertical",
+          "layout": "horizontal",
         },
         "type": "Form",
       },
@@ -2136,7 +2136,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.switch 
         ],
         "props": {
           "descriptionPlacement": "tooltip",
-          "layout": "vertical",
+          "layout": "horizontal",
         },
         "type": "Form",
       },
@@ -2376,7 +2376,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.transfo
         ],
         "props": {
           "descriptionPlacement": "tooltip",
-          "layout": "vertical",
+          "layout": "horizontal",
         },
         "type": "Form",
       },
@@ -3431,7 +3431,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
         ],
         "props": {
           "descriptionPlacement": "tooltip",
-          "layout": "vertical",
+          "layout": "horizontal",
         },
         "type": "Form",
       },
@@ -4040,7 +4040,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
         ],
         "props": {
           "descriptionPlacement": "tooltip",
-          "layout": "vertical",
+          "layout": "horizontal",
         },
         "type": "Form",
       },
@@ -4465,7 +4465,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.wait sn
         ],
         "props": {
           "descriptionPlacement": "tooltip",
-          "layout": "vertical",
+          "layout": "horizontal",
         },
         "type": "Form",
       },

@@ -1052,7 +1052,7 @@ export function compileNodeForm(schema: NodeFormSchema | null | undefined, optio
   // section keeps the editor's help-icon tooltips.
   const root: ElementDef = {
     type: "Form",
-    props: { layout: "vertical", descriptionPlacement: section === "identity" ? "below" : "tooltip" },
+    props: { layout: "horizontal", descriptionPlacement: section === "identity" ? "below" : "tooltip" },
     children
   };
   if (rootChecks.length > 0) root.checks = rootChecks;

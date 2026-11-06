@@ -828,7 +828,7 @@ describe("section (Inspector 参数 / 设置 tabs)", () => {
   });
 
   it("the root Form shows descriptions as tooltips", () => {
-    expect(compileNodeForm(waitSchema).spec.elements[ROOT_ID].props).toEqual({ layout: "vertical", descriptionPlacement: "tooltip" });
+    expect(compileNodeForm(waitSchema).spec.elements[ROOT_ID].props).toEqual({ layout: "horizontal", descriptionPlacement: "tooltip" });
   });
 });
 
