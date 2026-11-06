@@ -1278,8 +1278,13 @@
      否则 label 的 100% 只是自身内容的宽度，贴右无从谈起。 */
   .xflow-pv-sec-head .ant-collapse-title,
   .xflow-pv-sec-head .ant-collapse-header-text { flex: 1; min-width: 0; }
-  .xflow-pv-sec-title { font-size: var(--xflow-font-md); font-weight: var(--xflow-font-weight-semibold); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .xflow-pv-sec-extra { font-size: var(--xflow-font-sm); font-weight: var(--xflow-font-weight-regular); color: var(--xflow-text-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /*
+   * 卡头省略（§6.4，2026-11-06）：标题与 meta 都单行省略；空间不够时先截
+   * meta（shrink 权重远大于标题），标题至少保留首字 + 省略号；nowrap 保证
+   * 标题不会被挤成竖排。
+   */
+  .xflow-pv-sec-title { flex: 0 1 auto; min-width: 2em; font-size: var(--xflow-font-md); font-weight: var(--xflow-font-weight-semibold); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .xflow-pv-sec-extra { flex: 0 1000 auto; min-width: 0; font-size: var(--xflow-font-sm); font-weight: var(--xflow-font-weight-regular); color: var(--xflow-text-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .xflow-pv-sec-fields { display: flex; flex-direction: column; gap: var(--xflow-space-2); padding: var(--xflow-space-0-5) var(--xflow-space-3) var(--xflow-space-2); min-width: 0; }
   /* 密度档只在本节生效：值来自 .xflow-pv-wb 的 --xflow-pv-density-*（D9）。 */
   .xflow-pv-wb .xflow-pv-secs { gap: var(--xflow-pv-density-sec-gap); }
