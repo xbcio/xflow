@@ -10,12 +10,14 @@ import {
   cx,
   DescriptionPlacementContext,
   FieldLayoutContext,
+  FormLayoutContext,
   IssueList,
   isPlainObject,
   isWrongShape,
   RawValue,
   SectionIssuesContext,
   useFieldLayout,
+  useFormLayout,
   worstSeverity,
   type DescriptionPlacement,
   type IssueReporter
@@ -60,11 +62,13 @@ export const Form: ComposerComponent<FormProps> = {
         style={style}
       >
         <DescriptionPlacementContext.Provider value={props.descriptionPlacement ?? "below"}>
-          <FieldLayoutContext.Provider value={layout}>
-            {slots.header}
-            {children}
-            {slots.footer}
-          </FieldLayoutContext.Provider>
+          <FormLayoutContext.Provider value={layout}>
+            <FieldLayoutContext.Provider value={layout}>
+              {slots.header}
+              {children}
+              {slots.footer}
+            </FieldLayoutContext.Provider>
+          </FormLayoutContext.Provider>
         </DescriptionPlacementContext.Provider>
       </div>
     );
@@ -323,6 +327,13 @@ function ObjectGroupView({
   children: ReactNode;
 }) {
   const layout = useFieldLayout();
+  const formLayout = useFormLayout();
+  // An inline slot (ExpressionInput's literal control, KeyValue's value
+  // editors) hides the label; it does not change the form's direction, so the
+  // group's own fields follow the enclosing form instead (§6.4, 2026-11-06).
+  // Inside an ArrayTable row they stay stacked, as before.
+  const nested = layout === "inline" ? formLayout : layout;
+  const childLayout = nested === "cell" ? "vertical" : nested;
   const wrong = isWrongShape(value, isPlainObject);
   const title = props.title ?? props.label;
   const canClear = props.clearable && !readOnly && onChange !== undefined && isPlainObject(value) && Object.keys(value).length > 0;
@@ -348,8 +359,9 @@ function ObjectGroupView({
       {wrong ? (
         <RawValue value={value} expected="对象" readOnly={readOnly || onChange === undefined} onClear={() => onChange?.(undefined)} />
       ) : (
-        // Sub-fields are full fields again: their labels show inside a cell or an inline slot.
-        <FieldLayoutContext.Provider value={layout === "cell" || layout === "inline" ? "vertical" : layout}>{children}</FieldLayoutContext.Provider>
+        // Sub-fields are full fields again: inside an inline slot they take the
+        // form's layout, inside an ArrayTable cell they stay stacked.
+        <FieldLayoutContext.Provider value={childLayout}>{children}</FieldLayoutContext.Provider>
       )}
     </Section>
   );

@@ -9,7 +9,7 @@ import { Button } from "antd";
 import { z } from "zod";
 import { zodProps } from "../core";
 import type { ComposerComponent, ComposerComponentProps } from "../react";
-import { FieldFrame, FieldLayoutContext, fieldShape, hintText, isWrongShape, RawValue, safeJson, type FieldProps } from "./shared";
+import { FieldFrame, FieldLayoutContext, fieldShape, FormLayoutContext, hintText, isWrongShape, RawValue, safeJson, type FieldProps } from "./shared";
 
 export interface ArrayTableProps extends FieldProps {
   /** Column headers, in the order of the row elements. */
@@ -90,7 +90,9 @@ function ArrayTableField({ node, props, value, onChange, defaultHint, issues, re
               ) : null}
               {rows.map((row) => (
                 <div key={row.id} className="xflow-composer-array-row" role="row" data-composer-row={row.id}>
-                  <FieldLayoutContext.Provider value="cell">{row.children}</FieldLayoutContext.Provider>
+                  <FormLayoutContext.Provider value="cell">
+                    <FieldLayoutContext.Provider value="cell">{row.children}</FieldLayoutContext.Provider>
+                  </FormLayoutContext.Provider>
                   {editable ? (
                     <div className="xflow-composer-array-actions" role="cell">
                       {sortable ? (

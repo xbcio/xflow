@@ -5,13 +5,27 @@
 
 import { fireEvent, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ComposerSpec, ElementDef, Patch } from "../core";
+import { z } from "zod";
+import { zodProps, type ComposerSpec, type ElementDef, type Patch } from "../core";
 import { createRegistry, type ComposerComponent } from "../react";
 import { allPatches, mountComposer } from "../testing/harness";
 import { change, clickButton, clickClear, fieldOf, formSpec, kernels, one, pickOption, shownText } from "./form.testkit";
-import { createFormRegistry, formComponents, Input } from "./index";
+import { createFormRegistry, FieldLayoutContext, formComponents, Input } from "./index";
 
 const registry = createFormRegistry();
+
+/**
+ * A slot that hides its children's labels the way ExpressionInput's literal
+ * control and KeyValue's value editors do. It is test-only: no form component
+ * owns this shape, but a container must still know which form it lives in.
+ */
+const InlineSlot: ComposerComponent<Record<string, never>> = {
+  type: "InlineSlot",
+  props: zodProps(z.strictObject({})),
+  bindings: {},
+  render: ({ children }) => <FieldLayoutContext.Provider value="inline">{children}</FieldLayoutContext.Provider>
+};
+const slotRegistry = createFormRegistry([InlineSlot]);
 
 interface FieldCase {
   type: string;
@@ -493,6 +507,65 @@ for (const kernel of kernels) {
         expect(group.classList.contains("xflow-composer-object-group")).toBe(true);
         expect(group.classList.contains("xflow-composer-field")).toBe(false);
         expect(fieldOf(m.container, "inner").classList.contains("xflow-composer-field--label-side")).toBe(true);
+        expect(m.log).toEqual([]);
+      });
+
+      // §6.4 (2026-11-06): an inline slot hides the label; it must not flatten
+      // the form's direction. The real case is an ObjectGroup inside
+      // ExpressionInput's literal control (e.g. kafka's aggregate/tuning).
+      const slottedSpec = (layout: "horizontal" | "vertical"): ComposerSpec => ({
+        spec: "composer/v1",
+        root: "form",
+        elements: {
+          form: { type: "Form", props: { layout }, children: ["slot"] },
+          slot: { type: "InlineSlot", children: ["og"] },
+          og: { type: "ObjectGroup", props: { label: "对象", value: { $bindState: "/og" } }, children: ["inner"] },
+          inner: { type: "Input", props: { label: "内层", value: { $bindState: "/og/inner" } } }
+        }
+      });
+
+      for (const layout of ["horizontal", "vertical"] as const) {
+        it(`keeps an inline-slot ObjectGroup's fields in the enclosing ${layout} layout`, async () => {
+          const m = mountComposer({
+            kernel,
+            registry: slotRegistry,
+            spec: slottedSpec(layout),
+            value: { og: { inner: "x" } }
+          });
+          await m.flush();
+          const inner = fieldOf(m.container, "inner");
+          expect(inner.classList.contains("xflow-composer-field--label-side")).toBe(layout === "horizontal");
+          expect(m.log).toEqual([]);
+        });
+      }
+
+      it("keeps an inline-slot ObjectGroup's fields stacked inside an ArrayTable cell", async () => {
+        const m = mountComposer({
+          kernel,
+          registry: slotRegistry,
+          spec: {
+            spec: "composer/v1",
+            root: "form",
+            elements: {
+              form: { type: "Form", props: { layout: "horizontal" }, children: ["rows"] },
+              rows: {
+                type: "ArrayTable",
+                props: { label: "规则", value: { $bindState: "/rows" }, newRow: {} },
+                repeat: { statePath: "/rows" },
+                children: ["slot"]
+              },
+              slot: { type: "InlineSlot", children: ["og"] },
+              og: { type: "ObjectGroup", props: { label: "对象", value: { $bindItem: "og" } }, children: ["inner"] },
+              inner: { type: "Input", props: { label: "内层", value: { $bindItem: "og/inner" } } }
+            }
+          },
+          value: { rows: [{ og: { inner: "x" } }] }
+        });
+        await m.flush();
+        // Repeat rows suffix the element id (@rows#rN), so match the prefix.
+        const inner = m.container.querySelector<HTMLElement>('[data-composer-node^="inner@"]');
+        expect(inner).not.toBeNull();
+        expect(inner!.classList.contains("xflow-composer-field--label-side")).toBe(false);
         expect(m.log).toEqual([]);
       });
     });

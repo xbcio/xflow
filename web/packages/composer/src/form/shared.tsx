@@ -31,6 +31,19 @@ export function useFieldLayout(): FieldLayout {
 }
 
 /**
+ * The enclosing form cell's structural layout: "horizontal" / "vertical" from
+ * `Form.props.layout`, "cell" inside an ArrayTable row. Unlike
+ * `FieldLayoutContext` it is never narrowed by a slot override, so a container
+ * that receives an "inline" slot (ExpressionInput's literal control, KeyValue's
+ * value editors) can still lay its own children out like the form around it.
+ */
+export const FormLayoutContext = createContext<FieldLayout>("vertical");
+
+export function useFormLayout(): FieldLayout {
+  return useContext(FormLayoutContext);
+}
+
+/**
  * Where a field's `description` shows, from `Form.props.descriptionPlacement`:
  * "below" the control, or "tooltip" behind a help icon next to the label.
  * Fields with a hidden label (cell / inline layouts) always use "below".
