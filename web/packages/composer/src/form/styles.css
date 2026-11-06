@@ -353,6 +353,21 @@
   container-type: inline-size;
 }
 
+/*
+ * A group whose own fields are horizontal is a query container too (§6.4,
+ * 2026-11-06): the form's width says nothing about how much room a nested
+ * group actually has. The same container name lets the 260px fallback below
+ * apply against the nearest container without duplicating its rules. The body
+ * is a flex container in normal flow, so width: 100% gives the inline-size
+ * containment the definite width it erases from content.
+ */
+.xflow-composer-object-group--horizontal {
+  width: 100%;
+  box-sizing: border-box;
+  container-name: xflow-composer-form;
+  container-type: inline-size;
+}
+
 @container xflow-composer-form (max-width: 259.98px) {
   .xflow-composer-form--horizontal .xflow-composer-field--horizontal.xflow-composer-field--label-side {
     grid-template-columns: minmax(0, 1fr);

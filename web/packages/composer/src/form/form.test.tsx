@@ -510,6 +510,32 @@ for (const kernel of kernels) {
         expect(m.log).toEqual([]);
       });
 
+      // §6.4 (2026-11-06): a group whose own fields are horizontal queries its
+      // own body, so the 260px fallback measures the room the group has rather
+      // than the form's. A vertical group leaves the query to the form.
+      it("scopes a horizontal ObjectGroup body as its own query container", async () => {
+        for (const layout of ["horizontal", "vertical"] as const) {
+          const m = mountComposer({
+            kernel,
+            registry,
+            spec: {
+              spec: "composer/v1",
+              root: "form",
+              elements: {
+                form: { type: "Form", props: { layout }, children: ["og"] },
+                og: { type: "ObjectGroup", props: { label: "对象", value: { $bindState: "/og" } }, children: ["inner"] },
+                inner: { type: "Input", props: { label: "内层", value: { $bindState: "/og/inner" } } }
+              }
+            },
+            value: { og: { inner: "x" } }
+          });
+          await m.flush();
+          const body = one<HTMLElement>(fieldOf(m.container, "og"), ".xflow-composer-section-body");
+          expect(body.classList.contains("xflow-composer-object-group--horizontal"), layout).toBe(layout === "horizontal");
+          expect(m.log).toEqual([]);
+        }
+      });
+
       // §6.4 (2026-11-06): an inline slot hides the label; it must not flatten
       // the form's direction. The real case is an ObjectGroup inside
       // ExpressionInput's literal control (e.g. kafka's aggregate/tuning).

@@ -255,6 +255,15 @@ describe("horizontal label placement (§6.4)", () => {
     expect(css).not.toMatch(/\.xflow-composer-form--vertical\s*\{[^}]*width:/);
   });
 
+  it("makes a horizontal ObjectGroup body a query container with its own width", () => {
+    // The form's width says nothing about a nested group's room (§6.4,
+    // 2026-11-06): the body queries on its own, under the same container name,
+    // and needs a definite inline width because containment erases it.
+    expect(css).toMatch(
+      /\.xflow-composer-object-group--horizontal\s*\{[^}]*width:\s*100%;[^}]*container-name:\s*xflow-composer-form;[^}]*container-type:\s*inline-size;/
+    );
+  });
+
   it("restores the baseline object-group inset through a host knob", () => {
     expect(css).toMatch(
       /\.xflow-composer-object-group\s*\{[^}]*padding:\s*var\(--xflow-composer-object-group-padding,\s*10px 12px\)/

@@ -97,6 +97,8 @@ export interface SectionProps {
   headerStatus?: SectionHeaderStatus;
   issues: readonly Issue[];
   actions?: ReactNode;
+  /** Extra class on the body, e.g. the horizontal group's query container. */
+  bodyClassName?: string;
   children: ReactNode;
 }
 
@@ -256,7 +258,7 @@ export function Section(props: SectionProps) {
       ) : null}
       {props.description ? <p className="xflow-composer-section-description">{props.description}</p> : null}
       <IssueList id={issuesId} issues={props.issues} />
-      <div id={bodyId} className="xflow-composer-section-body" hidden={!open}>
+      <div id={bodyId} className={cx("xflow-composer-section-body", props.bodyClassName)} hidden={!open}>
         <SectionIssuesContext.Provider value={report}>{props.children}</SectionIssuesContext.Provider>
       </div>
     </section>
@@ -340,6 +342,9 @@ function ObjectGroupView({
   const section = (
     <Section
       className={cx("xflow-composer-object-group", layout === "cell" && "xflow-composer-object-group--cell")}
+      // A horizontal group queries its own body (§6.4, 2026-11-06): the form's
+      // width does not describe the room a nested group actually has.
+      bodyClassName={childLayout === "horizontal" ? "xflow-composer-object-group--horizontal" : undefined}
       nodeId={nodeId}
       title={title}
       description={props.description}
