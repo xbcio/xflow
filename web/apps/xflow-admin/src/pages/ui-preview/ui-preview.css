@@ -1285,6 +1285,14 @@
    */
   .xflow-pv-sec-title { flex: 0 1 auto; min-width: 2em; font-size: var(--xflow-font-md); font-weight: var(--xflow-font-weight-semibold); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .xflow-pv-sec-extra { flex: 0 1000 auto; min-width: 0; font-size: var(--xflow-font-sm); font-weight: var(--xflow-font-weight-regular); color: var(--xflow-text-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /*
+   * 卡头等高（§6.4，2026-11-06）：图集里的卡头可能带 24px 图标按钮，会比其他
+   * 卡头高 3px；统一到能容纳它的高度（24 + 6×2 内边距 + 1×2 边框），标题行
+   * 仍然是单行。
+   */
+  .xflow-pv-gallery .xflow-pv-sec-head {
+    min-height: calc(var(--xflow-space-6) + var(--xflow-space-3) + var(--xflow-space-0-5));
+  }
   .xflow-pv-sec-fields { display: flex; flex-direction: column; gap: var(--xflow-space-2); padding: var(--xflow-space-0-5) var(--xflow-space-3) var(--xflow-space-2); min-width: 0; }
   /* 密度档只在本节生效：值来自 .xflow-pv-wb 的 --xflow-pv-density-*（D9）。 */
   .xflow-pv-wb .xflow-pv-secs { gap: var(--xflow-pv-density-sec-gap); }
