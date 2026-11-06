@@ -963,22 +963,22 @@ describe("XFlowEditor", () => {
     expect(toolbar.querySelector(".xflow-editor-spec-chip")?.textContent).toBe("spec 1.0");
     expect(within(tools).getByRole("button", { name: "适应视图" })).toBeTruthy();
 
-    // Tier 1 (fits 1150): 校验 / 主题 move into ⋯; the middle group stays whole.
+    // Tier 1 (fits 1200): 校验 / 主题 move into ⋯; the middle group stays whole.
     act(() => container.setWidth(1280));
     expect(toolbar.getAttribute("data-fold")).toBe("1");
     expect(within(toolbar).queryByRole("button", { name: "校验" })).toBeNull();
     expect(within(toolbar).queryByRole("button", { name: "主题设置" })).toBeNull();
     expect(within(tools).getByRole("button", { name: "适应视图" })).toBeTruthy();
 
-    // Tier 2 (fits 1129): the subtitle and the spec chip give way.
-    act(() => container.setWidth(1140));
+    // Tier 2 (fits 1171): the subtitle and the spec chip give way.
+    act(() => container.setWidth(1180));
     expect(toolbar.getAttribute("data-fold")).toBe("2");
     expect(toolbar.querySelector(".xflow-editor-subtitle")).toBeNull();
     expect(toolbar.querySelector(".xflow-editor-spec-chip")).toBeNull();
     expect(within(tools).getByRole("button", { name: "适应视图" })).toBeTruthy();
 
-    // Tier 3 (fits 970): the middle group keeps 撤销 / 重做 / 运行 only.
-    act(() => container.setWidth(1000));
+    // Tier 3 (fits 1012): the middle group keeps 撤销 / 重做 / 运行 only.
+    act(() => container.setWidth(1050));
     expect(toolbar.getAttribute("data-fold")).toBe("3");
     expect(within(tools).getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual([
       "撤销",
@@ -1070,9 +1070,9 @@ describe("XFlowEditor", () => {
     await waitFor(() => expect(editor.getAttribute("data-theme")).toBe("dark"));
     await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
 
-    // Tier 3 (header 1000): the canvas extras join the menu, whose folded rows
+    // Tier 3 (header 1050): the canvas extras join the menu, whose folded rows
     // stay live.
-    act(() => container.setWidth(1000));
+    act(() => container.setWidth(1050));
     expect(toolbar.getAttribute("data-fold")).toBe("3");
     const narrowMenu = await openMenu();
     for (const name of ["选择", "连线", "添加节点", "适应视图", "校验", "浅色"]) {

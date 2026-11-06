@@ -20,6 +20,7 @@ import {
   PlayIcon,
   PlusIcon,
   RedoIcon,
+  SaveIcon,
   SearchIcon,
   ShieldIcon,
   SideLeftIcon,
@@ -930,8 +931,8 @@ const DEFAULT_SAVE_TOOLTIP = "保存工作流（⌘ / Ctrl + S）";
 const CONFIRM_BUTTON_STYLE = { height: foundationTokens.controlHeightSm } as const;
 
 /**
- * Top bar fold thresholds (§6.3, re-measured 2026-11-05 after the 28px density
- * step and the compact column-gap fix): measured in a real browser on the
+ * Top bar fold thresholds (§6.3, re-measured 2026-11-07 after the save key
+ * gained its icon): measured in a real browser on the
  * header itself, not copied from the baseline. The bar is
  * `minmax(0, 1fr) auto minmax(0, 1fr)`, so both side tracks are equal and
  * whichever cluster is wider sets both. Widths below are border-box (the unit
@@ -943,40 +944,40 @@ const CONFIRM_BUTTON_STYLE = { height: foundationTokens.controlHeightSm } as con
  * The column gap is the same 12px at every width (§6.3): the compact
  * `@container` rule no longer rewrites it, so 48 is a constant, not a stair.
  *
- * Left is the logo plus the title row's natural width; the title ellipsizes and
- * the subtitle is not counted, so these are floors. Measured on the real 52px
- * bar (headless Chromium, name 客户同步, dirty after one node drag so the
- * version and draft chips are both present):
+ * Left is the logo plus the title row; the title ellipsizes and the subtitle is
+ * not counted, so the chip row is its floor. Measured on the real 52px bar
+ * (headless Chromium, name 客户同步, dirty after one node drag so the version
+ * and draft chips are both present):
  *   tools 298 (8 keys, same as the ui-preview baseline) / 265 (7, no onRunNode)
  *         / 139 (3 at tier 3+)
- *   right 512.36 (tier 0) / 391.36 (tiers 1–3, 校验 + 主题 folded into ⋯)
- *         / 276 (tier 4, mode switch icon-only, ⌘S keycap hidden). The cluster's
- *         screen-reader span is absolutely positioned and not counted.
- *   left 394.08 (tiers 0–1, spec chip present) / 325.67 (tier 2+). The left
- *   cluster is 2.72px wider than the right one in tier 1, so it decides that
- *   threshold; the right cluster decides the rest.
+ *   right 533.36 (tier 0) / 412.36 (tiers 1–3, 校验 + 主题 folded into ⋯)
+ *         / 297 (tier 4, mode switch icon-only, ⌘S keycap hidden). The cluster's
+ *         screen-reader span is absolutely positioned and not counted. The save
+ *         key is 110.36 with the icon (89.36 without) and 73 at tier 4, so the
+ *         icon and its 8px gap widened tiers 0–3 by 21px.
+ *   left natural 409.08 (tiers 0–1, spec chip present) / 340.67 (tier 2+);
+ *         floor 325.08 / 256.67. The right cluster is the wider one in every
+ *         tier, so it decides all four thresholds.
  *
- *   tier 0 fits: 48 + 298 + 2 × 512.36 = 1370.72 → 1371
- *   tier 1 fits: 48 + 298 + 2 × 394.08 = 1134.16 → 1150 (rounded up to the next
- *   50px band, as the baseline's TOP_FOLD_2 is). The band that rounding gives
- *   back is the start of tier 2.
+ *   tier 0 fits: 48 + 298 + 2 × 533.36 = 1412.72 → 1413
+ *   tier 1 fits: 48 + 298 + 2 × 412.36 = 1170.72 → 1171, rounded up to the next
+ *   50px band (as the baseline's TOP_FOLD_2 is), so 1200. The band that
+ *   rounding gives back is the start of tier 2.
  *   tier 2 hides the subtitle and the spec chip; neither the right cluster nor
- *   the tools change, so 48 + 298 + 2 × 391.36 = 1128.72 → 1129.
+ *   the tools change, so the fit stays 1170.72 → 1171.
  *   tier 3 folds the canvas extras into ⋯:
- *   48 + 139 + 2 × 391.36 = 969.72 → 970.
+ *   48 + 139 + 2 × 412.36 = 1011.72 → 1012.
  *   tier 4 makes the mode switch icon-only (names move to tooltips) and drops
- *   the ⌘S keycap. The left cluster is again the wider one, so
- *   48 + 139 + 2 × 325.67 = 838.34 → 839 is the bottom of the supported range;
- *   below it the title chips themselves are squeezed, and there is no further
- *   fold step. The draft chip carries the change count, so the left width and
- *   this bottom follow its copy: the fixture's 「未保存 1 处」 gives 839, the
- *   baseline's 「未保存 4 处」 gives 843. The four thresholds above are the same
- *   either way.
+ *   the ⌘S keycap: 48 + 139 + 2 × 297 = 781 is the bottom of the supported
+ *   range; below it the title chips themselves are squeezed, and there is no
+ *   further fold step. The draft chip carries the change count; its copy moves
+ *   the left floor (256.67 here, still below the right cluster), so the right
+ *   cluster sets this bottom.
  *
  * 1280 (the §6.3 hard case) sits in tier 1: all 8 keys stay on the bar,
  * centred, with 校验 / 主题 in ⋯. 1600 stays at tier 0.
  */
-const TOOLBAR_FOLD_STEPS = [1371, 1150, 1129, 970] as const;
+const TOOLBAR_FOLD_STEPS = [1413, 1200, 1171, 1012] as const;
 
 /** 0 while unmeasured, so the first paint shows everything the bar can hold. */
 function toolbarFoldLevel(width: number): number {
@@ -5948,7 +5949,10 @@ export function XFlowEditor({
                   className="xflow-editor-save-button"
                   data-blocked={saveBlocked || undefined}
                   disabled={saveClean}
-                  icon={saveBlocked ? <WarnIcon className="xflow-editor-save-button__icon" /> : undefined}
+                  // §6.3: the save key carries the SaveIcon like the publish key
+                  // carries UploadIcon; a blocked save keeps the danger-colored
+                  // warning glyph next to the issue badge.
+                  icon={saveBlocked ? <WarnIcon className="xflow-editor-save-button__icon" /> : <SaveIcon />}
                   loading={saving}
                   onClick={() => void saveWorkflow()}
                 >

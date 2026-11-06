@@ -41,7 +41,7 @@ class MockResizeObserver {
   }
 }
 
-/** Fold tiers (§6.3): 1371 / 1150 / 1129 / 970, measured on the real bar. */
+/** Fold tiers (§6.3): 1413 / 1200 / 1171 / 1012, measured on the real bar. */
 function setWidth(width: number): void {
   act(() => {
     for (const observer of [...observed]) {
@@ -187,6 +187,13 @@ describe("top bar canvas tools (§6.3, 2026-11-04)", () => {
     expect(publish.querySelector('svg[data-xflow-icon="upload"]')).not.toBeNull();
   });
 
+  it("gives 保存 the save glyph like 发布 carries its upload glyph", () => {
+    render(<XFlowEditor value={workflow} onSave={vi.fn(async (next: WorkflowDef) => next)} />);
+
+    const save = screen.getByRole("button", { name: "保存" });
+    expect(save.querySelector('svg[data-xflow-icon="save"]')).not.toBeNull();
+  });
+
   it("puts an icon in each 编辑 | 运行记录 option and no tools while replaying", () => {
     render(<XFlowEditor value={workflow} mode="runs" />);
 
@@ -230,7 +237,7 @@ describe("top bar folding (§6.3)", () => {
     expect(menu.queryByRole("menuitem", { name: "撤销" })).toBeNull();
     await closeMenu();
 
-    // Tier 1 (fits 1150): 校验 and the theme radio group join ⋯. 1280 is the
+    // Tier 1 (fits 1200): 校验 and the theme radio group join ⋯. 1280 is the
     // §6.3 hard case, so the tier is exercised at its real width.
     setWidth(1280);
     expect(toolbar.getAttribute("data-fold")).toBe("1");
@@ -247,16 +254,16 @@ describe("top bar folding (§6.3)", () => {
     ]);
     await closeMenu();
 
-    // Tier 2 (fits 1129): the subtitle and the spec chip give way. The menu is
+    // Tier 2 (fits 1171): the subtitle and the spec chip give way. The menu is
     // the same; nothing else folds yet.
-    setWidth(1140);
+    setWidth(1180);
     expect(toolbar.getAttribute("data-fold")).toBe("2");
     expect(toolbar.querySelector(".xflow-editor-subtitle")).toBeNull();
     expect(toolbar.querySelector(".xflow-editor-spec-chip")).toBeNull();
     expect(toolNames()).toEqual(["撤销", "重做", "选择", "连线", "添加节点", "适应视图", "运行工作流"]);
 
-    // Tier 3 (fits 970): the canvas extras join ⋯; 撤销 / 重做 never do.
-    setWidth(1000);
+    // Tier 3 (fits 1012): the canvas extras join ⋯; 撤销 / 重做 never do.
+    setWidth(1050);
     expect(toolbar.getAttribute("data-fold")).toBe("3");
     expect(toolNames()).toEqual(["撤销", "重做", "运行工作流"]);
     // 1 · 2 · 8: no groups left to separate, so no rule is drawn.
@@ -281,7 +288,7 @@ describe("top bar folding (§6.3)", () => {
     const onRunNode = vi.fn(async () => ({ status: "success" }) as RuntimeSnapshot);
     render(<XFlowEditor value={workflow} onRunNode={onRunNode} />);
 
-    setWidth(1000);
+    setWidth(1050);
     const menu = await openMenu();
     const labels = menuLabels(menu);
     expect(labels.slice(0, 5)).toEqual(["选择", "连线", "添加节点", "适应视图", "测试此节点"]);
@@ -301,7 +308,7 @@ describe("top bar folding (§6.3)", () => {
     expect(onBar.getAttribute("data-fold")).toBe("1");
     expect(toolNames()).toHaveLength(8);
     // Tier 2 folds only the subtitle / spec chip, so the tools stay whole.
-    setWidth(1140);
+    setWidth(1180);
     expect(onBar.getAttribute("data-fold")).toBe("2");
     expect(toolNames()).toHaveLength(8);
     expect(within(canvasTools()).getByRole("button", { name: "适应视图" })).toBeTruthy();
