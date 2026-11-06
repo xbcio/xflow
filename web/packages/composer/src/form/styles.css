@@ -776,6 +776,9 @@
   flex-direction: column;
   gap: 6px;
   min-width: 0;
+  /* D-5: rows query this container, not the viewport — the same form renders in
+   a 320px inspector and a 520px drawer. */
+  container: xflow-composer-array / inline-size;
 }
 
 .xflow-composer-array-grid {
@@ -809,6 +812,13 @@
 .xflow-composer-array-heading {
   flex: 1 1 0;
   min-width: 0;
+}
+
+/* D-5: at ≥360 the table keeps a usable condition column (≥140px). */
+.xflow-composer-array-row > .xflow-composer-field:first-child,
+.xflow-composer-array-row > .xflow-composer-cell:first-child,
+.xflow-composer-array-heading:first-child {
+  min-width: 140px;
 }
 
 .xflow-composer-array-head {
@@ -876,6 +886,54 @@
   gap: 2px;
   width: 84px;
   min-height: var(--xflow-composer-control-height, var(--xflow-control-height, 32px));
+}
+
+/* D-5: below 360 the table cannot hold a 140px condition column plus a port
+ * and the row actions, so each rule becomes a card: the condition takes the
+ * first line, the port and the actions share the second. */
+@container xflow-composer-array (max-width: 359.98px) {
+  .xflow-composer-array-grid {
+    gap: 8px;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    overflow: visible;
+  }
+
+  /* The card carries the column meaning through aria-labels; the head would
+   * only repeat it above every card. */
+  .xflow-composer-array-head {
+    display: none;
+  }
+
+  .xflow-composer-array-row {
+    flex-wrap: wrap;
+    row-gap: 6px;
+    padding: 8px;
+    border: 1px solid var(--xflow-border, #d8dbdf);
+    border-radius: var(--xflow-radius-sm, 6px);
+    background: var(--xflow-field, #ffffff);
+  }
+
+  .xflow-composer-array-row + .xflow-composer-array-row {
+    border-top: 1px solid var(--xflow-border, #d8dbdf);
+  }
+
+  .xflow-composer-array-row > .xflow-composer-field,
+  .xflow-composer-array-row > .xflow-composer-cell {
+    flex: 1 1 140px;
+  }
+
+  .xflow-composer-array-row > .xflow-composer-field:first-child,
+  .xflow-composer-array-row > .xflow-composer-cell:first-child {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  .xflow-composer-array-actions {
+    width: auto;
+    margin-left: auto;
+  }
 }
 
 /* ---------------------------------------------------------- raw / errors */

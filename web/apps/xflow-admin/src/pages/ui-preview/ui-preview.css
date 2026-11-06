@@ -1768,15 +1768,24 @@
     background: var(--xflow-field);
     min-width: 0;
   }
-  .xflow-pv-rule-head {
+  .xflow-pv-rule-foot {
     display: flex;
     align-items: center;
     gap: var(--xflow-space-1-5);
-    font-size: var(--xflow-font-sm);
-    font-weight: var(--xflow-font-weight-semibold);
     min-width: 0;
   }
-  .xflow-pv-rule-head .xflow-pv-port { margin-left: auto; }
+  .xflow-pv-rule-title {
+    font-size: var(--xflow-font-sm);
+    font-weight: var(--xflow-font-weight-semibold);
+  }
+  .xflow-pv-rule-foot .xflow-pv-port { margin-left: 0; }
+  .xflow-pv-rule-actions {
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    gap: 2px;
+    margin-left: auto;
+  }
   .xflow-pv-rule-expr {
     align-self: flex-start;
     max-width: 100%;

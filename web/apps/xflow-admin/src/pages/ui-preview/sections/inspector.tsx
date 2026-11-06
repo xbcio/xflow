@@ -8,6 +8,7 @@ import {
   PlusIcon,
   SearchIcon,
   SlidersIcon,
+  TrashIcon,
   WarnIcon,
 } from '@xflow/icons';
 import { Button, Collapse, Input, Tabs, Tooltip } from 'antd';
@@ -103,12 +104,18 @@ function PortRow({
 function Rule({ rule }: { rule: RuleSpec }) {
   return (
     <div className="xflow-pv-rule">
-      <div className="xflow-pv-rule-head">
-        {rule.title}
-        <span className="xflow-pv-port">{rule.port}</span>
-      </div>
+      {/* D-5：窄栏下这条规则就是一张卡片——条件占满第一行，端口和行操作在第二行。 */}
       {rule.expr ? <span className="xflow-pv-expr-box xflow-pv-rule-expr">{rule.expr}</span> : null}
       {rule.note ? <span className="xflow-pv-hint">{rule.note}</span> : null}
+      <div className="xflow-pv-rule-foot">
+        <span className="xflow-pv-rule-title">{rule.title}</span>
+        <span className="xflow-pv-port">{rule.port}</span>
+        <span className="xflow-pv-rule-actions">
+          <IconButton small label={`上移${rule.title}`} icon={<DownIcon style={{ transform: 'rotate(180deg)' }} />} />
+          <IconButton small label={`下移${rule.title}`} icon={<DownIcon />} />
+          <IconButton small label={`删除${rule.title}`} icon={<TrashIcon />} />
+        </span>
+      </div>
     </div>
   );
 }
