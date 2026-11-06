@@ -575,6 +575,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.databas
           },
           "fxToggle": true,
           "label": "Data",
+          "labelPlacement": "top",
           "mode": "template",
           "required": {
             "$cond": {
@@ -799,6 +800,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.databas
           },
           "fxToggle": true,
           "label": "Where",
+          "labelPlacement": "top",
           "mode": "template",
           "required": {
             "$cond": {
@@ -931,6 +933,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
           },
           "fxToggle": true,
           "label": "Body",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/body",
@@ -1008,6 +1011,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
           },
           "fxToggle": true,
           "label": "Headers",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/headers",
@@ -1130,6 +1134,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
           },
           "fxToggle": true,
           "label": "Options",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/options",
@@ -1167,6 +1172,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.http sn
           },
           "fxToggle": true,
           "label": "Query Params",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/query",
@@ -2043,6 +2049,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.switch 
           },
           "fxToggle": true,
           "label": "Rules",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/rules",
@@ -2205,6 +2212,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.transfo
           },
           "fxToggle": true,
           "label": "Operations",
+          "labelPlacement": "top",
           "mode": "template",
           "required": true,
           "value": {
@@ -2413,6 +2421,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
           },
           "fxToggle": true,
           "label": "Aggregate",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/aggregate",
@@ -2825,6 +2834,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
           },
           "fxToggle": true,
           "label": "Message Schema",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/message_schema",
@@ -3095,6 +3105,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
           },
           "fxToggle": true,
           "label": "Tuning",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/tuning",
@@ -3809,6 +3820,7 @@ exports[`compileNodeForm: every fixture compiles to a valid Spec > xflow.trigger
           },
           "fxToggle": true,
           "label": "Tuning",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/tuning",

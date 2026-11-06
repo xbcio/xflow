@@ -20,7 +20,12 @@ export const chromeShape = {
   description: z.string().optional(),
   /** Marker only; enforcement is the `required` check next to it. */
   required: z.boolean().optional(),
-  disabled: z.boolean().optional()
+  disabled: z.boolean().optional(),
+  /**
+   * Where the label sits in a horizontal form (§6.4): the side column by
+   * default, "top" for a field whose control takes the whole row.
+   */
+  labelPlacement: z.enum(["side", "top"]).optional()
 };
 
 export interface ChromeProps {
@@ -28,6 +33,7 @@ export interface ChromeProps {
   description?: string;
   required?: boolean;
   disabled?: boolean;
+  labelPlacement?: "side" | "top";
 }
 
 const fieldType = z.enum(["string", "number", "boolean", "array", "object"]);

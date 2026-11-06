@@ -374,6 +374,7 @@ exports[`A6-generated node-types fixture > xflow.browser.cdp@1 snapshot 1`] = `
           },
           "fxToggle": true,
           "label": "Harvest Rules",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/harvest",
@@ -402,6 +403,7 @@ exports[`A6-generated node-types fixture > xflow.browser.cdp@1 snapshot 1`] = `
           },
           "fxToggle": true,
           "label": "Navigation Plan",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/plan",
@@ -430,6 +432,7 @@ exports[`A6-generated node-types fixture > xflow.browser.cdp@1 snapshot 1`] = `
           },
           "fxToggle": true,
           "label": "Seed Cookies",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/seed_cookies",
@@ -590,6 +593,7 @@ exports[`A6-generated node-types fixture > xflow.browser.cdp@1 snapshot 1`] = `
           },
           "fxToggle": true,
           "label": "TTL Rules",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/ttl",
@@ -773,6 +777,7 @@ exports[`A6-generated node-types fixture > xflow.database@1 snapshot 1`] = `
           },
           "fxToggle": true,
           "label": "Data",
+          "labelPlacement": "top",
           "mode": "template",
           "required": {
             "$cond": {
@@ -997,6 +1002,7 @@ exports[`A6-generated node-types fixture > xflow.database@1 snapshot 1`] = `
           },
           "fxToggle": true,
           "label": "Where",
+          "labelPlacement": "top",
           "mode": "template",
           "required": {
             "$cond": {
@@ -1161,6 +1167,7 @@ exports[`A6-generated node-types fixture > xflow.function@1 snapshot 1`] = `
           },
           "fxToggle": true,
           "label": "Params",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/params",
@@ -1302,6 +1309,7 @@ exports[`A6-generated node-types fixture > xflow.grpc@1 snapshot 1`] = `
           },
           "fxToggle": true,
           "label": "Metadata",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/metadata",
@@ -1368,6 +1376,7 @@ exports[`A6-generated node-types fixture > xflow.grpc@1 snapshot 1`] = `
           },
           "fxToggle": true,
           "label": "Options",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/options",
@@ -1397,6 +1406,7 @@ exports[`A6-generated node-types fixture > xflow.grpc@1 snapshot 1`] = `
           },
           "fxToggle": true,
           "label": "Request",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/request",
@@ -1547,6 +1557,7 @@ exports[`A6-generated node-types fixture > xflow.http@1 snapshot 1`] = `
           },
           "fxToggle": true,
           "label": "Body",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/body",
@@ -1624,6 +1635,7 @@ exports[`A6-generated node-types fixture > xflow.http@1 snapshot 1`] = `
           },
           "fxToggle": true,
           "label": "Headers",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/headers",
@@ -1747,6 +1759,7 @@ exports[`A6-generated node-types fixture > xflow.http@1 snapshot 1`] = `
           },
           "fxToggle": true,
           "label": "Options",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/options",
@@ -1784,6 +1797,7 @@ exports[`A6-generated node-types fixture > xflow.http@1 snapshot 1`] = `
           },
           "fxToggle": true,
           "label": "Query Params",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/query",
@@ -2365,6 +2379,7 @@ exports[`A6-generated node-types fixture > xflow.notification@1 snapshot 1`] = `
           },
           "fxToggle": true,
           "label": "Data",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/data",
@@ -3282,6 +3297,7 @@ exports[`A6-generated node-types fixture > xflow.switch@1 snapshot 1`] = `
           },
           "fxToggle": true,
           "label": "Rules",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/rules",
@@ -3444,6 +3460,7 @@ exports[`A6-generated node-types fixture > xflow.transform.aggregate@1 snapshot 
           },
           "fxToggle": true,
           "label": "Operations",
+          "labelPlacement": "top",
           "mode": "template",
           "required": true,
           "value": {
@@ -4017,6 +4034,7 @@ exports[`A6-generated node-types fixture > xflow.transform.rename@1 snapshot 1`]
           },
           "fxToggle": true,
           "label": "Mapping",
+          "labelPlacement": "top",
           "mode": "template",
           "required": true,
           "value": {
@@ -4120,6 +4138,7 @@ exports[`A6-generated node-types fixture > xflow.transform.set@1 snapshot 1`] = 
           },
           "fxToggle": true,
           "label": "Fields",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/fields",
@@ -4191,6 +4210,7 @@ exports[`A6-generated node-types fixture > xflow.transform.sort@1 snapshot 1`] =
           },
           "fxToggle": true,
           "label": "Fields",
+          "labelPlacement": "top",
           "mode": "template",
           "required": true,
           "value": {
@@ -4646,6 +4666,7 @@ exports[`A6-generated node-types fixture > xflow.trigger.kafka@1 snapshot 1`] = 
           },
           "fxToggle": true,
           "label": "Aggregate",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/aggregate",
@@ -4997,6 +5018,7 @@ exports[`A6-generated node-types fixture > xflow.trigger.kafka@1 snapshot 1`] = 
           },
           "fxToggle": true,
           "label": "Emit Retry",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/emit_retry",
@@ -5296,6 +5318,7 @@ exports[`A6-generated node-types fixture > xflow.trigger.kafka@1 snapshot 1`] = 
           },
           "fxToggle": true,
           "label": "Message Schema",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/message_schema",
@@ -5567,6 +5590,7 @@ exports[`A6-generated node-types fixture > xflow.trigger.kafka@1 snapshot 1`] = 
           },
           "fxToggle": true,
           "label": "Tuning",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/tuning",
@@ -6294,6 +6318,7 @@ exports[`A6-generated node-types fixture > xflow.trigger.redis@1 snapshot 1`] = 
           },
           "fxToggle": true,
           "label": "Tuning",
+          "labelPlacement": "top",
           "mode": "template",
           "value": {
             "$bindState": "/parameters/tuning",

@@ -116,6 +116,21 @@ const WIDGET_COMPONENTS: Readonly<Record<string, NodeFormComponentType>> = {
   [COMMON_WIDGET_DURATION_MS]: "DurationInput"
 };
 
+/**
+ * Controls that take the whole row in a horizontal form (§6.4 D2). A template
+ * field whose literal control is one of these must put the outer
+ * ExpressionInput's label on top too; otherwise the literal is squeezed into
+ * the 96px label column's neighbour.
+ */
+const FULL_ROW_CONTROLS: ReadonlySet<string> = new Set([
+  "TextArea",
+  "CodeEditor",
+  "JsonEditor",
+  "KeyValue",
+  "ArrayTable",
+  "ObjectGroup"
+]);
+
 const MSG = {
   required: "必填",
   requiredWhen: "当前配置下必填",
@@ -430,7 +445,14 @@ class Compiler {
       const literalId = this.add(`${idBase}:control`, control);
       const outer: ElementDef = {
         type: "ExpressionInput",
-        props: { ...chrome, value: bindExpr(field, scope), mode: "template", fxToggle: true, expect },
+        props: {
+          ...chrome,
+          ...(FULL_ROW_CONTROLS.has(control.type) && { labelPlacement: "top" }),
+          value: bindExpr(field, scope),
+          mode: "template",
+          fxToggle: true,
+          expect
+        },
         slots: { [EXPRESSION_LITERAL_SLOT]: [literalId] }
       };
       return [this.add(idBase, withVisible(withChecks(outer, controlChecks), visible))];

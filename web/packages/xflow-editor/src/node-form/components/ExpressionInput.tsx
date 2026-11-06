@@ -89,6 +89,10 @@ function ExpressionField({ node, props, value, onChange, defaultHint, issues, re
             : undefined
       }
       labelMode={content === "editor" ? "control" : "group"}
+      // A pure expression is a text editor with no literal alternative, so it
+      // takes the full row (§6.4 D3); the template state stays in the side
+      // column, where the fx key sits beside its control.
+      labelPlacement={props.labelPlacement ?? (props.mode === "pure" ? "top" : undefined)}
       stateClassName={unset ? "is-unset" : undefined}
     >
       {(ids) => {

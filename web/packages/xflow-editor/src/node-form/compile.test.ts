@@ -321,6 +321,15 @@ describe("degrade rules (Doc C §3.2)", () => {
     const { spec } = compile(httpSchema);
     expect(outer(spec, "/parameters/headers").props).toMatchObject({ mode: "template", expect: { type: "object", values: "string" } });
   });
+
+  it("a template field whose literal takes the full row puts the outer label on top", () => {
+    const { spec } = compile(httpSchema);
+    // KeyValue is a full-row control (§6.4 D2), so the wrapping ExpressionInput
+    // must not push it into the control column beside a 96px label.
+    expect(outer(spec, "/parameters/headers").props.labelPlacement).toBe("top");
+    // An ordinary Input literal keeps the side column.
+    expect(outer(spec, "/parameters/url").props.labelPlacement).toBeUndefined();
+  });
 });
 
 // --------------------------------------------------------- expression modes

@@ -5,7 +5,7 @@
 // readOnly respected, strict props.
 
 import { fireEvent, within } from "@testing-library/react";
-import type { ElementDef, Patch } from "@xflow/composer/core";
+import type { ComposerSpec, ElementDef, Patch } from "@xflow/composer/core";
 import { allPatches, mountComposer } from "@xflow/composer/testing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nodeFormChecks } from "../checks";
@@ -448,6 +448,61 @@ for (const kernel of kernels) {
         clickButton(field, /切换为表达式$/);
         await template.flush();
         expect(textarea(field).getAttribute("placeholder")).toBe("${{ $input.value }}");
+      });
+    });
+
+    describe("ExpressionInput label placement", () => {
+      const horizontal = (elements: Record<string, ElementDef>, children: string[]): ComposerSpec => ({
+        spec: "composer/v1",
+        minor: 0,
+        root: "form",
+        elements: { form: { type: "Form", props: { layout: "horizontal" }, children }, ...elements }
+      });
+      const template = (props: Record<string, unknown>) =>
+        horizontal(
+          {
+            f: {
+              type: "ExpressionInput",
+              props: { label: "Value", mode: "template", fxToggle: true, value: { $bindState: "/v" }, expect: { type: "string" }, ...props },
+              slots: { literal: ["lit"] }
+            },
+            lit: { type: "Input", props: { label: "Value", value: { $bindState: "/v" } } }
+          },
+          ["f"]
+        );
+      const placement = (container: HTMLElement) => {
+        const field = fieldOf(container, "f");
+        return {
+          top: field.classList.contains("xflow-composer-field--label-top"),
+          side: field.classList.contains("xflow-composer-field--label-side")
+        };
+      };
+
+      it("puts a pure expression on the full row (§6.4 D3)", async () => {
+        const m = mountComposer({
+          kernel,
+          registry,
+          spec: horizontal(
+            { f: { type: "ExpressionInput", props: { label: "Expr", mode: "pure", value: { $bindState: "/v" } } } },
+            ["f"]
+          ),
+          value: {}
+        });
+        await m.flush();
+        expect(placement(m.container)).toEqual({ top: true, side: false });
+        m.unmount();
+      });
+
+      it("keeps a template in the side column unless the host marks it full-row", async () => {
+        const side = mountComposer({ kernel, registry, spec: template({}), value: {} });
+        await side.flush();
+        expect(placement(side.container)).toEqual({ top: false, side: true });
+        side.unmount();
+
+        const full = mountComposer({ kernel, registry, spec: template({ labelPlacement: "top" }), value: {} });
+        await full.flush();
+        expect(placement(full.container)).toEqual({ top: true, side: false });
+        full.unmount();
       });
     });
 
