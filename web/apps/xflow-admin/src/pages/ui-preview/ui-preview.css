@@ -524,6 +524,45 @@
     border-left: 1px solid var(--xflow-border-subtle);
     box-shadow: var(--xflow-elev-4);
   }
+  /*
+   * §6.0（2026-11-06）：停靠态面板的拖动边线。8px 命中条居中压在 1px 边线上，
+   * 平时完全透明，悬停 / 拖动才画 2px primary 竖线。手柄挂在
+   * `.xflow-pv-wb-body`（position: relative）下而不是面板内部，属性面板的
+   * `overflow: hidden` 就裁不到它。
+   */
+  .xflow-pv-resizer {
+    position: absolute;
+    inset-block: 0;
+    width: 8px;
+    z-index: 5;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: col-resize;
+    touch-action: none;
+    outline: none;
+  }
+  .xflow-pv-resizer[data-side='left'] {
+    left: calc(var(--xflow-pv-rail) + var(--xflow-pv-left) - 4px);
+  }
+  .xflow-pv-resizer[data-side='right'] { right: calc(var(--xflow-pv-right) - 4px); }
+  .xflow-pv-resizer::before {
+    content: '';
+    position: absolute;
+    inset-block: 0;
+    left: 50%;
+    width: 2px;
+    transform: translateX(-50%);
+    background: var(--xflow-primary);
+    opacity: 0;
+    transition: opacity var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard);
+  }
+  .xflow-pv-resizer:hover::before,
+  .xflow-pv-resizer:focus-visible::before,
+  .xflow-pv-resizer[data-dragging='true']::before { opacity: 1; }
+  /* 拖动时关掉列宽过渡，整块工作台不选中文字、光标保持 col-resize。 */
+  .xflow-pv-wb[data-resizing] { user-select: none; cursor: col-resize; }
+  .xflow-pv-wb[data-resizing] .xflow-pv-wb-body { transition: none; }
 
   /* ===================== rail + left pane (§6.0.1) ===================== */
   .xflow-pv-rail {

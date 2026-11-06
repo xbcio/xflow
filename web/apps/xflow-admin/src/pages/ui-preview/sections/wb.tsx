@@ -31,7 +31,17 @@ import {
   WarnIcon,
 } from '@xflow/icons';
 import { Button, Collapse, Input, Segmented, Select, Switch, Tabs, Tooltip } from 'antd';
-import { Fragment, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import {
+  Fragment,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from 'react';
 
 import { cx } from '../components/cx';
 import { Minimap } from '../components/Minimap';
@@ -67,8 +77,124 @@ import {
 } from '../data';
 import { COMPACT_LEFT, COMPACT_RIGHT, fitScale, FRAME_LABEL_OFFSET, RULER, canvasPanY } from '../metrics';
 import { nodeStatusMeta, typeIcon } from '../meta';
+import { clampPanelWidth, PANEL_WIDTHS, RAIL_WIDTH, CANVAS_MIN, readStoredWidth, RESIZE_STEP, storePanelWidth, type PanelSide } from './panel-resize';
 
 const wbRun = wbRunVariant;
+
+/**
+ * §6.0（2026-11-06）：停靠态面板的内侧边线手柄。平时不可见，悬停 / 拖动时
+ * 显示 2px primary 竖线；指针移动超过 3px 才设 pointer capture，双击才能复位。
+ * 手柄挂在 `.xflow-pv-wb-body`（position: relative）下，而不是面板里，避免
+ * 属性面板的 `overflow: hidden` 裁掉一半命中区。
+ */
+function PanelResizer({
+  side,
+  value,
+  limit,
+  onChange,
+  onReset,
+  onDragChange,
+}: {
+  side: PanelSide;
+  value: number;
+  limit: number;
+  onChange: (width: number) => void;
+  onReset: () => void;
+  onDragChange: (dragging: boolean) => void;
+}) {
+  const { min, max, label } = PANEL_WIDTHS[side];
+  const [dragging, setDragging] = useState(false);
+  const drag = useRef<{ pointerId: number; startX: number; startWidth: number; moved: boolean } | null>(null);
+  const cleanup = useRef<(() => void) | null>(null);
+  const set = (width: number) => onChange(clampPanelWidth(side, width, limit));
+
+  useEffect(() => () => cleanup.current?.(), []);
+
+  const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    // 按下会顺手选中文字并移动焦点；这里先掐掉，再把焦点交给手柄自己。
+    event.preventDefault();
+    const handle = event.currentTarget;
+    handle.focus();
+    const start = { pointerId: event.pointerId, startX: event.clientX, startWidth: value, moved: false };
+    drag.current = start;
+    const move = (e: PointerEvent) => {
+      const state = drag.current;
+      if (!state || e.pointerId !== state.pointerId) return;
+      const delta = e.clientX - state.startX;
+      if (!state.moved && Math.abs(delta) <= 3) return;
+      if (!state.moved) {
+        state.moved = true;
+        setDragging(true);
+        onDragChange(true);
+        try {
+          handle.setPointerCapture(state.pointerId);
+        } catch {
+          // 指针已经离开；document 上的监听仍会继续跟随。
+        }
+      }
+      const next = side === 'left' ? state.startWidth + delta : state.startWidth - delta;
+      set(next);
+    };
+    const end = (e: PointerEvent) => {
+      if (e.pointerId !== start.pointerId) return;
+      cleanup.current?.();
+      cleanup.current = null;
+      drag.current = null;
+      setDragging(false);
+      onDragChange(false);
+    };
+    document.addEventListener('pointermove', move);
+    document.addEventListener('pointerup', end);
+    document.addEventListener('pointercancel', end);
+    cleanup.current = () => {
+      document.removeEventListener('pointermove', move);
+      document.removeEventListener('pointerup', end);
+      document.removeEventListener('pointercancel', end);
+    };
+  };
+
+
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    // ←/→ 朝面板变宽的方向走：左栏 → 变宽，属性面板 ← 变宽。
+    const grow = side === 'left' ? 'ArrowRight' : 'ArrowLeft';
+    const shrink = side === 'left' ? 'ArrowLeft' : 'ArrowRight';
+    if (event.key === grow) {
+      event.preventDefault();
+      set(value + RESIZE_STEP);
+    } else if (event.key === shrink) {
+      event.preventDefault();
+      set(value - RESIZE_STEP);
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      set(min);
+    } else if (event.key === 'End') {
+      event.preventDefault();
+      set(max);
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      onReset();
+    }
+  };
+
+  return (
+    <div
+      className="xflow-pv-resizer"
+      data-side={side}
+      data-dragging={dragging ? 'true' : undefined}
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={label}
+      aria-valuemin={min}
+      aria-valuemax={Math.max(min, Math.min(max, limit))}
+      aria-valuenow={value}
+      tabIndex={0}
+      onPointerDown={onPointerDown}
+      onKeyDown={onKeyDown}
+      onDoubleClick={onReset}
+    />
+  );
+}
 
 /**
  * Same glyph as the real editor's theme trigger (`ThemeContrastIcon` in
@@ -543,6 +669,10 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
   const [zoom, setZoom] = useState<number | null>(null);
   const [leftOpen, setLeftOpen] = useState(true);
   const [rightOpen, setRightOpen] = useState(true);
+  /** §6.0（2026-11-06）：停靠态面板宽度，收起再展开保持；存 localStorage。 */
+  const [leftWidth, setLeftWidth] = useState(() => readStoredWidth('left'));
+  const [rightWidth, setRightWidth] = useState(() => readStoredWidth('right'));
+  const [resizing, setResizing] = useState<PanelSide | null>(null);
   const [ruler, setRuler] = useState(true);
   // 展示态：这一页按 mockup 从打开开始；产品默认关（spec §6.2，preview 包实现）。
   const [minimap, setMinimap] = useState(true);
@@ -571,6 +701,44 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
           : 4;
   const leftDocked = leftOpen && !compactLeft;
   const rightDocked = rightOpen && !compactRight;
+
+  useEffect(() => storePanelWidth('left', leftWidth), [leftWidth]);
+  useEffect(() => storePanelWidth('right', rightWidth), [rightWidth]);
+
+  /**
+   * 画布至少保留 480：窗口变窄后已存的宽度可能放不下。按「先左后右」顺序夹取，
+   * 收右侧时用左栏刚算出的新值，只收不放，避免两边同时让位留下过大的画布。
+   */
+  useEffect(() => {
+    if (!shellWidth) return;
+    const room = shellWidth - 2 - RAIL_WIDTH - CANVAS_MIN;
+    let nextLeft = leftWidth;
+    let nextRight = rightWidth;
+    if (leftDocked) {
+      const maxLeft = Math.max(PANEL_WIDTHS.left.min, room - (rightDocked ? nextRight : 0));
+      if (nextLeft > maxLeft) nextLeft = maxLeft;
+    }
+    if (rightDocked) {
+      const maxRight = Math.max(PANEL_WIDTHS.right.min, room - (leftDocked ? nextLeft : 0));
+      if (nextRight > maxRight) nextRight = maxRight;
+    }
+    if (nextLeft !== leftWidth) setLeftWidth(nextLeft);
+    if (nextRight !== rightWidth) setRightWidth(nextRight);
+  }, [shellWidth, leftDocked, rightDocked, leftWidth, rightWidth]);
+
+  /**
+   * 画布始终保留 480：先压正在拖的这一侧，另一侧不动。`available` 是这一侧
+   * 能拿到的最大值；尚未量到宽度时按硬上限处理，不让第一帧把面板压到最小。
+   */
+  const panelLimit = (side: PanelSide) => {
+    if (!shellWidth) return PANEL_WIDTHS[side].max;
+    const other = side === 'left' ? (rightDocked ? rightWidth : 0) : (leftDocked ? leftWidth : 0);
+    return shellWidth - 2 - RAIL_WIDTH - other - CANVAS_MIN;
+  };
+  const resetWidth = (side: PanelSide) => {
+    if (side === 'left') setLeftWidth(PANEL_WIDTHS.left.fallback);
+    else setRightWidth(PANEL_WIDTHS.right.fallback);
+  };
   /**
    * First time the shell is narrow enough, the pane closes itself once — that is
    * the compact default (§6.0.1). After that the button is the user's: reopening
@@ -618,11 +786,21 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
   const panY = canvasPanY(scale, minContentTop);
   const selectedRect = metrics.rects.find((rect) => rect.id === selectedId);
   const selectedNode = wbNodes.find((node) => node.id === selectedId);
+  /**
+   * 宽度用内联变量覆盖 CSS 默认值；只在停靠态写，收起 / 抽屉态留给样式表把
+   * 变量置 0（内联样式会盖过样式表，这里不写才收得起来）。
+   */
+  const widthStyle = {
+    '--xflow-pv-left': leftDocked ? `${leftWidth}px` : undefined,
+    '--xflow-pv-right': rightDocked ? `${rightWidth}px` : undefined,
+  } as CSSProperties;
 
   return (
     <div
       className="xflow-pv-wb"
       ref={shellRef}
+      style={widthStyle}
+      data-resizing={resizing ?? undefined}
       data-compact={compactRight ? 'both' : compactLeft ? 'left' : undefined}
       data-left={leftDocked ? undefined : leftOpen ? 'drawer' : 'collapsed'}
       data-right={rightDocked ? undefined : rightOpen ? 'drawer' : 'collapsed'}
@@ -1075,6 +1253,28 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
             </Todo>
           </div>
         </aside>
+
+        {/* 停靠态才给手柄：收起 / 抽屉（≤1280）不提供拖动，宽度保持默认。 */}
+        {leftDocked ? (
+          <PanelResizer
+            side="left"
+            value={leftWidth}
+            limit={panelLimit('left')}
+            onChange={setLeftWidth}
+            onReset={() => resetWidth('left')}
+            onDragChange={(on) => setResizing(on ? 'left' : null)}
+          />
+        ) : null}
+        {rightDocked ? (
+          <PanelResizer
+            side="right"
+            value={rightWidth}
+            limit={panelLimit('right')}
+            onChange={setRightWidth}
+            onReset={() => resetWidth('right')}
+            onDragChange={(on) => setResizing(on ? 'right' : null)}
+          />
+        ) : null}
       </div>
 
       <div className="xflow-pv-bottom">
