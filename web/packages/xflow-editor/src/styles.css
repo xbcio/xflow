@@ -1977,6 +1977,43 @@ button.xflow-editor-overview__run:hover {
   border-bottom: 0;
 }
 
+/* Every card head in the panel takes the same density height (§6.4,
+ * 2026-11-06): the baseline's `.xflow-pv-wb .xflow-pv-sec-head` measures 29px.
+ * The padding comes from the composer host knob on the editor root (4/10), so
+ * this rule only pins the height the 13px/20 inner line cannot fill. */
+.xflow-editor .xflow-editor-inspector .xflow-composer-field-group > .xflow-composer-section-header {
+  min-height: var(--xflow-editor-density-head-height);
+}
+
+/* Card heads stay on one line (§6.4, 2026-11-06): the composer title ellipsises
+ * and its summary shrinks first, the same order as the SectionCard header. */
+.xflow-editor .xflow-editor-inspector .xflow-composer-section-toggle,
+.xflow-editor .xflow-editor-inspector .xflow-composer-section-title {
+  min-width: 0;
+}
+
+.xflow-editor .xflow-editor-inspector .xflow-composer-section-toggle {
+  flex: 0 1 auto;
+  overflow: hidden;
+}
+
+.xflow-editor .xflow-editor-inspector .xflow-composer-section-toggle > svg {
+  flex: 0 0 auto;
+}
+
+.xflow-editor .xflow-editor-inspector .xflow-composer-section-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xflow-editor .xflow-editor-inspector .xflow-composer-section-summary {
+  flex: 0 100 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .xflow-editor-inspector-header-actions {
   align-items: center;
   display: flex;
@@ -4144,19 +4181,27 @@ button.xflow-editor-overview__run:hover {
   border-radius: var(--xflow-editor-section-card-radius) var(--xflow-editor-section-card-radius) 0 0;
   display: flex;
   gap: var(--xflow-space-1-5);
+  /* A fixed 29px head, not a minimum (§6.4, 2026-11-06): the 22px action keys
+   * would otherwise push a head with actions to 30 and break the shared row.
+   * The title and meta truncate instead of wrapping, so nothing needs the row
+   * to grow. */
+  height: var(--xflow-editor-density-head-height);
   justify-content: space-between;
-  min-height: 36px;
-  padding: var(--xflow-space-2) var(--xflow-space-3);
+  padding: var(--xflow-editor-density-sec-head-y) var(--xflow-editor-density-sec-head-x);
 }
 
 .xflow-editor-section-card__title {
   align-items: center;
   color: var(--xflow-text-secondary);
   display: inline-flex;
+  flex: 0 1 auto;
   font-size: var(--xflow-font-md);
   gap: var(--xflow-space-1-5);
   line-height: var(--xflow-line-height-md);
-  min-width: 0;
+  /* §6.4 (2026-11-06): the title's floor is its own min-content (icon + the
+     strong's 2ch), so a long meta cannot crush the title's box and paint the
+     strong over the summary. */
+  min-width: min-content;
 }
 
 /* The baseline header is 36px: a 16px glyph beside a 13/20 title. */
@@ -4167,6 +4212,13 @@ button.xflow-editor-overview__run:hover {
 .xflow-editor-section-card__title strong {
   color: var(--xflow-text);
   font-weight: var(--xflow-font-weight-semibold);
+  /* §6.4 (2026-11-06): one line, ellipsised. The 2ch floor keeps the first
+     character plus the ellipsis when the header runs out of room; the meta is
+     what shrinks first (below). */
+  min-width: 2ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* The header's right end: the trailing summary, then the actions, 8px apart and
@@ -4181,7 +4233,10 @@ button.xflow-editor-overview__run:hover {
 /* A plain-text summary, never a chip: chip is reserved for status (§6.4). */
 .xflow-editor-section-card__meta {
   color: var(--xflow-text-tertiary);
-  flex: 0 1 auto;
+  /* The meta pays for a tight header first (§6.4, 2026-11-06): a 100x shrink
+   * factor against the title's 1 keeps the title readable until the summary is
+   * gone. */
+  flex: 0 100 auto;
   font-size: var(--xflow-font-sm);
   font-weight: var(--xflow-font-weight-regular);
   line-height: var(--xflow-line-height-sm);
