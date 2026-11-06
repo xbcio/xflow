@@ -534,6 +534,61 @@
   overflow: visible;
 }
 
+/* §6.0「拖动调整宽度」(2026-11-06): while a panel edge is being dragged the
+ * column tracks follow the pointer without animating, and neither the canvas
+ * nor the panels may start a text selection under it. */
+.xflow-editor-main[data-panel-resizing] {
+  cursor: col-resize;
+  transition: none;
+  user-select: none;
+}
+
+/*
+ * The 8px hit strip straddles the panel's 1px inner border (4px either side of
+ * the padding box's edge, i.e. centred on the border). The strip itself is the
+ * hit area — nothing is extended with a pseudo-element — and both panels are
+ * unclipped at this edge, so `elementsFromPoint` sees it on both halves. The
+ * 2px line is drawn in the middle and stays invisible until hover, keyboard
+ * focus or a drag.
+ */
+.xflow-editor-panel-resize {
+  background: transparent;
+  border: 0;
+  bottom: 0;
+  cursor: col-resize;
+  padding: 0;
+  position: absolute;
+  top: 0;
+  touch-action: none;
+  width: 8px;
+  z-index: 3;
+}
+
+.xflow-editor-panel-resize--left {
+  right: -4px;
+}
+
+.xflow-editor-panel-resize--right {
+  left: -4px;
+}
+
+.xflow-editor-panel-resize::after {
+  background: transparent;
+  bottom: 0;
+  content: "";
+  left: 50%;
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  width: 2px;
+}
+
+.xflow-editor-panel-resize:hover::after,
+.xflow-editor-panel-resize:focus-visible::after,
+.xflow-editor-panel-resize[data-dragging="true"]::after {
+  background: var(--xflow-primary);
+}
+
 .xflow-editor-rail {
   align-items: center;
   background: var(--xflow-panel);
