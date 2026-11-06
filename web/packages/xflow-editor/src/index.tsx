@@ -143,6 +143,7 @@ import { ApprovalDialog, type XFlowApprovalSignal } from "./panels/approvalDialo
 import { VersionHistory, type XFlowWorkflowVersions } from "./panels/versionHistory";
 import { CanvasContextMenu, ContextMenuLabel, type ContextMenuRequest } from "./panels/contextMenu";
 import { defaultNodeBox, layoutWorkflowPositions, type LayoutPoint } from "./panels/autoLayout";
+import { placeNewNode, type PlacementRect } from "./panels/placement";
 import {
   addConnection,
   connectionTypeFor,
@@ -2094,6 +2095,18 @@ function createNodeFromDescriptor(
   };
 }
 
+/** The canvas box of one node: its draft position plus the rendered card's own size. */
+function measuredNodeBox(node: WorkflowNode, index: number): PlacementRect {
+  const key = nodeKey(node, index).replace(/["\\]/g, "\\$&");
+  const element = document.querySelector<HTMLElement>(`.xflow-editor .react-flow__node[data-id="${key}"]`);
+  return {
+    x: node.position?.x ?? 0,
+    y: node.position?.y ?? 0,
+    width: element?.offsetWidth || defaultNodeBox.width,
+    height: element?.offsetHeight || defaultNodeBox.height
+  };
+}
+
 function createDraftWorkflow(): WorkflowDef {
   return {
     name: "未命名工作流",
@@ -3576,16 +3589,31 @@ export function XFlowEditor({
 
   const addNode = React.useCallback(
     (descriptor: NodeDescriptor, position?: { x: number; y: number }) => {
-      const nextNode = createNodeFromDescriptor(draftWorkflow, descriptor, position);
+      const nodes = draftWorkflow.nodes ?? [];
+      // A library click has no pointer position: it goes downstream of the
+      // selection, or near the centre of what the user currently sees. A drop
+      // keeps the pointer's position.
+      const placed = position ?? placeNewNode({
+        boxes: nodes.map(measuredNodeBox),
+        selected: selectedNode ? measuredNodeBox(selectedNode, selectedIndex) : undefined,
+        viewportCenter: previewHandleRef.current?.viewportCenter()
+      });
+      const nextNode = createNodeFromDescriptor(draftWorkflow, descriptor, placed);
       const withNode: WorkflowDef = {
         ...draftWorkflow,
-        nodes: [...(draftWorkflow.nodes ?? []), nextNode]
+        nodes: [...nodes, nextNode]
       };
       const connectedWorkflow = connectSelectedNode(withNode, selectedNode, nextNode);
       commitWorkflow(connectedWorkflow);
-      setSelectedKey(nodeKey(nextNode, (connectedWorkflow.nodes ?? []).length - 1));
+      const nextKey = nodeKey(nextNode, (connectedWorkflow.nodes ?? []).length - 1);
+      setSelectedKey(nextKey);
+      // A card added outside the visible pane is panned into view; a dropped
+      // card is where the pointer put it and never moves.
+      if (!position) {
+        previewHandleRef.current?.revealBounds({ ...placed, ...defaultNodeBox });
+      }
     },
-    [commitWorkflow, draftWorkflow, selectedNode]
+    [commitWorkflow, draftWorkflow, selectedIndex, selectedNode]
   );
 
   const dropNode = React.useCallback(

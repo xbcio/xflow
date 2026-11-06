@@ -203,3 +203,75 @@ export function locateViewportClearOf(
   }
   return fitViewportClearOf(bounds, area, layers, options);
 }
+
+/**
+ * The viewport that pans `bounds` (canvas units) fully inside `area` and clear
+ * of every floating layer, without changing the zoom. Undefined when the
+ * content is already clear. Used when new content lands somewhere the user
+ * cannot see it: the graph moves, the new node never does.
+ *
+ * Panning is the only degree of freedom here, so a node larger than the pane
+ * simply keeps its leading edge on screen; the layers are cleared one at a time
+ * with the smallest move that still fits inside the pane.
+ */
+export function revealViewport(
+  bounds: FitRect,
+  viewport: FitViewport,
+  area: { width: number; height: number },
+  layers: readonly FitRect[]
+): FitViewport | undefined {
+  if (bounds.width <= 0 || bounds.height <= 0 || viewport.zoom <= 0) return undefined;
+  const start = {
+    x: viewport.x + bounds.x * viewport.zoom,
+    y: viewport.y + bounds.y * viewport.zoom,
+    width: bounds.width * viewport.zoom,
+    height: bounds.height * viewport.zoom
+  };
+  // First clamp the content into the pane; a node that hangs off an edge is
+  // brought back before any layer is considered. Content larger than the pane
+  // keeps its leading edge (the node's own top-left) on screen.
+  const clamp = (value: number, size: number, extent: number) => {
+    if (size >= extent) return -value;
+    if (value < 0) return -value;
+    if (value + size > extent) return extent - (value + size);
+    return 0;
+  };
+  let dx = clamp(start.x, start.width, area.width);
+  let dy = clamp(start.y, start.height, area.height);
+  const obstacles = layers
+    .filter((layer) => layer.width > 0 && layer.height > 0)
+    .map((layer) => ({
+      x: layer.x - FLOAT_GAP,
+      y: layer.y - FLOAT_GAP,
+      width: layer.width + 2 * FLOAT_GAP,
+      height: layer.height + 2 * FLOAT_GAP
+    }));
+  // Each obstacle is cleared with the cheapest move that keeps the content in
+  // the pane. Iterating a bounded number of times settles the overlapping
+  // corner cases (a node caught between the ruler and the zoom bar) without a
+  // search; when no move is possible the content stays where the clamp put it.
+  for (let pass = 0; pass < obstacles.length + 1; pass += 1) {
+    const content = { x: start.x + dx, y: start.y + dy, width: start.width, height: start.height };
+    const hit = obstacles.find((layer) => intersects(layer, content));
+    if (!hit) break;
+    const moves = [
+      { dx: hit.x - (content.x + content.width), dy: 0 },
+      { dx: hit.x + hit.width - content.x, dy: 0 },
+      { dx: 0, dy: hit.y - (content.y + content.height) },
+      { dx: 0, dy: hit.y + hit.height - content.y }
+    ].filter((move) => {
+      const next = { x: content.x + move.dx, y: content.y + move.dy };
+      return next.x >= -0.5 && next.y >= -0.5
+        && next.x + content.width <= area.width + 0.5
+        && next.y + content.height <= area.height + 0.5;
+    });
+    if (moves.length === 0) break;
+    const move = moves.reduce((best, candidate) =>
+      Math.abs(candidate.dx) + Math.abs(candidate.dy) < Math.abs(best.dx) + Math.abs(best.dy) ? candidate : best
+    );
+    dx += move.dx;
+    dy += move.dy;
+  }
+  if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return undefined;
+  return { x: viewport.x + dx, y: viewport.y + dy, zoom: viewport.zoom };
+}

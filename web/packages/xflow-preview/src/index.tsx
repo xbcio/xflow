@@ -64,7 +64,7 @@ import {
   type WorkflowDef
 } from "@xflow/core";
 import { CanvasRulers, FLOAT_ATTRIBUTE, MAX_ZOOM, MINIMAP_SIZE, MIN_ZOOM, ZoomBar, measureSurface } from "./canvasChrome";
-import { fitViewportClearOf, locateViewportClearOf } from "./fit";
+import { fitViewportClearOf, locateViewportClearOf, revealViewport } from "./fit";
 import { categoryGlyph, statusGlyph } from "./icons";
 import { READABLE_FIT_ZOOM, hitInverseZoom, lodLevel, lodScale, type LodLevel } from "./lod";
 export { READABLE_FIT_ZOOM } from "./lod";
@@ -415,6 +415,20 @@ export interface XFlowPreviewHandle {
   fitView: (options?: { padding?: number; minZoom?: number }) => void;
   /** Brings one node into view; an unknown node id is ignored. */
   fitNode: (nodeId: string, options?: { padding?: number }) => void;
+  /**
+   * The canvas centre in flow coordinates (the pane's own centre, so the
+   * editor's side panels are already excluded). Undefined until React Flow is
+   * live. An owner placing new content uses it as its "near the viewport"
+   * anchor.
+   */
+  viewportCenter: () => { x: number; y: number } | undefined;
+  /**
+   * Pans (never zooms) so `bounds` in flow coordinates is fully on screen and
+   * clear of the floating layers (rulers, zoom bar, minimap, canvas floats).
+   * A no-op when the content already is. Used when new content lands off
+   * screen: the graph moves, the new node does not.
+   */
+  revealBounds: (bounds: { x: number; y: number; width: number; height: number }) => void;
 }
 
 /** One output port of a node that the owner reports as no longer existing. */
@@ -2579,6 +2593,24 @@ export function XFlowPreview({
           locateBoundsClear(flowInstance, bounds, canvasRef.current, options?.padding);
         }
       );
+    },
+    viewportCenter: () => {
+      if (!flowInstance) return undefined;
+      const surface = measureSurface(canvasRef.current);
+      if (!surface) return undefined;
+      const { x, y, zoom } = flowInstance.getViewport();
+      if (!(zoom > 0)) return undefined;
+      return {
+        x: (surface.area.width / 2 - x) / zoom,
+        y: (surface.area.height / 2 - y) / zoom
+      };
+    },
+    revealBounds: (bounds) => {
+      if (!flowInstance) return;
+      const surface = measureSurface(canvasRef.current);
+      if (!surface) return;
+      const next = revealViewport(bounds, flowInstance.getViewport(), surface.area, surface.layers);
+      if (next) void flowInstance.setViewport(next, { duration: locateTransitionDuration() });
     }
   }), [flowInstance]);
   React.useEffect(() => {

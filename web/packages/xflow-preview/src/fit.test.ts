@@ -4,6 +4,7 @@ import {
   FLOAT_GAP,
   fitViewportClearOf,
   locateViewportClearOf,
+  revealViewport,
   type FitRect,
   type FitViewport
 } from "./fit";
@@ -163,5 +164,45 @@ describe("locateViewportClearOf", () => {
 
   it("reports no viewport for empty bounds", () => {
     expect(locateViewportClearOf({ x: 0, y: 0, width: 0, height: 0 }, area, [], { ...locate, currentZoom: 1 })).toBeUndefined();
+  });
+});
+
+describe("revealViewport", () => {
+  const node = { x: 0, y: 0, width: 264, height: 64 };
+  const visible = { x: 100, y: 100, zoom: 1 };
+  const layers = [corner, rulerX, rulerY, zoomBar, minimap];
+
+  it("leaves a viewport alone when the content is already fully visible", () => {
+    expect(revealViewport({ x: 200, y: 200, ...node }, visible, area, layers)).toBeUndefined();
+  });
+
+  it("pans, never zooms, to bring content inside the pane", () => {
+    const far = { x: 4000, y: 2000, zoom: 0.8 };
+    const next = revealViewport({ x: 1000, y: 500, ...node }, far, area, layers)!;
+    expect(next.zoom).toBe(0.8);
+    const content = screenBox(next, { x: 1000, y: 500, ...node });
+    expect(content.x).toBeGreaterThanOrEqual(0);
+    expect(content.y).toBeGreaterThanOrEqual(0);
+    expect(content.x + content.width).toBeLessThanOrEqual(area.width + 1e-6);
+    expect(content.y + content.height).toBeLessThanOrEqual(area.height + 1e-6);
+  });
+
+  it("keeps the revealed card clear of the floating layers", () => {
+    // The node sits under the top-left corner of the rulers.
+    const hidden = { x: -40, y: -30, zoom: 1 };
+    const next = revealViewport({ x: 20, y: 20, ...node }, hidden, area, layers)!;
+    const content = screenBox(next, { x: 20, y: 20, ...node });
+    for (const layer of layers) {
+      expect(gapBetween(content, layer)).toBeGreaterThanOrEqual(FLOAT_GAP - 1e-9);
+    }
+  });
+
+  it("never shrinks content larger than the pane", () => {
+    const huge = { x: 0, y: 0, width: 2400, height: 1400 };
+    const next = revealViewport(huge, { x: -500, y: -300, zoom: 1 }, area, [])!;
+    expect(next.zoom).toBe(1);
+    // The leading edge is brought back; the rest stays off screen.
+    expect(next.x).toBeCloseTo(0, 6);
+    expect(next.y).toBeCloseTo(0, 6);
   });
 });
