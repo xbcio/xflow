@@ -194,7 +194,7 @@ export function SpecField({
             *
           </span>
         ) : null}
-        {field.help ? <FieldHelp text={field.help} label={field.label} /> : null}
+        {field.help ? <FieldHelp text={field.help} /> : null}
       </span>
       <SpecControl field={field} />
       {field.hint ? <span className="xflow-pv-hint">{field.hint}</span> : null}

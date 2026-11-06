@@ -321,7 +321,7 @@ function Field({
     <div className={cx('xflow-pv-field', layout === 'side' && 'xflow-pv-field--side')}>
       <span className="xflow-pv-field-label">
         {label}
-        {help ? <FieldHelp text={help.text} label={help.label} /> : null}
+        {help ? <FieldHelp text={help.text} /> : null}
       </span>
       {children}
     </div>

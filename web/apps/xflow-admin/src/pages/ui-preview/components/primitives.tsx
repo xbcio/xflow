@@ -171,13 +171,13 @@ export function Kbd({ children }: { children: ReactNode }) {
 
 /**
  * The `?` beside a field label (D-3): the description moves behind this button
- * (hover or Tab focus) and the text under the control shows only while the
- * field is focused or has an error. 12px glyph, tertiary colour.
+ * and shows on hover only — §9 (2026-11-07) keeps it out of the Tab order, as
+ * the description is not a control of its own. 12px glyph, tertiary colour.
  */
-export function FieldHelp({ text, label }: { text: string; label: string }) {
+export function FieldHelp({ text }: { text: string }) {
   return (
     <Tooltip title={text} rootClassName="xflow-pv-field-help-tooltip">
-      <button type="button" className="xflow-pv-field-help" aria-label={`查看说明：${label}`}>
+      <button type="button" className="xflow-pv-field-help" tabIndex={-1} aria-hidden="true">
         <HelpIcon aria-hidden="true" />
       </button>
     </Tooltip>

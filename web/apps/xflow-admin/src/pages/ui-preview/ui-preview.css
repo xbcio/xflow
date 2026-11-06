@@ -1392,7 +1392,6 @@
     cursor: help;
   }
   .xflow-pv-field-help:hover { color: var(--xflow-text-secondary); }
-  .xflow-pv-field-help:focus-visible { outline: 2px solid var(--xflow-accent); outline-offset: 1px; }
   .xflow-pv-field-help svg { width: 12px; height: 12px; }
   /* One line of non-32px controls (Switch, Slider, Segmented) centred on the label. */
   .xflow-pv-ctl-line {
