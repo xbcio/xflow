@@ -994,15 +994,18 @@ describe("xflow.editor browser-measured baseline fixes (E6)", () => {
   it("uses one 96px label column for composer and hand-written rows (§6.4)", () => {
     expect(css).toMatch(/--xflow-editor-density-label-width:\s*96px\s*;/);
     expect(css).toMatch(/--xflow-composer-label-width:\s*var\(--xflow-editor-density-label-width\)\s*;/);
-    for (const selector of [
-      ".xflow-editor-form-row--node",
-      ".xflow-editor-form-row--workflow",
-      ".xflow-editor-run-summary"
-    ]) {
+    for (const selector of [".xflow-editor-form-row--node", ".xflow-editor-form-row--workflow"]) {
       expect(rule(selector), selector).toMatch(
         /grid-template-columns:\s*var\(--xflow-composer-label-width,\s*96px\)\s*minmax\(0,\s*1fr\)\s*;/
       );
+      // Composer's side fields use a 12px column gap; a hand-written row with
+      // another gap would put its control off the shared left edge.
+      expect(rule(selector), selector).toMatch(/column-gap:\s*var\(--xflow-space-3\)\s*;/);
     }
+    expect(rule(".xflow-editor-run-summary")).toMatch(
+      /grid-template-columns:\s*var\(--xflow-composer-label-width,\s*96px\)\s*minmax\(0,\s*1fr\)\s*;/
+    );
+    expect(rule(".xflow-editor-run-summary")).toMatch(/gap:\s*var\(--xflow-space-1-5\) var\(--xflow-space-3\)\s*;/);
     // The diagnostics list is a key/value table, not a property-panel form row.
     expect(rule(".xflow-editor-kvlist")).toMatch(/grid-template-columns:\s*62px\s+minmax\(0,\s*1fr\)\s*;/);
   });

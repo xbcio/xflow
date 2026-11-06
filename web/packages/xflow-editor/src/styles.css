@@ -2579,7 +2579,7 @@ button.xflow-editor-overview__run:hover {
 .xflow-editor-run-summary {
   display: grid;
   font-size: var(--xflow-font-sm);
-  gap: var(--xflow-space-1-5) var(--xflow-space-2-5);
+  gap: var(--xflow-space-1-5) var(--xflow-space-3);
   grid-template-columns: var(--xflow-composer-label-width, 96px) minmax(0, 1fr);
   line-height: var(--xflow-line-height-md);
   margin: 0;
@@ -3799,10 +3799,12 @@ button.xflow-editor-overview__run:hover {
 }
 
 .xflow-editor-form-row--workflow {
+  column-gap: var(--xflow-space-3);
   grid-template-columns: var(--xflow-composer-label-width, 96px) minmax(0, 1fr);
 }
 
 .xflow-editor-form-row--node {
+  column-gap: var(--xflow-space-3);
   grid-template-columns: var(--xflow-composer-label-width, 96px) minmax(0, 1fr);
 }
 
