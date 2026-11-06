@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { XFlowEditor } from "./index";
 
@@ -90,6 +90,39 @@ describe("XFlowEditor panel collapse (§6.0)", () => {
     expect(screen.queryByRole("region", { name: /^(属性|工作流设置)$/ })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "展开属性面板" }));
     expect(screen.getByRole("region", { name: /^(属性|工作流设置)$/ })).toBeTruthy();
+  });
+
+  it("moves focus to the canvas recovery chip when 收起属性面板 unmounts the key that had it", () => {
+    render(<XFlowEditor value={workflow} />);
+    const collapse = screen.getByRole("button", { name: "收起属性面板" });
+    act(() => collapse.focus());
+
+    fireEvent.click(collapse);
+
+    expect(screen.queryByRole("button", { name: "收起属性面板" })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "展开属性面板" }));
+  });
+
+  it("leaves focus on the canvas when ⌥⌘B collapses the inspector from outside it", () => {
+    render(<XFlowEditor value={workflow} />);
+    const card = canvasNode("fetch");
+    act(() => card.focus());
+
+    fireEvent.keyDown(card, { key: "∫", code: "KeyB", metaKey: true, altKey: true });
+
+    expect(screen.queryByRole("button", { name: "收起属性面板" })).toBeNull();
+    expect(document.activeElement).toBe(card);
+  });
+
+  it("keeps focus on the rail key that collapsed the left column", () => {
+    render(<XFlowEditor value={workflow} />);
+    const railKey = screen.getByRole("button", { name: "节点与大纲" });
+    act(() => railKey.focus());
+
+    fireEvent.click(railKey);
+
+    expect(screen.queryByRole("region", { name: "节点" })).toBeNull();
+    expect(document.activeElement).toBe(railKey);
   });
 
   it("toggles both panels from the keyboard but not from a text field", () => {

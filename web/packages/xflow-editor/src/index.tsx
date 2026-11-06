@@ -3646,27 +3646,50 @@ export function XFlowEditor({
     setSelection(primary === undefined ? { keys } : { keys, primary });
   }, [commitWorkflow, draftWorkflow, editMode, selectedKeys, selection.primary]);
 
+  // §6.0 focus (2026-11-06): a collapse hands focus to the recovery entry only
+  // when focus was inside the panel being closed. Read `document.activeElement`
+  // before the state change, because the panel (and whatever held focus) is
+  // unmounted by the commit.
+  const leftPanelContentRef = React.useRef<HTMLDivElement | null>(null);
+  const rightPanelRef = React.useRef<HTMLElement | null>(null);
+  const leftCollapseFocusRef = React.useRef(false);
+  const rightCollapseFocusRef = React.useRef(false);
+  const collapseLeftPanel = React.useCallback(() => {
+    const active = document.activeElement;
+    leftCollapseFocusRef.current =
+      active instanceof HTMLElement && leftPanelContentRef.current?.contains(active) === true;
+    setLeftCollapsed(true);
+  }, []);
+  const collapseRightPanel = React.useCallback(() => {
+    const active = document.activeElement;
+    rightCollapseFocusRef.current =
+      active instanceof HTMLElement && rightPanelRef.current?.contains(active) === true;
+    setRightCollapsed(true);
+  }, []);
+
   // A compact left panel is a rail, not a collapsible column, so the same
   // intent opens or closes the drawer instead.
   const toggleLeftPanel = React.useCallback(() => {
     if (layout === "a") {
-      setLeftCollapsed((current) => !current);
+      if (leftCollapsed) setLeftCollapsed(false);
+      else collapseLeftPanel();
       return;
     }
     setCompactDrawer((current) => (current === "left" ? undefined : "left"));
-  }, [layout]);
+  }, [collapseLeftPanel, layout, leftCollapsed]);
 
   // The right panel collapses only on the desktop layout; below that it is a
   // docked column in "b" and a drawer in "c", so only "c" has a drawer to toggle.
   const toggleRightPanel = React.useCallback(() => {
     if (layout === "a") {
-      setRightCollapsed((current) => !current);
+      if (rightCollapsed) setRightCollapsed(false);
+      else collapseRightPanel();
       return;
     }
     if (layout === "c") {
       setCompactDrawer((current) => (current === "right" ? undefined : "right"));
     }
-  }, [layout]);
+  }, [collapseRightPanel, layout, rightCollapsed]);
 
   /**
    * Desktop rail section keys (§6.0): selecting the section that is already on
@@ -3686,12 +3709,12 @@ export function XFlowEditor({
       }
       // Compare the section actually on screen.
       if (leftSection === section) {
-        setLeftCollapsed(true);
+        collapseLeftPanel();
         return;
       }
       setDesktopRailSection(section);
     },
-    [layout, leftSection, leftCollapsed]
+    [collapseLeftPanel, layout, leftSection, leftCollapsed]
   );
 
   // Escape leaves a transient mode first (dialog, drawer, connect tool); with
@@ -5049,18 +5072,33 @@ export function XFlowEditor({
   const desktopLeftCollapsed = layout === "a" && leftCollapsed;
   const desktopRightCollapsed = layout === "a" && rightCollapsed;
   // Collapsing the column unmounts whatever held focus inside it (the 收起左栏
-  // key, a library row), which drops focus to <body>; the rail stays, so hand
-  // focus to its 节点 key. Focus that is anywhere else is left alone.
-  const wasLeftCollapsedRef = React.useRef(desktopLeftCollapsed);
+  // key, a library row); the rail stays, so hand focus to its 节点 key when the
+  // collapse started inside the panel (§6.0, 2026-11-06). A collapse started
+  // outside it (the rail key itself, ⌘B on the canvas) leaves focus alone.
   React.useEffect(() => {
-    const was = wasLeftCollapsedRef.current;
-    wasLeftCollapsedRef.current = desktopLeftCollapsed;
-    if (!desktopLeftCollapsed || was) return;
-    if (document.activeElement && document.activeElement !== document.body) return;
+    if (!desktopLeftCollapsed) {
+      leftCollapseFocusRef.current = false;
+      return;
+    }
+    if (!leftCollapseFocusRef.current) return;
+    leftCollapseFocusRef.current = false;
     editorRootRef.current
       ?.querySelector<HTMLButtonElement>(".xflow-editor-desktop-rail button[aria-label='节点与大纲']")
-      ?.focus();
+      ?.focus({ preventScroll: true });
   }, [desktopLeftCollapsed]);
+  // The right column's recovery entry is the canvas chip (§6.0): focus inside
+  // the panel moves there, focus outside (⌥⌘B on the canvas) stays put.
+  React.useEffect(() => {
+    if (!desktopRightCollapsed) {
+      rightCollapseFocusRef.current = false;
+      return;
+    }
+    if (!rightCollapseFocusRef.current) return;
+    rightCollapseFocusRef.current = false;
+    editorRootRef.current
+      ?.querySelector<HTMLButtonElement>(".xflow-editor-canvas-reopen")
+      ?.focus({ preventScroll: true });
+  }, [desktopRightCollapsed]);
   // Leaving the desktop layout swaps the left column for the compact rail and
   // closes the drawer, which unmounts a focused library row or outline item the
   // same way; hand focus to the rail's 节点 key instead of <body>.
@@ -5099,7 +5137,7 @@ export function XFlowEditor({
         icon={<SideLeftIcon />}
         size="small"
         variant="text"
-        onClick={() => setLeftCollapsed(true)}
+        onClick={collapseLeftPanel}
       />
     </Tooltip>
   ) : undefined;
@@ -5172,7 +5210,7 @@ export function XFlowEditor({
         icon={<SideRightIcon />}
         size="small"
         variant="text"
-        onClick={() => (layout === "c" ? setCompactDrawer(undefined) : setRightCollapsed(true))}
+        onClick={() => (layout === "c" ? setCompactDrawer(undefined) : collapseRightPanel())}
       />
     </Tooltip>
   );
@@ -5956,7 +5994,7 @@ export function XFlowEditor({
               />
             </nav>
             {desktopLeftCollapsed ? null : (
-              <div className="xflow-editor-left__content">
+              <div className="xflow-editor-left__content" ref={leftPanelContentRef}>
                 {/* The left column shares the editor density tier with the
                     inspector (§6.4, 2026-11-06): node library, outline,
                     variables and execution list all take the 28 / 22 step. */}
@@ -6239,7 +6277,7 @@ export function XFlowEditor({
         </section>
 
         {layout !== "c" ? (
-          <aside className="xflow-editor-right">
+          <aside className="xflow-editor-right" ref={rightPanelRef}>
             {desktopRightCollapsed ? null : editMode || runsMode ? (
               inspectorElement
             ) : (
