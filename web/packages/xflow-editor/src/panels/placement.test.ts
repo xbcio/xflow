@@ -76,4 +76,19 @@ describe("placeNewNode", () => {
     expect(defaultNodeBox.width).toBe(parseInt(foundationTokens.nodeWidth, 10));
     expect(defaultNodeBox.width).toBe(264);
   });
+
+  it("reserves the measured height of a tall card", () => {
+    // An http card draws 125px high, not the 64px default; the neighbour below
+    // the selected node starts at 120. Reserving 64 would put the candidate at
+    // y=8 and overlap it by 13, so the search must step past the neighbour.
+    const selected = box(0, 0);
+    const neighbour = box(defaultNodeBox.width + PLACEMENT_GAP, 120, defaultNodeBox.width, 125);
+    const size = { width: defaultNodeBox.width, height: 125 };
+    const placed = placeNewNode({ boxes: [selected, neighbour], selected, size });
+    const candidate: PlacementRect = { ...placed, ...size };
+    expect(placementClear(candidate, [selected, neighbour], PLACEMENT_GAP)).toBe(true);
+    for (const existing of [selected, neighbour]) {
+      expect(gapBetween(candidate, existing)).toBeGreaterThanOrEqual(PLACEMENT_GAP);
+    }
+  });
 });

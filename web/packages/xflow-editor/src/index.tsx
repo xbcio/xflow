@@ -2160,15 +2160,21 @@ function createNodeFromDescriptor(
   };
 }
 
-/** The canvas box of one node: its draft position plus the rendered card's own size. */
-function measuredNodeBox(node: WorkflowNode, index: number): PlacementRect {
+/** The rendered size of one node's card, or undefined while it has not been laid out. */
+function measuredNodeSize(node: WorkflowNode, index: number): { width: number; height: number } | undefined {
   const key = nodeKey(node, index).replace(/["\\]/g, "\\$&");
   const element = document.querySelector<HTMLElement>(`.xflow-editor .react-flow__node[data-id="${key}"]`);
+  const width = element?.offsetWidth ?? 0;
+  const height = element?.offsetHeight ?? 0;
+  return width > 0 && height > 0 ? { width, height } : undefined;
+}
+
+/** The canvas box of one node: its draft position plus the rendered card's own size. */
+function measuredNodeBox(node: WorkflowNode, index: number): PlacementRect {
   return {
     x: node.position?.x ?? 0,
     y: node.position?.y ?? 0,
-    width: element?.offsetWidth || defaultNodeBox.width,
-    height: element?.offsetHeight || defaultNodeBox.height
+    ...(measuredNodeSize(node, index) ?? defaultNodeBox)
   };
 }
 
@@ -3682,13 +3688,27 @@ export function XFlowEditor({
   const addNode = React.useCallback(
     (descriptor: NodeDescriptor, position?: { x: number; y: number }) => {
       const nodes = draftWorkflow.nodes ?? [];
+      // A new card is sized from an already rendered card of the same type: the
+      // form decides the height (an http card is 125px, not the 64px default),
+      // and reserving the default would let the new card overlap a neighbour
+      // that the clear-space search thought it had passed. One extra pixel
+      // covers the pending chip the fresh node shows: its 16px line grows the
+      // badge strip by a pixel, so a twin measured without a chip is a pixel
+      // shorter than the card about to be added.
+      const size = (() => {
+        const twin = nodes
+          .map((node, index) => (node.type === descriptor.type ? measuredNodeSize(node, index) : undefined))
+          .find((measured) => measured !== undefined);
+        return twin ? { width: twin.width, height: twin.height + 1 } : defaultNodeBox;
+      })();
       // A library click has no pointer position: it goes downstream of the
       // selection, or near the centre of what the user currently sees. A drop
       // keeps the pointer's position.
       const placed = position ?? placeNewNode({
         boxes: nodes.map(measuredNodeBox),
         selected: selectedNode ? measuredNodeBox(selectedNode, selectedIndex) : undefined,
-        viewportCenter: previewHandleRef.current?.viewportCenter()
+        viewportCenter: previewHandleRef.current?.viewportCenter(),
+        size
       });
       const nextNode = createNodeFromDescriptor(draftWorkflow, descriptor, placed);
       const withNode: WorkflowDef = {
@@ -3704,7 +3724,7 @@ export function XFlowEditor({
       // A card added outside the visible pane is panned into view; a dropped
       // card is where the pointer put it and never moves.
       if (!position) {
-        previewHandleRef.current?.revealBounds({ ...placed, ...defaultNodeBox });
+        previewHandleRef.current?.revealBounds({ ...placed, ...size });
       }
     },
     [commitWorkflow, draftWorkflow, selectedIndex, selectedNode]

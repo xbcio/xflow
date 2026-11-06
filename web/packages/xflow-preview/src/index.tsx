@@ -2320,6 +2320,11 @@ export function XFlowPreview({
     flow: ReactFlowInstance<PreviewFlowNode, Edge> | null;
     selectedNodeId: string | undefined;
   }>({ flow: null, selectedNodeId: undefined });
+  // The bounds the host last asked us to reveal. The selection that follows a
+  // library add is that same node, already being panned into view; a second
+  // locate would re-target the pan mid-flight and adopt its dipped zoom.
+  const revealedBoundsRef = React.useRef<{ x: number; y: number; width: number; height: number } | undefined>(undefined);
+  const revealClearTimerRef = React.useRef<number | undefined>(undefined);
   const canvasRef = React.useRef<HTMLDivElement | null>(null);
   /**
    * §6.1.1: cards must not be assumed to have one height, so the definition's
@@ -2591,6 +2596,7 @@ export function XFlowPreview({
   React.useEffect(() => () => {
     nodeFitCancelRef.current?.();
     viewFitCancelRef.current?.();
+    window.clearTimeout(revealClearTimerRef.current);
   }, []);
   // The view commands the owner's own chrome drives. Both reuse the same fit
   // paths as the in-canvas control and the selection follow, so an unmeasured
@@ -2629,6 +2635,11 @@ export function XFlowPreview({
       const surface = measureSurface(canvasRef.current);
       if (!surface) return;
       const next = revealViewport(bounds, flowInstance.getViewport(), surface.area, surface.layers);
+      revealedBoundsRef.current = bounds;
+      window.clearTimeout(revealClearTimerRef.current);
+      revealClearTimerRef.current = window.setTimeout(() => {
+        revealedBoundsRef.current = undefined;
+      }, locateTransitionDuration() + 80);
       if (next) void flowInstance.setViewport(next, { duration: locateTransitionDuration() });
     }
   }), [flowInstance]);
@@ -2714,6 +2725,15 @@ export function XFlowPreview({
 
     const selectedNode = flowInstance.getNodes().find((node) => node.id === selectedNodeId);
     if (!selectedNode) return;
+    // The host is already panning this node into view (a library add selects what
+    // it just revealed). Locating again would re-target that pan mid-flight.
+    const revealed = revealedBoundsRef.current;
+    const position = selectedNode.position;
+    if (revealed && position && Math.abs(position.x - revealed.x) < 0.5 && Math.abs(position.y - revealed.y) < 0.5) {
+      revealedBoundsRef.current = undefined;
+      window.clearTimeout(revealClearTimerRef.current);
+      return;
+    }
     // The fit exists to reveal a node that is off screen — one appended at a
     // default slot while the canvas is panned elsewhere, one picked from the
     // outline. A node that is already on screen is the one the user just placed,
