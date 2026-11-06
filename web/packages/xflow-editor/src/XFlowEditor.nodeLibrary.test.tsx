@@ -219,6 +219,24 @@ describe("node library from /v1/node-types (Doc C §6.3)", () => {
     }
   }, 60_000);
 
+  it("adds one node per gesture: a double click counts once, Enter still adds (D-2)", () => {
+    const handleChange = vi.fn();
+    render(<XFlowEditor nodeTypes={nodeTypes} value={workflow} onChange={handleChange} />);
+    expandAllGroups();
+    const count = () =>
+      ((handleChange.mock.calls.at(-1)?.[0] as WorkflowDef | undefined) ?? workflow).nodes?.length ?? 0;
+    const start = count();
+
+    // A browser double click follows click(detail 1) with click(detail 2).
+    fireEvent.click(tile("xflow.http"), { detail: 1 });
+    fireEvent.click(tile("xflow.http"), { detail: 2 });
+    expect(count()).toBe(start + 1);
+
+    // Keyboard activation (Enter/Space) reports detail 0.
+    fireEvent.click(tile("xflow.http"), { detail: 0 });
+    expect(count()).toBe(start + 2);
+  });
+
   it("drags a schema-only type onto the canvas and ignores types outside the library", () => {
     const handleChange = vi.fn();
     render(<XFlowEditor nodeTypes={nodeTypes} value={workflow} onChange={handleChange} />);

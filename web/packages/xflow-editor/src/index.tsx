@@ -2295,7 +2295,13 @@ function NodeLibrary({
                       data-source={descriptor.source}
                       draggable
                       type="button"
-                      onClick={() => onAddNode(descriptor)}
+                      onClick={(event) => {
+                        // A double click is one gesture, not two adds: the
+                        // second click (detail > 1) is ignored. Keyboard
+                        // activation reports detail 0 and still adds.
+                        if (event.detail > 1) return;
+                        onAddNode(descriptor);
+                      }}
                       onDragStart={(event) => {
                         // The canvas reads this payload back on drop. Click stays
                         // wired so the tile remains usable without a drag.
