@@ -13,8 +13,8 @@ import { WorkbenchSection } from './wb';
 function CompactFrame({ id, width, note }: { id: string; width: number; note: string }) {
   const frameRef = useRef<HTMLDivElement>(null);
   const measured = useElementWidth(frameRef);
-  const leftCollapsed = measured > 0 && measured < COMPACT_LEFT;
-  const rightCollapsed = measured > 0 && measured < COMPACT_RIGHT;
+  const leftCollapsed = measured > 0 && measured <= COMPACT_LEFT;
+  const rightCollapsed = measured > 0 && measured <= COMPACT_RIGHT;
 
   return (
     <figure className="xflow-pv-figure xflow-pv-compact-figure">
@@ -24,10 +24,10 @@ function CompactFrame({ id, width, note }: { id: string; width: number; note: st
           实测 {measured || '—'}px{measured > 0 && measured < width - 0.5 ? ' · 受窗口宽度限制' : ''}
         </span>
         <span>
-          左栏 {leftCollapsed ? '抽屉' : '固定'}（断点 {COMPACT_LEFT}）
+          左栏 {leftCollapsed ? '抽屉' : '固定'}（断点 ≤{COMPACT_LEFT}）
         </span>
         <span>
-          属性 {rightCollapsed ? '抽屉' : '固定'}（断点 {COMPACT_RIGHT}）
+          属性 {rightCollapsed ? '抽屉' : '固定'}（断点 ≤{COMPACT_RIGHT}）
         </span>
       </div>
       <div className="xflow-pv-compact-frame" style={{ width }} ref={frameRef}>
@@ -50,12 +50,12 @@ export function CompactSection() {
       <CompactFrame
         id="compact-1280"
         width={1200}
-        note="宿主 1200px（< 1280）：左栏自动折叠为抽屉、rail 可再打开，顶栏次要操作收进 ⋯；属性面板仍固定。"
+        note="宿主 1200px（≤ 1280）：左栏与属性都折叠为抽屉、rail 可再打开，顶栏次要操作收进 ⋯；画布拿到全部宽度。"
       />
       <CompactFrame
         id="compact-1024"
         width={960}
-        note="宿主 960px（< 1024）：两栏都折叠为抽屉，画布拿到全部宽度；rail 上的「属性」按钮是恢复入口。"
+        note="宿主 960px（≤ 1280）：两侧仍是抽屉，更窄的宿主行为相同；rail 上的「属性」按钮是恢复入口。"
       />
     </>
   );

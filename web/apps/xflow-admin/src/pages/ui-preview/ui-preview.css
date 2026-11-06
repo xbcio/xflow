@@ -500,9 +500,9 @@
     border: 0;
   }
   /*
-   * Compact (< 1280 / < 1024): the pane leaves the grid and floats over the
-   * canvas, so the canvas keeps the full width while the pane is open. The rail
-   * is what reopens it, and it sits under the drawer (z-index), never behind it.
+   * Compact (≤ 1280): both panes leave the grid and float over the canvas, so
+   * the canvas keeps the full width while a pane is open. The rail is what
+   * reopens it, and it sits under the drawer (z-index), never behind it.
    */
   .xflow-pv-wb[data-left='drawer'] { --xflow-pv-left: 0px; }
   .xflow-pv-wb[data-right='drawer'] { --xflow-pv-right: 0px; }

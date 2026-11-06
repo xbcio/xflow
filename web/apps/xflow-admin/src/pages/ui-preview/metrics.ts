@@ -37,10 +37,12 @@ export const MIN_SCALE = 0.1;
 /**
  * Compact-layout breakpoints (§6.0.1). They are measured on the workbench shell
  * rather than the window, so an embedded workbench collapses with the box it was
- * given; `service/` and the real editor read the same pair from xflow-core.
+ * given; `service/` and the real editor read the same pair from xflow-core. Both
+ * panes become drawers at or below `COMPACT_RIGHT`, the inclusive comparison the
+ * editor's `layoutTier` uses (`width <= breakpoints.compact`).
  */
 export const COMPACT_LEFT = 1280;
-export const COMPACT_RIGHT = 1024;
+export const COMPACT_RIGHT = 1280;
 
 /**
  * Vertical pan (screen px) that keeps the topmost canvas content at least

@@ -542,15 +542,16 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
   const [selectedId, setSelectedId] = useState('fetch_profile');
   const metrics = useCanvasMetrics(canvasRef);
   /**
-   * Compact layout (§6.0.1): below `COMPACT_LEFT` the two panes stop taking a
-   * column and open as overlays instead of squeezing the canvas; below
-   * `COMPACT_RIGHT` the inspector does the same. The breakpoints are measured on
-   * this shell, so the collapse follows the box the workbench was given.
+   * Compact layout (§6.0.1): at or below `COMPACT_RIGHT` both panes stop taking
+   * a column and open as overlays instead of squeezing the canvas. The
+   * comparison is inclusive, matching the editor's `layoutTier`
+   * (`width <= breakpoints.compact`), and is measured on this shell so the
+   * collapse follows the box the workbench was given.
    */
   const shellWidth = useElementWidth(shellRef);
   const topWidth = useElementWidth(topRef);
-  const compactLeft = shellWidth > 0 && shellWidth < COMPACT_LEFT;
-  const compactRight = shellWidth > 0 && shellWidth < COMPACT_RIGHT;
+  const compactLeft = shellWidth > 0 && shellWidth <= COMPACT_LEFT;
+  const compactRight = shellWidth > 0 && shellWidth <= COMPACT_RIGHT;
   /** Tier 0 until the header has been measured, so the first paint is never folded. */
   const fold = topWidth === 0 || topWidth >= TOP_FOLD_1
     ? 0
