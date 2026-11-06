@@ -2576,6 +2576,33 @@
     color: var(--xflow-warning);
   }
   .xflow-pv-version-note { padding: var(--xflow-space-2) var(--xflow-space-3) var(--xflow-space-3); margin: 0; }
+  /* §9 accept-rd：保存被错误阻断时只有 SaveIcon 转 danger，计数徽标保留，
+     按钮本身仍是 default（label / 边框 / 底色不变）。编辑器里是同一套规则。 */
+  .xflow-pv-save-blocked {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--xflow-space-2);
+    margin-bottom: var(--xflow-space-2-5);
+  }
+  .xflow-pv-save-blocked small { font-size: var(--xflow-font-xs); color: var(--xflow-text-tertiary); }
+  /* 顶栏控件高度（工作台密度档 28）；基准里这一段不在工作台壳内，显式给。 */
+  .xflow-pv-save-blocked .xflow-pv-top-text { height: 28px; }
+  .xflow-pv-save-blocked .xflow-pv-top-text[data-blocked] .xflow-icon { color: var(--xflow-danger); }
+  .xflow-pv-save-issues {
+    display: inline-block;
+    min-width: 16px;
+    padding: 0 var(--xflow-space-1);
+    border: 1px solid var(--xflow-danger-border);
+    border-radius: var(--xflow-radius-md);
+    background: var(--xflow-danger-bg-subtle);
+    color: var(--xflow-danger-fg);
+    font-size: var(--xflow-font-xs);
+    font-weight: var(--xflow-font-weight-semibold);
+    line-height: 14px;
+    text-align: center;
+    margin-inline-start: var(--xflow-space-1);
+  }
   /* 顶栏三种状态 chip（§6.10 的表）：并排展示，谁在线上由数据决定。 */
   .xflow-pv-version-states { display: flex; flex-wrap: wrap; gap: var(--xflow-space-2-5); }
   .xflow-pv-version-state {

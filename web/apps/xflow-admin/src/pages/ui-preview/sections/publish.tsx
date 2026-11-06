@@ -1,10 +1,11 @@
-import { HistoryIcon, LocateIcon, RedoIcon, XMarkIcon } from '@xflow/icons';
+import { HistoryIcon, LocateIcon, RedoIcon, SaveIcon, XMarkIcon } from '@xflow/icons';
 import { Button, Input, Tooltip } from 'antd';
 
 import { Banner } from '../components/Banner';
-import { CategoryIcon, IconButton, PanelTitle, StatusChip } from '../components/primitives';
+import { CategoryIcon, IconButton, Kbd, PanelTitle, StatusChip } from '../components/primitives';
 import { Todo } from '../components/Todo';
 import {
+  inspInvalid,
   pendingChangeAfter,
   pendingChangeKinds,
   pendingChangeText,
@@ -59,6 +60,13 @@ const diffCounts = pendingChangeKinds.map((kind) => ({
 const publishWarnings = wbIssues.length;
 
 const conflictBanner = wbExceptionCards.find((card) => card.id === 'conflict')!.banner!;
+
+/**
+ * 保存被阻断时徽标上的错误数（§9 accept-rd 2026-11-07）：与属性面板那个非法
+ * 样例是同一份数据（`inspInvalid` 每个分组各自声明 errors，求和）。基准与编辑器
+ * 说的是同一件事：徽标数 = 表单错误数。
+ */
+const saveBlockedErrors = inspInvalid.sections.reduce((total, section) => total + (section.errors ?? 0), 0);
 
 /**
  * 校验失败定位到的字段（G3）。索引由节点在 `wbNodes` 里的下标算出、键取自
@@ -336,9 +344,34 @@ function VersionOps({ row }: { row: VersionRow }) {
   );
 }
 
+/**
+ * 顶栏保存键的阻断态（§9 accept-rd 2026-11-07）：SaveIcon 转 danger，计数徽标
+ * 保留，按钮本身仍是 default（label / 边框 / 底色都不变）。编辑器里的
+ * `.xflow-editor-save-button[data-blocked]` 是同一套视觉，这里给基准对样。
+ */
+function SaveBlockedSample() {
+  return (
+    <div className="xflow-pv-save-blocked" role="group" aria-label="保存被阻断">
+      <Button className="xflow-pv-top-text" data-save-state="default" icon={<SaveIcon />}>
+        保存 <Kbd>⌘S</Kbd>
+      </Button>
+      <Button className="xflow-pv-top-text" data-save-state="blocked" data-blocked icon={<SaveIcon />}>
+        保存 <Kbd>⌘S</Kbd>
+        <span className="xflow-pv-save-issues" data-save-issues>
+          {saveBlockedErrors}
+        </span>
+      </Button>
+      <small>
+        {saveBlockedErrors} 个参数错误（server 为 enforce 模式）：保存已阻断。只有图标转 danger，计数保留，按钮仍是 default。
+      </small>
+    </div>
+  );
+}
+
 export function PublishSection() {
   return (
     <>
+      <SaveBlockedSample />
       <div className="xflow-pv-version-states">
         {versionStates.map((state) => (
           <div className="xflow-pv-version-state" key={state.id} data-version-state={state.id}>
