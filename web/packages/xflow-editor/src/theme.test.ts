@@ -237,3 +237,16 @@ describe("top bar density", () => {
     expect(coreControlHeightTheme.token?.controlHeightSM).toBe(24);
   });
 });
+
+describe("shared font tokens", () => {
+  it("inherits the pinned fontHeight so every Select fills its control", () => {
+    // The value now comes from @xflow/core's shared token map; the editor keeps
+    // no override of its own. This proves the inheritance and the 20px line box.
+    for (const appearance of appearances) {
+      const token = createEditorThemeConfig(appearance).token;
+      expect(token?.fontHeight, appearance).toBe(Number.parseInt(foundationTokens.lineHeightMd, 10));
+      expect(token?.fontHeight).toBe(20);
+      expect(token?.lineHeight).toBeCloseTo(20 / 13, 5);
+    }
+  });
+});

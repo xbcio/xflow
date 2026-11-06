@@ -143,6 +143,11 @@ describe("buildAntdTheme", () => {
         // ratio must land the body on the design's 20px rhythm.
         expect(token.fontSize * token.lineHeight).toBeCloseTo(20, 10);
         expect(token.fontSizeSM * token.lineHeightSM).toBeCloseTo(18, 10);
+        // AntD derives fontHeight from its own (fontSize + 8) rule — 21 at 13px —
+        // while the shared line box renders 20; pin it so Select's vertical
+        // padding fills the 28/32 control heights instead of coming out 27/31.
+        expect(token.fontHeight).toBe(20);
+        expect(token.fontSize * token.lineHeight).toBeCloseTo(token.fontHeight, 10);
         expect(token.boxShadow).toBe(palette.elev4);
         expect(token.boxShadowSecondary).toBe(palette.elev3);
         expect(token.boxShadowTertiary).toBe(palette.elev1);

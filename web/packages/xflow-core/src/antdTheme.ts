@@ -73,6 +73,7 @@ export interface SharedAntdToken {
   controlOutlineWidth: number;
   fontFamily: string;
   fontFamilyCode: string;
+  fontHeight: number;
   fontSize: number;
   fontSizeSM: number;
   fontWeightStrong: number;
@@ -341,6 +342,14 @@ export function buildAntdTheme(mode: Appearance, options: AntdThemeOptions = {})
       // ratio (20.43px); the small step pairs 12px with 18px.
       lineHeight: lineHeightOf(foundationTokens.lineHeightMd, foundationTokens.fontMd),
       lineHeightSM: lineHeightOf(foundationTokens.lineHeightSm, foundationTokens.fontSm),
+      /*
+       * AntD derives a Select's block padding from `fontHeight` while its
+       * content line box uses `lineHeight`. `fontHeight` is one of AntD's map
+       * tokens, computed from its own (fontSize + 8) rule — 21px at 13px — so
+       * pinning only the line box leaves every Select 1px short of its control
+       * height (27 at 28, 31 at 32). Pin the mapping to the same line box.
+       */
+      fontHeight: px(foundationTokens.lineHeightMd),
       lineWidthFocus: 2,
       motion: !options.reducedMotion,
       motionDurationFast: options.reducedMotion ? "0s" : foundationTokens.motionDurationFast,
