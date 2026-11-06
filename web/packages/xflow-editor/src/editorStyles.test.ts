@@ -188,7 +188,7 @@ describe("xflow.editor top bar (§6.3)", () => {
     expect(css).toMatch(/\.xflow-editor-logo-button\s*\{[^}]*background:\s*var\(--xflow-panel-raised\)\s*;/);
     expect(css).toMatch(/\.xflow-editor-canvas-tools\s*\{[^}]*border-radius:\s*var\(--xflow-radius-md\)\s*;/);
     expect(css).toMatch(
-      /\.xflow-editor-canvas-tools \.xflow-editor-icon-button\[aria-pressed="true"\]\:not\(:disabled\)\s*\{[^}]*background:\s*color-mix\(in srgb, var\(--xflow-primary\) 14%,\s*transparent\)\s*;[^}]*color:\s*var\(--xflow-primary\)\s*;/
+      /\.xflow-editor-canvas-tools \.xflow-editor-icon-button\[aria-pressed="true"\]:not\(:disabled\)\s*\{[^}]*background:\s*color-mix\(in srgb, var\(--xflow-primary\) 14%,\s*transparent\)\s*;[^}]*color:\s*var\(--xflow-primary\)\s*;/
     );
     expect(css).toMatch(/\.xflow-editor-sep\s*\{[^}]*border-color:\s*var\(--xflow-border\)\s*;/);
     expect(css).toMatch(/\.xflow-editor-run-button\s*\{[^}]*border-radius:\s*var\(--xflow-radius-sm\)\s*;/);
