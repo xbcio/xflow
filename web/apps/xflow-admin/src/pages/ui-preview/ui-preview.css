@@ -1388,7 +1388,7 @@
     vertical-align: -3px;
     background: none;
     border: 0;
-    border-radius: 9999px;
+    border-radius: var(--xflow-radius-full);
     cursor: help;
   }
   .xflow-pv-field-help:hover { color: var(--xflow-text-secondary); }
@@ -1783,7 +1783,7 @@
     display: inline-flex;
     flex: none;
     align-items: center;
-    gap: 2px;
+    gap: var(--xflow-space-0-5);
     margin-left: auto;
   }
   .xflow-pv-rule-expr {
