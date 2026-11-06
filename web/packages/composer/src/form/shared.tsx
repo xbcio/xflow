@@ -290,7 +290,10 @@ export function FieldFrame(props: FieldFrameProps) {
       <div className="xflow-composer-field-label-row">
         {label}
         <Tooltip title={props.description} rootClassName="xflow-composer-field-help-tooltip">
-          <button type="button" className="xflow-composer-field-help" aria-label={`查看说明：${props.label}`}>
+          {/* §9 (2026-11-07): hover-only. Keyboard users Tab straight to the
+           * control, whose aria-describedby already carries this text, so the
+           * glyph must not add a stop of its own. */}
+          <button type="button" className="xflow-composer-field-help" tabIndex={-1} aria-hidden="true">
             <HelpIcon aria-hidden="true" />
           </button>
         </Tooltip>

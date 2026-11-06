@@ -664,14 +664,23 @@ for (const kernel of kernels) {
         });
         await m.flush();
         const section = fieldOf(m.container, "g");
-        within(section).getByRole("button", { name: "查看说明：基础" });
+        // §9 (2026-11-07): the glyph is hover-only — not a Tab stop and hidden
+        // from assistive tech, which reads the section's aria-describedby.
+        const sectionHelp = section.querySelector<HTMLButtonElement>(".xflow-composer-section-help");
+        expect(sectionHelp).not.toBeNull();
+        expect(sectionHelp!.tabIndex).toBe(-1);
+        expect(sectionHelp!.getAttribute("aria-hidden")).toBe("true");
+        expect(sectionHelp!.getAttribute("aria-label")).toBeNull();
         // The description stays in the DOM for aria-describedby, not on screen.
         const sectionDescription = one<HTMLElement>(section, ".xflow-composer-section-description");
         expect(sectionDescription.classList.contains("xflow-composer-visually-hidden")).toBe(true);
         expect((section.getAttribute("aria-describedby") ?? "").split(" ")).toContain(sectionDescription.id);
         // The column help appears once in the header; rows keep a hidden copy.
         const table = fieldOf(m.container, "table");
-        const columnHelp = within(table).getByRole("button", { name: "查看说明：条件" });
+        const columnHelp = table.querySelector<HTMLButtonElement>(".xflow-composer-array-help");
+        expect(columnHelp).not.toBeNull();
+        expect(columnHelp!.tabIndex).toBe(-1);
+        expect(columnHelp!.getAttribute("aria-hidden")).toBe("true");
         expect(one<HTMLElement>(table, ".xflow-composer-array-heading").contains(columnHelp)).toBe(true);
         const rowDescription = one<HTMLElement>(table, ".xflow-composer-array-row[data-composer-row] .xflow-composer-field-description");
         expect(rowDescription.classList.contains("xflow-composer-visually-hidden")).toBe(true);
@@ -709,7 +718,10 @@ for (const kernel of kernels) {
           await m.flush();
           const field = fieldOf(m.container, "f");
           const help = one<HTMLButtonElement>(field, ".xflow-composer-field-label-row > .xflow-composer-field-help");
-          expect(help.getAttribute("aria-label")).toBe("查看说明：Name");
+          // §9 (2026-11-07): hover-only, so the control keeps the only Tab stop.
+          expect(help.tabIndex).toBe(-1);
+          expect(help.getAttribute("aria-hidden")).toBe("true");
+          expect(help.getAttribute("aria-label")).toBeNull();
           const description = one<HTMLElement>(field, ".xflow-composer-field-description");
           // Hidden by CSS until the field is focused or in error, but the
           // accessibility link is live the whole time.
@@ -731,7 +743,9 @@ for (const kernel of kernels) {
         expect(m.log).toEqual([]);
         const field = fieldOf(m.container, "f");
         const help = one<HTMLButtonElement>(field, ".xflow-composer-field-label-row > .xflow-composer-field-help");
-        expect(help.getAttribute("aria-label")).toBe("查看说明：Name");
+        expect(help.tabIndex).toBe(-1);
+        expect(help.getAttribute("aria-hidden")).toBe("true");
+        expect(help.getAttribute("aria-label")).toBeNull();
         expect(help.type).toBe("button");
         // Not rendered visibly below the control, but still the control's description.
         const description = one<HTMLElement>(field, ".xflow-composer-field-description");

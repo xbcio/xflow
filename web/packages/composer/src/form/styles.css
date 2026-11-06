@@ -130,11 +130,6 @@
   color: var(--xflow-text-secondary, #464d5a);
 }
 
-.xflow-composer-section-help:focus-visible {
-  outline: 2px solid var(--xflow-primary, #2f7cff);
-  outline-offset: 1px;
-}
-
 /* The header's right-aligned status line (e.g. 继承工作流 · 重试 2 次). */
 .xflow-composer-section-summary {
   margin-left: auto;
@@ -450,11 +445,6 @@
 
 .xflow-composer-field-help:hover {
   color: var(--xflow-text-secondary, #464d5a);
-}
-
-.xflow-composer-field-help:focus-visible {
-  outline: 2px solid var(--xflow-primary, #2f7cff);
-  outline-offset: 1px;
 }
 
 /* D-3: the help glyph is 12px even though the icon defaults to 16. */
@@ -870,11 +860,6 @@
 
 .xflow-composer-array-help:hover {
   color: var(--xflow-text-secondary, #464d5a);
-}
-
-.xflow-composer-array-help:focus-visible {
-  outline: 2px solid var(--xflow-primary, #2f7cff);
-  outline-offset: 1px;
 }
 
 .xflow-composer-array-actions,

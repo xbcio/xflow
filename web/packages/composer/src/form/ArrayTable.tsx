@@ -88,10 +88,13 @@ function ArrayTableField({ node, props, value, onChange, defaultHint, issues, re
                         <span className="xflow-composer-array-heading-text">{column}</span>
                         {description ? (
                           <Tooltip title={description} rootClassName="xflow-composer-array-help-tooltip">
+                            {/* §9 (2026-11-07): hover-only, like the field and
+                             * section glyphs; rows keep the text for a11y. */}
                             <button
                               type="button"
                               className="xflow-composer-array-help"
-                              aria-label={`查看说明：${column}`}
+                              tabIndex={-1}
+                              aria-hidden="true"
                             >
                               <HelpIcon aria-hidden="true" />
                             </button>

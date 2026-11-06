@@ -235,10 +235,13 @@ export function Section(props: SectionProps) {
           )}
           {props.description ? (
             <Tooltip title={props.description} rootClassName="xflow-composer-section-help-tooltip">
+              {/* §9 (2026-11-07): hover-only, not a Tab stop; the section's
+               * aria-describedby already carries the description. */}
               <button
                 type="button"
                 className="xflow-composer-section-help"
-                aria-label={`查看说明：${props.title ?? "分区"}`}
+                tabIndex={-1}
+                aria-hidden="true"
               >
                 <HelpIcon aria-hidden="true" />
               </button>

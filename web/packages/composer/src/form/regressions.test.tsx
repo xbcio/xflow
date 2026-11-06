@@ -149,11 +149,14 @@ for (const kernel of kernels) {
       const m = mountComposer({ kernel, registry, spec, value: { a: "x" }, focusRequest: { path: "/a", nonce: 1 } });
       await m.flush();
       const field = fieldOf(m.container, "a");
-      const help = within(field).getByRole("button", { name: "查看说明：A" });
+      const help = field.querySelector<HTMLButtonElement>(".xflow-composer-field-help");
+      expect(help).not.toBeNull();
       const control = within(field).getByLabelText("A");
-      // Guard the scenario: the help button really is the frame's first
-      // focusable element, so the assertion below proves it was skipped.
-      expect(help.compareDocumentPosition(control) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      // §9 (2026-11-07): the glyph is hover-only, so it is not a Tab stop and
+      // the frame's first focusable element is already the control.
+      expect(help!.tabIndex).toBe(-1);
+      expect(help!.getAttribute("aria-hidden")).toBe("true");
+      expect(help!.compareDocumentPosition(control) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
       expect(document.activeElement).toBe(control);
       expect(document.activeElement).not.toBe(help);
     });
