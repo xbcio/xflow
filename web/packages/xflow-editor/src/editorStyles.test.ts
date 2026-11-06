@@ -918,21 +918,67 @@ describe("xflow.editor browser-measured baseline fixes (E6)", () => {
     expect(rule(".xflow-editor-statusbar__sep")).toMatch(/height:\s*20px\s*;/);
   });
 
-  it("draws the workflow-settings stack at the baseline figure 6 values", () => {
+  it("keeps the execution filter inside the 240px column and grounds the card segmented control", () => {
+    // §6.4 (2026-11-06): the four-item filter measured 230px in a 215px row
+    // and clipped 3px past the panel; the 8px item inset brings it to 198px.
+    expect(rule(".xflow-editor .xflow-editor-exec-filters__label")).toMatch(
+      /padding-inline:\s*var\(--xflow-space-2\)\s*;/
+    );
+    // The card segmented track is the field ground; the selected block keeps
+    // the theme's panel + elev-1 tokens. Only the workflow-settings control is
+    // tagged — the top-bar view switch and this filter keep their own track.
+    expect(rule(".xflow-editor .xflow-editor-card-segmented")).toMatch(/background:\s*var\(--xflow-field\)\s*;/);
+    const settingsSource = readFileSync(`${import.meta.dirname}/panels/workflowSettings.tsx`, "utf8");
+    expect(settingsSource).toContain("xflow-editor-card-segmented");
+  });
+
+  it("keeps card heads on one line and truncates the meta before the title (§6.4)", () => {
+    // 2026-11-06: a long meta must not squeeze the title into vertical text.
+    // The title ellipsises down to the first character plus the ellipsis, and
+    // the meta carries the 100x shrink factor, so it gives up its width first.
+    const strong = rule(".xflow-editor-section-card__title strong");
+    expect(strong).toMatch(/min-width:\s*2ch\s*;/);
+    expect(strong).toMatch(/overflow:\s*hidden\s*;/);
+    expect(strong).toMatch(/text-overflow:\s*ellipsis\s*;/);
+    expect(strong).toMatch(/white-space:\s*nowrap\s*;/);
+    // The title's own floor keeps that 2ch visible instead of letting the flex
+    // row shrink its box under the summary.
+    expect(rule(".xflow-editor-section-card__title")).toMatch(/min-width:\s*min-content\s*;/);
+    expect(rule(".xflow-editor-section-card__meta")).toMatch(/flex:\s*0 100 auto\s*;/);
+    // Composer card heads follow the same rule: the toggle and title shrink,
+    // the title ellipsises, the summary is the first thing to give way.
+    expect(css).toMatch(
+      /\.xflow-editor \.xflow-editor-inspector \.xflow-composer-section-toggle,\s*\.xflow-editor \.xflow-editor-inspector \.xflow-composer-section-title\s*\{[^}]*min-width:\s*0\s*;/
+    );
+    expect(rule(".xflow-editor .xflow-editor-inspector .xflow-composer-section-toggle")).toMatch(
+      /flex:\s*0 1 auto\s*;[^}]*overflow:\s*hidden\s*;/
+    );
+    const composerTitle = rule(".xflow-editor .xflow-editor-inspector .xflow-composer-section-title");
+    expect(composerTitle).toMatch(/overflow:\s*hidden\s*;/);
+    expect(composerTitle).toMatch(/text-overflow:\s*ellipsis\s*;/);
+    expect(composerTitle).toMatch(/white-space:\s*nowrap\s*;/);
+    expect(rule(".xflow-editor .xflow-editor-inspector .xflow-composer-section-summary")).toMatch(
+      /flex:\s*0 100 auto\s*;/
+    );
+  });
+
+  it("draws the workflow-settings stack at the density tier values", () => {
     const root = rule(".xflow-editor-workflow-settings");
     expect(root).toMatch(/--xflow-editor-section-card-radius:\s*var\(--xflow-radius-md\)\s*;/);
     expect(root).toMatch(/--xflow-editor-section-card-bg:\s*var\(--xflow-panel-raised\)\s*;/);
-    expect(root).toMatch(/gap:\s*var\(--xflow-space-2\)\s*;/);
+    expect(root).toMatch(/gap:\s*var\(--xflow-editor-density-sec-gap\)\s*;/);
     const head = rule(".xflow-editor-workflow-settings .xflow-editor-section-card__header");
-    // The baseline head is 35px tall at every width of content (an action key
-    // or not), so the height is a floor rather than the padding around a line.
-    expect(head).toMatch(/min-height:\s*35px\s*;/);
-    expect(head).toMatch(/padding:\s*0 var\(--xflow-space-3\)\s*;/);
+    // §6.4 (2026-11-06): the workflow-settings cards join the same density tier
+    // as the inspector's, so every card head measures the baseline's 29px.
+    expect(head).toMatch(/min-height:\s*var\(--xflow-editor-density-head-height\)\s*;/);
+    expect(head).toMatch(
+      /padding:\s*var\(--xflow-editor-density-sec-head-y\) var\(--xflow-editor-density-sec-head-x\)\s*;/
+    );
     expect(rule(".xflow-editor-workflow-settings .xflow-editor-section-card__title")).toMatch(
       /font-size:\s*var\(--xflow-font-md\)\s*;/
     );
     expect(rule(".xflow-editor-workflow-settings .xflow-editor-section-card__body")).toMatch(
-      /padding:\s*var\(--xflow-space-0-5\) var\(--xflow-space-3\) var\(--xflow-space-2\)\s*;/
+      /padding:\s*var\(--xflow-editor-density-sec-body-y\) var\(--xflow-editor-density-sec-body-x\) var\(--xflow-editor-density-sec-body-b\)\s*;/
     );
   });
 

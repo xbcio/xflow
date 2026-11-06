@@ -5568,7 +5568,10 @@ button.xflow-editor-overview__run:hover {
   font-weight: var(--xflow-font-weight-medium);
   height: 26px;
   line-height: 26px;
-  padding-inline: var(--xflow-space-3);
+  /* The 240px column leaves 215px after the filter row's 12px insets; four
+   * items at the baseline's 12px inline padding measure 230 and clip 3px past
+   * the panel (measured 2026-11-05). 8px brings the track to 198px. */
+  padding-inline: var(--xflow-space-2);
 }
 
 .xflow-editor-exec-rows {
