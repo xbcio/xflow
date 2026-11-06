@@ -1112,7 +1112,7 @@ export const wfSettings = {
     /* A `seg` control with no `options` renders a one-option segmented control —
      * a track with a single, immovable thumb. Every `seg` sample declares its
      * choices; the value only says which one is selected. */
-    { label: '超限时', value: '排队', control: 'seg', options: ['排队', '丢弃', '失败'] },
+    { label: '超限时', value: '排队', control: 'seg', options: ['排队', '拒绝'] },
     { label: '队列上限', value: '100', control: 'number' },
     { label: '排队超时', value: '10', control: 'number', unit: '分钟' },
   ] as FieldSpec[],
