@@ -13,7 +13,7 @@ import { RevealProvider } from "./reveal";
 const defaultWarn = (warning: Warning) => console.warn(`[composer] ${warning.code}: ${warning.message}`);
 
 export function Composer(props: ComposerProps) {
-  const { spec, registry, context, externalIssues, onValidate } = props;
+  const { spec, registry, context, externalIssues, suppressedChecks, onValidate } = props;
   const kernel = props.kernel ?? defaultKernel;
   const readOnly = props.readOnly ?? false;
   const [, invalidate] = useReducer((n: number) => n + 1, 0);
@@ -48,13 +48,14 @@ export function Composer(props: ComposerProps) {
         value,
         context,
         externalIssues,
+        suppressedChecks,
         schemas: registry.schemas,
         bindingKinds: registry.bindingKinds,
         checks: registry.checks,
         expressions: registry.expressions,
         previous: previousRef.current
       }),
-    [spec, value, context, externalIssues, registry]
+    [spec, value, context, externalIssues, suppressedChecks, registry]
   );
   previousRef.current = tree;
   controller.tree = tree;

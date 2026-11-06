@@ -799,6 +799,36 @@ describe("option descriptions", () => {
   }
 });
 
+describe("suppressed checks", () => {
+  const spec = formSpec(
+    {
+      name: {
+        type: "Input",
+        props: { label: "Name", required: true, value: { $bindState: "/name" } },
+        checks: [{ type: "required", message: "必填" }]
+      }
+    },
+    ["name"]
+  );
+
+  it("drops a suppressed check entirely instead of demoting it", async () => {
+    const m = mountComposer({ kernel: kernels[0], registry, spec, value: {}, suppressedChecks: ["required"] });
+    await m.flush();
+    const field = fieldOf(m.container, "name");
+    expect(field.querySelector(".xflow-composer-issue--error")).toBeNull();
+    expect(field.classList.contains("is-error")).toBe(false);
+    expect(within(m.container).getByLabelText(/^Name/).getAttribute("aria-invalid")).toBeNull();
+  });
+
+  it("reports the same check again when it is not suppressed", async () => {
+    const m = mountComposer({ kernel: kernels[0], registry, spec, value: {} });
+    await m.flush();
+    const field = fieldOf(m.container, "name");
+    expect(field.classList.contains("is-error")).toBe(true);
+    expect(within(m.container).getByLabelText(/^Name/).getAttribute("aria-invalid")).toBe("true");
+  });
+});
+
 describe("registry", () => {
   it("formComponents covers every built-in type", () => {
     expect(formComponents.map((c) => c.type).sort()).toEqual(

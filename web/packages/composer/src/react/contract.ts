@@ -124,6 +124,12 @@ export interface ComposerProps {
   context?: Record<string, unknown>;
   /** Issues keyed by JSON Pointer (e.g. backend param_issues). */
   externalIssues?: Record<string, Issue[]>;
+  /**
+   * Check types to drop from this render, e.g. "required" while a freshly added
+   * node has not been touched yet. The spec is not changed and the same checks
+   * report normally as soon as the list empties.
+   */
+  suppressedChecks?: readonly string[];
   readOnly?: boolean;
   onChange(patches: Patch[]): void;
   onValidate?(result: ValidationResult): void;

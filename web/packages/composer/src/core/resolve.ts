@@ -51,6 +51,13 @@ export interface ResolveInput {
   context?: Record<string, unknown>;
   data?: Record<string, DataState>;
   externalIssues?: Record<string, Issue[]>;
+  /**
+   * Check types whose findings are dropped entirely rather than demoted. The
+   * editor uses it to keep a just-added node's missing required parameters from
+   * counting as errors until the user edits the node or asks to validate; the
+   * spec itself stays untouched.
+   */
+  suppressedChecks?: readonly string[];
   schemas: Readonly<Record<string, PropsSchema<unknown>>>;
   /**
    * Binding value kinds per component type (the component's `bindings`
@@ -162,6 +169,7 @@ export function resolve(input: ResolveInput): ResolvedTree {
   const pending: PendingIssue[] = [];
   const usedIds = new Set<string>();
   const { spec, value, schemas, checks, expressions } = input;
+  const suppressedChecks = input.suppressedChecks;
   const context = input.context ?? {};
   const data = input.data ?? EMPTY_DATA;
 
@@ -493,6 +501,7 @@ export function resolve(input: ResolveInput): ResolvedTree {
     source: string,
     setError: (error: ResolveError) => void
   ): void {
+    if (suppressedChecks?.includes(check.type)) return;
     if (check.when !== undefined) {
       const when = evalCond(check.when, scope.cond);
       if (when.error) setError({ code: "cond", message: `checks ${check.type}.when: ${when.error}` });

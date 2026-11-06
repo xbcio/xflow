@@ -126,6 +126,12 @@ export interface XFlowPreviewNodeIssues {
   errors: number;
   warnings: number;
   /**
+   * Missing required fields on a node the user just added and has not touched
+   * yet (§6.1, D-4). They are not errors, so the card shows a neutral
+   * 待填 N 项 chip instead of the red issue badge.
+   */
+  pending?: number;
+  /**
    * The first finding's message, already safe to display. The owner must not
    * put a parameter value in it: a title is visible text, not a log.
    */
@@ -1439,7 +1445,7 @@ function sameNote(a: XFlowPreviewNodeNote | undefined, b: XFlowPreviewNodeNote |
 function sameIssues(a: XFlowPreviewNodeIssues | undefined, b: XFlowPreviewNodeIssues | undefined): boolean {
   if (a === b) return true;
   if (!a || !b) return false;
-  return a.errors === b.errors && a.warnings === b.warnings && a.message === b.message;
+  return a.errors === b.errors && a.warnings === b.warnings && a.pending === b.pending && a.message === b.message;
 }
 
 function samePolicy(a: PreviewNodePolicy | undefined, b: PreviewNodePolicy | undefined): boolean {
@@ -1778,6 +1784,9 @@ const PreviewNode = React.memo(function PreviewNode({
   // count; warnings surface only when the form found no error.
   const issueErrors = issues?.errors ?? 0;
   const issueWarnings = issues?.warnings ?? 0;
+  // D-4: a just-added node's missing required fields are 待填, not errors, so
+  // they never take the red badge while the card is still pristine.
+  const issuePending = issueErrors === 0 ? issues?.pending ?? 0 : 0;
   const issueTone = issueErrors > 0 ? "danger" : issueWarnings > 0 ? "warning" : undefined;
   const issueCount = issueErrors > 0 ? issueErrors : issueWarnings;
   const issueLabel = issueTone === "danger"
@@ -2041,6 +2050,16 @@ const PreviewNode = React.memo(function PreviewNode({
               <span className="xflow-preview-node__badge" data-badge="disabled" title="已禁用">
                 <span aria-hidden="true" className="xflow-preview-node__badge-icon"><BanIcon /></span>
                 已禁用
+              </span>
+            ) : null}
+            {issuePending > 0 ? (
+              <span
+                aria-label={`待填 ${issuePending} 项`}
+                className="xflow-preview-node__badge xflow-preview-node__pending"
+                data-badge="pending"
+                title={`待填 ${issuePending} 项必填参数`}
+              >
+                {`待填 ${issuePending} 项`}
               </span>
             ) : null}
             {issueLabel ? (

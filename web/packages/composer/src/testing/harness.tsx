@@ -24,6 +24,8 @@ export interface MountOptions {
   focusRequest?: FocusRequest;
   /** Host's handled-notification receiver (the reveal tests' clear hook). */
   onFocusRequestHandled?: (nonce: number) => void;
+  /** Check types to drop (D-4's pristine-node suppression). */
+  suppressedChecks?: readonly string[];
 }
 
 export interface Mounted extends RenderResult {
@@ -91,6 +93,7 @@ export function mountComposer(options: MountOptions): Mounted {
         value={value}
         context={options.context}
         readOnly={options.readOnly}
+        suppressedChecks={options.suppressedChecks}
         focusRequest={focusRequest}
         onFocusRequestHandled={options.onFocusRequestHandled}
         onChange={onChange}

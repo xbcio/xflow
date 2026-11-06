@@ -1173,6 +1173,71 @@ interface FormIssueSummary {
   warnings: number;
   nodes: string[];
   diagnostics: WorkflowDiagnostic[];
+  /** Per node, the missing required fields a pristine node does not count yet. */
+  pending: { node: string; count: number }[];
+}
+
+/** Check types a pristine node keeps quiet until the user touches it (D-4). */
+const REQUIRED_CHECKS: readonly string[] = ["required"];
+const NO_PRISTINE_NODES: ReadonlySet<string> = new Set();
+
+/**
+ * One pass over every node's compiled form (Doc C §1 rule 3, WB-13): the
+ * counts and the diagnostics rows are produced together, never by filtering a
+ * separately computed set. `pristine` demotes a node's missing required fields
+ * to the 待填 count instead of errors; passing an empty set is the settled pass
+ * the save / publish path uses.
+ */
+function summarizeFormIssues(
+  workflow: WorkflowDef,
+  nodeTypes: NodeTypesResponse | undefined,
+  formHost: NodeFormHost,
+  pristine: ReadonlySet<string>
+): FormIssueSummary {
+  const diagnostics: WorkflowDiagnostic[] = [];
+  const summary: FormIssueSummary = { errors: 0, warnings: 0, nodes: [], diagnostics, pending: [] };
+  if (!nodeTypes) return summary;
+  const credentials = Object.keys(workflow.credentials ?? {});
+  (workflow.nodes ?? []).forEach((node, index) => {
+    const schema = formSchemaForNode(nodeTypes, node);
+    if (!schema) return;
+    const issues = formHost.compiler.issues(
+      schema,
+      node,
+      { hasTemplate: nodeHasTemplate(workflow, node), parameters: node.parameters, schemasLoaded: true },
+      { ports: portsForNode(schema, node), credentials }
+    );
+    if (issues.length === 0) return;
+    const name = nodeName(node, index);
+    const isPristine = pristine.has(nodeKey(node, index));
+    let errors = 0;
+    // One count per field: an expression wrapper can report the same missing
+    // value through more than one frame.
+    const pendingPaths = new Set<string>();
+    for (const issue of issues) {
+      if (isPristine && issue.severity === "error" && issue.check === "required") {
+        pendingPaths.add(issue.path ?? "");
+        continue;
+      }
+      const status = issue.severity === "warning" ? "warn" : "error";
+      if (status === "error") errors += 1;
+      else summary.warnings += 1;
+      diagnostics.push({
+        status,
+        area: "parameters",
+        message: issue.message,
+        nodeName: name,
+        ...(issue.path ? { path: issue.path } : {}),
+        source: "local"
+      });
+    }
+    if (pendingPaths.size > 0) summary.pending.push({ node: name, count: pendingPaths.size });
+    if (errors > 0) {
+      summary.errors += errors;
+      summary.nodes.push(name);
+    }
+  });
+  return summary;
 }
 
 /**
@@ -3123,8 +3188,29 @@ export function XFlowEditor({
   const nodeTypesRef = React.useRef(nodeTypes);
   nodeTypesRef.current = nodeTypes;
 
+  /**
+   * D-4: nodes added during this session whose fields the user has not touched.
+   * Their missing required parameters are not errors yet: nothing is marked red,
+   * the card says 待填 N 项, and the counts leave them out. Editing any field of
+   * the node, or asking to validate / save / publish / run, settles it. This is
+   * session state only and never reaches the workflow definition.
+   */
+  const [pristineNodes, setPristineNodes] = React.useState<ReadonlySet<string>>(NO_PRISTINE_NODES);
+  const pristineNodesRef = React.useRef(pristineNodes);
+  pristineNodesRef.current = pristineNodes;
+  const settleNodePristine = React.useCallback((key: string) => {
+    setPristineNodes((current) => {
+      if (!current.has(key)) return current;
+      const next = new Set(current);
+      next.delete(key);
+      return next;
+    });
+  }, []);
+  const settleAllPristine = React.useCallback(() => setPristineNodes(NO_PRISTINE_NODES), []);
+
   /** Commits one node's parseable draft now (blur, tab switch, debounce, save). */
   const commitParameterDraft = React.useCallback((key: string, keepRedo = false) => {
+    settleNodePristine(key);
     const draft = parameterDraftsRef.current[key];
     if (!draft || draft.error) return;
     const parsed = parseParametersText(draft.text);
@@ -3135,7 +3221,7 @@ export function XFlowEditor({
     commitWorkflowWith((latest) => updateNodeByKey(latest, key, (node) =>
       serializeJson(node.parameters ?? {}) === serializeJson(parameters) ? node : { ...node, parameters }
     ), keepRedo);
-  }, [commitWorkflowWith, replaceParameterDrafts]);
+  }, [commitWorkflowWith, replaceParameterDrafts, settleNodePristine]);
   const flushParameterDrafts = React.useCallback((keepRedo = false) => {
     clearDraftTimer();
     for (const [key, draft] of Object.entries(parameterDraftsRef.current)) {
@@ -3190,6 +3276,14 @@ export function XFlowEditor({
   const handleNodeRenamed = React.useCallback((previousKey: string, nextKey: string) => {
     setSelectedKey(nextKey);
     if (previousKey === nextKey) return;
+    // A pristine node keeps its state across a rename: its key is its name.
+    setPristineNodes((nodes) => {
+      if (!nodes.has(previousKey)) return nodes;
+      const next = new Set(nodes);
+      next.delete(previousKey);
+      next.add(nextKey);
+      return next;
+    });
     const current = parameterDraftsRef.current;
     if (!(previousKey in current)) return;
     const { [previousKey]: draft, ...rest } = current;
@@ -3217,6 +3311,9 @@ export function XFlowEditor({
    * derived from the committed value on the next render.
    */
   const applyNodePatches = React.useCallback((key: string, patches: Patch[]) => {
+    // Any form write is the user touching this node; its missing required
+    // fields become ordinary errors from here on.
+    settleNodePristine(key);
     // A debounced JSON draft of this node must not land on top of the form edit.
     commitParameterDraft(key);
     if (parameterDraftsRef.current[key]?.error) return; // read-only while the JSON is broken
@@ -3229,7 +3326,7 @@ export function XFlowEditor({
       if (applied.length === 0 || next === node) return latest;
       return { ...latest, nodes: nodesNow.map((candidate, candidateIndex) => (candidateIndex === index ? next : candidate)) };
     });
-  }, [commitParameterDraft, commitWorkflowWith]);
+  }, [commitParameterDraft, commitWorkflowWith, settleNodePristine]);
 
   const [paramIssues, setParamIssues] = React.useState<ParamIssue[]>();
   const externalIssuesMap = React.useMemo(() => externalIssuesByNode(paramIssues), [paramIssues]);
@@ -3247,43 +3344,10 @@ export function XFlowEditor({
   // on the save button in every mode, blocking only in enforce mode. The same
   // single pass collects the diagnostics rows (WB-13): counts are incremented
   // while the rows are built, never by filtering a separately computed set.
-  const formIssueSummary = React.useMemo<FormIssueSummary>(() => {
-    const diagnostics: WorkflowDiagnostic[] = [];
-    const summary: FormIssueSummary = { errors: 0, warnings: 0, nodes: [], diagnostics };
-    if (!nodeTypes) return summary;
-    const credentials = Object.keys(draftWorkflow.credentials ?? {});
-    (draftWorkflow.nodes ?? []).forEach((node, index) => {
-      const schema = formSchemaForNode(nodeTypes, node);
-      if (!schema) return;
-      const issues = formHost.compiler.issues(
-        schema,
-        node,
-        { hasTemplate: nodeHasTemplate(draftWorkflow, node), parameters: node.parameters, schemasLoaded: true },
-        { ports: portsForNode(schema, node), credentials }
-      );
-      if (issues.length === 0) return;
-      const name = nodeName(node, index);
-      let errors = 0;
-      for (const issue of issues) {
-        const status = issue.severity === "warning" ? "warn" : "error";
-        if (status === "error") errors += 1;
-        else summary.warnings += 1;
-        diagnostics.push({
-          status,
-          area: "parameters",
-          message: issue.message,
-          nodeName: name,
-          ...(issue.path ? { path: issue.path } : {}),
-          source: "local"
-        });
-      }
-      if (errors > 0) {
-        summary.errors += errors;
-        summary.nodes.push(name);
-      }
-    });
-    return summary;
-  }, [draftWorkflow, formHost, nodeTypes]);
+  const formIssueSummary = React.useMemo<FormIssueSummary>(
+    () => summarizeFormIssues(draftWorkflow, nodeTypes, formHost, pristineNodes),
+    [draftWorkflow, formHost, nodeTypes, pristineNodes]
+  );
   const formIssueSummaryRef = React.useRef(formIssueSummary);
   formIssueSummaryRef.current = formIssueSummary;
   /**
@@ -3293,7 +3357,7 @@ export function XFlowEditor({
    * sentence, never a parameter value.
    */
   const nodeIssueBadges = React.useMemo(() => {
-    const byNode = new Map<string, { errors: number; warnings: number; errorMessage?: string; warningMessage?: string }>();
+    const byNode = new Map<string, { errors: number; warnings: number; pending?: number; errorMessage?: string; warningMessage?: string }>();
     for (const row of formIssueSummary.diagnostics) {
       if (!row.nodeName) continue;
       const entry = byNode.get(row.nodeName) ?? { errors: 0, warnings: 0 };
@@ -3306,13 +3370,23 @@ export function XFlowEditor({
       }
       byNode.set(row.nodeName, entry);
     }
+    for (const entry of formIssueSummary.pending) {
+      const node = byNode.get(entry.node) ?? { errors: 0, warnings: 0 };
+      node.pending = (node.pending ?? 0) + entry.count;
+      byNode.set(entry.node, node);
+    }
     return new Map(
       [...byNode].map(([name, entry]) => [
         name,
-        { errors: entry.errors, warnings: entry.warnings, message: entry.errorMessage ?? entry.warningMessage }
+        {
+          errors: entry.errors,
+          warnings: entry.warnings,
+          pending: entry.pending ?? 0,
+          message: entry.errorMessage ?? entry.warningMessage
+        }
       ])
     );
-  }, [formIssueSummary.diagnostics]);
+  }, [formIssueSummary]);
   // Stable between draft edits so the preview keeps its cards' memo identity;
   // a new identity here is the same signal as any other changed node data.
   const previewNodeIssues = React.useCallback(
@@ -3375,6 +3449,20 @@ export function XFlowEditor({
       revealDock();
       return true;
     }
+    if (pristineNodesRef.current.size > 0) {
+      // D-4: asking to save / run / publish settles every pristine node. Under
+      // enforce the settled errors block the action, exactly like validation.
+      settleAllPristine();
+      if (nodeTypesRef.current?.param_validation_mode === "enforce") {
+        const settled = summarizeFormIssues(latestDraftRef.current, nodeTypesRef.current, formHost, NO_PRISTINE_NODES);
+        if (settled.errors > 0) {
+          setOperationError(`节点 ${settled.nodes.join("、")} 的参数未通过校验（${settled.errors} 个错误），请修正后再${action}`);
+          setOperationStatus(`${action}已阻止`);
+          revealDock();
+          return true;
+        }
+      }
+    }
     const summary = formIssueSummaryRef.current;
     if (nodeTypesRef.current?.param_validation_mode === "enforce" && summary.errors > 0) {
       setOperationError(`节点 ${summary.nodes.join("、")} 的参数未通过校验（${summary.errors} 个错误），请修正后再${action}`);
@@ -3383,7 +3471,7 @@ export function XFlowEditor({
       return true;
     }
     return false;
-  }, [flushParameterDrafts]);
+  }, [flushParameterDrafts, formHost, settleAllPristine]);
   const restoreHistory = React.useCallback((nextWorkflow: WorkflowDef, nextHistory: WorkflowHistory) => {
     historyRef.current = nextHistory;
     setHistory(nextHistory);
@@ -3468,10 +3556,14 @@ export function XFlowEditor({
     };
   }, [diagnostics, formIssueSummary, invalidDraftCount, invalidWorkflowJsonFields.length, validationMode]);
   const validateCurrentWorkflow = React.useCallback(() => {
-    const hasErrors = diagnostics.some((item) => item.status === "error");
+    // D-4: asking to validate settles every pristine node first, so the result
+    // describes the definition as it would be judged on save.
+    settleAllPristine();
+    const settled = summarizeFormIssues(latestDraftRef.current, nodeTypesRef.current, formHost, NO_PRISTINE_NODES);
+    const hasErrors = settled.errors > 0 || diagnostics.some((item) => item.status === "error");
     setOperationStatus(hasErrors ? "校验失败" : "校验通过");
     revealDock();
-  }, [diagnostics]);
+  }, [diagnostics, formHost, settleAllPristine]);
 
   // §6.3 compact top bar (layout b/c): 撤销 / 重做 / 校验 / 主题 join the ⋯ menu
   // in that order, keeping each button's disabled state and shortcut hint. The
@@ -3606,6 +3698,8 @@ export function XFlowEditor({
       const connectedWorkflow = connectSelectedNode(withNode, selectedNode, nextNode);
       commitWorkflow(connectedWorkflow);
       const nextKey = nodeKey(nextNode, (connectedWorkflow.nodes ?? []).length - 1);
+      // D-4: a fresh node starts pristine; its required fields are 待填, not errors.
+      setPristineNodes((current) => (current.has(nextKey) ? current : new Set(current).add(nextKey)));
       setSelectedKey(nextKey);
       // A card added outside the visible pane is panned into view; a dropped
       // card is where the pointer put it and never moves.
@@ -3967,12 +4061,15 @@ export function XFlowEditor({
   }, [publishOpen, suggestedVersion]);
 
   const openPublishDialog = React.useCallback(() => {
+    // D-4: publishing settles every pristine node, so the dialog's counts are
+    // the ones that will decide the publish.
+    settleAllPristine();
     const initial = suggestNextVersion(onlineVersion);
     publishSuggestedRef.current = initial;
     setPublishVersion(initial);
     setPublishError(undefined);
     setPublishOpen(true);
-  }, [onlineVersion]);
+  }, [onlineVersion, settleAllPristine]);
 
   const publishWorkflow = React.useCallback(async () => {
     if (readOnly || !onPublish || publishingRef.current) return;
@@ -4111,6 +4208,8 @@ export function XFlowEditor({
       revealDock();
       return;
     }
+    // D-4: running settles every pristine node, like validate / save / publish.
+    settleAllPristine();
     // The dialog owns Run while it is open (⌘Enter reaches here too).
     if (runParamsRequest) return;
     if (blockedByParameterDraft("运行")) return;
@@ -4123,7 +4222,7 @@ export function XFlowEditor({
       return;
     }
     await startRun(undefined);
-  }, [blockedByParameterDraft, onRun, readOnly, runParamsRequest, startRun]);
+  }, [blockedByParameterDraft, onRun, readOnly, runParamsRequest, settleAllPristine, startRun]);
 
   const submitRunParams = React.useCallback(async (options: XFlowRunOptions) => {
     setRunParamsRequest((current) => (current ? { ...current, error: undefined } : current));
@@ -5371,6 +5470,9 @@ export function XFlowEditor({
       headerAction={collapseRightAction}
       externalIssues={
         !runsMode && selectedNode ? externalIssuesMap.get(nodeName(selectedNode, selectedIndex)) : undefined
+      }
+      suppressedChecks={
+        selectedNode && pristineNodes.has(nodeKey(selectedNode, selectedIndex)) ? REQUIRED_CHECKS : undefined
       }
       focusRequest={inspectorFocusRequest}
       formHost={formHost}

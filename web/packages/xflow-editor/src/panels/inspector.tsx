@@ -287,6 +287,7 @@ function NodeParametersForm({
   nodeTypes,
   host,
   externalIssues,
+  suppressedChecks,
   focusRequest,
   onFocusRequestHandled,
   readOnly,
@@ -304,6 +305,8 @@ function NodeParametersForm({
   nodeTypes?: NodeTypesResponse;
   host: NodeFormHost;
   externalIssues?: Record<string, Issue[]>;
+  /** Check types the composer should not report (a pristine new node's required fields). */
+  suppressedChecks?: readonly string[];
   /** Reveals one bound parameter path (the diagnostics' 定位字段). */
   focusRequest?: FocusRequest;
   /** Reports the executed nonce back, so the editor can clear the request. */
@@ -372,6 +375,7 @@ function NodeParametersForm({
         readOnly={readOnly}
         registry={host.registry}
         spec={renderedSpec}
+        suppressedChecks={suppressedChecks}
         value={node}
         onChange={handleChange}
       />
@@ -1171,6 +1175,7 @@ export function Inspector({
   nodeCategories,
   formHost,
   externalIssues,
+  suppressedChecks,
   parameterTab,
   revealNonce,
   focusRequest,
@@ -1214,6 +1219,8 @@ export function Inspector({
   nodeCategories?: Readonly<Record<string, string>>;
   formHost: NodeFormHost;
   externalIssues?: Record<string, Issue[]>;
+  /** Check types the composer should not report (a pristine new node's required fields). */
+  suppressedChecks?: readonly string[];
   parameterTab: ParameterTab;
   /** Bumped by the editor to bring the configuration view to the front. */
   revealNonce?: number;
@@ -1603,6 +1610,7 @@ export function Inspector({
   ) => (
     <NodeParametersForm
       externalIssues={externalIssues}
+      suppressedChecks={suppressedChecks}
       host={formHost}
       invalidDraft={invalidDraft}
       node={node}
@@ -1685,6 +1693,7 @@ export function Inspector({
         ) : (
           <NodeParametersForm
             externalIssues={externalIssues}
+            suppressedChecks={suppressedChecks}
             focusRequest={focusRequest}
             host={formHost}
             invalidDraft={invalidDraft}
@@ -1705,6 +1714,7 @@ export function Inspector({
       <div className="xflow-editor-config__settings">
         <NodeParametersForm
           externalIssues={externalIssues}
+          suppressedChecks={suppressedChecks}
           host={formHost}
           invalidDraft={invalidDraft}
           node={selectedNode}
