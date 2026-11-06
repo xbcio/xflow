@@ -980,7 +980,36 @@ describe("round-2 visual audit fixes", () => {
   });
 
   it("draws the inspector cards as baseline shells on the panel ground (D9)", () => {
-    expect(rule(".xflow-editor .xflow-editor-config")).toMatch(/gap:\s*var\(--xflow-space-3\)\s*;/);
+    expect(rule(".xflow-editor .xflow-editor-config")).toMatch(/gap:\s*var\(--xflow-editor-density-sec-gap\)\s*;/);
+    // The density tier owns the card rhythm (§6.4, 2026-11-06): identity, the
+    // params cards and the JSON source read the variables instead of literals.
+    expect(rule(".xflow-editor .xflow-editor-config__identity")).toMatch(
+      /gap:\s*var\(--xflow-editor-density-field-gap\)\s*;/
+    );
+    expect(rule(".xflow-editor .xflow-editor-config__params .xflow-editor-node-form")).toMatch(
+      /gap:\s*var\(--xflow-editor-density-sec-gap\)\s*;/
+    );
+    expect(
+      rule(
+        ".xflow-editor .xflow-editor-config__params > .xflow-editor-node-form > .xflow-composer-form > .xflow-composer-field-group > .xflow-composer-section-header"
+      )
+    ).toMatch(/min-height:\s*var\(--xflow-editor-density-head-height\)\s*;/);
+    expect(rule(".xflow-editor .xflow-editor-config__params > .xflow-editor-param-source")).toMatch(
+      /padding:\s*var\(--xflow-editor-density-sec-body-y\) var\(--xflow-editor-density-sec-body-x\) var\(--xflow-editor-density-sec-body-b\)\s*;/
+    );
+    // Every card head is the same height: the SectionCard header and the
+    // composer FieldGroup headers both read the one measured value. The
+    // SectionCard head is fixed (not a minimum) so its 22px action keys cannot
+    // make an action-bearing head 1px taller than the rest.
+    expect(rule(".xflow-editor-section-card__header")).toMatch(
+      /height:\s*var\(--xflow-editor-density-head-height\)\s*;/
+    );
+    expect(rule(".xflow-editor .xflow-editor-inspector .xflow-composer-field-group > .xflow-composer-section-header")).toMatch(
+      /min-height:\s*var\(--xflow-editor-density-head-height\)\s*;/
+    );
+    expect(rule(".xflow-editor-section-card__body")).toMatch(
+      /gap:\s*var\(--xflow-editor-density-field-gap\)\s*;/
+    );
     // The card owns one 1px frame and elev-1; its header/body halves draw none.
     const card = rule(".xflow-editor .xflow-editor-inspector .xflow-editor-section-card");
     expect(card).toMatch(/background:\s*var\(--xflow-panel-raised\)\s*;/);

@@ -2069,12 +2069,12 @@ button.xflow-editor-overview__run:hover {
  * border, fill or horizontal padding — and the body takes the design's
  * 4 / 12 / 12 rhythm. */
 .xflow-editor .xflow-editor-config > .xflow-editor-section-card > .xflow-editor-section-card__body {
-  gap: var(--xflow-space-3);
-  padding: var(--xflow-space-1) var(--xflow-space-3) var(--xflow-space-3);
+  gap: var(--xflow-editor-density-field-gap);
+  padding: var(--xflow-editor-density-sec-body-y) var(--xflow-editor-density-sec-body-x) var(--xflow-editor-density-sec-body-b);
 }
 
 .xflow-editor .xflow-editor-config .xflow-composer-form {
-  gap: var(--xflow-space-3);
+  gap: var(--xflow-editor-density-sec-gap);
 }
 
 /* Only the FieldGroups inside the parameters card are flattened; the merged
@@ -2520,7 +2520,7 @@ button.xflow-editor-overview__run:hover {
 .xflow-editor-run-panel {
   display: flex;
   flex-direction: column;
-  gap: var(--xflow-space-3);
+  gap: var(--xflow-editor-density-sec-gap);
 }
 
 .xflow-editor-run-summary {
@@ -2548,12 +2548,13 @@ button.xflow-editor-overview__run:hover {
 /* Design `.sec`: an 8px header row over a 4px/12px body, on the raised card
  * that `.xflow-composer-field-group` already draws. */
 .xflow-editor-run-section > .xflow-composer-section-header {
-  padding: var(--xflow-space-2) var(--xflow-space-3);
+  min-height: var(--xflow-editor-density-head-height);
+  padding: var(--xflow-editor-density-sec-head-y) var(--xflow-editor-density-sec-head-x);
 }
 
 .xflow-editor-run-section > .xflow-composer-section-body {
-  gap: var(--xflow-space-3);
-  padding: var(--xflow-space-1) var(--xflow-space-3) var(--xflow-space-3);
+  gap: var(--xflow-editor-density-field-gap);
+  padding: var(--xflow-editor-density-sec-body-y) var(--xflow-editor-density-sec-body-x) var(--xflow-editor-density-sec-body-b);
 }
 
 .xflow-editor-run-hint {
@@ -4014,8 +4015,8 @@ button.xflow-editor-overview__run:hover {
 .xflow-editor .xflow-editor-config {
   display: flex;
   flex-direction: column;
-  /* Baseline .insp-body: 12px between the section cards. */
-  gap: var(--xflow-space-3);
+  /* Baseline .insp-body: the card stack, at the density step. */
+  gap: var(--xflow-editor-density-sec-gap);
   min-width: 0;
 }
 
@@ -4121,7 +4122,7 @@ button.xflow-editor-overview__run:hover {
 .xflow-editor-workflow-settings {
   display: flex;
   flex-direction: column;
-  gap: var(--xflow-space-2-5);
+  gap: var(--xflow-editor-density-sec-gap);
 }
 
 .xflow-editor-section-card {
@@ -4193,9 +4194,9 @@ button.xflow-editor-overview__run:hover {
 
 .xflow-editor-section-card__body {
   display: grid;
-  gap: var(--xflow-space-2);
+  gap: var(--xflow-editor-density-field-gap);
   min-width: 0;
-  padding: var(--xflow-space-2) var(--xflow-space-2-5) var(--xflow-space-2-5);
+  padding: var(--xflow-editor-density-sec-body-y) var(--xflow-editor-density-sec-body-x) var(--xflow-editor-density-sec-body-b);
 }
 
 /* 工作流设置 draws the baseline gallery's section stack (figure 6): 8px between
@@ -4207,7 +4208,7 @@ button.xflow-editor-overview__run:hover {
   --xflow-editor-section-card-header-bg: var(--xflow-surface-raised);
   --xflow-editor-section-card-radius: var(--xflow-radius-md);
 
-  gap: var(--xflow-space-2);
+  gap: var(--xflow-editor-density-sec-gap);
 }
 
 /* 标识's copy control is a 12x19 text button in Typography's action slot. It
@@ -4226,8 +4227,8 @@ button.xflow-editor-overview__run:hover {
 }
 
 .xflow-editor-workflow-settings .xflow-editor-section-card__header {
-  min-height: 35px;
-  padding: 0 var(--xflow-space-3);
+  min-height: var(--xflow-editor-density-head-height);
+  padding: var(--xflow-editor-density-sec-head-y) var(--xflow-editor-density-sec-head-x);
 }
 
 .xflow-editor-workflow-settings .xflow-editor-section-card__title {
@@ -4235,7 +4236,7 @@ button.xflow-editor-overview__run:hover {
 }
 
 .xflow-editor-workflow-settings .xflow-editor-section-card__body {
-  padding: var(--xflow-space-0-5) var(--xflow-space-3) var(--xflow-space-2);
+  padding: var(--xflow-editor-density-sec-body-y) var(--xflow-editor-density-sec-body-x) var(--xflow-editor-density-sec-body-b);
 }
 
 .xflow-editor-variable-list {
@@ -5879,7 +5880,7 @@ button.xflow-editor-overview__run:hover {
 .xflow-editor .xflow-editor-config__identity {
   display: flex;
   flex-direction: column;
-  gap: var(--xflow-space-3);
+  gap: var(--xflow-editor-density-field-gap);
   min-width: 0;
 }
 
@@ -5905,7 +5906,7 @@ button.xflow-editor-overview__run:hover {
 /* 参数 (§2.2): each descriptor group is a top-level card; there is no
  * 节点参数 wrapper any more, so the FieldGroup owns the frame. */
 .xflow-editor .xflow-editor-config__params .xflow-editor-node-form {
-  gap: var(--xflow-space-3);
+  gap: var(--xflow-editor-density-sec-gap);
 }
 
 .xflow-editor .xflow-editor-config__params > .xflow-editor-node-form > .xflow-composer-form > .xflow-composer-field-group {
@@ -5915,8 +5916,8 @@ button.xflow-editor-overview__run:hover {
 }
 
 .xflow-editor .xflow-editor-config__params > .xflow-editor-node-form > .xflow-composer-form > .xflow-composer-field-group > .xflow-composer-section-header {
-  min-height: 36px;
-  padding: var(--xflow-space-2) var(--xflow-space-3);
+  min-height: var(--xflow-editor-density-head-height);
+  padding: var(--xflow-editor-density-sec-head-y) var(--xflow-editor-density-sec-head-x);
 }
 
 /* The JSON source view replaces the parameter cards and takes the same frame. */
@@ -5925,7 +5926,7 @@ button.xflow-editor-overview__run:hover {
   border: 1px solid var(--xflow-border);
   border-radius: var(--xflow-radius-md);
   box-shadow: var(--xflow-elev-1);
-  padding: var(--xflow-space-3);
+  padding: var(--xflow-editor-density-sec-body-y) var(--xflow-editor-density-sec-body-x) var(--xflow-editor-density-sec-body-b);
 }
 
 /* 头部 (§2.1): the display name and the neutral 已禁用 chip share the first
