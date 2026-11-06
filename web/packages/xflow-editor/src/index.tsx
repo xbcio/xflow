@@ -3403,26 +3403,6 @@ export function XFlowEditor({
   const invalidDraftCount = Object.values(parameterDrafts).filter((draft) => draft.error).length;
   const invalidWorkflowJsonFields = (Object.keys(workflowJsonLabels) as WorkflowJsonField[])
     .filter((field) => workflowJsonDrafts[field]?.error);
-  // 没有未保存修改时保存不可用 (baseline: `publish.tsx` clean state). A definition
-  // that was never persisted reads 未保存 even at zero changes, and a pending
-  // parameters draft (debounced, or unparseable) is an edit the count has not
-  // seen yet, so neither counts as clean.
-  const saveClean = versionChip.tone === "success"
-    && Object.keys(parameterDrafts).length === 0
-    && invalidWorkflowJsonFields.length === 0;
-  const saveBlocked = invalidDraftCount > 0 || invalidWorkflowJsonFields.length > 0
-    || (validationMode === "enforce" && formIssueSummary.errors > 0);
-  const saveTooltip = saveClean
-    ? "没有未保存的修改"
-    : invalidDraftCount > 0
-      ? `${invalidDraftCount} 个节点的参数 JSON 未通过解析，修正后才能保存`
-      : invalidWorkflowJsonFields.length > 0
-        ? `工作流 ${invalidWorkflowJsonFields.map((field) => workflowJsonLabels[field]).join("、")} JSON 未通过解析，修正后才能保存`
-      : formIssueSummary.errors > 0
-        ? validationMode === "enforce"
-          ? `${formIssueSummary.errors} 个参数错误（server 为 enforce 模式），修正后才能保存`
-          : `${formIssueSummary.errors} 个参数问题（server 为 ${validationMode} 模式，不阻止保存）`
-        : DEFAULT_SAVE_TOOLTIP;
 
   /**
    * Save/run gate. Flushes parseable JSON drafts first, then blocks while any
@@ -3541,6 +3521,35 @@ export function XFlowEditor({
     ],
     [draftWorkflow, nodeTypes, operationError, paramIssues, formIssueSummary]
   );
+  // §9 accept-rd (2026-11-07): the save button's badge and the status bar print
+  // one number taken from one set of rows. `area: "operation"` rows repeat the
+  // last refused save / run; they are the reason shown in the drawer, not a
+  // finding about the definition (the publish counts already skip them), and
+  // counting them here made the strip read one higher than the badge.
+  const definitionErrorCount = React.useMemo(
+    () => diagnostics.filter((entry) => entry.status === "error" && entry.area !== "operation").length,
+    [diagnostics]
+  );
+  // 没有未保存修改时保存不可用 (baseline: `publish.tsx` clean state). A definition
+  // that was never persisted reads 未保存 even at zero changes, and a pending
+  // parameters draft (debounced, or unparseable) is an edit the count has not
+  // seen yet, so neither counts as clean.
+  const saveClean = versionChip.tone === "success"
+    && Object.keys(parameterDrafts).length === 0
+    && invalidWorkflowJsonFields.length === 0;
+  const saveBlocked = invalidDraftCount > 0 || invalidWorkflowJsonFields.length > 0
+    || (validationMode === "enforce" && formIssueSummary.errors > 0);
+  const saveTooltip = saveClean
+    ? "没有未保存的修改"
+    : invalidDraftCount > 0
+      ? `${invalidDraftCount} 个节点的参数 JSON 未通过解析，修正后才能保存`
+      : invalidWorkflowJsonFields.length > 0
+        ? `工作流 ${invalidWorkflowJsonFields.map((field) => workflowJsonLabels[field]).join("、")} JSON 未通过解析，修正后才能保存`
+        : definitionErrorCount > 0
+          ? saveBlocked
+            ? `${definitionErrorCount} 个错误（server 为 enforce 模式），修正后才能保存`
+            : `${definitionErrorCount} 个错误（server 为 ${validationMode} 模式，不阻止保存）`
+          : DEFAULT_SAVE_TOOLTIP;
   // §6.10 publish gate: unparseable drafts and diagnostics errors block; node
   // form findings are errors only where the server enforces them (everywhere
   // else they are the warnings the dialog says may be published). Local form
@@ -6125,9 +6134,9 @@ export function XFlowEditor({
                   {/* Fold 4 (§6.3): the ⌘S keycap is the first thing to go; the
                       shortcut stays in the tooltip. */}
                   {toolbarFold < 4 ? <kbd className="xflow-editor-kbd">⌘S</kbd> : null}
-                  {formIssueSummary.errors > 0 ? (
+                  {definitionErrorCount > 0 ? (
                     <span className="xflow-editor-save-issues" data-testid="save-issue-count">
-                      {formIssueSummary.errors}
+                      {definitionErrorCount}
                     </span>
                   ) : null}
                 </Button>
@@ -6665,6 +6674,7 @@ export function XFlowEditor({
           workflow={draftWorkflow}
           runtime={localRuntime}
           diagnostics={diagnostics}
+          errorCount={definitionErrorCount}
           blockedDraftNodes={operationError ? blockedDraftNodes : undefined}
           nodeCategories={nodeCategories}
           latestExecution={execution}

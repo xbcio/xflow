@@ -405,6 +405,51 @@ describe("node-form findings in the issue list (WB-13)", () => {
   });
 });
 
+// §9 accept-rd (2026-11-07): the save badge and the status strip print one
+// number from one set of rows. Before this, a refused save appended an
+// `area: "operation"` row that the strip counted and the badge did not, so the
+// strip read one higher after every blocked save / run.
+describe("save badge and status strip share one error count", () => {
+  const formTypes = generated as unknown as NodeTypesResponse;
+  const enforce: NodeTypesResponse = { ...formTypes, param_validation_mode: "enforce" };
+  const missingUrl: WorkflowDef = {
+    // No id: an unsaved draft keeps 保存 usable without an edit.
+    name: "http",
+    nodes: [{ name: "api", type: "xflow.http", parameters: { method: "GET" } }],
+    connections: {}
+  };
+
+  it("does not let the refused-operation row lift the strip above the badge", async () => {
+    render(<XFlowEditor value={missingUrl} nodeTypes={enforce} onSave={async (next) => next} />);
+    const save = screen.getByRole("button", { name: /保存/ });
+    expect(strip().textContent).toContain("1 错误");
+    expect(within(save).getByTestId("save-issue-count").textContent).toBe("1");
+
+    fireEvent.click(save);
+    await waitFor(() =>
+      expect(screen.getAllByText(/节点 api 的参数未通过校验（1 个错误）/).length).toBeGreaterThan(0)
+    );
+    // The refusal row still explains itself in the auto-revealed drawer.
+    const badge = within(screen.getByRole("button", { name: /保存/ })).getByTestId("save-issue-count").textContent;
+    const text = strip("诊断台摘要").textContent ?? "";
+    expect(badge).toBe("1");
+    expect(text).toContain("1 错误");
+    expect(text).not.toContain("2 错误");
+  });
+
+  it("counts a graph error and a form error on both surfaces", () => {
+    // One dangling edge target (graph) plus the missing URL (form): two rows,
+    // two on the badge. Counting only form errors would print 1 beside 2.
+    const brokenForm: WorkflowDef = {
+      ...missingUrl,
+      connections: { api: { main: [{ node: "missing" }] } }
+    };
+    render(<XFlowEditor value={brokenForm} nodeTypes={enforce} onSave={async (next) => next} />);
+    expect(screen.getByRole("button", { name: "展开诊断台" }).textContent).toContain("2 错误");
+    expect(screen.getByTestId("save-issue-count").textContent).toBe("2");
+  });
+});
+
 describe("drawer head and tabs (§6.0 / §6.5)", () => {
   it("is a region named by its 诊断台 heading, with the issue count tab and every other tab wired", () => {
     render(<XFlowEditor value={withoutCredentials(broken)} />);

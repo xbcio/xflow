@@ -57,6 +57,13 @@ export interface DiagnosticsDockProps {
   operationError?: string;
   /** Nodes whose unparseable parameters JSON blocked the last save/run. */
   blockedDraftNodes?: string[];
+  /**
+   * The strip's error count (§9 accept-rd 2026-11-07). The editor passes the
+   * same number its save badge prints, so the two cannot drift; the rows behind
+   * it exclude `area: "operation"` (the last refused save / run is a message,
+   * not a finding). Omit it and the strip counts its own error rows.
+   */
+  errorCount?: number;
   /** Declared descriptor category per node type (spec §6.13), for the category mix. */
   nodeCategories?: Readonly<Record<string, string>>;
   /** The top bar's unsaved wording (§6.3), reused for the summary's 版本 row. */
@@ -1167,6 +1174,7 @@ export function DiagnosticsDock({
   runtime,
   diagnostics: allDiagnostics,
   operationError,
+  errorCount: definitionErrorCount,
   unsavedCount,
   dock,
   onDockChange,
@@ -1263,7 +1271,7 @@ export function DiagnosticsDock({
         covered={expanded}
         drawerId={drawerId}
         edgeCount={edgeCount}
-        errorCount={errors.length}
+        errorCount={definitionErrorCount ?? errors.length}
         expanded={!collapsed}
         nodeCount={nodes.length}
         runLabel={runLabel}
