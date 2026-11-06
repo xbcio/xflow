@@ -2051,16 +2051,16 @@ button.xflow-editor-overview__run:hover {
   white-space: nowrap;
 }
 
-/* Copy / ⋯: the same 32×24 ghost chip as the title bar's keys (§6.0, §6.4). */
+/* Copy / ⋯: the ghost chip at the panel's density step (§6.4, 2026-11-06). */
 .xflow-editor button.xflow-editor-inspector-head__action {
   align-items: center;
   border-radius: var(--xflow-radius-sm);
   color: var(--xflow-text);
   display: inline-flex;
   font-size: var(--xflow-font-xl);
-  height: var(--xflow-control-height-sm);
+  height: var(--xflow-editor-density-control-h-sm);
   justify-content: center;
-  min-width: var(--xflow-control-height);
+  min-width: var(--xflow-editor-density-control-h);
   padding: 0 var(--xflow-space-2);
 }
 
@@ -3564,8 +3564,9 @@ button.xflow-editor-overview__run:hover {
 
 .xflow-editor .xflow-editor-field {
   font-size: var(--xflow-font-md);
-  height: var(--xflow-control-height);
-  line-height: calc(var(--xflow-control-height) - 2px);
+  /* §6.4 (2026-11-06): the inspector's identity field is a density control. */
+  height: var(--xflow-editor-density-control-h);
+  line-height: calc(var(--xflow-editor-density-control-h) - 2px);
   padding-inline: var(--xflow-space-2-5);
 }
 
@@ -3598,6 +3599,10 @@ button.xflow-editor-overview__run:hover {
   border-color: var(--xflow-border);
   color: var(--xflow-text);
   font-size: var(--xflow-font-md);
+  /* §6.4 (2026-11-06): the search is a density control; the affix wrapper's
+   * 3px padding + 1px border keep its inner 20px line, so pin the box to 28
+   * instead of letting the line box round the whole field to 29. */
+  height: var(--xflow-editor-density-control-h);
   outline-color: transparent;
 }
 
@@ -4297,7 +4302,7 @@ button.xflow-editor-overview__run:hover {
   align-items: center;
   display: inline-flex;
   gap: 0;
-  height: var(--xflow-control-height);
+  height: var(--xflow-editor-density-control-h);
 }
 
 /* ED-19: 入口 rows reuse the outline's icon + name + secondary type ordering.
@@ -4409,7 +4414,7 @@ button.xflow-editor-overview__run:hover {
 
 .xflow-editor .xflow-editor-variable-type {
   font-size: var(--xflow-font-md);
-  height: var(--xflow-control-height);
+  height: var(--xflow-editor-density-control-h);
   min-width: 0;
   width: 100%;
 }
@@ -4432,11 +4437,11 @@ button.xflow-editor-overview__run:hover {
   border-radius: var(--xflow-radius-xs);
   color: var(--xflow-text-tertiary);
   display: inline-flex;
-  height: var(--xflow-control-height-sm);
+  height: var(--xflow-editor-density-control-h-sm);
   justify-content: center;
-  min-width: var(--xflow-control-height-sm);
+  min-width: var(--xflow-editor-density-control-h-sm);
   padding: 0;
-  width: var(--xflow-control-height-sm);
+  width: var(--xflow-editor-density-control-h-sm);
 }
 
 .xflow-editor .xflow-editor-variable-action:not(:disabled):hover {
@@ -4474,7 +4479,7 @@ button.xflow-editor-overview__run:hover {
   border-radius: var(--xflow-radius-xs);
   color: var(--xflow-text-secondary);
   font-size: var(--xflow-font-md);
-  height: var(--xflow-control-height);
+  height: var(--xflow-editor-density-control-h);
   justify-self: start;
 }
 

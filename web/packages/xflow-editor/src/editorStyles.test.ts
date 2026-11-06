@@ -96,12 +96,19 @@ describe("xflow.editor cascade frame", () => {
   });
 
   it("sizes the panel-titlebar icon buttons from the shared 24px control height", () => {
-    for (const hook of [
-      "xflow-editor-variable-action",
-      "xflow-editor-panel-collapse"
-    ]) {
-      expect(css, hook).toMatch(new RegExp(`\\.${hook}\\b[^{}]*\\{[^{}]*height:\\s*var\\(--xflow-control-height-sm\\)`));
-    }
+    // The title bar keeps the foundation step; only the variable row's action
+    // keys below it follow the editor density tier (§6.4, 2026-11-06).
+    expect(css).toMatch(
+      /\.xflow-editor-panel-collapse\b[^{}]*\{[^{}]*height:\s*var\(--xflow-control-height-sm\)/
+    );
+    expect(css).toMatch(
+      /\.xflow-editor-variable-action\s*\{[^{}]*height:\s*var\(--xflow-editor-density-control-h-sm\)\s*;/
+    );
+    // The library search is the left column's density control; without the pin
+    // its affix wrapper's line box rounds to 29.
+    expect(css).toMatch(
+      /\.xflow-editor \.xflow-editor-library-search\s*\{[^{}]*height:\s*var\(--xflow-editor-density-control-h\)\s*;/
+    );
     // The collapse keys are the baseline's 32×24 ghost IconButton (6px
     // radius, 8px inline padding), so the title-bar actions line up with the
     // mock's `.btn--icon.btn--sm`.
@@ -966,6 +973,14 @@ describe("round-2 visual audit fixes", () => {
 
   it("draws the inspector form controls as the baseline .ctl: 6px radius, 10px inline padding, 3px/18% focus ring", () => {
     expect(rule(".xflow-editor .xflow-editor-field")).toMatch(/padding-inline:\s*var\(--xflow-space-2-5\)\s*;/);
+    // §6.4 (2026-11-06): this is the identity field inside the density tier, so
+    // its height and line box follow the density step rather than the 32px core.
+    expect(rule(".xflow-editor .xflow-editor-field")).toMatch(
+      /height:\s*var\(--xflow-editor-density-control-h\)\s*;/
+    );
+    expect(rule(".xflow-editor .xflow-editor-field")).toMatch(
+      /line-height:\s*calc\(var\(--xflow-editor-density-control-h\) - 2px\)\s*;/
+    );
     expect(rule(".xflow-editor .xflow-editor-textarea")).toMatch(/min-height:\s*64px\s*;/);
     expect(rule(".xflow-editor .xflow-editor-textarea")).toMatch(
       /padding:\s*var\(--xflow-space-1-5\) var\(--xflow-space-2-5\)\s*;/

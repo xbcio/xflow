@@ -5223,6 +5223,11 @@ export function XFlowEditor({
     : undefined;
 
   const inspectorElement = (
+    // The inspector lives in the editor density tier (§6.4, 2026-11-06): the
+    // same 28 / 22 step as the top bar, here through the nested provider so the
+    // panel's AntD controls, popups and dialogs follow it. Before this it only
+    // wrapped the <header>; the canvas keeps its foundation step.
+    <ConfigProvider theme={editorDensityTheme}>
     <Inspector
       defaultTab={runsMode ? "run" : undefined}
       editable={editMode}
@@ -5271,6 +5276,7 @@ export function XFlowEditor({
       // snapshot definition) keeps the settings-only panel.
       overview={runsMode ? undefined : workflowOverview}
     />
+    </ConfigProvider>
   );
 
   // §6.12 dialog inputs: the definition node (parameters, label) and the
@@ -5951,6 +5957,10 @@ export function XFlowEditor({
             </nav>
             {desktopLeftCollapsed ? null : (
               <div className="xflow-editor-left__content">
+                {/* The left column shares the editor density tier with the
+                    inspector (§6.4, 2026-11-06): node library, outline,
+                    variables and execution list all take the 28 / 22 step. */}
+                <ConfigProvider theme={editorDensityTheme}>
                 {runsMode ? (
                   <ExecutionListPanel
                     selectedId={selectedExecution?.executionId}
@@ -5970,6 +5980,7 @@ export function XFlowEditor({
                     onWorkflowJsonText={updateWorkflowJsonText}
                   />
                 )}
+                </ConfigProvider>
               </div>
             )}
           </div>
@@ -6264,6 +6275,8 @@ export function XFlowEditor({
             size={240}
             onClose={() => setCompactDrawer(undefined)}
           >
+            {/* The drawer carries the same density tier as the docked column. */}
+            <ConfigProvider theme={editorDensityTheme}>
             {leftDrawerSection === "executions" ? (
               <ExecutionListPanel
                 selectedId={selectedExecution?.executionId}
@@ -6282,6 +6295,7 @@ export function XFlowEditor({
                 onWorkflowJsonText={updateWorkflowJsonText}
               />
             )}
+            </ConfigProvider>
           </Drawer>
         ) : null}
 
