@@ -168,6 +168,19 @@ describe("xflow.editor cascade frame", () => {
     expect(css).not.toContain("border-end-end-radius: 0");
     expect(css).not.toContain("border-start-start-radius: 0");
   });
+
+  it("gives the literal editor the fx chip's 12px mono step without shrinking the row", () => {
+    // §6.4 (2026-11-06): the literal the chip reveals is an expression, so it
+    // takes the same mono 12px as the chip — wrapper and AntD's textarea alike.
+    expect(css).toMatch(
+      /\.xflow-editor \.xflow-editor-nodeform-expression-editor,\s*\.xflow-editor \.xflow-editor-nodeform-expression-editor textarea\s*\{[^}]*font-family:\s*var\(--xflow-font-mono\);\s*font-size:\s*var\(--xflow-font-sm\);\s*line-height:\s*var\(--xflow-line-height-md\);\s*\}/
+    );
+    // Smaller type must not shrink a single line: the pinned 20px line box is
+    // what AntD's autoSize adds padding and border to (20 + 6 + 2 = 28).
+    expect(css).toMatch(
+      /\.xflow-editor \.xflow-composer-form \.xflow-editor-nodeform-expression-editor\s*\{[^}]*min-height:\s*var\(--xflow-editor-density-control-h\)\s*;/
+    );
+  });
 });
 
 describe("xflow.editor panel title bar (§6.0)", () => {

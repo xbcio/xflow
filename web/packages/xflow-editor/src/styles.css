@@ -3862,6 +3862,12 @@ button.xflow-editor-overview__run:hover {
 .xflow-editor .xflow-editor-nodeform-expression-editor,
 .xflow-editor .xflow-editor-nodeform-expression-editor textarea {
   font-family: var(--xflow-font-mono);
+  /* The literal the fx chip reveals is an expression, not body text: it takes
+     the same 12px mono step as the chip (§6.4, 2026-11-06). The line box stays
+     the shared 20px, so AntD's autoSize height (line box + 6 padding + 2 border)
+     is still the 28px density control for one line and grows in 20px steps. */
+  font-size: var(--xflow-font-sm);
+  line-height: var(--xflow-line-height-md);
 }
 
 .xflow-editor .xflow-editor-nodeform-expression.is-expression .xflow-editor-nodeform-expression-editor {
