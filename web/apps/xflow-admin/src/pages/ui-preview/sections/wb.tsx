@@ -780,17 +780,30 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
     }
   }, [leftOpen, rightOpen]);
   useLayoutEffect(() => {
-    if (compactLeft && !autoCollapsed.current.left) {
-      autoCollapsed.current.left = true;
-      if (libRef.current?.contains(document.activeElement)) focusReturn.current = 'left';
-      setLeftOpen(false);
+    // 变窄时收起的只记「自动」那一次：进入紧凑宽度时面板还开着，才在变宽时
+    // 还原（§9 accept-rd 2026-11-07，与编辑器一致 —— 编辑器宽屏直接恢复停靠列，
+    // 存值宽度照用）。宽屏下用户自己收起的面板不会被重新打开。
+    if (compactLeft) {
+      if (!autoCollapsed.current.left && leftOpen) {
+        autoCollapsed.current.left = true;
+        if (libRef.current?.contains(document.activeElement)) focusReturn.current = 'left';
+        setLeftOpen(false);
+      }
+    } else if (autoCollapsed.current.left) {
+      autoCollapsed.current.left = false;
+      setLeftOpen(true);
     }
-    if (compactRight && !autoCollapsed.current.right) {
-      autoCollapsed.current.right = true;
-      if (inspRef.current?.contains(document.activeElement)) focusReturn.current = 'right';
-      setRightOpen(false);
+    if (compactRight) {
+      if (!autoCollapsed.current.right && rightOpen) {
+        autoCollapsed.current.right = true;
+        if (inspRef.current?.contains(document.activeElement)) focusReturn.current = 'right';
+        setRightOpen(false);
+      }
+    } else if (autoCollapsed.current.right) {
+      autoCollapsed.current.right = false;
+      setRightOpen(true);
     }
-  }, [compactLeft, compactRight]);
+  }, [compactLeft, compactRight, leftOpen, rightOpen]);
 
   const scale = zoom ?? (metrics.content ? fitScale(metrics, metrics.content) : 1);
   const minContentTop = Math.min(...wbFrames.map((frame) => frame.top - FRAME_LABEL_OFFSET));
