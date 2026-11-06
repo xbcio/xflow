@@ -991,6 +991,22 @@ describe("xflow.editor browser-measured baseline fixes (E6)", () => {
     );
   });
 
+  it("uses one 96px label column for composer and hand-written rows (§6.4)", () => {
+    expect(css).toMatch(/--xflow-editor-density-label-width:\s*96px\s*;/);
+    expect(css).toMatch(/--xflow-composer-label-width:\s*var\(--xflow-editor-density-label-width\)\s*;/);
+    for (const selector of [
+      ".xflow-editor-form-row--node",
+      ".xflow-editor-form-row--workflow",
+      ".xflow-editor-run-summary"
+    ]) {
+      expect(rule(selector), selector).toMatch(
+        /grid-template-columns:\s*var\(--xflow-composer-label-width,\s*96px\)\s*minmax\(0,\s*1fr\)\s*;/
+      );
+    }
+    // The diagnostics list is a key/value table, not a property-panel form row.
+    expect(rule(".xflow-editor-kvlist")).toMatch(/grid-template-columns:\s*62px\s+minmax\(0,\s*1fr\)\s*;/);
+  });
+
   it("stacks a workflow-settings row label-over-control with the baseline 12px/500 label", () => {
     const row = rule(".xflow-editor-workflow-settings .xflow-editor-form-row--workflow");
     expect(row).toMatch(/flex-direction:\s*column\s*;/);

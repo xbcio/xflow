@@ -41,6 +41,8 @@
   /* ObjectGroup draws its own body padding below (§6.4 D2); the composer's
    * outer padding would double the nested fields' inset. */
   --xflow-editor-density-object-group-padding: 0;
+  /* §6.4: one label column for composer fields and the hand-written rows. */
+  --xflow-editor-density-label-width: 96px;
   /*
    * The composer host knobs the density tier sets (§6.4, 2026-11-06). Composer
    * reads every one with a fallback and never declares it, so this root is the
@@ -57,6 +59,7 @@
   --xflow-composer-section-body-gap: var(--xflow-editor-density-field-gap);
   --xflow-composer-section-body-padding: var(--xflow-editor-density-sec-body-y) var(--xflow-editor-density-sec-body-x) var(--xflow-editor-density-sec-body-b);
   --xflow-composer-object-group-padding: var(--xflow-editor-density-object-group-padding);
+  --xflow-composer-label-width: var(--xflow-editor-density-label-width);
   /* §6.5: status bar 28 + this drawer (280, spec §3.2); b/c tiers clamp it below. */
   --xflow-editor-drawer-height: 280px;
   /* The summary folded under the issue list at compact width. */
@@ -2345,7 +2348,7 @@ button.xflow-editor-overview__run:hover {
   align-items: center;
   display: grid;
   gap: var(--xflow-space-2);
-  grid-template-columns: 56px minmax(0, 1fr);
+  grid-template-columns: var(--xflow-composer-label-width, 96px) minmax(0, 1fr);
 }
 
 .xflow-editor-form label span {
@@ -2577,7 +2580,7 @@ button.xflow-editor-overview__run:hover {
   display: grid;
   font-size: var(--xflow-font-sm);
   gap: var(--xflow-space-1-5) var(--xflow-space-2-5);
-  grid-template-columns: 84px minmax(0, 1fr);
+  grid-template-columns: var(--xflow-composer-label-width, 96px) minmax(0, 1fr);
   line-height: var(--xflow-line-height-md);
   margin: 0;
 }
@@ -3377,7 +3380,7 @@ button.xflow-editor-overview__run:hover {
   }
 
   .xflow-editor-form label {
-    grid-template-columns: 48px minmax(0, 1fr);
+    grid-template-columns: var(--xflow-composer-label-width, 96px) minmax(0, 1fr);
   }
 
 }
@@ -3796,11 +3799,11 @@ button.xflow-editor-overview__run:hover {
 }
 
 .xflow-editor-form-row--workflow {
-  grid-template-columns: 64px minmax(0, 1fr);
+  grid-template-columns: var(--xflow-composer-label-width, 96px) minmax(0, 1fr);
 }
 
 .xflow-editor-form-row--node {
-  grid-template-columns: 52px minmax(0, 1fr);
+  grid-template-columns: var(--xflow-composer-label-width, 96px) minmax(0, 1fr);
 }
 
 .xflow-editor-form-section__title--spaced {
