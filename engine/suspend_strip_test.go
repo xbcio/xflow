@@ -82,3 +82,60 @@ func TestFirstSuspendWithAnEmptyStripListKeepsTheInput(t *testing.T) {
 		t.Fatalf("stored output = %#v, want %#v", out, params)
 	}
 }
+
+// parkWithoutInput is parkWithSpec with the lease's input dropped, the shape a
+// control plane persists when it does not expect the node to suspend. The
+// commit must rebuild the input rather than park the node on an empty output.
+func parkWithoutInput(t *testing.T, params map[string]any, spec *types.SuspendSpec) map[string]any {
+	t.Helper()
+	g, err := graph.Compile(&types.WorkflowDef{
+		Name:  "suspend-no-input",
+		Nodes: []types.NodeDef{{Name: "wait", Type: "test.suspend"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := newFakeState()
+	queue := &fakeQueue{}
+	eng := New(state, queue)
+	ctx := context.Background()
+
+	id, err := eng.Submit(ctx, g, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := eng.BuildTaskLease(ctx, queue.Drain()[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease.Input = nil
+	if err := eng.CommitTaskResult(ctx, lease, TaskResult{Suspend: spec}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := state.GetOutput(ctx, id, "wait")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func TestFirstSuspendRebuildsAMissingInput(t *testing.T) {
+	params := map[string]any{"approved": true, "amount": 42}
+	out := parkWithoutInput(t, params, &types.SuspendSpec{
+		Mode: types.ModeSignal, Signals: []string{"go"},
+	})
+	if !reflect.DeepEqual(out, params) {
+		t.Fatalf("stored output = %#v, want the rebuilt input %#v", out, params)
+	}
+}
+
+func TestFirstSuspendRebuildHonoursStripFromOutput(t *testing.T) {
+	params := map[string]any{"approved": true, "amount": 42}
+	out := parkWithoutInput(t, params, &types.SuspendSpec{
+		Mode: types.ModeSignal, Signals: []string{"go"}, StripFromOutput: []string{"approved"},
+	})
+	want := map[string]any{"amount": 42}
+	if !reflect.DeepEqual(out, want) {
+		t.Fatalf("stored output = %#v, want %#v", out, want)
+	}
+}

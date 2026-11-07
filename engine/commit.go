@@ -452,6 +452,21 @@ func (e *Engine) commitSuspendedTaskResult(ctx context.Context, lease *TaskLease
 			return CommitOutcomeTransientError, fmt.Errorf("resuspend result for %s without resume payload", lease.Task.NodeName)
 		}
 		oldSignalName = lease.Task.Payload.Name
+	} else if lease.Input == nil && result.Suspend != nil {
+		// A control plane may persist the lease without its input to keep the
+		// record small. The stored output is what the resumption re-enters
+		// with, so rebuild it rather than suspend the node on an empty one.
+		input, err := e.buildInput(ctx, &lease.Task, g)
+		if err != nil {
+			if errors.Is(err, ErrExecutionInactive) {
+				return CommitOutcomeExecutionInactive, nil
+			}
+			return CommitOutcomeTransientError, fmt.Errorf("rebuild input for suspension of %s: %w", lease.Task.NodeName, err)
+		}
+		output = cloneMap(input.Data)
+		for _, key := range result.Suspend.StripFromOutput {
+			delete(output, key)
+		}
 	} else if lease.Input != nil {
 		// A first suspension stores the input as the node's output, so the
 		// resumption re-enters with the same data. No state is folded in: state
