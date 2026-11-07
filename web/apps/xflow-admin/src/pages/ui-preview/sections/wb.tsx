@@ -395,7 +395,7 @@ function InspectorConfig() {
   return (
     <Collapse
       ghost
-      className="xflow-pv-secs"
+      className="xflow-pv-secs xflow-pv-secs--flat"
       defaultActiveKey={['base', 'request']}
       expandIconPlacement="start"
       expandIcon={({ isActive }) => <DownIcon style={{ transform: isActive ? undefined : 'rotate(-90deg)' }} />}
@@ -403,7 +403,7 @@ function InspectorConfig() {
       items={[
         {
           key: 'base',
-          className: 'xflow-pv-sec-card xflow-pv-sec-fixed',
+          className: 'xflow-pv-sec-fixed',
           /*
            * 基础信息只放身份字段，展开且不可折叠：折起来会把它变成一屏里最先
            * 消失的东西，而改名是面板里最常用的动作。`collapsible: 'icon'` 加上
@@ -411,7 +411,7 @@ function InspectorConfig() {
            */
           collapsible: 'icon',
           showArrow: false,
-          label: <SectionLabel title="基础信息" />,
+          label: <SectionLabel title="基础信息" icon="info" />,
           children: (
             <div className="xflow-pv-sec-fields">
               <Field
@@ -438,9 +438,8 @@ function InspectorConfig() {
         },
         {
           key: 'request',
-          className: 'xflow-pv-sec-card',
           label: (
-            <SectionLabel title="请求">
+            <SectionLabel title="请求" icon="globe">
               <StatusChip tone="success" icon={<CheckIcon />} label="有效" />
             </SectionLabel>
           ),
@@ -498,9 +497,8 @@ function InspectorConfig() {
         },
         {
           key: 'headers',
-          className: 'xflow-pv-sec-card',
           label: (
-            <SectionLabel title="请求头与查询" extra="已填 2 项" />
+            <SectionLabel title="请求头与查询" icon="link" extra="已填 2 项" />
           ),
           children: (
             <div className="xflow-pv-sec-fields">
@@ -515,9 +513,8 @@ function InspectorConfig() {
         },
         {
           key: 'advanced',
-          className: 'xflow-pv-sec-card',
           label: (
-            <SectionLabel title="高级" extra="未设置" />
+            <SectionLabel title="高级" icon="grid" extra="未设置" />
           ),
           children: (
             <div className="xflow-pv-sec-fields">
@@ -546,8 +543,7 @@ function InspectorConfig() {
         },
         {
           key: 'execution',
-          className: 'xflow-pv-sec-card',
-          label: <SectionLabel title="执行策略" extra="继承工作流 · 重试 2 次" />,
+          label: <SectionLabel title="执行策略" icon="shield" extra="继承工作流 · 重试 2 次" />,
           children: (
             <div className="xflow-pv-sec-fields">
               <Field label="错误处理">
@@ -579,8 +575,7 @@ function InspectorConfig() {
         },
         {
           key: 'notes',
-          className: 'xflow-pv-sec-card',
-          label: <SectionLabel title="备注" extra="无" />,
+          label: <SectionLabel title="备注" icon="flag" extra="无" />,
           children: (
             <div className="xflow-pv-sec-fields">
               <Input.TextArea rows={2} placeholder="给同事看的说明，不参与运行" />
@@ -1209,6 +1204,7 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
             <CategoryIcon category="action" icon="globe" />
             <span className="xflow-pv-insp-node">拉取客户档案</span>
             <StatusChip tone="success" icon={<CheckIcon />} label="成功" />
+            <IconButton small label="以 JSON 编辑参数" icon={<CodeIcon />} />
             <IconButton small label="复制节点" icon={<CopyIcon />} />
             <IconButton small label="更多操作" icon={<MoreIcon />} />
             {/*
@@ -1221,8 +1217,7 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
             size="small"
             className="xflow-pv-insp-tabs"
             defaultActiveKey="config"
-            // 「以 JSON 编辑参数」从参数卡头搬进 tab 栏右端（§2.1 / §6.1）。
-            tabBarExtraContent={<IconButton small label="以 JSON 编辑参数" icon={<CodeIcon />} />}
+            // 「以 JSON 编辑参数」已移出 tab 栏，放到节点头部（§6.4 属性面板重设计）。
             classNames={{
               header: 'xflow-pv-insp-tabs-head',
               body: 'xflow-pv-insp-tabs-body',

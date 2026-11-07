@@ -1225,7 +1225,7 @@
    */
   .xflow-pv-insp-head {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+    grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
     align-items: center;
     gap: var(--xflow-space-1) var(--xflow-space-2-5);
     padding: var(--xflow-space-3);
@@ -1256,9 +1256,19 @@
    * footer.
    */
   .xflow-pv-insp-tabs-body { height: 100%; overflow: auto; }
-  /* Tabs nav + pane both take the panel's 12px gutter. */
-  .xflow-pv-insp-tabs-head { padding-inline: var(--xflow-space-3); }
-  .xflow-pv-insp-tabs-content { min-width: 0; padding: 0 var(--xflow-space-3); }
+  /* tab 栏 + pane 都占满面板宽度：区块平铺后分隔线通栏，水平留白交给节头 / 节身。 */
+  .xflow-pv-insp-tabs-head { padding-inline: 0; }
+  /*
+   * 三个 tab 均分 tab 栏宽度（§6.4 属性面板重设计）：每个 tab 文字居中，下划线
+   * 指示条由 rc-tabs 按 tab 自身宽度绘制，因此与 tab 同宽；JSON 切换已移出。
+   */
+  .xflow-pv-insp-tabs-head .ant-tabs-nav-list { display: flex; width: 100%; }
+  .xflow-pv-insp-tabs-head .ant-tabs-tab { flex: 1 1 0; justify-content: center; margin: 0; }
+  .xflow-pv-insp-tabs-head .ant-tabs-tab + .ant-tabs-tab { margin: 0; }
+  .xflow-pv-insp-tabs-head .ant-tabs-tab-btn { width: 100%; text-align: center; }
+  .xflow-pv-insp-tabs-content { min-width: 0; padding: 0; }
+  .xflow-pv-insp-tabs-content > .xflow-pv-tab-note { padding: var(--xflow-space-3); }
+  .xflow-pv-insp-tabs-content > .xflow-pv-kvlist { padding: var(--xflow-space-3); }
   .xflow-pv-insp-tabs-content > * { min-width: 0; }
   /* runs 的属性面板是手写 body（没有 AntD 的 content 包装），补上同样的 12px 内边距。 */
   .xflow-pv-run-body { padding: var(--xflow-space-3); }
@@ -1318,29 +1328,8 @@
   }
   .xflow-pv-sec-body { background: var(--xflow-panel-raised); border: 1px solid var(--xflow-border); border-top: 0; border-radius: 0 0 var(--xflow-radius-md) var(--xflow-radius-md); min-width: 0; overflow: hidden; }
   /*
-   * Card shell (W0, 2026-10-30 用户指示)：Collapse item 本体承担 1px 边框 + 浅阴影，
-   * 头/身两半不再各画边框，否则中间会出现一条接缝阴影。只有工作台的节加这个类。
-   */
-  .xflow-pv-sec-card {
-    background: var(--xflow-panel-raised);
-    border: 1px solid var(--xflow-border);
-    border-radius: var(--xflow-radius-md);
-    box-shadow: var(--xflow-elev-1);
-    overflow: hidden;
-  }
-  .xflow-pv-sec-card .xflow-pv-sec-head {
-    background: transparent;
-    border: 0;
-    border-radius: 0;
-  }
-  .xflow-pv-sec-card .xflow-pv-sec-body {
-    background: transparent;
-    border: 0;
-    border-radius: 0;
-  }
-  /*
-   * 基础信息卡展开且不可折叠（§2.2）：`collapsible: 'icon'` + 隐藏箭头之后，
-   * AntD 仍给卡头留 pointer 光标；改回默认，卡头不再看起来能点。
+   * 基础信息节展开且不可折叠（§2.2）：`collapsible: 'icon'` + 隐藏箭头之后，
+   * AntD 仍给节头留 pointer 光标；改回默认，节头不再看起来能点。
    */
   .xflow-pv-sec-fixed .ant-collapse-header { cursor: default; }
   /* tab 栏右端的「以 JSON 编辑参数」按钮与 tab 基线对齐（§2.1）。 */
@@ -1380,6 +1369,72 @@
     gap: var(--xflow-pv-density-field-gap);
     padding: var(--xflow-pv-density-sec-body-y) var(--xflow-pv-density-sec-body-x) var(--xflow-pv-density-sec-body-b);
   }
+  /*
+   * 属性面板平铺分节（§6.4 属性面板重设计，2026-11-07）：所有区块不再画成带
+   * 边框和阴影的卡片，区块之间只用一条 1px border 分隔；节头 32 高、左右
+   * padding 12，节身左右 12、上 0 下 12；面板底色统一为 panel。
+   */
+  .xflow-pv-secs--flat { gap: 0; }
+  .xflow-pv-secs--flat > .ant-collapse-item,
+  .xflow-pv-secs--flat > .xflow-pv-sec {
+    border: 0;
+    border-top: 1px solid var(--xflow-border);
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+  .xflow-pv-secs--flat > :first-child { border-top: 0; }
+  .xflow-pv-secs--flat .xflow-pv-sec-head {
+    height: 32px;
+    min-height: 32px;
+    padding: 0 var(--xflow-space-3);
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+  }
+  .xflow-pv-secs--flat .xflow-pv-sec-head:hover { background: transparent; }
+  .xflow-pv-secs--flat .xflow-pv-sec-body { background: transparent; border: 0; border-radius: 0; }
+  .xflow-pv-secs--flat .xflow-pv-sec-fields { padding: 0 var(--xflow-space-3) var(--xflow-space-3); }
+  .xflow-pv-secs--flat .xflow-pv-sec-pad { padding: 0 var(--xflow-space-3) var(--xflow-space-3); }
+  .xflow-pv-wb .xflow-pv-secs--flat .xflow-pv-sec-fields { padding: 0 var(--xflow-space-3) var(--xflow-space-3); }
+  .xflow-pv-sec-icon { display: inline-flex; flex: none; color: var(--xflow-text-tertiary); font-size: var(--xflow-font-sm); }
+  /* 工作流设置（§6.4 工作流设置重设计）：标题栏下的摘要行、概览只读信息行、
+     节头右侧的 mono id 与 24×24 复制按钮、触发器行。 */
+  .xflow-pv-insp-summary { padding: 0 var(--xflow-space-3) var(--xflow-space-2); font-size: var(--xflow-font-sm); color: var(--xflow-text-tertiary); }
+  .xflow-pv-info-rows { display: flex; flex-direction: column; gap: var(--xflow-space-2); }
+  .xflow-pv-info-row { display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; column-gap: var(--xflow-space-3); min-height: 28px; font-size: var(--xflow-font-sm); }
+  .xflow-pv-info-label { color: var(--xflow-text-secondary); }
+  .xflow-pv-info-value { min-width: 0; color: var(--xflow-text); }
+  .xflow-pv-info-link { border: 0; background: none; padding: 0; font: inherit; color: var(--xflow-warning-fg); cursor: pointer; text-align: start; }
+  .xflow-pv-info-link[data-tone='success'] { color: var(--xflow-success); }
+  .xflow-pv-sec-id {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    font-size: var(--xflow-font-sm);
+    line-height: 16px;
+    font-family: var(--xflow-font-mono);
+    color: var(--xflow-text-tertiary);
+  }
+  .xflow-pv-trigger-list { display: flex; flex-direction: column; }
+  .xflow-pv-trigger-row {
+    display: flex;
+    align-items: center;
+    gap: var(--xflow-space-2);
+    height: 28px;
+    padding: 0;
+    border: 0;
+    background: none;
+    font-size: var(--xflow-font-sm);
+    color: var(--xflow-text);
+    text-align: start;
+    cursor: pointer;
+    min-width: 0;
+  }
+  .xflow-pv-trigger-row .xflow-pv-mono { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--xflow-font-sm); }
+  .xflow-pv-duration { display: flex; align-items: center; gap: var(--xflow-space-2); min-width: 0; }
+  .xflow-pv-duration-value { flex: 1 1 auto; min-width: 0; }
+  .xflow-pv-duration-unit { flex: none; width: 72px; }
   .xflow-pv-field { display: flex; flex-direction: column; min-width: 0; }
   .xflow-pv-field > * { min-width: 0; max-width: 100%; }
   .xflow-pv-field-label {

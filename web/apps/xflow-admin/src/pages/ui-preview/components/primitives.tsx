@@ -146,14 +146,22 @@ export function Port({
 export function SectionLabel({
   title,
   extra,
+  icon,
   children,
 }: {
   title: string;
   extra?: ReactNode;
+  /** 节头左侧图标（§6.4 属性面板重设计）：展开箭头之后、标题之前。 */
+  icon?: IconKey;
   children?: ReactNode;
 }) {
   return (
     <span className="xflow-pv-sec-label">
+      {icon ? (
+        <span className="xflow-pv-sec-icon" aria-hidden="true">
+          {typeIcon[icon]}
+        </span>
+      ) : null}
       <span className="xflow-pv-sec-title">{title}</span>
       {extra || children ? (
         <span className="xflow-pv-sec-right">

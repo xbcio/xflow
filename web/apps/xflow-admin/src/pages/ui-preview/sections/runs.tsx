@@ -302,10 +302,10 @@ function RunInspector() {
               </Fragment>
             ))}
           </dl>
-          <div className="xflow-pv-secs">
+          <div className="xflow-pv-secs xflow-pv-secs--flat">
             <div className="xflow-pv-sec">
               <div className="xflow-pv-sec-head">
-                <SectionLabel title="错误" />
+                <SectionLabel title="错误" icon="warn" />
               </div>
               <div className="xflow-pv-sec-body">
                 <div className="xflow-pv-sec-pad">
@@ -325,7 +325,7 @@ function RunInspector() {
             </div>
             <div className="xflow-pv-sec">
               <div className="xflow-pv-sec-head">
-                <SectionLabel title="输出" extra={<span className="xflow-pv-faint">无</span>} />
+                <SectionLabel title="输出" icon="upload" extra={<span className="xflow-pv-faint">无</span>} />
               </div>
             </div>
           </div>

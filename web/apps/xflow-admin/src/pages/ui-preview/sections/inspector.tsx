@@ -47,7 +47,7 @@ function Sections({
   return (
     <Collapse
       ghost
-      className="xflow-pv-secs"
+      className="xflow-pv-secs xflow-pv-secs--flat"
       defaultActiveKey={items.filter((item) => item.defaultActive !== false).map((item) => item.key)}
       expandIconPlacement="start"
       expandIcon={({ isActive }) => <DownIcon style={{ transform: isActive ? undefined : 'rotate(-90deg)' }} />}
@@ -160,7 +160,7 @@ function InspPanel({
           className="xflow-pv-insp-tabs"
           defaultActiveKey={activeTab}
           // 三个 tab（§2.1，2026-11-04 用户裁定）：设置并入配置页的执行策略卡。
-          tabBarExtraContent={<IconButton small label="以 JSON 编辑参数" icon={<CodeIcon />} />}
+          // JSON 切换已移出 tab 栏，放到节点头部（§6.4 属性面板重设计）。
           classNames={{
             header: 'xflow-pv-insp-tabs-head',
             body: 'xflow-pv-insp-tabs-body',
@@ -219,6 +219,11 @@ function NodeHead({
   /** Inline rename (user ruling 2026-10-17): double-click the name; Enter commits, Esc cancels. */
   renaming?: boolean;
 }) {
+  const json = (
+    <Tooltip title="以 JSON 编辑参数">
+      <Button type="text" size="small" className="xflow-pv-tool" icon={<CodeIcon />} aria-label="以 JSON 编辑参数" />
+    </Tooltip>
+  );
   const copy = (
     <Tooltip title="复制节点">
       <Button type="text" size="small" className="xflow-pv-tool" icon={<CopyIcon />} aria-label="复制节点" />
@@ -249,6 +254,7 @@ function NodeHead({
         </Tooltip>
       )}
       {chip}
+      {json}
       {copy}
       {more}
       <div className="xflow-pv-insp-type" title={sub}>
@@ -286,13 +292,13 @@ export function InspectorSection() {
                 {
                   key: 'base',
                   fixed: true,
-                  label: <SectionLabel title="基础信息" />,
+                  label: <SectionLabel title="基础信息" icon="info" />,
                   children: fields(inspSwitch.base),
                 },
                 {
                   key: 'route',
                   label: (
-                    <SectionLabel title="路由">
+                    <SectionLabel title="路由" icon="branch">
                       <StatusChip tone="success" icon={<CheckIcon />} label="有效" />
                     </SectionLabel>
                   ),
@@ -311,13 +317,13 @@ export function InspectorSection() {
                 {
                   key: 'execution',
                   defaultActive: false,
-                  label: <SectionLabel title="执行策略" extra="继承工作流 · 重试 2 次" />,
+                  label: <SectionLabel title="执行策略" icon="shield" extra="继承工作流 · 重试 2 次" />,
                   children: fields(inspSettings[0].fields),
                 },
                 {
                   key: 'notes',
                   defaultActive: false,
-                  label: <SectionLabel title="备注" extra="无" />,
+                  label: <SectionLabel title="备注" icon="flag" extra="无" />,
                   children: <Input.TextArea rows={2} placeholder="给同事看的说明，不参与运行" />,
                 },
               ]}
@@ -332,7 +338,7 @@ export function InspectorSection() {
           }
         />
         <figcaption>
-          配置 tab：基础信息（不可折叠）+ 路由（端口只在路由卡里出现一次），执行策略与备注折叠；宿主没接 onRunNode 时底部整条不渲染
+          配置 tab：基础信息（不可折叠）+ 路由（端口只在路由节里出现一次），执行策略与备注折叠；区块平铺分节、没有卡片阴影；宿主没接 onRunNode 时底部整条不渲染
         </figcaption>
       </figure>
 
@@ -351,7 +357,7 @@ export function InspectorSection() {
                 {
                   key: 'notes',
                   defaultActive: false,
-                  label: <SectionLabel title="备注" extra="无" />,
+                  label: <SectionLabel title="备注" icon="flag" extra="无" />,
                   children: <Input.TextArea rows={2} placeholder="给同事看的说明，不参与运行" />,
                 },
               ]}
@@ -372,7 +378,7 @@ export function InspectorSection() {
               items={[
                 {
                   key: 'in',
-                  label: <SectionLabel title="输入" />,
+                  label: <SectionLabel title="输入" icon="link" />,
                   children: inspConnections.inputs.map((row) => (
                     <PortRow
                       key={row.id}
@@ -384,12 +390,12 @@ export function InspectorSection() {
                 },
                 {
                   key: 'out',
-                  label: <SectionLabel title="输出端口" />,
+                  label: <SectionLabel title="输出端口" icon="upload" />,
                   children: inspConnections.outputs.map((row) => <PortRow key={row.id} row={row} dir="out" />),
                 },
                 {
                   key: 'policy',
-                  label: <SectionLabel title="错误策略" />,
+                  label: <SectionLabel title="错误策略" icon="warn" />,
                   children: fields(inspConnections.policy),
                 },
               ]}
@@ -427,13 +433,13 @@ export function InspectorSection() {
                 items={[
                   {
                     key: 'in',
-                    label: <SectionLabel title="输入" />,
+                    label: <SectionLabel title="输入" icon="link" />,
                     children: <pre className="xflow-pv-code">{inspRuns.input}</pre>,
                   },
                   {
                     key: 'out',
                     label: (
-                      <SectionLabel title="输出">
+                      <SectionLabel title="输出" icon="upload">
                         <Tooltip title="复制输出">
                           <Button
                             type="text"
@@ -479,7 +485,7 @@ export function InspectorSection() {
               chip={<StatusChip tone="danger" icon={<WarnIcon />} label="失败" />}
             />
           }
-          body={<Sections items={[{ key: 'base', label: <SectionLabel title="基础信息" />, children: fields(inspSwitch.base.slice(0, 1)) }]} />}
+          body={<Sections items={[{ key: 'base', label: <SectionLabel title="基础信息" icon="info" />, children: fields(inspSwitch.base.slice(0, 1)) }]} />}
         />
         <figcaption>失败 + 改名态：最近一次运行失败时「运行」tab 带红点；双击节点名进入内联改名，Enter 提交、Esc 取消</figcaption>
       </figure>
@@ -502,7 +508,7 @@ export function InspectorSection() {
                 {
                   key: 'base',
                   fixed: true,
-                  label: <SectionLabel title="基础信息" />,
+                  label: <SectionLabel title="基础信息" icon="info" />,
                   children: fields(inspSwitch.base),
                 },
               ]}
