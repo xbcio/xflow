@@ -257,7 +257,7 @@ describe("outline keyboard (§6.0.1)", () => {
     rerender(<XFlowEditor value={emptied} readOnlyReason="没有写权限" />);
 
     expect(within(outlineRegion()).queryByRole("tree")).toBeNull();
-    expect(screen.queryByPlaceholderText(/搜索 Webhook/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "搜索节点" })).toBeNull();
     expect(document.activeElement).not.toBe(document.body);
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "节点与大纲" }));
   });
@@ -318,9 +318,13 @@ describe("outline status dots (§4, §6.0.1)", () => {
       normal: { status: "skipped" }
     }
   };
+  /** §6.0.1 (2026-11-07): dots belong to the run view, never the edit view. */
+  const runView = (value: WorkflowDef, snapshot?: RuntimeSnapshot) => (
+    <XFlowEditor readOnlyReason="只读回放" runtime={snapshot} value={value} />
+  );
 
   it("takes each dot's tone from the status table, the same snapshot the canvas reads", () => {
-    render(<XFlowEditor runtime={runtime} value={workflow} />);
+    render(runView(workflow, runtime));
 
     for (const [name, status] of [["start", "success"], ["check", "failed"], ["vip", "running"], ["normal", "skipped"]] as const) {
       const row = rowOf(name);
@@ -335,7 +339,7 @@ describe("outline status dots (§4, §6.0.1)", () => {
   });
 
   it("marks a node the run has not reached pending (the status the dashed ring is drawn for), and a skipped one neutral", () => {
-    render(<XFlowEditor runtime={runtime} value={workflow} />);
+    render(runView(workflow, runtime));
 
     expect(rowOf("finish").getAttribute("data-status")).toBe("pending");
     expect(rowOf("finish").getAttribute("data-tone")).toBe("neutral");
@@ -343,15 +347,23 @@ describe("outline status dots (§4, §6.0.1)", () => {
   });
 
   it("is all pending when there is no run", () => {
-    render(<XFlowEditor value={workflow} />);
+    render(runView(workflow));
 
     expect(items().map((row) => row.getAttribute("data-status"))).toEqual(["pending", "pending", "pending", "pending", "pending"]);
   });
 
   it("reads a disabled node as disabled until the run reports it", () => {
-    render(<XFlowEditor value={{ ...workflow, nodes: workflow.nodes?.map((node) => (node.name === "normal" ? { ...node, disabled: true } : node)) }} />);
+    render(runView({ ...workflow, nodes: workflow.nodes?.map((node) => (node.name === "normal" ? { ...node, disabled: true } : node)) }));
 
     expect(rowOf("normal").getAttribute("data-status")).toBe("disabled");
+  });
+
+  it("draws no dots in the edit view, and a BanIcon for a disabled node", () => {
+    render(<XFlowEditor runtime={runtime} value={{ ...workflow, nodes: workflow.nodes?.map((node) => (node.name === "normal" ? { ...node, disabled: true } : node)) }} />);
+
+    expect(items().every((row) => row.getAttribute("data-status") === null)).toBe(true);
+    expect(outlineRegion().querySelector(".xflow-editor-outline__dot")).toBeNull();
+    expect(rowOf("normal").querySelector(".xflow-editor-outline__ban")).toBeTruthy();
   });
 });
 
@@ -360,7 +372,9 @@ describe("outline empty state", () => {
     render(<XFlowEditor value={{ ...workflow, nodes: [], connections: {} }} />);
 
     expect(within(outlineRegion()).queryByRole("tree")).toBeNull();
-    expect(within(outlineRegion()).getByText("添加节点后，这里按执行顺序列出。")).toBeTruthy();
+    // §6.0.1 (2026-11-07): the empty note names the canvas, with an add entry.
+    expect(within(outlineRegion()).getByText("画布上还没有节点")).toBeTruthy();
+    expect(within(outlineRegion()).getByRole("button", { name: "添加节点" })).toBeTruthy();
     expect(outlineRegion().querySelector(".xflow-editor-panel-title__count")?.textContent).toBe("0");
   });
 });

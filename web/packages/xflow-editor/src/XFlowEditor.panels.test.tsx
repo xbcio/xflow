@@ -143,7 +143,7 @@ describe("XFlowEditor panel collapse (§6.0)", () => {
     // Canvas-scope shortcuts defer to a text field (the same rule as ⌘B).
     const library = screen.getByRole("region", { name: "节点" });
     fireEvent.click(within(library).getByRole("button", { name: "搜索节点" }));
-    const search = within(library).getByPlaceholderText("搜索 Webhook / If / HTTP…");
+    const search = within(library).getByPlaceholderText("搜索节点，如 HTTP / If / Webhook");
     fireEvent.keyDown(search, { key: "b", metaKey: true });
     fireEvent.keyDown(search, { key: "∫", code: "KeyB", metaKey: true, altKey: true });
     expect(screen.getByRole("region", { name: "节点" })).toBeTruthy();

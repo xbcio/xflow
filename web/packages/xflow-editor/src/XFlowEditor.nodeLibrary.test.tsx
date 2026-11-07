@@ -48,15 +48,26 @@ const workflow: WorkflowDef = {
 };
 
 const library = () => screen.getByRole("region", { name: "节点" });
-/** ED-14 opens only the first group by default; tile-level tests open the rest. */
+/** 常用 is the only open group by default; tile-level tests open the rest. */
 const expandAllGroups = () => {
   for (const group of library().querySelectorAll<HTMLButtonElement>(".xflow-editor-node-group__title[aria-expanded='false']")) {
     fireEvent.click(group);
   }
 };
-const tiles = () => Array.from(library().querySelectorAll<HTMLButtonElement>("button[data-node-type]"));
+const tiles = () => {
+  // 常用 repeats its types in their own groups (§6.0.1); the type set is unique.
+  const seen = new Set<string>();
+  return Array.from(library().querySelectorAll<HTMLButtonElement>("button[data-node-type]")).filter((element) => {
+    const type = element.dataset.nodeType as string;
+    if (seen.has(type)) return false;
+    seen.add(type);
+    return true;
+  });
+};
 const tile = (type: string) => {
-  const found = library().querySelector<HTMLButtonElement>(`button[data-node-type="${type}"]`);
+  // The row in the type's own group is the last match: 常用 renders first.
+  const matches = library().querySelectorAll<HTMLButtonElement>(`button[data-node-type="${type}"]`);
+  const found = matches[matches.length - 1];
   if (!found) throw new Error(`no library tile for ${type}`);
   return found;
 };
@@ -100,29 +111,50 @@ describe("node library from /v1/node-types (Doc C §6.3)", () => {
     expect(within(library()).getByRole("button", { name: /人工 1/ })).toBeTruthy();
   });
 
-  it("opens only the first group by default and folds the rest with their counts (ED-14)", () => {
+  it("opens 常用 and folds the type groups by default, with their counts (§6.0.1)", () => {
     render(<XFlowEditor nodeTypes={nodeTypes} value={workflow} />);
 
     const titles = Array.from(library().querySelectorAll<HTMLButtonElement>(".xflow-editor-node-group__title"));
-    expect(titles.map((title) => title.getAttribute("aria-expanded"))).toEqual(["true", "false", "false", "false", "false"]);
+    // 常用 first and open; the workflow already has a trigger, so 触发器 folds
+    // like the other type groups (§6.0.1, 2026-11-07).
+    expect(titles).toHaveLength(6);
+    expect(titles.map((title) => title.querySelector(".xflow-editor-block-title")?.textContent)).toEqual([
+      "常用",
+      "触发器",
+      "流程控制",
+      "动作",
+      "代码与转换",
+      "人工"
+    ]);
+    expect(titles.map((title) => title.getAttribute("aria-expanded"))).toEqual([
+      "true",
+      "false",
+      "false",
+      "false",
+      "false",
+      "false"
+    ]);
     // The collapsed headers keep their counts.
     const counts = titles.map((title) => title.querySelector(".xflow-editor-node-group__count")?.textContent);
-    expect(counts[0]).toBe("5");
+    expect(counts[0]).toBe("6");
     expect(counts.slice(1).every((count) => Number(count) > 0)).toBe(true);
-    expect(tile("xflow.trigger.webhook")).toBeTruthy();
-    expect(library().querySelector('button[data-node-type="xflow.http"]')).toBeNull();
+    // 常用 carries the six defaults…
+    expect(tile("xflow.http")).toBeTruthy();
+    expect(tile("xflow.if")).toBeTruthy();
+    // …and the type groups stay folded.
+    expect(library().querySelector('button[data-node-type="xflow.trigger.webhook"]')).toBeNull();
 
     // Opening a group is session-local state: it survives search and closes again.
-    fireEvent.click(titles[2]);
-    expect(titles[2].getAttribute("aria-expanded")).toBe("true");
-    expect(tile("xflow.http")).toBeTruthy();
-    fireEvent.click(titles[2]);
-    expect(titles[2].getAttribute("aria-expanded")).toBe("false");
-    expect(library().querySelector('button[data-node-type="xflow.http"]')).toBeNull();
+    fireEvent.click(titles[1]);
+    expect(titles[1].getAttribute("aria-expanded")).toBe("true");
+    expect(tile("xflow.trigger.webhook")).toBeTruthy();
+    fireEvent.click(titles[1]);
+    expect(titles[1].getAttribute("aria-expanded")).toBe("false");
+    expect(library().querySelector('button[data-node-type="xflow.trigger.webhook"]')).toBeNull();
 
     // A search ignores the fold so a match in a collapsed group stays reachable.
     fireEvent.keyDown(window, { key: "/" });
-    const search = within(library()).getByPlaceholderText("搜索 Webhook / If / HTTP…");
+    const search = within(library()).getByPlaceholderText("搜索节点，如 HTTP / If / Webhook");
     fireEvent.change(search, { target: { value: "http" } });
     expect(tile("xflow.http")).toBeTruthy();
   });

@@ -629,7 +629,10 @@ describe("运行记录 mode (§6.8)", () => {
     const nodeCount = () => container.querySelectorAll(".xflow-preview-node").length;
     expect(nodeCount()).toBe(3);
 
-    fireEvent.click(within(screen.getByRole("region", { name: "节点" })).getByRole("button", { name: "HTTP" }));
+    // 常用 repeats the common types, so the first HTTP row is its copy.
+    fireEvent.click(
+      within(screen.getByRole("region", { name: "节点" })).getAllByRole("button", { name: "HTTP" })[0]
+    );
     expect(nodeCount()).toBe(4);
 
     fireEvent.click(screen.getByRole("radio", { name: "运行记录" }));

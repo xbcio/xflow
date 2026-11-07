@@ -392,7 +392,11 @@ describe("dual-zone left column (§6.0.1)", () => {
     expect(library.querySelector("h3")?.textContent).toBe("节点");
     expect(outline.querySelector("h3")?.textContent).toBe("大纲");
     // 节点 counts the types in the library; 大纲 counts the workflow's nodes.
-    expect(countOf(library)).toBe(String(library.querySelectorAll("button[data-node-type]").length));
+    // 常用 repeats its types in their own groups, so the rows are deduplicated.
+    const listedTypes = new Set(
+      Array.from(library.querySelectorAll("button[data-node-type]"), (row) => row.getAttribute("data-node-type"))
+    );
+    expect(countOf(library)).toBe(String(listedTypes.size));
     expect(Number(countOf(library))).toBeGreaterThan(0);
     expect(countOf(outline)).toBe("3");
     // The title-bar keys: the collapse action stays on the upper zone only.
@@ -631,7 +635,7 @@ describe("dual-zone left column (§6.0.1)", () => {
     expect((wrapper as HTMLElement).style.width).toBe("320px");
   });
 
-  it("draws the library group head label, then the chevron, then the count last", () => {
+  it("draws the library group head chevron first, then the label, then the count last", () => {
     render(<XFlowEditor value={workflow} />);
     const head = document.querySelector<HTMLElement>(".xflow-editor-node-group__title")!;
     const parts = Array.from(head.querySelector(".xflow-editor-node-group__heading")!.children).map((child) =>
@@ -641,7 +645,9 @@ describe("dual-zone left column (§6.0.1)", () => {
           ? "count"
           : "label"
     );
-    expect(parts).toEqual(["label", "chevron", "count"]);
+    // §6.0.1 (2026-11-07): the chevron sits on the left, like the inspector's
+    // section heads; the count stays at the far right.
+    expect(parts).toEqual(["chevron", "label", "count"]);
     // The chevron is decoration: it must not leak into the toggle's accessible name.
     expect(head.querySelector(".xflow-editor-node-group__chevron")?.getAttribute("aria-hidden")).toBe("true");
     expect(head.parentElement?.querySelector(":scope > .xflow-editor-node-group__title")).toBe(head);
@@ -692,25 +698,40 @@ describe("node-library rows (§6.0.1)", () => {
   };
   const hint = (type: string) => tile(type).querySelector<HTMLElement>(".xflow-editor-node-tile__hint");
 
-  it("puts the type's description on the second line, ellipsised with a title", () => {
+  it("puts the type's description on the second line, ellipsised, and in the tooltip", async () => {
     render(<XFlowEditor nodeTypes={nodeTypes} value={workflow} />);
     expandAllGroups();
 
     expect(hint("xflow.http")?.textContent).toBe("调用 HTTP 接口并返回响应");
-    expect(hint("xflow.http")?.getAttribute("title")).toBe("调用 HTTP 接口并返回响应");
+    // §6.0.1 (2026-11-07): the full purpose moved from a title attribute to
+    // the 400ms hover card, which also names the mono type id.
+    fireEvent.mouseEnter(tile("xflow.http"));
+    const tooltip = await waitFor(() => {
+      const node = document.querySelector<HTMLElement>(".xflow-editor-node-tile__tooltip");
+      if (!node) throw new Error("no tooltip");
+      return node;
+    });
+    expect(tooltip.textContent).toContain("调用 HTTP 接口并返回响应");
+    expect(tooltip.querySelector(".xflow-editor-node-tile__tooltip-type")?.textContent).toBe("xflow.http");
     expect(tile("xflow.http").querySelector("strong")?.textContent).toBe("HTTP");
   });
 
-  it("falls back to the type id when there is no description, and keeps the id searchable", () => {
+  it("falls back to the type id when there is no description, and keeps the id searchable", async () => {
     render(<XFlowEditor nodeTypes={nodeTypes} value={workflow} />);
     expandAllGroups();
 
     expect(hint("acme.plain")?.textContent).toBe("acme.plain");
-    expect(hint("acme.plain")?.getAttribute("title")).toBe("acme.plain");
+    fireEvent.mouseEnter(tile("acme.plain"));
+    const tooltip = await waitFor(() => {
+      const node = document.querySelector<HTMLElement>(".xflow-editor-node-tile__tooltip");
+      if (!node) throw new Error("no tooltip");
+      return node;
+    });
+    expect(tooltip.querySelector(".xflow-editor-node-tile__tooltip-type")?.textContent).toBe("acme.plain");
 
     const library = screen.getByRole("region", { name: "节点" });
     fireEvent.click(within(library).getByRole("button", { name: "搜索节点" }));
-    fireEvent.change(within(library).getByPlaceholderText("搜索 Webhook / If / HTTP…"), { target: { value: "acme." } });
+    fireEvent.change(within(library).getByPlaceholderText("搜索节点，如 HTTP / If / Webhook"), { target: { value: "acme." } });
     expect(library.querySelector('button[data-node-type="acme.plain"]')).toBeTruthy();
     expect(library.querySelector('button[data-node-type="xflow.http"]')).toBeNull();
   });
@@ -736,7 +757,7 @@ describe("node-library rows (§6.0.1)", () => {
     const key = within(library).getByRole("button", { name: "搜索节点" });
 
     // Hidden and out of the layout until asked for; the key points at the box.
-    expect(within(library).queryByPlaceholderText("搜索 Webhook / If / HTTP…")).toBeNull();
+    expect(within(library).queryByPlaceholderText("搜索节点，如 HTTP / If / Webhook")).toBeNull();
     expect(library.querySelector(".xflow-editor-library__search")?.hasAttribute("hidden")).toBe(true);
     expect(key.getAttribute("aria-expanded")).toBe("false");
     expect(key.getAttribute("aria-controls")).toBe(library.querySelector(".xflow-editor-library__search")?.id);
@@ -746,7 +767,7 @@ describe("node-library rows (§6.0.1)", () => {
 
     fireEvent.click(key);
 
-    const search = within(library).getByPlaceholderText("搜索 Webhook / If / HTTP…");
+    const search = within(library).getByPlaceholderText("搜索节点，如 HTTP / If / Webhook");
     expect(document.activeElement).toBe(search);
     expect(key.getAttribute("aria-expanded")).toBe("true");
     expect(key.getAttribute("data-active")).toBe("true");
@@ -760,13 +781,13 @@ describe("node-library rows (§6.0.1)", () => {
     expect(document.activeElement).not.toBe(key);
 
     fireEvent.keyDown(window, { key: "/" });
-    const search = within(library).getByPlaceholderText("搜索 Webhook / If / HTTP…");
+    const search = within(library).getByPlaceholderText("搜索节点，如 HTTP / If / Webhook");
     expect(document.activeElement).toBe(search);
 
     fireEvent.change(search, { target: { value: "http" } });
     expect(key.getAttribute("data-active")).toBe("true");
-    // The filter narrows the list.
-    expect(within(library).getByRole("button", { name: "HTTP" })).toBeTruthy();
+    // The filter narrows the list; HTTP shows in 常用 and again in its group.
+    expect(within(library).getAllByRole("button", { name: "HTTP" }).length).toBeGreaterThan(0);
     expect(within(library).queryByRole("button", { name: "Kafka" })).toBeNull();
   });
 
@@ -776,17 +797,17 @@ describe("node-library rows (§6.0.1)", () => {
     const key = within(library).getByRole("button", { name: "搜索节点" });
 
     fireEvent.click(key);
-    const search = within(library).getByPlaceholderText("搜索 Webhook / If / HTTP…");
+    const search = within(library).getByPlaceholderText("搜索节点，如 HTTP / If / Webhook");
     fireEvent.change(search, { target: { value: "http" } });
     fireEvent.keyDown(search, { key: "Escape" });
 
-    expect(within(library).queryByPlaceholderText("搜索 Webhook / If / HTTP…")).toBeNull();
+    expect(within(library).queryByPlaceholderText("搜索节点，如 HTTP / If / Webhook")).toBeNull();
     expect(document.activeElement).toBe(key);
     expect(key.getAttribute("aria-expanded")).toBe("false");
 
     // Reopening starts from an empty filter.
     fireEvent.click(key);
-    expect((within(library).getByPlaceholderText("搜索 Webhook / If / HTTP…") as HTMLInputElement).value).toBe("");
+    expect((within(library).getByPlaceholderText("搜索节点，如 HTTP / If / Webhook") as HTMLInputElement).value).toBe("");
   });
 
   it("folds an empty search away on blur but keeps a keyword on screen", () => {
@@ -795,17 +816,17 @@ describe("node-library rows (§6.0.1)", () => {
     const key = within(library).getByRole("button", { name: "搜索节点" });
     const open = () => {
       fireEvent.click(key);
-      return within(library).getByPlaceholderText("搜索 Webhook / If / HTTP…");
+      return within(library).getByPlaceholderText("搜索节点，如 HTTP / If / Webhook");
     };
 
     fireEvent.blur(open());
-    expect(within(library).queryByPlaceholderText("搜索 Webhook / If / HTTP…")).toBeNull();
+    expect(within(library).queryByPlaceholderText("搜索节点，如 HTTP / If / Webhook")).toBeNull();
 
     const filtered = open();
     fireEvent.change(filtered, { target: { value: "http" } });
     fireEvent.blur(filtered);
     // The list stays filtered, so its filter must stay visible.
-    expect(within(library).getByPlaceholderText("搜索 Webhook / If / HTTP…")).toBeTruthy();
+    expect(within(library).getByPlaceholderText("搜索节点，如 HTTP / If / Webhook")).toBeTruthy();
     expect(key.getAttribute("aria-expanded")).toBe("true");
   });
 
@@ -815,10 +836,10 @@ describe("node-library rows (§6.0.1)", () => {
     const key = within(library).getByRole("button", { name: "搜索节点" });
 
     fireEvent.click(key);
-    fireEvent.change(within(library).getByPlaceholderText("搜索 Webhook / If / HTTP…"), { target: { value: "http" } });
+    fireEvent.change(within(library).getByPlaceholderText("搜索节点，如 HTTP / If / Webhook"), { target: { value: "http" } });
     fireEvent.click(key);
 
-    expect(within(library).queryByPlaceholderText("搜索 Webhook / If / HTTP…")).toBeNull();
+    expect(within(library).queryByPlaceholderText("搜索节点，如 HTTP / If / Webhook")).toBeNull();
     expect(key.getAttribute("aria-expanded")).toBe("false");
     expect(key.hasAttribute("data-active")).toBe(false);
   });
@@ -830,13 +851,13 @@ describe("node-library rows (§6.0.1)", () => {
     expect(key.getAttribute("aria-keyshortcuts")).toBe("/");
 
     fireEvent.keyDown(window, { key: "/" });
-    expect(within(library).getByPlaceholderText("搜索 Webhook / If / HTTP…")).toBeTruthy();
+    expect(within(library).getByPlaceholderText("搜索节点，如 HTTP / If / Webhook")).toBeTruthy();
     expect(key.getAttribute("aria-expanded")).toBe("true");
 
     // Esc from anywhere (here: the key, not the input) closes and restores focus.
     key.focus();
     fireEvent.keyDown(key, { key: "Escape" });
-    expect(within(library).queryByPlaceholderText("搜索 Webhook / If / HTTP…")).toBeNull();
+    expect(within(library).queryByPlaceholderText("搜索节点，如 HTTP / If / Webhook")).toBeNull();
     expect(document.activeElement).toBe(key);
   });
 
@@ -848,7 +869,7 @@ describe("node-library rows (§6.0.1)", () => {
     fireEvent.keyDown(window, { key: "/" });
 
     await waitFor(() => {
-      const search = within(screen.getByRole("region", { name: "节点" })).getByPlaceholderText("搜索 Webhook / If / HTTP…");
+      const search = within(screen.getByRole("region", { name: "节点" })).getByPlaceholderText("搜索节点，如 HTTP / If / Webhook");
       expect(document.activeElement).toBe(search);
     });
   });

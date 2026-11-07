@@ -736,14 +736,14 @@
   min-width: 0;
 }
 
-/* §6.0.1 dual-zone shell (baseline `.xflow-pv-lib`): the outline sizes to its
- * tree up to half the column, and the library absorbs the rest. A fixed 3:2
- * split left the outline ~287px at 900 high, cutting the last section of an
- * ordinary eight-node tree mid-row; when the outline needs more than half it
- * stops there and its list scrolls. Preview has the outline alone, which then
- * fills the column. */
+/* §6.0.1 dual-zone shell (2026-11-07): the outline sizes to its tree up to
+ * half the column, the library absorbs the rest, and the 8px rule between them
+ * is draggable. LeftZones writes the rows inline (auto vs a stored ratio);
+ * these values are the auto fallback. `container-type` lets the library switch
+ * to two columns off the zone's own width, not the viewport's. */
 .xflow-editor-lib {
   background: var(--xflow-panel);
+  container: xflow-lib / inline-size;
   display: grid;
   grid-template-rows: minmax(0, 1fr) fit-content(50%);
   min-height: 0;
@@ -754,10 +754,35 @@
   grid-template-rows: minmax(0, 1fr);
 }
 
-/* The rule between the zones. It follows the `.xflow-editor .xflow-editor-panel`
- * reset (border: 0) at the same specificity, so it is not reset away. */
-.xflow-editor .xflow-editor-lib[data-zones="dual"] > .xflow-editor-outline {
-  border-top: 1px solid var(--xflow-border-subtle);
+/* The outline keeps its three-row floor; the library takes what is left. */
+.xflow-editor .xflow-editor-lib > .xflow-editor-outline {
+  min-height: 132px;
+}
+
+/* The rule between the zones: 8px of hit area with a 1px line inside. */
+.xflow-editor-lib__divider {
+  cursor: row-resize;
+  position: relative;
+  touch-action: none;
+}
+
+.xflow-editor-lib__divider::before {
+  background: var(--xflow-border-subtle);
+  content: "";
+  height: 1px;
+  inset-inline: 0;
+  position: absolute;
+  top: 50%;
+}
+
+.xflow-editor-lib__divider:hover::before,
+.xflow-editor-lib__divider[data-dragging="true"]::before {
+  background: var(--xflow-primary);
+}
+
+.xflow-editor-lib__divider:focus-visible {
+  outline: 2px solid var(--xflow-focus-ring);
+  outline-offset: -2px;
 }
 
 .xflow-editor-panel-title {
@@ -832,9 +857,31 @@
   padding: 0;
 }
 
+/* §6.0.1 (2026-11-07): the box is not permanent; its title-bar key unfolds a
+ * 28px row under the head, and the list scrolls below it. */
 .xflow-editor-library__search {
   flex: 0 0 auto;
-  padding: 0 var(--xflow-space-3) var(--xflow-space-2-5);
+  padding: 0 var(--xflow-space-3) var(--xflow-space-2);
+}
+
+/* §6.0.1 (2026-11-07): the search key is a 24×24 square in the title bar. */
+.xflow-editor .xflow-editor-library__search-key {
+  height: 24px;
+  min-width: 24px;
+  padding-inline: 0;
+  width: 24px;
+}
+
+.xflow-editor-library__empty,
+.xflow-editor-library__error {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-sm);
+  padding: var(--xflow-space-2);
+}
+
+.xflow-editor-library__empty p,
+.xflow-editor-library__error p {
+  margin: 0 0 var(--xflow-space-1);
 }
 
 .xflow-editor-library__list {
@@ -911,18 +958,22 @@
   color: var(--xflow-text-tertiary);
   font-size: var(--xflow-font-sm);
   line-height: var(--xflow-line-height-md);
-  margin: 0;
   padding: var(--xflow-space-1) var(--xflow-space-2);
+}
+
+.xflow-editor-outline__empty p {
+  margin: 0;
 }
 
 .xflow-editor-outline__heading {
   align-items: center;
   color: var(--xflow-text-tertiary);
   display: flex;
-  font-size: var(--xflow-font-xs);
+  /* §6.0.1 (2026-11-07): section headings keep the colour bar at 12/600. */
+  font-size: var(--xflow-font-sm);
   font-weight: var(--xflow-font-weight-semibold);
   gap: var(--xflow-space-1-5);
-  line-height: var(--xflow-line-height-xs);
+  line-height: var(--xflow-line-height-sm);
   margin: var(--xflow-space-2) var(--xflow-space-1) var(--xflow-space-0-5);
 }
 
@@ -962,10 +1013,10 @@
   display: flex;
   font-size: var(--xflow-font-md);
   font-weight: var(--xflow-font-weight-regular);
-  /* The baseline row is a flush 30px line: no border eating 2px of its box. */
   gap: var(--xflow-space-2);
-  height: 30px;
+  height: 28px;
   padding: 0 var(--xflow-space-2);
+  position: relative;
 }
 
 .xflow-editor-outline__item:hover {
@@ -981,8 +1032,27 @@
   background: color-mix(in srgb, var(--xflow-primary) 12%, transparent);
 }
 
+/* The selected row's 2px primary bar, inside the row so the height is exact. */
+.xflow-editor-outline__item[aria-current="true"]::before {
+  background: var(--xflow-primary);
+  border-radius: var(--xflow-radius-full);
+  content: "";
+  inset-block: 4px;
+  inset-inline-start: 0;
+  position: absolute;
+  width: 2px;
+}
+
 .xflow-editor-outline__name {
+  display: flex;
   flex: 1 1 auto;
+  gap: var(--xflow-space-1);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.xflow-editor-outline__label {
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-align: start;
@@ -990,16 +1060,30 @@
   white-space: nowrap;
 }
 
-.xflow-editor-outline__item[aria-current="true"] .xflow-editor-outline__name {
+.xflow-editor-outline__item[aria-current="true"] .xflow-editor-outline__label {
   color: var(--xflow-primary-fg);
   font-weight: var(--xflow-font-weight-semibold);
 }
 
+/* The technical name gives way first when the row runs out of space. */
 .xflow-editor-outline__sub {
   color: var(--xflow-text-tertiary);
+  flex: 0 100 auto;
   font-family: var(--xflow-font-mono);
-  font-size: var(--xflow-font-xs);
-  margin-inline-start: var(--xflow-space-1);
+  font-size: var(--xflow-font-sm);
+  margin-inline-start: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A disabled node in the edit view carries the ban glyph instead of a dot. */
+.xflow-editor-outline__ban {
+  color: var(--xflow-text-tertiary);
+  flex: 0 0 auto;
+  height: 12px;
+  width: 12px;
 }
 
 /* The status dot: the tone token of the node's status; pending is a dashed ring. */
@@ -1025,7 +1109,7 @@
   border: 1.5px dashed var(--xflow-editor-outline-tone);
 }
 
-.xflow-editor-outline__item[data-status="skipped"] .xflow-editor-outline__name {
+.xflow-editor-outline__item[data-status="skipped"] .xflow-editor-outline__label {
   color: var(--xflow-text-tertiary);
 }
 
@@ -1115,6 +1199,8 @@
   margin-top: var(--xflow-space-3);
 }
 
+/* §6.0.1 (2026-11-07): one 28px group row per type group — chevron, 12/600
+ * name, 12 tertiary count. The whole row toggles, with no hover fill. */
 .xflow-editor-node-group__title {
   align-items: center;
   background: transparent;
@@ -1124,27 +1210,15 @@
   display: flex;
   font: inherit;
   font-size: var(--xflow-font-sm);
-  /* The baseline's group row is 600; the count beside the label keeps the
-   * regular step (see __count). */
   font-weight: var(--xflow-font-weight-semibold);
   gap: var(--xflow-space-1-5);
+  height: 28px;
   justify-content: space-between;
-  line-height: var(--xflow-line-height-md);
-  /* The baseline header sits 4px in from the list gutter and 8px above its
-   * cards, which the single-grid baseline gets from the grid gap. */
-  margin: var(--xflow-space-1) var(--xflow-space-1) var(--xflow-space-2);
+  margin: var(--xflow-space-1) var(--xflow-space-1) var(--xflow-space-0-5);
   min-width: 0;
   padding: 0;
   text-align: left;
   width: calc(100% - 8px);
-}
-
-.xflow-editor-node-group__title:hover {
-  color: var(--xflow-text);
-}
-
-.xflow-editor-node-group__title[aria-expanded="false"] {
-  margin-bottom: 0;
 }
 
 .xflow-editor-node-group__title:focus-visible {
@@ -1166,10 +1240,6 @@
   font-weight: var(--xflow-font-weight-semibold);
 }
 
-.xflow-editor-node-group__title:hover .xflow-editor-block-title {
-  color: var(--xflow-text);
-}
-
 .xflow-editor-node-group__count {
   color: var(--xflow-text-tertiary);
   font-size: var(--xflow-font-sm);
@@ -1177,22 +1247,12 @@
   margin-left: auto;
 }
 
+/* The chevron leads the row (§6.0.1, 2026-11-07) and is always visible. */
 .xflow-editor-node-group__chevron {
   color: var(--xflow-text-tertiary);
   flex: 0 0 auto;
   font-size: var(--xflow-font-xs);
-  /* The design has no permanent affordance: reveal it on hover/focus, and keep
-   * it visible while collapsed so the closed group still advertises the toggle. */
-  opacity: 0;
-  transition:
-    opacity var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard),
-    transform var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard);
-}
-
-.xflow-editor-node-group__title:hover .xflow-editor-node-group__chevron,
-.xflow-editor-node-group__title:focus-visible .xflow-editor-node-group__chevron,
-.xflow-editor-node-group__chevron.is-collapsed {
-  opacity: 1;
+  transition: transform var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard);
 }
 
 .xflow-editor-node-group__chevron.is-collapsed {
@@ -1202,59 +1262,49 @@
 .xflow-editor-node-grid,
 .xflow-editor-node-list {
   display: grid;
-  gap: var(--xflow-space-1);
+  gap: var(--xflow-space-0-5);
   grid-template-columns: minmax(0, 1fr);
 }
 
-/* Baseline `.xflow-pv-lib-list`: two cards per row, 8px apart. The grouped
- * wrapper keeps the DOM "header + its items" while the list itself is the grid. */
-.xflow-editor-node-list {
-  gap: var(--xflow-space-2);
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+/* §6.0.1: at a 360px-wide zone the rows themselves become two columns. */
+@container xflow-lib (min-width: 360px) {
+  .xflow-editor-node-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .xflow-editor-node-tile[data-source="runner"] {
+    grid-column: 1 / -1;
+  }
 }
 
-/* Baseline `.xflow-pv-lib-item`: a bordered 44px card on the field surface, icon
- * block hard against the left gutter, name over a one-line hint. */
+/* §6.0.1 (2026-11-07): a flush 40px row — no card, no hover fill, no shadow.
+ * The pointer is the only affordance; focus and drag keep their own states. */
 .xflow-editor-node-tile {
   align-items: center;
-  background: var(--xflow-field);
-  border: 1px solid var(--xflow-border);
+  background: transparent;
+  border: 0;
   border-radius: var(--xflow-radius-sm);
   color: var(--xflow-text);
-  cursor: grab;
+  cursor: pointer;
   display: flex;
-  font-size: var(--xflow-font-xs);
+  font-size: var(--xflow-font-md);
   font-weight: var(--xflow-font-weight-regular);
-  gap: var(--xflow-space-1-5);
-  /* Baseline card: a 40px text block in the 34px content box (44 - 2 x 4px
-   * padding - 2 x 1px border) overflows by 3px on each side, exactly as it
-   * does inside the baseline's 44px AntD button. */
-  height: 44px;
+  gap: var(--xflow-space-2);
+  height: 40px;
   min-width: 0;
-  padding: var(--xflow-space-1);
+  padding: 0 var(--xflow-space-1);
   text-align: start;
-  transition:
-    background-color var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard),
-    border-color var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard),
-    color var(--xflow-motion-duration-fast) var(--xflow-motion-ease-standard);
   width: 100%;
 }
 
-.xflow-editor-node-tile:hover {
-  background: var(--xflow-hover);
-  border-color: var(--xflow-primary);
-}
-
-/* A runner-reported tile carries the "Runner" badge, which costs ~47px of a
- * 108px card — the name would ellipsize to two characters. Give that rare card
- * the whole row; server tiles keep the two-card grid. */
-.xflow-editor-node-tile[data-source="runner"] {
-  grid-column: 1 / -1;
+/* The one tinted state: a row being dragged onto the canvas. */
+.xflow-editor-node-tile[data-dragging="true"] {
+  background: color-mix(in srgb, var(--xflow-primary) 10%, transparent);
 }
 
 .xflow-editor-node-tile:focus-visible {
   outline: 2px solid var(--xflow-focus-ring);
-  outline-offset: 2px;
+  outline-offset: -2px;
 }
 
 .xflow-editor-node-tile__content {
@@ -1266,7 +1316,6 @@
 .xflow-editor-node-tile__content strong,
 .xflow-editor-node-tile__content small {
   display: block;
-  line-height: var(--xflow-line-height-md);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1275,12 +1324,22 @@
 
 .xflow-editor-node-tile__content strong {
   color: var(--xflow-text);
+  font-size: var(--xflow-font-md);
   font-weight: var(--xflow-font-weight-medium);
+  line-height: 18px;
 }
 
 .xflow-editor-node-tile__content small {
   color: var(--xflow-text-tertiary);
-  font-size: var(--xflow-font-xs);
+  font-size: var(--xflow-font-sm);
+  line-height: 16px;
+}
+
+/* The search hit: the matched run in primary, never a background. */
+.xflow-editor .xflow-editor-node-tile__match {
+  background: transparent;
+  color: var(--xflow-primary-fg);
+  font-weight: var(--xflow-font-weight-semibold);
 }
 
 .xflow-editor .xflow-editor__node-tile-source {
@@ -3811,6 +3870,12 @@ button.xflow-editor-overview__run:hover {
 
 .xflow-editor .xflow-editor-node-tile__tooltip > span:not(:first-child) {
   color: var(--xflow-text-secondary);
+}
+
+.xflow-editor .xflow-editor-node-tile__tooltip > span.xflow-editor-node-tile__tooltip-type {
+  color: var(--xflow-text-tertiary);
+  font-family: var(--xflow-font-mono);
+  font-size: var(--xflow-font-xs);
 }
 
 /* Same specificity as the rule above and later, so the source line keeps its tone. */

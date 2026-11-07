@@ -404,11 +404,14 @@ describe("xflow.editor responsive rules (§7.1 breakpoints)", () => {
     // not only the `width < N` shape the threshold scan understands.
     const named = [...css.matchAll(/@container\s+([\w-]+)/g)];
     expect(named.length).toBeGreaterThan(0);
-    for (const [, name] of named) expect(name).toBe("xflow-editor");
+    // xflow-editor is the workbench tier; xflow-lib is the library zone's own
+    // two-column query (§6.0.1, 2026-11-07).
+    for (const [, name] of named) expect(["xflow-editor", "xflow-lib"]).toContain(name);
 
-    const queries = [...css.matchAll(/@container\s+[\w-]+\s*\(width\s*(<=?)\s*(\d+)px\)/g)];
-    expect(queries.length, "every @container is a width query on the editor").toBe(named.length);
-    const thresholds = queries.map(([, , value]) => Number(value)).sort((a, b) => a - b);
+    const queries = [...css.matchAll(/@container\s+([\w-]+)\s*\((min-)?width\s*(<=?|:)\s*(\d+)px\)/g)];
+    expect(queries.length, "every @container is a width query").toBe(named.length);
+    const workbench = queries.filter(([, name]) => name === "xflow-editor");
+    const thresholds = workbench.map(([, , , , value]) => Number(value)).sort((a, b) => a - b);
     // Two compact blocks read xflow-core's breakpoints.compact (the locate
     // panel removed the third), so a single drift back to the old 1120 turns
     // this red; 560 is an editor-only density tier retained from the viewport
@@ -417,9 +420,14 @@ describe("xflow.editor responsive rules (§7.1 breakpoints)", () => {
     // Every tier is inclusive: the JS layout tier uses `<= compact`, so 1280 is
     // compact in CSS and in JS alike, and 560 keeps the `max-width` semantics
     // it replaced.
-    for (const [, operator, value] of queries) {
+    for (const [, , , operator, value] of workbench) {
       expect(operator, value).toBe("<=");
     }
+    // The library turns its rows into two columns at ≥ 360 (§6.0.1).
+    const libraryQuery = queries.find(([, name]) => name === "xflow-lib");
+    expect(libraryQuery?.[2]).toBe("min-");
+    expect(libraryQuery?.[3]).toBe(":");
+    expect(Number(libraryQuery?.[4])).toBe(360);
   });
 });
 
@@ -683,12 +691,17 @@ describe("xflow.editor left column (§6.0.1, §6.5)", () => {
     expect(css).not.toMatch(/\.xflow-editor-rail button > span\b/);
   });
 
-  it("draws the 1px rule between the zones on a rule that follows the panel border reset", () => {
-    const divider = rule('.xflow-editor .xflow-editor-lib[data-zones="dual"] > .xflow-editor-outline');
-    expect(divider).toMatch(/border-top:\s*1px solid var\(--xflow-border-subtle\)\s*;/);
-    expect(css.indexOf('.xflow-editor-lib[data-zones="dual"] > .xflow-editor-outline')).toBeGreaterThan(
-      css.indexOf(".xflow-editor .xflow-editor-panel {")
-    );
+  it("draws the 1px line inside the 8px draggable rule between the zones", () => {
+    // §6.0.1 (2026-11-07): the rule is its own element, not the outline's border.
+    const divider = rule(".xflow-editor-lib__divider");
+    expect(divider).toMatch(/cursor:\s*row-resize\s*;/);
+    expect(divider).toMatch(/position:\s*relative\s*;/);
+    const line = rule(".xflow-editor-lib__divider::before");
+    expect(line).toMatch(/background:\s*var\(--xflow-border-subtle\)\s*;/);
+    expect(line).toMatch(/height:\s*1px\s*;/);
+    expect(line).toMatch(/top:\s*50%\s*;/);
+    // The rule follows the panel reset, so it still paints above the panel.
+    expect(css.indexOf(".xflow-editor-lib__divider")).toBeGreaterThan(css.indexOf(".xflow-editor .xflow-editor-panel {"));
   });
 
   it("sizes the outline to its tree up to half the column, then scrolls it", () => {
@@ -728,16 +741,22 @@ describe("xflow.editor left column (§6.0.1, §6.5)", () => {
     expect(rule(".xflow-editor-main")).toMatch(/position:\s*relative\s*;/);
   });
 
-  it("shows the draggable library cards with the grab cursor", () => {
-    expect(rule(".xflow-editor-node-tile")).toMatch(/cursor:\s*grab\s*;/);
-    // The baseline card: 1px outlined, 4px inset, 44px tall on the field surface.
-    expect(rule(".xflow-editor-node-tile")).toMatch(/border:\s*1px solid var\(--xflow-border\)\s*;/);
-    expect(rule(".xflow-editor-node-tile")).toMatch(/padding:\s*var\(--xflow-space-1\)\s*;/);
-    expect(rule(".xflow-editor-node-tile")).toMatch(/background:\s*var\(--xflow-field\)\s*;/);
-    expect(rule(".xflow-editor-node-tile")).toMatch(/border-radius:\s*var\(--xflow-radius-sm\)\s*;/);
-    // A bare /height:/ also matches `min-height`, so the card's fixed 44px box
-    // needs the lookbehind.
-    expect(rule(".xflow-editor-node-tile")).toMatch(/(?<![\w-])height:\s*44px\s*;/);
+  it("draws the library rows flush at 40px with only the pointer as affordance", () => {
+    const tile = rule(".xflow-editor-node-tile");
+    expect(tile).toMatch(/cursor:\s*pointer\s*;/);
+    expect(tile).toMatch(/background:\s*transparent\s*;/);
+    expect(tile).toMatch(/border:\s*0\s*;/);
+    expect(tile).toMatch(/(?<![\w-])height:\s*40px\s*;/);
+    expect(tile).toMatch(/border-radius:\s*var\(--xflow-radius-sm\)\s*;/);
+    // No hover rule at all (§6.0.1, 2026-11-07); the drag tint is the one state.
+    expect(css).not.toContain(".xflow-editor-node-tile:hover");
+    expect(rule('.xflow-editor-node-tile[data-dragging="true"]')).toMatch(
+      /background:\s*color-mix\(in srgb, var\(--xflow-primary\) 10%, transparent\)\s*;/
+    );
+    // The row list is one column until the zone itself reaches 360.
+    const list = rule(".xflow-editor-node-grid,\n.xflow-editor-node-list");
+    expect(list).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\)\s*;/);
+    expect(list).toMatch(/gap:\s*var\(--xflow-space-0-5\)\s*;/);
   });
 
   it("draws the library card icon as the density 24px block with a 12px glyph", () => {
@@ -768,9 +787,10 @@ describe("xflow.editor left column (§6.0.1, §6.5)", () => {
     expect(sm).toMatch(/border-radius:\s*var\(--xflow-radius-xs\)\s*;/);
   });
 
-  it("draws an outline row as the baseline 30px line: 0 8px padding, 8px gap, 13px, small radius", () => {
+  it("draws an outline row as a 28px line: 0 8px padding, 8px gap, 13px, small radius", () => {
     const row = rule(".xflow-editor-outline__item");
-    expect(row).toMatch(/height:\s*30px\s*;/);
+    // §6.0.1 (2026-11-07): 28px, tighter than the old 30px baseline line.
+    expect(row).toMatch(/height:\s*28px\s*;/);
     expect(row).toMatch(/padding:\s*0 var\(--xflow-space-2\)\s*;/);
     expect(row).toMatch(/gap:\s*var\(--xflow-space-2\)\s*;/);
     expect(row).toMatch(/font-size:\s*var\(--xflow-font-md\)\s*;/);
@@ -783,11 +803,15 @@ describe("xflow.editor left column (§6.0.1, §6.5)", () => {
     );
   });
 
-  it("marks the current row with a 12% primary ground and a 600 primary-fg name", () => {
+  it("marks the current row with a 12% primary ground, a 2px bar and a 600 primary-fg name", () => {
     expect(rule('.xflow-editor-outline__item[aria-current="true"]')).toMatch(
       /background:\s*color-mix\(in srgb, var\(--xflow-primary\) 12%, transparent\)\s*;/
     );
-    const name = rule('.xflow-editor-outline__item[aria-current="true"] .xflow-editor-outline__name');
+    // §6.0.1 (2026-11-07): the left 2px primary bar marks the row too.
+    const bar = rule('.xflow-editor-outline__item[aria-current="true"]::before');
+    expect(bar).toMatch(/background:\s*var\(--xflow-primary\)\s*;/);
+    expect(bar).toMatch(/width:\s*2px\s*;/);
+    const name = rule('.xflow-editor-outline__item[aria-current="true"] .xflow-editor-outline__label');
     // The raw brand blue is 3.85:1 on the row's tint; the text alias is AA.
     expect(name).toMatch(/color:\s*var\(--xflow-primary-fg\)\s*;/);
     expect(name).toMatch(/font-weight:\s*var\(--xflow-font-weight-semibold\)\s*;/);
@@ -805,7 +829,7 @@ describe("xflow.editor left column (§6.0.1, §6.5)", () => {
     expect(rule('.xflow-editor-outline__item[data-status="pending"] .xflow-editor-outline__dot')).toMatch(
       /border:\s*1\.5px dashed var\(--xflow-editor-outline-tone\)\s*;/
     );
-    expect(rule('.xflow-editor-outline__item[data-status="skipped"] .xflow-editor-outline__name')).toMatch(
+    expect(rule('.xflow-editor-outline__item[data-status="skipped"] .xflow-editor-outline__label')).toMatch(
       /color:\s*var\(--xflow-text-tertiary\)\s*;/
     );
     // Each tone resolves to its palette token and nothing else.
@@ -816,11 +840,11 @@ describe("xflow.editor left column (§6.0.1, §6.5)", () => {
     }
   });
 
-  it("draws the section heading 11/600 tertiary on the paired 16px line with a 3x10 colour bar, and the node name 11 mono", () => {
+  it("draws the section heading 12/600 with a 3x10 colour bar, and the node name 12 mono", () => {
     const heading = rule(".xflow-editor-outline__heading");
-    expect(heading).toMatch(/font-size:\s*var\(--xflow-font-xs\)\s*;/);
-    expect(heading).toMatch(/line-height:\s*var\(--xflow-line-height-xs\)\s*;/);
-    expect(rule(".xflow-editor-outline__sub")).toMatch(/font-size:\s*var\(--xflow-font-xs\)\s*;/);
+    expect(heading).toMatch(/font-size:\s*var\(--xflow-font-sm\)\s*;/);
+    expect(heading).toMatch(/line-height:\s*var\(--xflow-line-height-sm\)\s*;/);
+    expect(rule(".xflow-editor-outline__sub")).toMatch(/font-size:\s*var\(--xflow-font-sm\)\s*;/);
     expect(heading).toMatch(/font-weight:\s*var\(--xflow-font-weight-semibold\)\s*;/);
     expect(heading).toMatch(/color:\s*var\(--xflow-text-tertiary\)\s*;/);
     const bar = rule(".xflow-editor-outline__bar");
@@ -867,10 +891,17 @@ describe("xflow.editor browser-measured baseline fixes (E6)", () => {
     expect(css.match(/--xflow-editor-panel-right-width:/g) ?? []).toHaveLength(1);
   });
 
-  it("lays the library out as the baseline two-card grid", () => {
-    const list = rule(".xflow-editor-node-list");
-    expect(list).toMatch(/grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)\s*;/);
-    expect(list).toMatch(/gap:\s*var\(--xflow-space-2\)\s*;/);
+  it("lays the library out as one column until the zone itself reaches 360px (§6.0.1)", () => {
+    // The default is 240 wide: one column of 40px rows.
+    const list = rule(".xflow-editor-node-grid,\n.xflow-editor-node-list");
+    expect(list).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\)\s*;/);
+    expect(list).toMatch(/gap:\s*var\(--xflow-space-0-5\)\s*;/);
+    // A wider zone turns the same rows into two columns; the query is on the
+    // library container, not the viewport.
+    expect(css).toMatch(/@container xflow-lib \(min-width: 360px\)/);
+    expect(css).toMatch(
+      /@container xflow-lib \(min-width: 360px\)\s*\{[\s\S]*?\.xflow-editor-node-list\s*\{[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)\s*;/
+    );
   });
 
   it("draws a pressed title-bar action at 14% and the search prefix 16px tertiary", () => {
@@ -888,10 +919,10 @@ describe("xflow.editor browser-measured baseline fixes (E6)", () => {
     expect(prefix).toMatch(/font-size:\s*var\(--xflow-font-xl\)\s*;/);
   });
 
-  it("draws the outline rows flush, with no border narrowing the 30px line", () => {
+  it("draws the outline rows flush, with no border narrowing the 28px line", () => {
     expect(rule(".xflow-editor-outline__item")).not.toMatch(/border:\s*1px solid transparent\s*;/);
-    expect(rule(".xflow-editor-outline__item")).toMatch(/height:\s*30px\s*;/);
-    expect(rule(".xflow-editor-outline__sub")).toMatch(/margin-inline-start:\s*var\(--xflow-space-1\)\s*;/);
+    expect(rule(".xflow-editor-outline__item")).toMatch(/height:\s*28px\s*;/);
+    expect(rule(".xflow-editor-outline__sub")).toMatch(/margin-inline-start:\s*0\s*;/);
   });
 
   it("sets the canvas float colours; the add glyph is the package's 16px default", () => {
@@ -943,40 +974,38 @@ describe("xflow.editor browser-measured baseline fixes (E6)", () => {
     expect(css).not.toMatch(/\.xflow-editor-theme-trigger:focus-visible/);
   });
 
-  it("draws the library group head with the count last and the baseline 4/4/8 margins", () => {
+  it("draws the library group head as a 28px row with the count last", () => {
     const title = rule(".xflow-editor-node-group__title");
-    expect(title).toMatch(
-      /margin:\s*var\(--xflow-space-1\) var\(--xflow-space-1\) var\(--xflow-space-2\)\s*;/
-    );
+    // §6.0.1 (2026-11-07): one 28px row — chevron, 12/600 name, count.
+    expect(title).toMatch(/(?<![\w-])height:\s*28px\s*;/);
+    expect(title).toMatch(/font-size:\s*var\(--xflow-font-sm\)\s*;/);
+    expect(title).toMatch(/font-weight:\s*var\(--xflow-font-weight-semibold\)\s*;/);
     expect(title).toMatch(/width:\s*calc\(100% - 8px\)\s*;/);
     expect(rule(".xflow-editor-node-group__count")).toMatch(/margin-left:\s*auto\s*;/);
-    // The band between groups is the baseline's 12px (its 8px grid gap plus
-    // the header's 4px top margin, which a grid never collapses). Here the
-    // title's 4px top margin collapses into this margin, so the sibling margin
-    // carries the whole 12 rather than 8 + 4.
+    // The band between groups is the baseline's 12px: the title's 4px top
+    // margin collapses into the sibling's margin, so the sibling carries all 12.
     expect(rule(".xflow-editor-node-group + .xflow-editor-node-group")).toMatch(
       /margin-top:\s*var\(--xflow-space-3\)\s*;/
     );
   });
 
-  it("tints the card's hover, gives a runner card the whole row and keeps the 60px rail", () => {
-    const hover = rule(".xflow-editor-node-tile:hover");
-    expect(hover).toMatch(/background:\s*var\(--xflow-hover\)\s*;/);
-    expect(hover).toMatch(/border-color:\s*var\(--xflow-primary\)\s*;/);
-    // The Runner badge costs about half a 108px card, so that rare card spans
-    // both columns while server cards keep the two-card grid.
+  it("draws no hover state, gives a runner row the whole width and keeps the 60px rail", () => {
+    // §6.0.1 (2026-11-07): no hover fill or shadow; the pointer is the only cue.
+    expect(css).not.toContain(".xflow-editor-node-tile:hover");
+    // The Runner badge costs about half a 108px row, so that rare row spans both
+    // columns while server rows keep the two-column grid.
     expect(rule('.xflow-editor-node-tile[data-source="runner"]')).toMatch(/grid-column:\s*1 \/ -1\s*;/);
     // The rail is the 60px column beside the 240px content (W2).
     expect(css).toMatch(/--xflow-editor-panel-rail-width:\s*60px\s*;/);
   });
 
-  it("reveals the group chevron on hover/focus and keeps it visible while collapsed", () => {
-    expect(rule(".xflow-editor-node-group__chevron")).toMatch(/opacity:\s*0\s*;/);
-    expect(css).toMatch(
-      /\.xflow-editor-node-group__title:hover \.xflow-editor-node-group__chevron,[\s\S]*?\{[^}]*opacity:\s*1\s*;/
-    );
-    expect(css).toMatch(/\.xflow-editor-node-group__title:focus-visible \.xflow-editor-node-group__chevron/);
-    expect(css).toMatch(/\.xflow-editor-node-group__chevron\.is-collapsed\s*\{[^}]*opacity:\s*1\s*;/);
+  it("keeps the group chevron visible in every state, leading the row", () => {
+    // §6.0.1 (2026-11-07): the chevron always shows; only its rotation changes.
+    const chevron = rule(".xflow-editor-node-group__chevron");
+    expect(chevron).not.toMatch(/opacity\s*:/);
+    expect(chevron).toMatch(/flex:\s*0 0 auto\s*;/);
+    expect(rule(".xflow-editor-node-group__chevron.is-collapsed")).toMatch(/transform:\s*rotate\(-90deg\)\s*;/);
+    expect(css).not.toMatch(/\.xflow-editor-node-group__title:hover \.xflow-editor-node-group__chevron/);
   });
 
   it("lifts the compact drawers with elev-4 and a divider on the canvas side", () => {
@@ -1311,8 +1340,8 @@ describe("xflow.editor small-text tones, hit targets and forced colours", () => 
     // min() keeps a taller row from losing target. The step comes from the token.
     expect(after).toMatch(/inset:\s*min\(0px, calc\(\(100% - var\(--xflow-control-height-sm\)\) \/ 2\)\) 0\s*;/);
     expect(after).not.toMatch(/\b24px\b/);
-    // The visible row keeps its 20px line; only the target grows.
-    expect(block(".xflow-editor-node-group__title")).toMatch(/line-height:\s*var\(--xflow-line-height-md\)\s*;/);
+    // The visible row is now a 28px flex line; only the target grows.
+    expect(block(".xflow-editor-node-group__title")).toMatch(/(?<![\w-])height:\s*28px\s*;/);
   });
 
   it("grows the overview diagnostics button to a 24px target through an inset-block ::after", () => {

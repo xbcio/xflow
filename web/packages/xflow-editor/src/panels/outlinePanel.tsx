@@ -1,5 +1,5 @@
 import * as React from "react";
-import { LocateIcon, OutlineIcon, SearchIcon } from "@xflow/icons";
+import { BanIcon, LocateIcon, OutlineIcon, SearchIcon } from "@xflow/icons";
 import { Button, Tooltip } from "antd";
 import type { RuntimeSnapshot, WorkflowDef, WorkflowEditorSection } from "@xflow/core";
 import { nodeCategoryMeta, nodeStatusMeta, type NodeStatusKey } from "@xflow/core";
@@ -17,9 +17,11 @@ export function OutlinePanel({
   nodeCategories,
   sections,
   runtime,
+  showStatus = false,
   selectedKey,
   canLocate,
   headerAction,
+  onAddNode,
   onLocate,
   onSearch,
   onSelectNode,
@@ -36,12 +38,16 @@ export function OutlinePanel({
   sections?: readonly WorkflowEditorSection[];
   /** The run the canvas cards show; absent when there is none. */
   runtime?: RuntimeSnapshot;
+  /** Draw per-row status dots: only the run view does (§6.0.1 2026-11-07). */
+  showStatus?: boolean;
   /** The canvas selection; the tree highlights it and follows it. */
   selectedKey?: string;
   /** A node is selected, so 定位选中节点 has something to fit. */
   canLocate: boolean;
   /** The left-column collapse key, when this zone is the only one on screen. */
   headerAction?: React.ReactNode;
+  /** The outline's empty state offers 添加节点 while the editor can add. */
+  onAddNode?: () => void;
   onLocate: () => void;
   onSearch: (trigger: HTMLElement) => void;
   /** A row was chosen: select the node and bring it to the middle of the canvas. */
@@ -106,6 +112,8 @@ export function OutlinePanel({
         rows={rows}
         runtime={runtime}
         selectedKey={selectedKey}
+        showStatus={showStatus}
+        onAddNode={onAddNode}
         onFocusLost={onFocusLost}
         onSelectNode={onSelectNode}
       />
@@ -148,13 +156,17 @@ function statusOf(runtime: RuntimeSnapshot | undefined, item: OutlineItemRow): N
 function OutlineTree({
   rows,
   runtime,
+  showStatus,
   selectedKey,
+  onAddNode,
   onFocusLost,
   onSelectNode
 }: {
   rows: OutlineRow[];
   runtime?: RuntimeSnapshot;
+  showStatus: boolean;
   selectedKey?: string;
+  onAddNode?: () => void;
   onFocusLost?: () => void;
   onSelectNode: (key: string) => void;
 }): React.ReactElement {
@@ -195,7 +207,14 @@ function OutlineTree({
   if (items.length === 0) {
     return (
       <div className="xflow-editor-outline__list">
-        <p className="xflow-editor-outline__empty">添加节点后，这里按执行顺序列出。</p>
+        <div className="xflow-editor-outline__empty">
+          <p>画布上还没有节点</p>
+          {onAddNode ? (
+            <Button size="small" type="link" onClick={onAddNode}>
+              添加节点
+            </Button>
+          ) : null}
+        </div>
       </div>
     );
   }
@@ -249,12 +268,12 @@ function OutlineTree({
     return (
       <div
         aria-current={current ? "true" : undefined}
-        aria-description={meta.label}
+        aria-description={showStatus ? meta.label : undefined}
         className="xflow-editor-outline__item"
         data-indent={item.indent > 0 ? "1" : undefined}
         data-node-key={item.key}
-        data-status={status}
-        data-tone={meta.tone}
+        data-status={showStatus ? status : undefined}
+        data-tone={showStatus ? meta.tone : undefined}
         key={item.id}
         role="treeitem"
         tabIndex={item.key === tabbableKey ? 0 : -1}
@@ -264,10 +283,14 @@ function OutlineTree({
       >
         <NodeCategoryIcon category={item.category} size="sm" type={item.type} />
         <span className="xflow-editor-outline__name">
-          {item.label}
+          <span className="xflow-editor-outline__label">{item.label}</span>
           {item.label === item.name ? null : <span className="xflow-editor-outline__sub">{item.name}</span>}
         </span>
-        <span aria-hidden="true" className="xflow-editor-outline__dot" title={meta.label} />
+        {showStatus ? (
+          <span aria-hidden="true" className="xflow-editor-outline__dot" title={meta.label} />
+        ) : item.disabled ? (
+          <BanIcon aria-hidden="true" className="xflow-editor-outline__ban" />
+        ) : null}
       </div>
     );
   };

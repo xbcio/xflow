@@ -40,12 +40,10 @@ import {
   Divider,
   Drawer,
   Dropdown,
-  Input,
   Modal,
   Popconfirm,
   Popover,
   Segmented,
-  Tag,
   Tooltip,
   type InputRef,
   type MenuProps
@@ -87,7 +85,7 @@ import {
 } from "@xflow/core";
 import type { Patch } from "@xflow/composer/core";
 import type { FocusRequest } from "@xflow/composer/react";
-import { READABLE_FIT_ZOOM, XFlowPreview, XFLOW_NODE_DRAG_MIME, type PreviewConnection, type PreviewNodePosition, type PreviewSectionGeometry, type XFlowPreviewHandle } from "@xflow/preview";
+import { READABLE_FIT_ZOOM, XFlowPreview, type PreviewConnection, type PreviewNodePosition, type PreviewSectionGeometry, type XFlowPreviewHandle } from "@xflow/preview";
 import {
   createNodeFormRegistry,
   danglingPorts,
@@ -101,14 +99,19 @@ import {
   translateNodeFormText,
   type DanglingEdge
 } from "./node-form";
-import type { NodeFormKind, NodeFormPort, NodeFormPorts, NodeFormSchema, NodeFormSource } from "./node-form/schema";
-import { nodeLibraryLabel, nodeLibraryMatches, nodeTilePurpose } from "./nodeLibraryCopy";
+import type { NodeFormKind, NodeFormPorts, NodeFormSchema, NodeFormSource } from "./node-form/schema";
+import { nodeLibraryLabel } from "./nodeLibraryCopy";
 import { statusGlyph } from "./panels/statusGlyph";
 import { VariablesPanel } from "./panels/variables";
 import type { WorkflowDiagnostic } from "./panels/diagnostics";
 import { DiagnosticsDock, type DiagnosticsDockController, type DockState } from "./panels/diagnostics";
 import { NodeSearch, type NodeSearchOption } from "./panels/nodeSearch";
 import { NodeCategoryIcon, categoryGlyphFor, nodeTypeGlyph } from "./panels/categoryIcon";
+import { NodeLibrary } from "./panels/nodeLibrary";
+import { nodeLibraryGroups, type NodeLibraryGroup } from "./panels/nodeLibraryGroups";
+import { workflowHasTrigger } from "./panels/libraryExpansion";
+import { LeftZones } from "./panels/leftZones";
+import { readRecentNodeTypes, rememberRecentNodeType } from "./panels/recentNodeTypes";
 import { OutlinePanel } from "./panels/outlinePanel";
 import { RailKey } from "./panels/rail";
 import { PanelResizeHandle } from "./panels/panelResizeHandle";
@@ -164,7 +167,6 @@ import {
   type ParameterTab
 } from "./panels/workflowOps";
 import {
-  EditorPanel,
   editorTooltipClassNames,
   hostCapabilityCopy,
   serializeJson,
@@ -1014,20 +1016,6 @@ function layoutTier(width: number): "wide" | "compact" {
   return "wide";
 }
 
-/** The "Runner" badge on a runner-reported library tile; colored by --xflow-node-source-*. */
-const editorNodeSourceTagClassNames = {
-  content: "xflow-editor__node-tile-source-label",
-  root: "xflow-editor__node-tile-source-root"
-};
-
-/** The library's always-on search box (baseline `.xflow-pv-search`): prefix icon, "/" key hint as suffix. */
-const editorLibrarySearchClassNames = {
-  input: "xflow-editor-field__control",
-  prefix: "xflow-editor-library-search__prefix",
-  root: "xflow-editor-library-search",
-  suffix: "xflow-editor-library-search__suffix"
-};
-
 const editorCompactDrawerClassNames = {
   body: "xflow-editor-compact-drawer__body",
   close: "xflow-editor-compact-drawer__close",
@@ -1121,9 +1109,6 @@ function ThemeSettings({
   );
 }
 
-/** Node-library groups in display order; "其他" collects types with no presentation entry. */
-const nodeLibraryGroups = ["触发器", "流程控制", "动作", "代码与转换", "人工", "其他"] as const;
-type NodeLibraryGroup = (typeof nodeLibraryGroups)[number];
 type NodeTone = "blue" | "cyan" | "green" | "amber" | "violet";
 
 /** One node-library tile: what the type is (from the schema) plus how it looks. */
@@ -1410,17 +1395,6 @@ function nodeCategoriesFromTypes(nodeTypes: NodeTypesResponse | undefined): Read
   }
   derivedNodeCategories.set(nodeTypes, categories);
   return categories;
-}
-
-/** One-line port summary for a library tile's tooltip, from the schema's ports. */
-function describePorts(ports: NodeFormPorts | undefined): string | undefined {
-  if (!ports) return undefined;
-  const names = (list: NodeFormPort[] | undefined) => (list ?? []).map((port) => port.name).join(", ");
-  const parts = [
-    ports.inputs?.length ? `输入 ${names(ports.inputs)}` : "",
-    ports.dynamic_outputs ? "输出 动态" : ports.outputs?.length ? `输出 ${names(ports.outputs)}` : ""
-  ].filter(Boolean);
-  return parts.length ? parts.join(" · ") : undefined;
 }
 
 function defaultSelectedKey(nodes: WorkflowNode[]): string | undefined {
@@ -2200,235 +2174,6 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
-/** Tooltip line naming where a runner-reported type came from, or undefined for server types. */
-function describeSource(descriptor: NodeDescriptor): string | undefined {
-  if (descriptor.source !== "runner") return undefined;
-  return descriptor.pools?.length ? `Runner 资源池 ${descriptor.pools.join(", ")}` : "Runner 上报 · 未归属资源池";
-}
-
-function nodeTileTooltip(descriptor: NodeDescriptor): React.ReactNode {
-  const ports = describePorts(descriptor.ports);
-  const source = describeSource(descriptor);
-  if (!ports && !source && !descriptor.description) return descriptor.type;
-  return (
-    <span className="xflow-editor-node-tile__tooltip">
-      <span>{descriptor.type}</span>
-      {ports ? <span>{ports}</span> : null}
-      {source ? <span className="xflow-editor-node-tile__tooltip-source">{source}</span> : null}
-      {descriptor.description ? <span>{descriptor.description}</span> : null}
-    </span>
-  );
-}
-
-function NodeLibrary({
-  descriptors: libraryDescriptors,
-  onAddNode,
-  onSearchOpenChange,
-  searchButtonRef,
-  searchInputRef,
-  searchOpen,
-  headerAction
-}: {
-  descriptors: NodeDescriptor[];
-  onAddNode: (descriptor: NodeDescriptor) => void;
-  /** The title-bar key opens and closes the search box. */
-  onSearchOpenChange: (open: boolean) => void;
-  /** The key itself, so Esc can hand focus back after closing. */
-  searchButtonRef?: React.RefObject<HTMLButtonElement | null>;
-  searchInputRef?: React.Ref<InputRef>;
-  searchOpen: boolean;
-  headerAction?: React.ReactNode;
-}): React.ReactElement {
-  const [query, setQuery] = React.useState("");
-  // ED-14: progressive disclosure. The first group (触发器) opens by default and
-  // every other group starts collapsed with its count in the header; a search
-  // ignores the fold so matches stay visible. The fold is session-local state —
-  // the library stays mounted for the whole editing session.
-  const [collapsedGroups, setCollapsedGroups] = React.useState<ReadonlySet<NodeDescriptor["group"]>>(
-    () => new Set(nodeLibraryGroups.filter((group) => group !== nodeLibraryGroups[0]))
-  );
-  // The box is hidden (and out of the layout) until its key opens it; the key
-  // stays the control that owns it, hence aria-controls on the always-present
-  // wrapper rather than on the conditionally mounted field.
-  const searchId = React.useId();
-  const normalizedQuery = query.trim().toLowerCase();
-  const closeSearch = React.useCallback(() => {
-    setQuery("");
-    onSearchOpenChange(false);
-  }, [onSearchOpenChange]);
-  // A close from outside the input (Esc on the key, the shortcut path, a layout
-  // switch) must not leave the next open showing the old filter.
-  React.useEffect(() => {
-    if (!searchOpen) setQuery("");
-  }, [searchOpen]);
-  const searchButton = (
-    <Tooltip classNames={editorTooltipClassNames} title="搜索节点（/）">
-      <Button
-        aria-controls={searchId}
-        aria-expanded={searchOpen}
-        aria-keyshortcuts="/"
-        aria-label="搜索节点"
-        className="xflow-editor-panel-collapse"
-        color="default"
-        data-active={searchOpen || normalizedQuery.length > 0 ? "true" : undefined}
-        icon={<SearchIcon />}
-        ref={searchButtonRef}
-        size="small"
-        variant="text"
-        onClick={() => {
-          if (searchOpen) closeSearch();
-          else onSearchOpenChange(true);
-        }}
-      />
-    </Tooltip>
-  );
-  const toggleGroup = React.useCallback((group: NodeDescriptor["group"]) => {
-    setCollapsedGroups((current) => {
-      const next = new Set(current);
-      if (next.has(group)) next.delete(group);
-      else next.add(group);
-      return next;
-    });
-  }, []);
-  const matchesQuery = React.useCallback(
-    (descriptor: NodeDescriptor) => nodeLibraryMatches(descriptor, normalizedQuery),
-    [normalizedQuery]
-  );
-  const descriptorsForGroup = React.useCallback(
-    (group: NodeDescriptor["group"]) =>
-      libraryDescriptors.filter((descriptor) => descriptor.group === group && matchesQuery(descriptor)),
-    [libraryDescriptors, matchesQuery]
-  );
-
-  return (
-    <EditorPanel
-      actions={
-        <>
-          {searchButton}
-          {headerAction}
-        </>
-      }
-      bodyClassName="xflow-editor-library__body"
-      className="xflow-editor-library"
-      count={libraryDescriptors.length}
-      divider={false}
-      icon={<GridIcon />}
-      title="节点"
-    >
-      {/* Hidden until its key opens it; "/" opens and focuses it (the shortcut
-       * list). The wrapper keeps the aria-controls target in the DOM. */}
-      <div className="xflow-editor-library__search" hidden={!searchOpen} id={searchId}>
-        {searchOpen ? (
-          <Input
-            autoFocus
-            ref={searchInputRef}
-            classNames={editorLibrarySearchClassNames}
-            placeholder="搜索 Webhook / If / HTTP…"
-            prefix={<SearchIcon />}
-            suffix={<kbd className="xflow-editor-kbd">/</kbd>}
-            value={query}
-            onBlur={(event) => {
-              // An empty box folds away, but not when the pointer is on its
-              // key: that key's click closes it and must not be undone by the
-              // blur firing first.
-              if (query.trim() !== "" || event.relatedTarget === searchButtonRef?.current) return;
-              onSearchOpenChange(false);
-            }}
-            onChange={(event) => setQuery(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key !== "Escape") return;
-              event.preventDefault();
-              event.stopPropagation();
-              setQuery("");
-              onSearchOpenChange(false);
-              searchButtonRef?.current?.focus({ preventScroll: true });
-            }}
-          />
-        ) : null}
-      </div>
-      <div className="xflow-editor-library__list">
-      {nodeLibraryGroups.map((group) => {
-        const descriptors = descriptorsForGroup(group);
-        const collapsed = !normalizedQuery && collapsedGroups.has(group);
-        // An empty group is hidden: always while searching, and for "其他",
-        // which only exists to catch types without a presentation entry.
-        if (descriptors.length === 0 && (normalizedQuery || group === "其他")) return null;
-
-        return (
-          <div className="xflow-editor-node-group" key={group}>
-            <button
-              aria-expanded={!collapsed}
-              className="xflow-editor-node-group__title"
-              type="button"
-              onClick={() => toggleGroup(group)}
-            >
-              <span className="xflow-editor-node-group__heading">
-                <span className="xflow-editor-block-title">{group}</span>
-                <DownIcon aria-hidden="true" className={collapsed ? "xflow-editor-node-group__chevron is-collapsed" : "xflow-editor-node-group__chevron"} />
-                <span className="xflow-editor-node-group__count">{descriptors.length}</span>
-              </span>
-            </button>
-            {collapsed ? null : (
-              <div className="xflow-editor-node-list">
-                {descriptors.map((descriptor) => (
-                  <Tooltip classNames={editorTooltipClassNames} key={descriptor.type} title={nodeTileTooltip(descriptor)}>
-                    <button
-                      aria-label={descriptor.source === "runner" ? `${descriptor.label} (Runner)` : descriptor.label}
-                      className="xflow-editor-node-tile"
-                      data-node-type={descriptor.type}
-                      data-source={descriptor.source}
-                      draggable
-                      type="button"
-                      onClick={(event) => {
-                        // A double click is one gesture, not two adds: the
-                        // second click (detail > 1) is ignored. Keyboard
-                        // activation reports detail 0 and still adds.
-                        if (event.detail > 1) return;
-                        onAddNode(descriptor);
-                      }}
-                      onDragStart={(event) => {
-                        // The canvas reads this payload back on drop. Click stays
-                        // wired so the tile remains usable without a drag.
-                        event.dataTransfer.setData(XFLOW_NODE_DRAG_MIME, descriptor.type);
-                        event.dataTransfer.effectAllowed = "copy";
-                      }}
-                    >
-                      <NodeCategoryIcon category={descriptor.category} type={descriptor.type} />
-                      <span className="xflow-editor-node-tile__content">
-                        <strong>{descriptor.label}</strong>
-                        {/* A descriptor description, else the builtin purpose table, else the type id. */}
-                        <small
-                          className="xflow-editor-node-tile__hint"
-                          title={descriptor.description || descriptor.type}
-                        >
-                          {nodeTilePurpose(descriptor)}
-                        </small>
-                      </span>
-                      {descriptor.source === "runner" ? (
-                        <Tag
-                          aria-hidden="true"
-                          className="xflow-editor__node-tile-source"
-                          classNames={editorNodeSourceTagClassNames}
-                          variant="outlined"
-                        >
-                          Runner
-                        </Tag>
-                      ) : null}
-                    </button>
-                  </Tooltip>
-                ))}
-              </div>
-            )}
-          </div>
-        );
-      })}
-      {normalizedQuery && !libraryDescriptors.some(matchesQuery) ? (
-        <p className="xflow-editor-empty">没有匹配节点。</p>
-      ) : null}
-      </div>
-    </EditorPanel>
-  );
-}
 
 /**
  * §6.2 empty canvas: shown only while the workflow has no nodes, centred on the
@@ -2702,11 +2447,13 @@ export function XFlowEditor({
   const [desktopRailSection, setDesktopRailSection] = React.useState<"library" | "variables">("library");
   const nodeLibrarySearchRef = React.useRef<InputRef | null>(null);
   const nodeLibrarySearchButtonRef = React.useRef<HTMLButtonElement | null>(null);
-  /** Whether the library's search box is open; the title-bar key toggles it. */
+  // §6.0.1 (2026-11-07): the box is not permanent; its title-bar key opens it.
   const [nodeLibrarySearchOpen, setNodeLibrarySearchOpen] = React.useState(false);
   // Bumped by the "/" shortcut; the effect below focuses the search once the
   // library column (re)mounted by the same gesture is in the DOM.
   const [librarySearchFocusNonce, setLibrarySearchFocusNonce] = React.useState(0);
+  /** The 常用 group's recent types (localStorage-backed, shared across workflows). */
+  const [recentNodeTypes, setRecentNodeTypes] = React.useState<string[]>(() => readRecentNodeTypes());
   const [nodeSearchOpen, setNodeSearchOpen] = React.useState(false);
   /** Bumped per open so the panel starts with an empty query (E2b review). */
   const [nodeSearchNonce, setNodeSearchNonce] = React.useState(0);
@@ -3730,6 +3477,9 @@ export function XFlowEditor({
       // D-4: a fresh node starts pristine; its required fields are 待填, not errors.
       setPristineNodes((current) => (current.has(nextKey) ? current : new Set(current).add(nextKey)));
       setSelectedKey(nextKey);
+      // 常用 (§6.0.1): every add path — click, drop, context menu — records the
+      // type, so the group's order follows what the user actually reached for.
+      setRecentNodeTypes(rememberRecentNodeType(descriptor.type));
       // A card added outside the visible pane is panned into view; a dropped
       // card is where the pointer put it and never moves.
       if (!position) {
@@ -3737,6 +3487,15 @@ export function XFlowEditor({
       }
     },
     [commitWorkflow, draftWorkflow, selectedIndex, selectedNode]
+  );
+
+  /** The library hands back a type id; the editor owns placement and history. */
+  const addNodeByType = React.useCallback(
+    (type: string) => {
+      const descriptor = libraryDescriptors.find((candidate) => candidate.type === type);
+      if (descriptor) addNode(descriptor);
+    },
+    [addNode, libraryDescriptors]
   );
 
   const dropNode = React.useCallback(
@@ -4596,9 +4355,9 @@ export function XFlowEditor({
 
   const focusLibrarySearchFromKey = React.useCallback(() => {
     openNodeLibrary();
+    // "/" unfolds the box (§6.0.1, 2026-11-07); the nonce covers the case
+    // where the gesture also mounts the column.
     setNodeLibrarySearchOpen(true);
-    // The nonce matters when the box is already open: `open` does not change,
-    // so the focus effect below is the one that reaches it.
     setLibrarySearchFocusNonce((nonce) => nonce + 1);
   }, [openNodeLibrary]);
   React.useEffect(() => {
@@ -5396,36 +5155,47 @@ export function XFlowEditor({
   }, []);
   /**
    * The 节点 state of the left column (§6.0.1): the node library over the
-   * outline, one region each. Preview has no library, so the outline fills the
-   * column alone and carries the collapse action itself.
+   * outline, one region each, split by the draggable rule. Preview has no
+   * library, so the outline fills the column alone and carries the collapse
+   * action itself.
    */
   const renderNodeZones = (headerAction: React.ReactNode): React.ReactElement => (
-    <aside aria-label="节点与大纲" className="xflow-editor-lib" data-zones={editMode ? "dual" : "single"}>
-      {editMode ? (
+    <LeftZones
+      dual={editMode}
+      library={
         <NodeLibrary
           descriptors={libraryDescriptors}
+          error={nodeTypesError}
+          groups={nodeLibraryGroups}
+          hasTrigger={workflowHasTrigger(draftWorkflow.nodes ?? [])}
           headerAction={headerAction}
+          recentTypes={recentNodeTypes}
           searchButtonRef={nodeLibrarySearchButtonRef}
           searchInputRef={nodeLibrarySearchRef}
           searchOpen={nodeLibrarySearchOpen}
-          onAddNode={addNode}
+          onAddNode={addNodeByType}
+          onRetry={onRetryNodeTypes}
           onSearchOpenChange={setNodeLibrarySearchOpen}
         />
-      ) : null}
-      <OutlinePanel
-        canLocate={selectedNode !== undefined}
-        headerAction={editMode ? undefined : headerAction}
-        nodeCategories={nodeCategories}
-        runtime={localRuntime}
-        sections={editorSections}
-        selectedKey={selectedKey}
-        workflow={draftWorkflow}
-        onFocusLost={handleOutlineFocusLost}
-        onLocate={locateSelectedNode}
-        onSearch={openNodeSearch}
-        onSelectNode={selectOutlineNode}
-      />
-    </aside>
+      }
+      outline={
+        <OutlinePanel
+          canLocate={selectedNode !== undefined}
+          headerAction={editMode ? undefined : headerAction}
+          nodeCategories={nodeCategories}
+          runtime={localRuntime}
+          sections={editorSections}
+          selectedKey={selectedKey}
+          showStatus={!editMode}
+          workflow={draftWorkflow}
+          onAddNode={editMode ? openNodeLibrary : undefined}
+          onFocusLost={handleOutlineFocusLost}
+          onLocate={locateSelectedNode}
+          onSearch={openNodeSearch}
+          onSelectNode={selectOutlineNode}
+        />
+      }
+    />
   );
   const collapseRightAction = (
     <Tooltip classNames={editorTooltipClassNames} title="收起属性面板 ⌥⌘B">

@@ -236,7 +236,10 @@ describe("XFlowEditor", () => {
     expect(editor.getAttribute("data-canvas-tool")).toBe("select");
 
     expandAllGroups();
-    fireEvent.click(within(screen.getByRole("region", { name: "节点" })).getByRole("button", { name: "HTTP" }));
+    // 常用 repeats the common types, so the first HTTP row is its copy.
+    fireEvent.click(
+      within(screen.getByRole("region", { name: "节点" })).getAllByRole("button", { name: "HTTP" })[0]
+    );
     expect(undo.disabled).toBe(false);
     fireEvent.click(undo);
     expect(handleChange).toHaveBeenLastCalledWith(workflow);
@@ -245,27 +248,32 @@ describe("XFlowEditor", () => {
     expect(handleChange.mock.calls.at(-1)?.[0]?.nodes).toHaveLength(4);
   });
 
-  it("collapses node-library groups without removing their discovery affordance", () => {
+  it("opens 常用 by default and folds the trigger group once the workflow has one", () => {
     render(<XFlowEditor value={workflow} />);
 
     const library = screen.getByRole("region", { name: "节点" });
-    const triggers = within(library).getByRole("button", { name: /触发器 4/ });
+    // §6.0.1 (2026-11-07): 常用 is open; 触发器 folds when a trigger exists.
+    expect(within(library).getByRole("button", { name: /常用/ }).getAttribute("aria-expanded")).toBe("true");
+    const triggers = within(library).getByRole("button", { name: /触发器/ });
+    expect(triggers.getAttribute("aria-expanded")).toBe("false");
+    expect(within(library).queryByRole("button", { name: "Webhook" })).toBeNull();
+    // The 常用 rows stay reachable while the type groups are folded.
+    expect(within(library).getAllByRole("button", { name: "HTTP" }).length).toBeGreaterThan(0);
+
+    fireEvent.click(triggers);
     expect(triggers.getAttribute("aria-expanded")).toBe("true");
     expect(within(library).getByRole("button", { name: "Webhook" })).toBeTruthy();
 
     fireEvent.click(triggers);
     expect(triggers.getAttribute("aria-expanded")).toBe("false");
     expect(within(library).queryByRole("button", { name: "Webhook" })).toBeNull();
-
-    fireEvent.click(triggers);
-    expect(triggers.getAttribute("aria-expanded")).toBe("true");
   });
 
   it("starts a library drag with the node type the canvas reads back on drop", () => {
     render(<XFlowEditor value={workflow} />);
     expandAllGroups();
 
-    const tile = within(screen.getByRole("region", { name: "节点" })).getByRole("button", { name: "HTTP" });
+    const tile = within(screen.getByRole("region", { name: "节点" })).getAllByRole("button", { name: "HTTP" })[0];
     expect(tile.getAttribute("draggable")).toBe("true");
     const setData = vi.fn();
     fireEvent.dragStart(tile, { dataTransfer: { setData, effectAllowed: "" } });
@@ -765,7 +773,7 @@ describe("XFlowEditor", () => {
     // the dialog keeps an accessible name.
     expect(screen.getByRole("dialog", { name: "节点与大纲" })).toBeTruthy();
     // The box starts hidden; opening the drawer focuses its key instead.
-    expect(screen.queryByPlaceholderText("搜索 Webhook / If / HTTP…")).toBeNull();
+    expect(screen.queryByPlaceholderText("搜索节点，如 HTTP / If / Webhook")).toBeNull();
     const searchKey = within(screen.getByRole("region", { name: "节点" })).getByRole("button", { name: "搜索节点" });
     await waitFor(() => {
       expect(document.activeElement).toBe(searchKey);
@@ -1298,12 +1306,12 @@ describe("XFlowEditor", () => {
     const library = screen.getByRole("region", { name: "节点" });
     expect(library.querySelector(".xflow-editor-panel-title__icon")?.getAttribute("aria-hidden")).toBe("true");
     // The baseline's box starts hidden; the title-bar key reveals it.
-    expect(within(library).queryByPlaceholderText("搜索 Webhook / If / HTTP…")).toBeNull();
+    expect(within(library).queryByPlaceholderText("搜索节点，如 HTTP / If / Webhook")).toBeNull();
     const key = within(library).getByRole("button", { name: "搜索节点" });
     expect(key.getAttribute("aria-expanded")).toBe("false");
     fireEvent.click(key);
 
-    const searchInput = within(library).getByPlaceholderText("搜索 Webhook / If / HTTP…");
+    const searchInput = within(library).getByPlaceholderText("搜索节点，如 HTTP / If / Webhook");
     expect(searchInput).toBeTruthy();
     expect(searchInput.className).toContain("xflow-editor-field__control");
     expect(library.querySelector(".xflow-editor-library-search")).toBeTruthy();
@@ -1311,7 +1319,8 @@ describe("XFlowEditor", () => {
     expect(within(library).queryByRole("button", { name: "search" })).toBeNull();
 
     fireEvent.change(searchInput, { target: { value: "http" } });
-    expect(within(library).getByRole("button", { name: "HTTP" })).toBeTruthy();
+    // 常用 repeats the common types, so the hit appears in both groups.
+    expect(within(library).getAllByRole("button", { name: "HTTP" }).length).toBeGreaterThan(0);
     expect(within(library).queryByRole("button", { name: "Kafka" })).toBeNull();
   });
 
@@ -1619,7 +1628,8 @@ describe("XFlowEditor", () => {
     expandAllGroups();
 
     const library = screen.getByRole("region", { name: "节点" });
-    fireEvent.click(within(library).getByRole("button", { name: "HTTP" }));
+    // 常用 repeats the common types, so the first HTTP row is its copy.
+    fireEvent.click(within(library).getAllByRole("button", { name: "HTTP" })[0]);
 
     expect(handleChange).toHaveBeenCalledWith({
       ...workflow,
@@ -1652,6 +1662,8 @@ describe("XFlowEditor", () => {
     render(<XFlowEditor value={workflow} onChange={handleChange} />);
 
     const library = screen.getByRole("region", { name: "节点" });
+    // 触发器 folds by default here: the fixture already has a trigger.
+    expandAllGroups();
     fireEvent.click(within(library).getByRole("button", { name: "Webhook" }));
 
     expect(handleChange).toHaveBeenCalledWith({
@@ -2319,7 +2331,10 @@ describe("XFlowEditor", () => {
     render(<XFlowEditor value={workflow} onChange={handleChange} />);
 
     expandAllGroups();
-    fireEvent.click(within(screen.getByRole("region", { name: "节点" })).getByRole("button", { name: "HTTP" }));
+    // 常用 repeats the common types, so the first HTTP row is its copy.
+    fireEvent.click(
+      within(screen.getByRole("region", { name: "节点" })).getAllByRole("button", { name: "HTTP" })[0]
+    );
     const addedCount = handleChange.mock.calls.at(-1)?.[0]?.nodes.length;
     expect(addedCount).toBe(4);
 
@@ -2414,7 +2429,10 @@ describe("XFlowEditor", () => {
     render(<XFlowEditor value={workflow} onChange={handleChange} onSave={handleSave} />);
 
     expandAllGroups();
-    fireEvent.click(within(screen.getByRole("region", { name: "节点" })).getByRole("button", { name: "HTTP" }));
+    // 常用 repeats the common types, so the first HTTP row is its copy.
+    fireEvent.click(
+      within(screen.getByRole("region", { name: "节点" })).getAllByRole("button", { name: "HTTP" })[0]
+    );
     const changeCountBefore = handleChange.mock.calls.length;
 
     const nameField = within(workflowSettings()).getByLabelText("工作流名称");
