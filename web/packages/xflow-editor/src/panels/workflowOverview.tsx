@@ -5,6 +5,7 @@ import * as React from "react";
 import { versionLabel } from "../versioning";
 import { countWorkflowEdges, type WorkflowDiagnostic } from "./diagnostics";
 import { executionClock, executionDuration } from "./executionList";
+import { SectionCard } from "./shared";
 import { statusGlyph } from "./statusGlyph";
 import { nodeLabel } from "./workflowOps";
 
@@ -18,11 +19,14 @@ export interface WorkflowOverviewRun {
 
 /**
  * What the Inspector shows above the workflow settings when no node is
- * selected. It only states facts the editor already holds: counts from the
- * draft, triggers from its nodes, validation from the diagnostics it computed
- * for the dock, the version/save state from the top bar's own baseline, and —
- * when the host has a run — that run. Anything the host did not send stays
- * absent rather than becoming a placeholder.
+ * selected. §6.4 (2026-11-07): one summary line under the panel title bar,
+ * then a 概览 section carrying the trigger / validation / version rows in the
+ * same 96px label column as every other settings row. It only states facts the
+ * editor already holds: counts from the draft, triggers from its nodes,
+ * validation from the diagnostics it computed for the dock, the version/save
+ * state from the top bar's own baseline, and — when the host has a run — that
+ * run. Anything the host did not send stays absent rather than becoming a
+ * placeholder.
  */
 export interface WorkflowOverviewProps {
   workflow: WorkflowDef;
@@ -68,7 +72,8 @@ export function WorkflowOverview({
     .filter((label): label is string => Boolean(label));
   const errors = diagnostics.filter((item) => item.status === "error" && item.area !== "operation").length;
   const warnings = diagnostics.filter((item) => item.status === "warn").length;
-  const validationText = errors === 0 && warnings === 0 ? "无问题" : `${errors} 错误 · ${warnings} 警告`;
+  // §6.4 (2026-11-07): 通过 when nothing is wrong; otherwise the two counts.
+  const validationText = errors === 0 && warnings === 0 ? "通过" : `${errors} 错误 · ${warnings} 警告`;
   const runMeta = latestRun ? workflowStatusMeta[latestRun.status] : undefined;
   const runDuration = latestRun ? executionDuration(latestRun) : undefined;
   const runBody = latestRun && runMeta ? (
@@ -90,79 +95,72 @@ export function WorkflowOverview({
   ) : null;
 
   return (
-    <section aria-label="工作流概览" className="xflow-editor-overview">
-      <div className="xflow-editor-overview__stats">
-        <div className="xflow-editor-overview__stat">
-          <span className="xflow-editor-overview__stat-value">{nodes.length}</span>
-          <span className="xflow-editor-overview__stat-label">节点</span>
-        </div>
-        <div className="xflow-editor-overview__stat">
-          <span className="xflow-editor-overview__stat-value">{countWorkflowEdges(workflow)}</span>
-          <span className="xflow-editor-overview__stat-label">连线</span>
-        </div>
-        <div className="xflow-editor-overview__stat">
-          <span className="xflow-editor-overview__stat-value">{sectionCount}</span>
-          <span className="xflow-editor-overview__stat-label">分区</span>
-        </div>
-      </div>
-      <div className="xflow-editor-overview__row">
-        <span className="xflow-editor-overview__label">触发器</span>
-        <span
-          className="xflow-editor-overview__value"
-          data-empty={triggers.length === 0 ? "true" : undefined}
-          title={triggers.length > 0 ? triggers.join("、") : undefined}
-        >
-          {triggers.length > 0 ? triggers.join("、") : "未配置触发器"}
-        </span>
-      </div>
-      <div className="xflow-editor-overview__row">
-        <span className="xflow-editor-overview__label">校验</span>
-        {onOpenDiagnostics ? (
-          <button
-            className="xflow-editor-overview__value xflow-editor-overview__link"
-            data-tone={errors > 0 ? "danger" : warnings > 0 ? "warning" : "success"}
-            title="打开诊断台"
-            type="button"
-            onClick={onOpenDiagnostics}
-          >
-            {errors > 0 ? <WarnIcon /> : <CheckIcon />}
-            <span>{validationText}</span>
-          </button>
-        ) : (
-          <span
-            className="xflow-editor-overview__value"
-            data-tone={errors > 0 ? "danger" : warnings > 0 ? "warning" : "success"}
-          >
-            {validationText}
-          </span>
-        )}
-      </div>
-      <div className="xflow-editor-overview__row">
-        <span className="xflow-editor-overview__label">版本</span>
-        <span className="xflow-editor-overview__value">
-          {version ? versionLabel(version) : "未发布"}
-          <span className="xflow-editor-overview__save" data-dirty={unsavedCount > 0 ? "true" : undefined}>
-            {unsavedCount > 0 ? `${unsavedCount} 处未保存` : persisted ? "已保存" : "未保存"}
-          </span>
-        </span>
-      </div>
-      {latestRun ? (
-        <div className="xflow-editor-overview__row">
-          <span className="xflow-editor-overview__label">最近运行</span>
-          {onOpenRun ? (
-            <button
-              className="xflow-editor-overview__value xflow-editor-overview__run"
-              title={`在回放中打开 ${latestRun.executionId}`}
-              type="button"
-              onClick={() => onOpenRun(latestRun.executionId)}
+    <>
+      <p className="xflow-editor-workflow-summary">
+        {nodes.length} 节点 · {countWorkflowEdges(workflow)} 连线 · {sectionCount} 分区
+      </p>
+      <section aria-label="工作流概览" className="xflow-editor-overview">
+        <SectionCard ariaLabel="概览" title="概览">
+          <div className="xflow-editor-form-row xflow-editor-form-row--workflow">
+            <span className="xflow-editor-form-row__label">触发器</span>
+            <span
+              className="xflow-editor-overview__value"
+              data-empty={triggers.length === 0 ? "true" : undefined}
+              title={triggers.length > 0 ? triggers.join("、") : undefined}
             >
-              {runBody}
-            </button>
-          ) : (
-            <span className="xflow-editor-overview__value xflow-editor-overview__run">{runBody}</span>
-          )}
-        </div>
-      ) : null}
-    </section>
+              {triggers.length > 0 ? triggers.join("、") : "未配置触发器"}
+            </span>
+          </div>
+          <div className="xflow-editor-form-row xflow-editor-form-row--workflow">
+            <span className="xflow-editor-form-row__label">校验</span>
+            {onOpenDiagnostics ? (
+              <button
+                className="xflow-editor-overview__value xflow-editor-overview__link"
+                data-tone={errors > 0 ? "danger" : warnings > 0 ? "warning" : "success"}
+                title="打开诊断台"
+                type="button"
+                onClick={onOpenDiagnostics}
+              >
+                {errors > 0 ? <WarnIcon /> : <CheckIcon />}
+                <span>{validationText}</span>
+              </button>
+            ) : (
+              <span
+                className="xflow-editor-overview__value"
+                data-tone={errors > 0 ? "danger" : warnings > 0 ? "warning" : "success"}
+              >
+                {validationText}
+              </span>
+            )}
+          </div>
+          <div className="xflow-editor-form-row xflow-editor-form-row--workflow">
+            <span className="xflow-editor-form-row__label">版本</span>
+            <span className="xflow-editor-overview__value">
+              {version ? versionLabel(version) : "未发布"}
+              <span className="xflow-editor-overview__save" data-dirty={unsavedCount > 0 ? "true" : undefined}>
+                {unsavedCount > 0 ? `${unsavedCount} 处未保存` : persisted ? "已保存" : "未保存"}
+              </span>
+            </span>
+          </div>
+          {latestRun ? (
+            <div className="xflow-editor-form-row xflow-editor-form-row--workflow">
+              <span className="xflow-editor-form-row__label">最近运行</span>
+              {onOpenRun ? (
+                <button
+                  className="xflow-editor-overview__value xflow-editor-overview__run"
+                  title={`在回放中打开 ${latestRun.executionId}`}
+                  type="button"
+                  onClick={() => onOpenRun(latestRun.executionId)}
+                >
+                  {runBody}
+                </button>
+              ) : (
+                <span className="xflow-editor-overview__value xflow-editor-overview__run">{runBody}</span>
+              )}
+            </div>
+          ) : null}
+        </SectionCard>
+      </section>
+    </>
   );
 }

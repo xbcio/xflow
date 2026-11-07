@@ -2199,12 +2199,9 @@ describe("XFlowEditor", () => {
   it("shows the workflow overview above the settings when nothing is selected (EL-13)", () => {
     render(<XFlowEditor value={{ ...workflow, version: "2.1.0" }} />);
     const inspector = workflowSettings();
+    // §6.4 (2026-11-07): the three stat tiles became one summary line.
+    expect(within(inspector).getByText("3 节点 · 2 连线 · 0 分区")).toBeTruthy();
     const overview = within(inspector).getByRole("region", { name: "工作流概览" });
-
-    const stats = [...overview.querySelectorAll(".xflow-editor-overview__stat-value")].map(
-      (value) => value.textContent
-    );
-    expect(stats).toEqual(["3", "2", "0"]);
     expect(overview.textContent).toContain("start");
     expect(overview.textContent).toContain("v2.1.0");
     expect(overview.textContent).toContain("已保存");

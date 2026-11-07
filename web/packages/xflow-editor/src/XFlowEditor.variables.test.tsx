@@ -2,7 +2,6 @@
 // credential references), the ⌘K node search (jump by name, next to the outline), and
 // the Inspector's workflow settings shown with no node selected.
 
-import * as React from "react";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkflowDef } from "@xflow/core";
@@ -41,29 +40,6 @@ afterEach(() => {
   if (originalClipboard) Object.defineProperty(navigator, "clipboard", originalClipboard);
   else Reflect.deleteProperty(navigator, "clipboard");
 });
-
-/** A controlled host that stores the editor's payload, as a real workbench does. */
-function ControlledEditor({
-  initial,
-  onChange,
-  onSave
-}: {
-  initial: WorkflowDef;
-  onChange?: (next: WorkflowDef) => void;
-  onSave?: React.ComponentProps<typeof XFlowEditor>["onSave"];
-}): React.ReactElement {
-  const [value, setValue] = React.useState(initial);
-  return (
-    <XFlowEditor
-      value={value}
-      onChange={(next) => {
-        onChange?.(next);
-        setValue(next);
-      }}
-      onSave={onSave}
-    />
-  );
-}
 
 /** Opens an editor AntD Select and clicks the option titled `label`. */
 const pickEditorOption = (combo: HTMLElement, label: string): void => {
@@ -263,7 +239,7 @@ describe("node search and workflow settings", () => {
     expect([...mode!.children].some((child) => child.classList.contains("xflow-editor-form-row__label"))).toBe(true);
   });
 
-  it("lays the settings out in §6.4 order, with 标识 and 时区 under 基本", () => {
+  it("lays the settings out in §6.4 order, with 标识 in the 基本 head and 时区 under 基本", () => {
     const handleChange = vi.fn();
     render(
       <XFlowEditor
@@ -274,38 +250,36 @@ describe("node search and workflow settings", () => {
     fireEvent.keyDown(window, { key: "Escape" });
     const inspector = screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
 
-    // 入口 sits between 基本 and 并发, and no dead 超时 row survives the split.
+    // 概览 leads (§6.4, 2026-11-07), then 基本 / 触发器 / 并发 / 错误与重试 / 高级.
     const groups = within(inspector)
       .getAllByRole("group")
       .map((group) => group.getAttribute("aria-label"))
       .filter((name): name is string => Boolean(name));
-    expect(groups.slice(0, 5)).toEqual(["基本", "入口", "并发", "错误与重试", "高级"]);
+    expect(groups.slice(0, 5)).toEqual(["概览", "基本", "触发器", "并发", "错误与重试"]);
     expect(groups.at(-1)).toBe("Pin Data");
     expect(within(inspector).queryByLabelText("超时")).toBeNull();
     expect(within(inspector).queryByText("超时")).toBeNull();
 
-    // The fixture's start node is the workflow's only entry.
-    const entry = within(inspector).getByRole("group", { name: "入口" });
+    // The fixture's start node is the workflow's only trigger.
+    const entry = within(inspector).getByRole("group", { name: "触发器" });
     expect(within(entry).getByText("start")).toBeTruthy();
     expect(within(entry).getByText("xflow.start")).toBeTruthy();
-    // ED-19: the row reuses the outline's category icon + secondary type, and
-    // the locate key is an icon (not the word 定位).
-    expect(entry.querySelector(".xflow-editor-entry-row .xflow-editor-category-icon")?.getAttribute("data-cat")).toBe(
+    // ED-19: the row reuses the outline's category icon, and the whole row is
+    // the locate target (§6.4, 2026-11-07) with its type in mono.
+    expect(entry.querySelector(".xflow-editor-trigger-row .xflow-editor-category-icon")?.getAttribute("data-cat")).toBe(
       "control"
     );
-    const locate = within(entry).getByRole("button", { name: "定位入口 start" });
-    expect(locate.classList.contains("xflow-editor-entry-row__locate")).toBe(true);
+    const locate = within(entry).getByRole("button", { name: "start xflow.start" });
+    expect(locate.classList.contains("xflow-editor-trigger-row")).toBe(true);
+    expect(locate.getAttribute("title")).toBe("定位到画布：start");
     expect(locate.querySelector("svg")).toBeTruthy();
-    expect(within(entry).queryByText("定位")).toBeNull();
 
     const basic = within(inspector).getByRole("group", { name: "基本" });
     expect((within(basic).getByLabelText("执行时区") as HTMLInputElement).value).toBe("Asia/Shanghai");
-    const idText = basic.querySelector(".xflow-editor-workflow-id__text");
-    expect(idText?.textContent).toBe("wf-abcde…");
+    // 标识 moved to the head's right: mono 12, full id in the title, copy key.
+    const idText = basic.querySelector(".xflow-editor-workflow-id");
+    expect(idText?.textContent).toBe("wf-abcdefgh-1234");
     expect(idText?.getAttribute("title")).toBe("wf-abcdefgh-1234");
-    expect(idText?.getAttribute("aria-label")).toBe("wf-abcdefgh-1234");
-    // The 24px hit-area rule hangs off Typography's semantic action hook, not
-    // its generated `.ant-*` class.
     expect(
       within(basic).getByRole("button", { name: "复制工作流标识" }).classList.contains("xflow-editor-workflow-id__copy"),
     ).toBe(true);
@@ -367,7 +341,7 @@ describe("node search and workflow settings", () => {
     expect(within(popup!).queryByText("stop：失败即停止")).toBeNull();
   });
 
-  it("lists start, trigger-typed and trigger-kind nodes in 入口, and 定位 selects the node", () => {
+  it("lists start, trigger-typed and trigger-kind nodes in 触发器, and the row selects the node", () => {
     const entryWorkflow: WorkflowDef = {
       ...workflow,
       nodes: [
@@ -380,9 +354,9 @@ describe("node search and workflow settings", () => {
     render(<XFlowEditor value={entryWorkflow} />);
     fireEvent.keyDown(window, { key: "Escape" });
     const inspector = screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
-    const entry = within(inspector).getByRole("group", { name: "入口" });
+    const entry = within(inspector).getByRole("group", { name: "触发器" });
 
-    // Only the webhook and the start node are entries; the action node is not.
+    // Only the webhook and the start node are triggers; the action node is not.
     expect(within(entry).getAllByRole("listitem")).toHaveLength(2);
     // Each row's icon follows the type's own category (ED-19).
     const entryRows = within(entry).getAllByRole("listitem");
@@ -396,22 +370,23 @@ describe("node search and workflow settings", () => {
     expect(within(entry).getByText("xflow.start")).toBeTruthy();
     expect(within(entry).queryByText("worker")).toBeNull();
 
-    fireEvent.click(within(entry).getByRole("button", { name: "定位入口 客户回调" }));
+    // §6.4 (2026-11-07): the whole 28px row locates, no separate 定位 key.
+    fireEvent.click(within(entry).getByRole("button", { name: "客户回调 xflow.trigger.webhook" }));
     expect(canvasNode("hook").closest(".xflow-preview-node")?.getAttribute("data-selected")).toBe("true");
     // Selecting an entry hands the Inspector to that node's form.
     const nodePanel = screen.getByRole("region", { name: "属性" });
     expect(within(nodePanel).getByText("客户回调", { selector: ".xflow-editor-inspector-head__name" })).toBeTruthy();
   });
 
-  it("draws 入口 rows without a 定位 key when no locate callback is passed, and an empty note with no entries", () => {
+  it("draws 触发器 rows without a locate target when no callback is passed, and an empty note with no entries", () => {
     const registry = createNodeFormRegistry();
     const formHost = { registry, compiler: new NodeFormCompiler(registry), renameRef: { current: undefined } };
     const { unmount } = render(
       <Inspector formHost={formHost} parameterTab="form" selectedIndex={-1} workflow={workflow} />
     );
-    const entry = screen.getByRole("group", { name: "入口" });
+    const entry = screen.getByRole("group", { name: "触发器" });
     expect(within(entry).getByText("start")).toBeTruthy();
-    expect(within(entry).queryByRole("button", { name: /^定位入口/ })).toBeNull();
+    expect(within(entry).queryByRole("button", { name: /start/ })).toBeNull();
     unmount();
 
     render(
@@ -422,7 +397,7 @@ describe("node search and workflow settings", () => {
         workflow={{ ...workflow, nodes: [{ name: "worker", type: "xflow.function" }] }}
       />
     );
-    const empty = screen.getByRole("group", { name: "入口" });
+    const empty = screen.getByRole("group", { name: "触发器" });
     expect(within(empty).getByText("该工作流没有入口节点。")).toBeTruthy();
     expect(within(empty).queryByRole("listitem")).toBeNull();
   });
@@ -512,8 +487,9 @@ describe("node search and workflow settings", () => {
     });
 
     // 基本 carries the timezone and the execution timeout; 错误与重试 carries the error policy and retry.
-    // The timeout is the Go time.Duration wire form: integer nanoseconds, never a "30s" string.
-    fireEvent.change(within(inspector()).getByLabelText("执行超时"), { target: { value: "1800000000000" } });
+    // §6.4 (2026-11-07): the timeout is a number plus unit, stored as integer nanoseconds.
+    // An empty timeout reads in 分, so 30 means 30 minutes = 1.8e12 ns.
+    fireEvent.change(within(inspector()).getByLabelText("执行超时"), { target: { value: "30" } });
     expect(lastWorkflow(handleChange).settings).toEqual({
       timeout: 1800000000000,
       concurrency: { limit: 4, mode: "queue", max_queued: 9, queue_timeout: 120000000000 }
@@ -572,16 +548,57 @@ describe("node search and workflow settings", () => {
     expect(lastWorkflow(handleChange).settings?.timeout).toBeUndefined();
   });
 
-  it("rejects a Go duration string in 执行超时 instead of writing it", () => {
+  it("edits 执行超时 as a number plus unit and still stores integer nanoseconds", () => {
     const handleChange = vi.fn();
-    render(<XFlowEditor value={workflow} onChange={handleChange} />);
+    render(
+      <XFlowEditor value={{ ...workflow, settings: { timeout: 7_200_000_000_000 } }} onChange={handleChange} />
+    );
     const inspector = () => screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
     fireEvent.keyDown(window, { key: "Escape" });
+    const timeout = () => within(inspector()).getByLabelText("执行超时") as HTMLInputElement;
+    const unit = () => within(inspector()).getByLabelText("执行超时单位");
+    const unitText = () =>
+      within(inspector()).getByLabelText("执行超时单位").closest(".xflow-editor-select__root")?.textContent;
 
-    // The server decodes settings.timeout as integer nanoseconds and rejects "30s".
-    fireEvent.change(within(inspector()).getByLabelText("执行超时"), { target: { value: "30s" } });
-    expect(handleChange).not.toHaveBeenCalled();
-    expect(within(inspector()).getByRole("alert")).toBeTruthy();
+    // 7.2e12 ns is exactly two hours, so the field reads 2 时.
+    expect(timeout().value).toBe("2");
+    expect(unitText()).toContain("时");
+
+    fireEvent.change(timeout(), { target: { value: "3" } });
+    expect(lastWorkflow(handleChange).settings).toEqual({ timeout: 10_800_000_000_000 });
+
+    // Switching the unit only changes how the stored value reads.
+    pickEditorOption(unit(), "分");
+    expect(timeout().value).toBe("180");
+    expect(lastWorkflow(handleChange).settings).toEqual({ timeout: 10_800_000_000_000 });
+    pickEditorOption(unit(), "秒");
+    expect(timeout().value).toBe("10800");
+    expect(lastWorkflow(handleChange).settings).toEqual({ timeout: 10_800_000_000_000 });
+
+    // A later edit uses the unit the user picked, even when the value would
+    // auto-derive another one (90 s is not a whole number of minutes).
+    fireEvent.change(timeout(), { target: { value: "90" } });
+    expect(lastWorkflow(handleChange).settings).toEqual({ timeout: 90_000_000_000 });
+    expect(unitText()).toContain("秒");
+
+    // Clearing writes no timeout at all.
+    fireEvent.change(timeout(), { target: { value: "" } });
+    expect(lastWorkflow(handleChange).settings?.timeout).toBeUndefined();
+  });
+
+  it("reads an empty 执行超时 as 不限", () => {
+    const handleChange = vi.fn();
+    render(<XFlowEditor value={workflow} onChange={handleChange} />);
+    fireEvent.keyDown(window, { key: "Escape" });
+    const inspector = screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
+
+    const timeout = within(inspector).getByLabelText("执行超时") as HTMLInputElement;
+    expect(timeout.value).toBe("");
+    expect(timeout.getAttribute("placeholder")).toBe("不限");
+    // 0 is still a legal value; an empty field writes no timeout at all.
+    fireEvent.change(timeout, { target: { value: "0" } });
+    expect(within(inspector).queryByRole("alert")).toBeNull();
+    expect(lastWorkflow(handleChange).settings).toEqual({ timeout: 0 });
   });
 
   it("reads the bare-int concurrency shorthand into the structured rows", () => {
@@ -595,93 +612,6 @@ describe("node search and workflow settings", () => {
     expect(within(inspector()).getByLabelText("队列上限")).toBeTruthy();
   });
 
-  it("rejects 执行超时 values that are not non-negative integer nanoseconds", () => {
-    const handleChange = vi.fn();
-    render(<XFlowEditor value={workflow} onChange={handleChange} />);
-    const inspector = () => screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
-    fireEvent.keyDown(window, { key: "Escape" });
-    const timeout = () => within(inspector()).getByLabelText("执行超时") as HTMLInputElement;
-    const message = "需要非负整数纳秒，例如 1800000000000；0 或留空不限";
-
-    // A JSON string, a negative number, a fraction, a boolean, null, an array and
-    // an object all parse as JSON yet cannot be a Go time.Duration. Numbers past
-    // the safe-integer range are rejected too, even when JSON parses them as integers
-    // (9007199254740993 rounds to 9007199254740992).
-    for (const text of ['"30s"', "-5", "1.5", "true", "null", "[]", "{}", "1e21", "9007199254740993"]) {
-      fireEvent.change(timeout(), { target: { value: text } });
-      expect(timeout().getAttribute("aria-invalid")).toBe("true");
-      expect(within(inspector()).getByRole("alert").textContent).toBe(message);
-    }
-    expect(handleChange).not.toHaveBeenCalled();
-
-    // A legal value after a rejected one commits and clears the message.
-    fireEvent.change(timeout(), { target: { value: "0" } });
-    expect(within(inspector()).queryByRole("alert")).toBeNull();
-    expect(lastWorkflow(handleChange).settings).toEqual({ timeout: 0 });
-  });
-
-  it("restores 执行超时 to the edit's starting value when typed text turns invalid", () => {
-    const handleChange = vi.fn();
-    const onSave = vi.fn(async (next: WorkflowDef) => next);
-    render(<ControlledEditor initial={{ ...workflow, settings: { timeout: 1800000000000 } }} onChange={handleChange} onSave={onSave} />);
-    const inspector = () => screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
-    fireEvent.keyDown(window, { key: "Escape" });
-    const timeout = () => within(inspector()).getByLabelText("执行超时") as HTMLInputElement;
-    const save = () => screen.getByRole("button", { name: "保存" }) as HTMLButtonElement;
-
-    // Legal integer prefixes still commit as they are typed (the existing semantics).
-    fireEvent.change(timeout(), { target: { value: "3" } });
-    expect(lastWorkflow(handleChange).settings?.timeout).toBe(3);
-    expect(save().disabled).toBe(false);
-    fireEvent.change(timeout(), { target: { value: "30" } });
-    expect(lastWorkflow(handleChange).settings?.timeout).toBe(30);
-
-    // The rejected "30s" must not leave the 30 behind: the model returns to the
-    // value the edit started from, while the typed text and error stay visible.
-    fireEvent.change(timeout(), { target: { value: "30s" } });
-    expect(lastWorkflow(handleChange).settings?.timeout).toBe(1800000000000);
-    expect(timeout().value).toBe("30s");
-    expect(timeout().getAttribute("aria-invalid")).toBe("true");
-    expect(within(inspector()).getByRole("alert")).toBeTruthy();
-    expect(save().disabled).toBe(true);
-
-    // Each invalid shape reverts the same way, from a committed prefix.
-    for (const text of ["1.5", "9007199254740993", "abc", "-5"]) {
-      fireEvent.change(timeout(), { target: { value: "3" } });
-      expect(lastWorkflow(handleChange).settings?.timeout).toBe(3);
-      fireEvent.change(timeout(), { target: { value: text } });
-      expect(lastWorkflow(handleChange).settings?.timeout).toBe(1800000000000);
-      expect(within(inspector()).getByRole("alert")).toBeTruthy();
-    }
-
-    // Clearing is still a legal edit that removes the field and the message.
-    fireEvent.change(timeout(), { target: { value: "" } });
-    expect(lastWorkflow(handleChange).settings?.timeout).toBeUndefined();
-    expect(within(inspector()).queryByRole("alert")).toBeNull();
-  });
-
-  it("accepts non-negative integer nanoseconds and a cleared 执行超时", () => {
-    const handleChange = vi.fn();
-    render(<XFlowEditor value={workflow} onChange={handleChange} />);
-    const inspector = () => screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
-    fireEvent.keyDown(window, { key: "Escape" });
-    const timeout = () => within(inspector()).getByLabelText("执行超时");
-
-    // 0 is "no limit" and stays a legal value.
-    fireEvent.change(timeout(), { target: { value: "0" } });
-    expect(within(inspector()).queryByRole("alert")).toBeNull();
-    expect(lastWorkflow(handleChange).settings).toEqual({ timeout: 0 });
-
-    // Beyond 2^31 still lies in the int64 nanosecond range.
-    fireEvent.change(timeout(), { target: { value: "3000000000" } });
-    expect(within(inspector()).queryByRole("alert")).toBeNull();
-    expect(lastWorkflow(handleChange).settings).toEqual({ timeout: 3000000000 });
-
-    // An emptied row leaves the DSL rather than writing an empty value.
-    fireEvent.change(timeout(), { target: { value: "" } });
-    expect(handleChange).toHaveBeenCalledTimes(3);
-    expect(lastWorkflow(handleChange).settings?.timeout).toBeUndefined();
-  });
 
   it("keeps the other 执行设置 rows on their existing permissive literals", () => {
     const handleChange = vi.fn();
@@ -689,8 +619,8 @@ describe("node search and workflow settings", () => {
     const inspector = () => screen.getByRole("region", { name: /^(属性|工作流设置)$/ });
     fireEvent.keyDown(window, { key: "Escape" });
 
-    // Only 超时 is a Go duration; the integer check must not leak into the other rows,
-    // which keep accepting whatever their literal parses to (a fraction included).
+    // The numeric timeout control must not tighten the other rows, which keep
+    // accepting whatever their literal parses to (a fraction included).
     fireEvent.click(within(inspector()).getByLabelText("自动重试"));
     fireEvent.change(within(inspector()).getByLabelText("重试最大尝试次数"), { target: { value: "1.5" } });
     expect(within(inspector()).queryByRole("alert")).toBeNull();
@@ -727,9 +657,9 @@ describe("node search and workflow settings", () => {
       retry: { enabled: true }
     });
 
-    // Back on the rows, they read what the source wrote.
+    // Back on the rows, they read what the source wrote: 6e10 ns is 1 分.
     fireEvent.click(toggle);
-    expect((within(inspector()).getByLabelText("执行超时") as HTMLInputElement).value).toBe("60000000000");
+    expect((within(inspector()).getByLabelText("执行超时") as HTMLInputElement).value).toBe("1");
     expect((within(inspector()).getByLabelText("并发上限") as HTMLInputElement).value).toBe("4");
     expect((within(inspector()).getByRole("radio", { name: "拒绝" }) as HTMLInputElement).checked).toBe(true);
     expect(within(inspector()).queryByLabelText("队列上限")).toBeNull();

@@ -38,20 +38,31 @@ const props = (): WorkflowOverviewProps => ({
 });
 
 describe("WorkflowOverview (EL-13)", () => {
-  it("states the counts, trigger, validation, version and save state the editor holds", () => {
+  it("opens with the summary line, then states trigger, validation and save state", () => {
     render(<WorkflowOverview {...props()} />);
 
+    // §6.4 (2026-11-07): the three stat tiles become one 12px summary line.
+    expect(screen.getByText("3 节点 · 2 连线 · 2 分区")).toBeTruthy();
+    expect(document.querySelector(".xflow-editor-overview__stat-value")).toBeNull();
     const overview = screen.getByRole("region", { name: "工作流概览" });
-    const stats = [...overview.querySelectorAll(".xflow-editor-overview__stat-value")].map(
-      (value) => value.textContent
-    );
-    expect(stats).toEqual(["3", "2", "2"]);
     expect(within(overview).getByText("定时触发")).toBeTruthy();
     expect(within(overview).getByText("1 错误 · 1 警告")).toBeTruthy();
     expect(overview.textContent).toContain("v2.1.0");
     expect(overview.textContent).toContain("已保存");
     // No run was supplied: the row stays absent rather than becoming a placeholder.
     expect(within(overview).queryByText("最近运行")).toBeNull();
+  });
+
+  it("writes 通过 in success tone when validation has nothing to report", () => {
+    render(
+      <WorkflowOverview
+        {...props()}
+        diagnostics={[{ status: "pass", area: "workflow", message: "结构有效" }]}
+      />
+    );
+
+    const value = screen.getByText("通过");
+    expect(value.getAttribute("data-tone")).toBe("success");
   });
 
   it("jumps to the diagnostics dock and into the replay from the validation and run rows", () => {

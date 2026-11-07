@@ -1,6 +1,6 @@
 import * as React from "react";
-import { AuditIcon, BranchIcon, DownIcon, GearIcon, LinkIcon, LocateIcon, PinIcon, SlidersIcon } from "@xflow/icons";
-import { Button, Input, InputNumber, Segmented, Select, Switch, Tooltip, Typography } from "antd";
+import { AuditIcon, BranchIcon, CopyIcon, DownIcon, GearIcon, LinkIcon, PinIcon, SlidersIcon } from "@xflow/icons";
+import { Button, Input, InputNumber, Segmented, Select, Switch, Tooltip } from "antd";
 import type {
   ConcurrencyMode,
   ConcurrencySettings,
@@ -81,11 +81,16 @@ const concurrencyModeClassNames = {
 
 const NANOS_PER_MINUTE = 60_000_000_000;
 const NANOS_PER_SECOND = 1_000_000_000;
-const SHORT_WORKFLOW_ID_LENGTH = 8;
+const NANOS_PER_HOUR = 3_600_000_000_000;
 
-/** IN-03: the identifier is the server-issued id, shown short; no slug is minted. */
-function shortWorkflowId(id: string): string {
-  return id.length > SHORT_WORKFLOW_ID_LENGTH ? `${id.slice(0, SHORT_WORKFLOW_ID_LENGTH)}…` : id;
+/**
+ * 标识 in the 基本 head (§6.4, 2026-11-07): the full server id, shortened from
+ * the middle when the head cannot hold it. The title keeps the whole value.
+ */
+function middleEllipsis(id: string, max = 28): string {
+  if (id.length <= max) return id;
+  const head = Math.ceil((max - 1) / 2);
+  return `${id.slice(0, head)}…${id.slice(-(max - 1 - head))}`;
 }
 
 /** How the settings rows hold `settings.concurrency`; the wire form is rebuilt on every write. */
@@ -189,12 +194,74 @@ function NumberField({
   );
 }
 
-/** settings.timeout is Go `time.Duration`: integer nanoseconds, so "30s", -5 and 1.5 cannot be written. */
-function timeoutError(value: unknown): string | undefined {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
-    return "需要非负整数纳秒，例如 1800000000000；0 或留空不限";
-  }
-  return undefined;
+/** settings.timeout is Go `time.Duration`: integer nanoseconds. */
+type TimeoutUnit = "s" | "m" | "h";
+
+const timeoutUnits: { value: TimeoutUnit; label: string; nanos: number }[] = [
+  { value: "s", label: "秒", nanos: NANOS_PER_SECOND },
+  { value: "m", label: "分", nanos: NANOS_PER_MINUTE },
+  { value: "h", label: "时", nanos: NANOS_PER_HOUR }
+];
+
+/** The largest unit that divides the stored duration exactly, default 分. */
+function timeoutUnitFor(nanos: number | undefined): TimeoutUnit {
+  if (nanos === undefined || nanos === 0) return "m";
+  if (nanos % NANOS_PER_HOUR === 0) return "h";
+  if (nanos % NANOS_PER_MINUTE === 0) return "m";
+  return "s";
+}
+
+/**
+ * §6.4 (2026-11-07): a number plus a 秒 / 分 / 时 unit, still stored as integer
+ * nanoseconds; blank reads as 不限. Switching the unit never rewrites the
+ * stored value — it only changes how it reads.
+ */
+function TimeoutField({
+  readOnly,
+  value,
+  onChange
+}: {
+  readOnly: boolean;
+  value: number | undefined;
+  onChange: (next: number | undefined) => void;
+}): React.ReactElement {
+  const [unit, setUnit] = React.useState<TimeoutUnit>(() => timeoutUnitFor(value));
+  const divisor = timeoutUnits.find((item) => item.value === unit)?.nanos ?? NANOS_PER_MINUTE;
+  // The unit follows an outside write (the JSON source, a new workflow), but
+  // never the user's own keystrokes: picking 秒 and typing 120 must not snap
+  // back to 分 mid-edit.
+  const lastCommitted = React.useRef(value);
+  React.useEffect(() => {
+    if (lastCommitted.current === value) return;
+    lastCommitted.current = value;
+    setUnit(timeoutUnitFor(value));
+  }, [value]);
+  const commit = (next: number | undefined) => {
+    lastCommitted.current = next;
+    onChange(next);
+  };
+  return (
+    <span className="xflow-editor-number-field xflow-editor-timeout-field">
+      <InputNumber<number>
+        aria-label="执行超时"
+        className="xflow-editor-timeout-field__control"
+        min={0}
+        placeholder="不限"
+        readOnly={readOnly}
+        value={value === undefined ? undefined : value / divisor}
+        onChange={(next) => commit(next === undefined || next === null ? undefined : Math.round(next * divisor))}
+      />
+      <Select<TimeoutUnit>
+        aria-label="执行超时单位"
+        className="xflow-editor-timeout-field__unit"
+        classNames={editorSelectClassNames}
+        disabled={readOnly}
+        options={timeoutUnits.map(({ value: unitValue, label }) => ({ value: unitValue, label }))}
+        value={unit}
+        onChange={(next) => setUnit(next)}
+      />
+    </span>
+  );
 }
 
 /** Writes a top-level object field, dropping it when empty so the DSL stays clean. */
@@ -278,12 +345,19 @@ function Hint({ help, text }: { help: string; text: string }): React.ReactElemen
   return (
     <p className="xflow-editor-variable-hint xflow-editor-hint">
       <span>{text}</span>
-      <Tooltip classNames={editorTooltipClassNames} title={help}>
-        <button aria-label={`帮助：${text}`} className="xflow-editor-hint__help" type="button">
-          ?
-        </button>
-      </Tooltip>
+      <HelpKey help={help} label={text} />
     </p>
+  );
+}
+
+/** The label-side "?" (§6.4 D-3): the explanation lives in its tooltip. */
+function HelpKey({ help, label }: { help: string; label: string }): React.ReactElement {
+  return (
+    <Tooltip classNames={editorTooltipClassNames} title={help}>
+      <button aria-label={`帮助：${label}`} className="xflow-editor-hint__help" type="button">
+        ?
+      </button>
+    </Tooltip>
   );
 }
 
@@ -291,10 +365,13 @@ function Hint({ help, text }: { help: string; text: string }): React.ReactElemen
  * long control (the baseline's full-row field, §6.4 D5). */
 function SettingRow({
   label,
+  help,
   children,
   top = false
 }: {
   label: string;
+  /** A label-side "?" whose tooltip holds the explanation (D-3). */
+  help?: React.ReactNode;
   children: React.ReactNode;
   top?: boolean;
 }): React.ReactElement {
@@ -302,19 +379,12 @@ function SettingRow({
     <label
       className={`xflow-editor-form-row xflow-editor-form-row--workflow${top ? " xflow-editor-form-row--top" : ""}`}
     >
-      <span className="xflow-editor-form-row__label">{label}</span>
+      <span className="xflow-editor-form-row__label">
+        {label}
+        {help}
+      </span>
       {children}
     </label>
-  );
-}
-
-/** A read-only labelled row; static text is not a labelable control. */
-function StaticRow({ label, children }: { label: string; children: React.ReactNode }): React.ReactElement {
-  return (
-    <div className="xflow-editor-form-row xflow-editor-form-row--workflow">
-      <span className="xflow-editor-form-row__label">{label}</span>
-      {children}
-    </div>
   );
 }
 
@@ -346,12 +416,17 @@ function CollapsibleCard({
   const bodyId = React.useId();
   return (
     <div aria-label={ariaLabel} className="xflow-editor-section-card" role="group">
-      <header className="xflow-editor-section-card__header">
+      {/* §6.4 (2026-11-07): the whole head toggles; the chevron keeps the
+       * keyboard path, and the actions stop the click from folding the card. */}
+      <header className="xflow-editor-section-card__header" data-collapsible="true" onClick={onToggle}>
         <span className="xflow-editor-section-card__title">
           {icon}
           <strong>{title}</strong>
         </span>
-        <span className="xflow-editor-section-card__trailing">
+        <span
+          className="xflow-editor-section-card__trailing"
+          onClick={(event) => event.stopPropagation()}
+        >
           {meta !== undefined ? <span className="xflow-editor-section-card__meta">{meta}</span> : null}
           <span className="xflow-editor-section-card__actions">
             {actions}
@@ -368,7 +443,10 @@ function CollapsibleCard({
               }
               size="small"
               type="text"
-              onClick={onToggle}
+              onClick={(event) => {
+                event.stopPropagation();
+                onToggle();
+              }}
             />
           </span>
         </span>
@@ -465,7 +543,36 @@ export function WorkflowSettings({
 
   return (
     <div className="xflow-editor-workflow-settings">
-      <SectionCard ariaLabel="基本" icon={<AuditIcon />} title="基本">
+      <SectionCard
+        actions={
+          workflow.id ? (
+            <Tooltip classNames={editorTooltipClassNames} title="复制工作流标识">
+              <Button
+                aria-label="复制工作流标识"
+                className="xflow-editor-workflow-id__copy"
+                icon={<CopyIcon />}
+                size="small"
+                type="text"
+                onClick={() => {
+                  void navigator.clipboard?.writeText(workflow.id ?? "").catch(() => undefined);
+                }}
+              />
+            </Tooltip>
+          ) : undefined
+        }
+        ariaLabel="基本"
+        icon={<AuditIcon />}
+        meta={
+          workflow.id ? (
+            <span className="xflow-editor-workflow-id" title={workflow.id}>
+              {middleEllipsis(workflow.id)}
+            </span>
+          ) : (
+            <span className="xflow-editor-workflow-id xflow-editor-workflow-id--empty">未保存</span>
+          )
+        }
+        title="基本"
+      >
         <SettingRow label="名称">
           <Input
             aria-label="工作流名称"
@@ -476,21 +583,6 @@ export function WorkflowSettings({
             onChange={(event) => updateMeta({ name: event.target.value })}
           />
         </SettingRow>
-        <StaticRow label="标识">
-          {workflow.id ? (
-            <Typography.Text
-              className="xflow-editor-workflow-id"
-              classNames={{ action: "xflow-editor-workflow-id__copy" }}
-              copyable={{ text: workflow.id, tooltips: ["复制工作流标识", "已复制"] }}
-            >
-              <span aria-label={workflow.id} className="xflow-editor-workflow-id__text" title={workflow.id}>
-                {shortWorkflowId(workflow.id)}
-              </span>
-            </Typography.Text>
-          ) : (
-            <span className="xflow-editor-workflow-id xflow-editor-workflow-id--empty">未保存</span>
-          )}
-        </StaticRow>
         <SettingRow label="版本">
           <Input
             aria-label="工作流版本"
@@ -518,28 +610,28 @@ export function WorkflowSettings({
             }
           />
         </SettingRow>
-        <SettingRow label="执行超时">
-          <LiteralInput
-            ariaLabel="执行超时"
-            mode="json"
-            placeholder="纳秒，例如 1800000000000；留空不限"
+        <SettingRow
+          help={
+            <HelpKey
+              help="整个执行的预算，含排队与挂起等待；留空为不限。到期后执行以超时终态结束，不走错误策略。"
+              label="执行超时"
+            />
+          }
+          label="执行超时"
+        >
+          <TimeoutField
             readOnly={settingsReadOnly}
-            validate={timeoutError}
             value={settings.timeout}
-            onCommit={(next) =>
+            onChange={(next) =>
               writeSettings((current) => {
                 const nextSettings = { ...current };
                 if (next === undefined) delete nextSettings.timeout;
-                else nextSettings.timeout = next as number;
+                else nextSettings.timeout = next;
                 return nextSettings;
               })
             }
           />
         </SettingRow>
-        <Hint
-          help="到期后执行以超时终态结束，不走错误策略。"
-          text="执行超时是整个执行的预算（整数纳秒，含排队与挂起等待），0 或留空为不限。"
-        />
         <SettingRow label="描述" top>
           <Input.TextArea
             aria-label="工作流描述"
@@ -552,38 +644,37 @@ export function WorkflowSettings({
         </SettingRow>
       </SectionCard>
       <SectionCard
-        ariaLabel="入口"
+        ariaLabel="触发器"
         icon={<LinkIcon />}
         meta={entryNodes.length > 0 ? entryNodes.length : undefined}
-        title="入口"
+        title="触发器"
       >
         {entryNodes.length === 0 ? (
           <p className="xflow-editor-variable-empty">该工作流没有入口节点。</p>
         ) : (
-          <ul className="xflow-editor-variable-list">
-            {entryNodes.map((entry) => (
-              <li className="xflow-editor-entry-row" key={entry.key}>
-                <NodeCategoryIcon size="sm" type={entry.type || undefined} />
-                <span className="xflow-editor-outline__name">
-                  {entry.label}
-                  <span className="xflow-editor-outline__sub">{entry.type || "—"}</span>
-                </span>
-                {onLocateNode ? (
-                  <Tooltip classNames={editorTooltipClassNames} title="定位到画布">
-                    <Button
-                      aria-label={`定位入口 ${entry.label}`}
-                      className="xflow-editor-entry-row__locate"
-                      color="default"
-                      icon={<LocateIcon />}
-                      size="small"
-                      type="text"
-                      variant="text"
-                      onClick={() => onLocateNode(entry.key)}
-                    />
-                  </Tooltip>
-                ) : null}
-              </li>
-            ))}
+          <ul className="xflow-editor-variable-list xflow-editor-trigger-list">
+            {entryNodes.map((entry) =>
+              onLocateNode ? (
+                <li key={entry.key}>
+                  <button
+                    className="xflow-editor-trigger-row"
+                    title={`定位到画布：${entry.label}`}
+                    type="button"
+                    onClick={() => onLocateNode(entry.key)}
+                  >
+                    <NodeCategoryIcon size="sm" type={entry.type || undefined} />
+                    <span className="xflow-editor-trigger-row__label">{entry.label}</span>
+                    <code className="xflow-editor-trigger-row__type">{entry.type || "—"}</code>
+                  </button>
+                </li>
+              ) : (
+                <li className="xflow-editor-trigger-row" key={entry.key}>
+                  <NodeCategoryIcon size="sm" type={entry.type || undefined} />
+                  <span className="xflow-editor-trigger-row__label">{entry.label}</span>
+                  <code className="xflow-editor-trigger-row__type">{entry.type || "—"}</code>
+                </li>
+              )
+            )}
           </ul>
         )}
       </SectionCard>

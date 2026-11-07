@@ -1831,62 +1831,17 @@
   margin: var(--xflow-space-2-5) 0 0;
 }
 
-/* EL-13: the no-selection overview above the settings form. The inspector's
- * settings container owns the 12px side padding; the overview only adds the
- * vertical rhythm and a rule that separates it from the settings cards. */
+/* EL-13 / §6.4 (2026-11-07): the no-selection panel opens with one summary line
+ * and then the flat 概览 section; the settings container owns the 12px inset. */
 .xflow-editor .xflow-editor-overview {
-  border-bottom: 1px solid var(--xflow-border-subtle);
-  display: flex;
-  flex-direction: column;
-  gap: var(--xflow-space-2);
-  padding: var(--xflow-space-3) 0;
-}
-
-.xflow-editor-overview__stats {
-  display: grid;
-  gap: var(--xflow-space-1-5);
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.xflow-editor-overview__stat {
-  /* 2026-10-30 用户指示（D9）: the baseline `.xflow-pv-sec-card` shell —
-   * panel-raised with its own 1px frame (reverses E-B's EL-09 tile). */
-  background: var(--xflow-panel-raised);
-  border: 1px solid var(--xflow-border);
-  border-radius: var(--xflow-radius-sm);
-  box-shadow: var(--xflow-elev-1);
-  display: flex;
-  flex-direction: column;
-  gap: var(--xflow-space-0-5);
   min-width: 0;
-  padding: var(--xflow-space-2) var(--xflow-space-2-5);
 }
 
-.xflow-editor-overview__stat-value {
-  color: var(--xflow-text);
-  font-size: var(--xflow-font-lg);
-  font-variant-numeric: tabular-nums;
-  font-weight: var(--xflow-font-weight-semibold);
-  line-height: var(--xflow-line-height-md);
-}
-
-.xflow-editor-overview__stat-label {
+.xflow-editor-workflow-summary {
   color: var(--xflow-text-tertiary);
-  font-size: var(--xflow-font-xs);
-}
-
-.xflow-editor-overview__row {
-  align-items: baseline;
-  display: flex;
   font-size: var(--xflow-font-sm);
-  gap: var(--xflow-space-3);
-  justify-content: space-between;
-  min-width: 0;
-}
-
-.xflow-editor-overview__label {
-  color: var(--xflow-text-tertiary);
-  flex: none;
+  line-height: var(--xflow-line-height-md);
+  margin: var(--xflow-space-3) 0 var(--xflow-space-2);
 }
 
 .xflow-editor-overview__value {
@@ -1896,7 +1851,7 @@
   gap: var(--xflow-space-1);
   min-width: 0;
   overflow: hidden;
-  text-align: right;
+  text-align: start;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1947,10 +1902,6 @@
   text-overflow: ellipsis;
 }
 
-.xflow-editor-overview__link:hover {
-  text-decoration: underline;
-}
-
 .xflow-editor-overview__save {
   color: var(--xflow-text-tertiary);
   font-size: var(--xflow-font-xs);
@@ -1969,8 +1920,10 @@
   padding: 0;
 }
 
+/* §6.4 (2026-11-07): a clickable row changes the pointer only — no hover fill,
+ * underline, shadow or border. */
 button.xflow-editor-overview__run:hover {
-  text-decoration: underline;
+  text-decoration: none;
 }
 
 .xflow-editor-overview__run-time {
@@ -4499,10 +4452,11 @@ button.xflow-editor-overview__run:hover {
  * sections, raised 8px-radius cards, a 13px/600 head with 6/12 padding, and a
  * 2/12/8 body. The shared card keeps its own values for the other panels; only
  * its variables and header/body padding change under this root. */
+/* §6.4 (2026-11-07): the flat sections own the panel ground; the workflow
+ * settings keep only the block rhythm. */
 .xflow-editor-workflow-settings {
-  --xflow-editor-section-card-bg: var(--xflow-panel-raised);
-  --xflow-editor-section-card-header-bg: var(--xflow-surface-raised);
-  --xflow-editor-section-card-radius: var(--xflow-radius-md);
+  --xflow-editor-section-card-bg: transparent;
+  --xflow-editor-section-card-header-bg: transparent;
 
   gap: var(--xflow-editor-density-sec-gap);
 }
@@ -4512,12 +4466,24 @@ button.xflow-editor-overview__run:hover {
  * margins return exactly the width/height the extra padding would add, so the
  * glyph and the neighbouring text keep their places. The hook is Typography's
  * `classNames.action`, not its generated `.ant-*` class. */
+/* 标识 in the 基本 head (§6.4, 2026-11-07): mono 12 tertiary, middle-ellipsised
+ * by the caller, with a 24×24 copy key beside it. */
+.xflow-editor .xflow-editor-workflow-id {
+  color: var(--xflow-text-tertiary);
+  font-family: var(--xflow-font-mono);
+  font-size: var(--xflow-font-sm);
+}
+
+.xflow-editor .xflow-editor-workflow-id--empty {
+  font-family: var(--xflow-font-sans);
+}
+
 .xflow-editor .xflow-editor-workflow-id__copy {
   align-items: center;
   display: inline-flex;
   height: 24px;
   justify-content: center;
-  margin: calc(var(--xflow-space-0-5) * -1) calc(var(--xflow-space-1-5) * -1);
+  min-width: 24px;
   padding: 0;
   width: 24px;
 }
@@ -4596,37 +4562,53 @@ button.xflow-editor-overview__run:hover {
   height: var(--xflow-editor-density-control-h);
 }
 
-/* ED-19: 入口 rows reuse the outline's icon + name + secondary type ordering.
-   The locate key is a hover/focus affordance, never display:none, so it keeps
-   its place in the Tab order. */
-.xflow-editor .xflow-editor-entry-row {
+/* §6.4 (2026-11-07): 触发器 rows are 28px lines — icon, display name and the
+ * mono type id — and the whole row locates the node. Hover changes the pointer
+ * only. */
+.xflow-editor .xflow-editor-trigger-list {
+  gap: var(--xflow-space-0-5);
+}
+
+.xflow-editor .xflow-editor-trigger-row {
   align-items: center;
+  background: transparent;
+  border: 0;
   border-radius: var(--xflow-radius-sm);
+  color: var(--xflow-text);
+  cursor: pointer;
   display: flex;
+  font: inherit;
   gap: var(--xflow-space-2);
-  min-height: 30px;
+  height: 28px;
   min-width: 0;
-  padding: 1px var(--xflow-space-0-5);
+  padding: 0 var(--xflow-space-1);
+  text-align: start;
+  width: 100%;
 }
 
-.xflow-editor .xflow-editor-entry-row:hover,
-.xflow-editor .xflow-editor-entry-row:focus-within {
-  background: var(--xflow-hover);
-}
-
-.xflow-editor .xflow-editor-entry-row .xflow-editor-entry-row__locate {
-  flex: 0 0 auto;
-  opacity: 0;
-}
-
-.xflow-editor .xflow-editor-entry-row:hover .xflow-editor-entry-row__locate,
-.xflow-editor .xflow-editor-entry-row:focus-within .xflow-editor-entry-row__locate {
-  opacity: 1;
-}
-
-.xflow-editor .xflow-editor-entry-row .xflow-editor-entry-row__locate:focus-visible {
+.xflow-editor .xflow-editor-trigger-row:focus-visible {
   outline: 2px solid var(--xflow-focus-ring);
-  outline-offset: 1px;
+  outline-offset: -2px;
+}
+
+.xflow-editor .xflow-editor-trigger-row__label {
+  flex: 0 1 auto;
+  font-size: var(--xflow-font-md);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xflow-editor .xflow-editor-trigger-row__type {
+  color: var(--xflow-text-tertiary);
+  flex: 0 100 auto;
+  font-family: var(--xflow-font-mono);
+  font-size: var(--xflow-font-sm);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ED-18: one-line hint plus the "?" help key beside it. */
@@ -4808,21 +4790,24 @@ button.xflow-editor-overview__run:hover {
 /* §6.4 D5 (2026-11-06): the workflow settings share the node parameters' side
    label column. 描述 is a full-row field (`--top`), matching the baseline's
    top-laid 描述 sample. */
-.xflow-editor-workflow-settings .xflow-editor-form-row--workflow {
+.xflow-editor-workflow-settings .xflow-editor-form-row--workflow,
+.xflow-editor-inspector-settings .xflow-editor-form-row--workflow {
   display: grid;
   grid-template-columns: var(--xflow-composer-label-width, 96px) minmax(0, 1fr);
   align-items: start;
   column-gap: var(--xflow-space-3);
 }
 
-.xflow-editor-workflow-settings .xflow-editor-form-row--workflow > :not(.xflow-editor-form-row__label) {
+.xflow-editor-workflow-settings .xflow-editor-form-row--workflow > :not(.xflow-editor-form-row__label),
+.xflow-editor-inspector-settings .xflow-editor-form-row--workflow > :not(.xflow-editor-form-row__label) {
   grid-column: 2;
   min-width: 0;
 }
 
 /* The baseline `.xflow-pv-field-label`: 12px / 500 in the secondary text colour,
    centred on the control's first line at the density control height. */
-.xflow-editor-workflow-settings .xflow-editor-form-row__label {
+.xflow-editor-workflow-settings .xflow-editor-form-row__label,
+.xflow-editor-inspector-settings .xflow-editor-form-row__label {
   align-items: center;
   color: var(--xflow-text-secondary);
   display: flex;
@@ -4868,6 +4853,17 @@ button.xflow-editor-overview__run:hover {
   color: var(--xflow-text-tertiary);
   flex: none;
   font-size: var(--xflow-font-sm);
+}
+
+/* §6.4 (2026-11-07): 执行超时 is a number plus a unit select. */
+.xflow-editor .xflow-editor-timeout-field__control {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.xflow-editor .xflow-editor-timeout-field__unit {
+  flex: 0 0 68px;
+  width: 68px;
 }
 
 /* AntD hard-codes the switch track to 100px; the design scale calls it pill. */

@@ -1075,24 +1075,27 @@ describe("xflow.editor browser-measured baseline fixes (E6)", () => {
     );
   });
 
-  it("draws the workflow-settings stack at the density tier values", () => {
+  it("draws the workflow settings as flat sections on the panel ground", () => {
     const root = rule(".xflow-editor-workflow-settings");
-    expect(root).toMatch(/--xflow-editor-section-card-radius:\s*var\(--xflow-radius-md\)\s*;/);
-    expect(root).toMatch(/--xflow-editor-section-card-bg:\s*var\(--xflow-panel-raised\)\s*;/);
+    // §6.4 (2026-11-07): no raised card — the block rhythm is all that is left
+    // on this root; the flat shell comes from the shared inspector rule.
     expect(root).toMatch(/gap:\s*var\(--xflow-editor-density-sec-gap\)\s*;/);
-    const head = rule(".xflow-editor-workflow-settings .xflow-editor-section-card__header");
-    // §6.4 (2026-11-06): the workflow-settings cards join the same density tier
-    // as the inspector's, so every card head measures the baseline's 29px.
-    expect(head).toMatch(/min-height:\s*var\(--xflow-editor-density-head-height\)\s*;/);
-    expect(head).toMatch(
-      /padding:\s*var\(--xflow-editor-density-sec-head-y\) var\(--xflow-editor-density-sec-head-x\)\s*;/
+    expect(root).toMatch(/--xflow-editor-section-card-bg:\s*transparent\s*;/);
+    const flat = rule(
+      ".xflow-editor .xflow-editor-inspector .xflow-editor-section-card,\n.xflow-editor .xflow-editor-inspector .xflow-composer-field-group"
     );
-    expect(rule(".xflow-editor-workflow-settings .xflow-editor-section-card__title")).toMatch(
-      /font-size:\s*var\(--xflow-font-md\)\s*;/
-    );
-    expect(rule(".xflow-editor-workflow-settings .xflow-editor-section-card__body")).toMatch(
-      /padding:\s*var\(--xflow-editor-density-sec-body-y\) var\(--xflow-editor-density-sec-body-x\) var\(--xflow-editor-density-sec-body-b\)\s*;/
-    );
+    expect(flat).toMatch(/background:\s*transparent\s*;/);
+    expect(flat).toMatch(/border:\s*0\s*;/);
+    expect(flat).toMatch(/border-top:\s*1px solid var\(--xflow-border\)\s*;/);
+    expect(flat).toMatch(/border-radius:\s*0\s*;/);
+    expect(flat).toMatch(/box-shadow:\s*none\s*;/);
+    // The first block of a tab body needs no second rule under the tab line;
+    // nested blocks keep theirs so 执行策略 and 备注 stay separated.
+    expect(
+      rule(
+        ".xflow-editor .xflow-editor-inspector .xflow-editor-config > .xflow-editor-section-card:first-child,\n.xflow-editor .xflow-editor-inspector .xflow-editor-run-panel > .xflow-composer-field-group:first-child,\n.xflow-editor .xflow-editor-inspector .xflow-editor-connection-list > .xflow-editor-section-card:first-child,\n.xflow-editor .xflow-editor-inspector .xflow-editor-overview > .xflow-editor-section-card:first-child"
+      )
+    ).toMatch(/border-top:\s*0\s*;/);
   });
 
   it("uses one 96px label column for composer and hand-written rows (§6.4)", () => {
@@ -1115,12 +1118,18 @@ describe("xflow.editor browser-measured baseline fixes (E6)", () => {
   });
 
   it("lays workflow-settings rows on the shared side label column (§6.4 D5)", () => {
-    const row = rule(".xflow-editor-workflow-settings .xflow-editor-form-row--workflow");
+    // §6.4 (2026-11-07): the same row grammar serves the settings panel and the
+    // 概览 section, so both selectors share one rule.
+    const row = rule(
+      ".xflow-editor-workflow-settings .xflow-editor-form-row--workflow,\n.xflow-editor-inspector-settings .xflow-editor-form-row--workflow"
+    );
     expect(row).toMatch(/grid-template-columns:\s*var\(--xflow-composer-label-width,\s*96px\)\s*minmax\(0,\s*1fr\)\s*;/);
     expect(row).not.toMatch(/flex-direction:\s*column/);
     // The baseline `.xflow-pv-field-label`: 12px / 500 secondary, its first line
     // centred on the density control, and no stacked-layout bottom margin.
-    const label = rule(".xflow-editor-workflow-settings .xflow-editor-form-row__label");
+    const label = rule(
+      ".xflow-editor-workflow-settings .xflow-editor-form-row__label,\n.xflow-editor-inspector-settings .xflow-editor-form-row__label"
+    );
     expect(label).toMatch(/font-size:\s*var\(--xflow-font-sm\)\s*;/);
     expect(label).toMatch(/font-weight:\s*var\(--xflow-font-weight-medium\)\s*;/);
     expect(label).toMatch(/color:\s*var\(--xflow-text-secondary\)\s*;/);
@@ -1129,7 +1138,9 @@ describe("xflow.editor browser-measured baseline fixes (E6)", () => {
     );
     expect(label).not.toMatch(/margin-bottom/);
     // 描述 keeps the baseline's top-laid full-row form.
-    const top = rule(".xflow-editor-workflow-settings .xflow-editor-form-row--workflow.xflow-editor-form-row--top");
+    const top = rule(
+      ".xflow-editor-workflow-settings .xflow-editor-form-row--workflow.xflow-editor-form-row--top"
+    );
     expect(top).toMatch(/display:\s*flex\s*;/);
     expect(top).toMatch(/flex-direction:\s*column\s*;/);
   });
@@ -1223,6 +1234,10 @@ describe("round-2 visual audit fixes", () => {
       /\.xflow-editor \.xflow-editor-inspector > \.xflow-editor-panel__body,\s*\.xflow-editor \.xflow-editor-inspector__body \{([^}]*)\}/
     )?.[1] ?? "";
     expect(panelBody).toMatch(/background:\s*var\(--xflow-panel\)\s*;/);
+    // The overview's stat tiles are gone (§6.4, 2026-11-07); the summary line
+    // replaces them and no tile shell may return.
+    expect(css).not.toContain(".xflow-editor-overview__stat");
+    expect(rule(".xflow-editor-workflow-summary")).toMatch(/font-size:\s*var\(--xflow-font-sm\)\s*;/);
     // The meta stays plain text (§6.4, 2026-11-06): no chip shell.
     const meta = rule(".xflow-editor-section-card__meta");
     expect(meta).not.toMatch(/border/);
@@ -1317,8 +1332,12 @@ describe("xflow.editor small-text tones, hit targets and forced colours", () => 
     expect(after).toMatch(/position:\s*absolute\s*;/);
     expect(after).toMatch(/inset-block:\s*calc\(\(var\(--xflow-space-6\) - 100%\) \/ -2\)\s*;/);
     expect(after).toMatch(/inset-inline:\s*0\s*;/);
-    // The visible row keeps its 12px line; only the target grows.
-    expect(block(".xflow-editor-overview__row")).toMatch(/font-size:\s*var\(--xflow-font-sm\)\s*;/);
+    // The row keeps the 12px label step; only the target grows.
+    expect(
+      block(
+        ".xflow-editor-workflow-settings .xflow-editor-form-row__label,\n.xflow-editor-inspector-settings .xflow-editor-form-row__label"
+      )
+    ).toMatch(/font-size:\s*var\(--xflow-font-sm\)\s*;/);
   });
 
   it("marks the replayed execution row with the primary tint, ahead of the hover wash", () => {
