@@ -59,6 +59,27 @@ export function SpecControl({ field }: { field: FieldSpec }) {
           options={options}
         />
       );
+    case 'duration':
+      /*
+       * 执行超时（§6.4 工作流设置重设计）：数值 + 单位选择并排，存值仍是纳秒；
+       * 留空（placeholder）表示不限。单位选项秒 / 分 / 时。
+       */
+      return (
+        <span className={cx('xflow-pv-duration', field.focus && 'xflow-pv-focus')}>
+          <InputNumber
+            className="xflow-pv-spec-control xflow-pv-duration-value"
+            status={status}
+            placeholder={placeholder}
+            value={toNumber(field.value, field.placeholder)}
+          />
+          <Select
+            aria-label={`${field.label}单位`}
+            className="xflow-pv-duration-unit"
+            value={field.unit}
+            options={(field.options ?? []).map((value) => ({ value, label: value }))}
+          />
+        </span>
+      );
     case 'number':
       return (
         <span className={cx('xflow-pv-num', field.focus && 'xflow-pv-focus')}>

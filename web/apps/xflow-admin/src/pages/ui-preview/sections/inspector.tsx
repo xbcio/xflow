@@ -6,7 +6,6 @@ import {
   DownIcon,
   MoreIcon,
   PlusIcon,
-  SearchIcon,
   SlidersIcon,
   TrashIcon,
   WarnIcon,
@@ -522,56 +521,80 @@ export function InspectorSection() {
         <InspPanel
           title="工作流设置"
           titleCount="未选中节点"
+          head={<div className="xflow-pv-insp-summary">{wfSettings.summary}</div>}
           body={
             <Sections
               items={[
                 {
+                  key: 'overview',
+                  label: <SectionLabel title="概览" icon="info" />,
+                  children: (
+                    <div className="xflow-pv-info-rows">
+                      {wfSettings.overview.map((row) => (
+                        <div className="xflow-pv-info-row" key={row.label}>
+                          <span className="xflow-pv-info-label">{row.label}</span>
+                          <span className={row.mono ? 'xflow-pv-info-value xflow-pv-mono' : 'xflow-pv-info-value'}>
+                            {row.tone ? (
+                              <button type="button" className="xflow-pv-info-link" data-tone={row.tone}>
+                                {row.value}
+                              </button>
+                            ) : (
+                              row.value
+                            )}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  ),
+                },
+                {
                   key: 'basic',
-                  label: <SectionLabel title="基本" />,
+                  label: (
+                    <SectionLabel title="基本" icon="grid">
+                      <span className="xflow-pv-sec-id" title={wfSettings.identifier}>
+                        {wfSettings.identifier.length <= 24
+                          ? wfSettings.identifier
+                          : `${wfSettings.identifier.slice(0, 12)}…${wfSettings.identifier.slice(-11)}`}
+                      </span>
+                      <IconButton small label="复制标识" icon={<CopyIcon />} onClick={(event) => event.stopPropagation()} />
+                    </SectionLabel>
+                  ),
                   children: <div className="xflow-pv-field-grid">{fields(wfSettings.basic)}</div>,
                 },
                 {
-                  key: 'entry',
-                  label: <SectionLabel title="入口" extra="1" />,
+                  key: 'triggers',
+                  label: <SectionLabel title="触发器" icon="link" extra="1" />,
                   children: (
-                    <PortRow
-                      row={wfSettings.entry[0]}
-                      dir="in"
-                      align="start"
-                      icon={<CategoryIcon category="trigger" icon="link" size="sm" />}
-                      action={
-                        <Button size="small" icon={<SearchIcon />}>
-                          定位
-                        </Button>
-                      }
-                    />
+                    <div className="xflow-pv-trigger-list">
+                      {wfSettings.triggers.map((trigger) => (
+                        <button type="button" className="xflow-pv-trigger-row" key={trigger.id}>
+                          <CategoryIcon category={trigger.category} icon={trigger.icon} size="sm" />
+                          <span>{trigger.label}</span>
+                          <span className="xflow-pv-mono xflow-pv-faint">{trigger.typeId}</span>
+                        </button>
+                      ))}
+                    </div>
                   ),
                 },
                 {
                   key: 'concurrency',
-                  label: <SectionLabel title="并发" />,
+                  label: <SectionLabel title="并发" icon="hourglass" />,
                   children: <div className="xflow-pv-field-grid">{fields(wfSettings.concurrency)}</div>,
                 },
                 /*
-                 * The last two sections open collapsed: five expanded sections
-                 * are taller than the panel, which left 错误与重试 and 高级 below
-                 * the fold — the reader could not see that the panel has five
-                 * sections at all.
+                 * The last two sections open collapsed: six sections are taller
+                 * than the panel, which left 错误与重试 and 高级 below the fold.
                  */
                 {
                   key: 'retry',
                   defaultActive: false,
-                  label: (
-                    <SectionLabel title="错误与重试" extra="节点默认继承" />
-                  ),
+                  label: <SectionLabel title="错误与重试" icon="warn" extra="节点默认继承" />,
                   children: <div className="xflow-pv-field-grid">{fields(wfSettings.retry)}</div>,
                 },
                 {
                   key: 'advanced',
                   defaultActive: false,
-                  label: (
-                    <SectionLabel title="高级" extra="调度 · 实验" />
-                  ),
+                  label: <SectionLabel title="高级" icon="shield" extra="调度 · 实验" />,
                   children: <div className="xflow-pv-field-grid">{fields(wfSettings.advanced)}</div>,
                 },
               ]}
@@ -579,7 +602,7 @@ export function InspectorSection() {
           }
         />
         <figcaption>
-          未选中节点：面板变成工作流设置（基本 / 入口 / 并发 / 错误与重试 / 高级），五节在一屏内看全，后两节折叠
+          未选中节点：面板变成工作流设置，标题栏下是「7 节点 · 6 连线 · 3 分区」摘要行，之后是概览 / 基本 / 触发器 / 并发 / 错误与重试 / 高级；区块平铺分节，无卡片阴影与悬浮效果
         </figcaption>
       </figure>
 

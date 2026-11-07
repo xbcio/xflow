@@ -882,6 +882,10 @@ export const wbOutline: OutlineRow[] = wbOutlineSections.flatMap((section) => {
 
 export const wbOutlineTotal = wbOutline.filter((row) => row.kind === 'item').length;
 
+/** 工作流设置摘要行（§6.4 工作流设置重设计）：节点 / 连线 / 分区都从图里算。 */
+export const wbSectionCount = wbOutlineSections.length;
+export const wbSettingsSummary = `${wbGraphStats.nodes} 节点 · ${wbGraphStats.edges} 连线 · ${wbSectionCount} 分区`;
+
 /** The panel header counts what the group list actually holds. */
 export const wbLibraryTotal = wbLibraryGroups.reduce((total, group) => total + group.count, 0);
 
@@ -962,8 +966,8 @@ export interface FieldSpec {
   label: string;
   value?: string;
   /** `select` / `expr` render the display control's own affordances. */
-  control?: 'text' | 'select' | 'multi' | 'expr' | 'area' | 'number' | 'seg' | 'switch' | 'slider' | 'pair';
-  /** `select` / `seg` choices; a `multi` control takes the selected tags from here. */
+  control?: 'text' | 'select' | 'multi' | 'expr' | 'area' | 'number' | 'seg' | 'switch' | 'slider' | 'pair' | 'duration';
+  /** `select` / `seg` choices; a `multi` control takes the selected tags from here; `duration` takes the unit options. */
   options?: string[];
   mono?: boolean;
   /**
@@ -1114,15 +1118,48 @@ export const inspRuns = {
   ].join('\n'),
 };
 
+/** 概览节的只读信息行（§6.4 工作流设置重设计）：标签列 96，和其他行一致。 */
+export interface InfoRowSpec {
+  label: string;
+  value: string;
+  mono?: boolean;
+  /** 校验行：有警告时整段 warning 色并可点击打开诊断台；无问题写「通过」success。 */
+  tone?: 'warning' | 'success';
+}
+
+const wbErrorCount = wbIssues.filter((issue) => issue.severity === 'danger').length;
+const wbWarningCount = wbIssues.filter((issue) => issue.severity === 'warning').length;
+
 export const wfSettings = {
+  /** 「基本」节头右侧的完整 id（过长从中间省略）与 24×24 复制按钮。 */
+  identifier: 'customer-sync',
+  summary: wbSettingsSummary,
+  overview: [
+    { label: '触发器', value: '客户回调 · Webhook' },
+    {
+      label: '校验',
+      value: wbErrorCount === 0 && wbWarningCount === 0 ? '通过' : `${wbErrorCount} 错误 · ${wbWarningCount} 警告`,
+      tone: wbErrorCount === 0 && wbWarningCount === 0 ? 'success' : 'warning',
+    },
+    { label: '版本', value: 'v1.2.0 · 线上', mono: true },
+  ] as InfoRowSpec[],
   basic: [
     { label: '名称', value: '客户同步' },
-    { label: '标识', value: 'customer-sync', mono: true },
     { label: '版本', value: '1.2.0', mono: true },
     { label: '时区', value: 'Asia/Shanghai', control: 'select' },
+    {
+      label: '执行超时',
+      value: '168',
+      control: 'duration',
+      unit: '时',
+      options: ['秒', '分', '时'],
+      help: '整个执行的预算，含排队与挂起等待；留空为不限',
+    },
     { label: '描述', value: '这个工作流做什么', control: 'area', placeholder: true, wide: true, layout: 'top', rows: 2 },
   ] as FieldSpec[],
-  entry: [{ id: 'e1', port: 'main', to: '客户回调 · Webhook' }] as PortRowSpec[],
+  triggers: [
+    { id: 'e1', label: '客户回调', typeId: 'xflow.trigger.webhook', category: 'trigger' as Category, icon: 'link' as IconKey },
+  ],
   concurrency: [
     { label: '上限', value: '10', control: 'number', unit: '个执行' },
     /* A `seg` control with no `options` renders a one-option segmented control —
