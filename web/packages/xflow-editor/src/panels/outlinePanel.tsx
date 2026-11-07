@@ -137,7 +137,6 @@ export function OutlinePanel({
       bodyClassName="xflow-editor-outline__body"
       className="xflow-editor-outline"
       count={count}
-      divider={false}
       icon={<OutlineIcon />}
       title="大纲"
     >

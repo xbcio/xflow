@@ -225,15 +225,15 @@ describe("xflow.editor cascade frame", () => {
 });
 
 describe("xflow.editor panel title bar (§6.0)", () => {
-  it("is a 40px bar with the baseline padding and gap; the rule is opt-in", () => {
+  it("is a 40px bar with the baseline padding and gap; the line is a shared variant", () => {
     expect(css).toMatch(/\.xflow-editor\s*\{[^}]*--xflow-editor-panel-title-height:\s*40px\s*;/);
     expect(css).toMatch(/\.xflow-editor-panel-title\s*\{[^}]*height:\s*var\(--xflow-editor-panel-title-height\)\s*;/);
     expect(css).toMatch(/\.xflow-editor-panel-title\s*\{[^}]*gap:\s*var\(--xflow-space-2\)\s*;/);
     expect(css).toMatch(
       /\.xflow-editor-panel-title\s*\{[^}]*padding:\s*0 var\(--xflow-space-2\) 0 var\(--xflow-space-3\)\s*;/
     );
-    // The left column's two zones have no rule under their bars (mock `.panel-title`);
-    // only the property panel asks for the `--divider` variant.
+    // The base class never draws its own rule; 属性 / 节点 / 大纲 / 诊断台 all
+    // opt into the single `--divider` variant (spec §6.0, 2026-11-07).
     expect(css).not.toMatch(/(?:^|\n)\.xflow-editor-panel-title\s*\{[^}]*border-bottom/);
     expect(css).toMatch(/\.xflow-editor-panel-title--divider\s*\{[^}]*border-bottom:\s*1px solid var\(--xflow-border-subtle\)\s*;/);
   });

@@ -148,7 +148,7 @@ export interface EditorPanelProps {
   children: React.ReactNode;
   className?: string;
   count?: React.ReactNode;
-  /** Draws the 1px rule under the title bar; the left column's zones turn it off. */
+  /** Draws the 1px rule under the title bar; on wherever §6.0's panels render one. */
   divider?: boolean;
   icon: React.ReactNode;
   title: React.ReactNode;

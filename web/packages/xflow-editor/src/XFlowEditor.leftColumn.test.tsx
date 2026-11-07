@@ -404,6 +404,20 @@ describe("dual-zone left column (§6.0.1)", () => {
     expect(within(outline).queryByRole("button", { name: "收起左栏" })).toBeNull();
   });
 
+  it("rules off both left-column title bars like 属性 (§6.0)", () => {
+    // 2026-11-07: all four panels share the one `--divider` variant, so the
+    // computed border-bottom (1px solid var(--xflow-border-subtle)) is the
+    // property panel's line, not a second colour. jsdom applies no stylesheet;
+    // editorStyles.test.ts pins the rule and shared.test.tsx the default.
+    render(<XFlowEditor value={workflow} />);
+    const header = (region: HTMLElement) => region.querySelector(".xflow-editor-panel-title");
+    const library = header(screen.getByRole("region", { name: "节点" }));
+    const outline = header(screen.getByRole("region", { name: "大纲" }));
+    for (const bar of [library, outline]) {
+      expect(bar?.classList.contains("xflow-editor-panel-title--divider")).toBe(true);
+    }
+  });
+
   it("draws the baseline's side-left sprite glyph on the 收起左栏 key", () => {
     render(<XFlowEditor value={workflow} />);
     const collapse = within(screen.getByRole("region", { name: "节点" })).getByRole("button", { name: "收起左栏" });

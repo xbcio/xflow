@@ -29,6 +29,17 @@ describe("EditorPanel (§6.0 title bar)", () => {
     expect(region.querySelector(".xflow-editor-panel-title__count")?.textContent).toBe("12");
   });
 
+  it("defaults the divider on, the one rule 属性 / 节点 / 大纲 share (§6.0)", () => {
+    render(
+      <EditorPanel icon={<span />} title="属性">
+        <p>body</p>
+      </EditorPanel>
+    );
+
+    const bar = screen.getByRole("region", { name: "属性" }).querySelector<HTMLElement>(".xflow-editor-panel-title");
+    expect(bar?.classList.contains("xflow-editor-panel-title--divider")).toBe(true);
+  });
+
   it("hides the decorative icon from assistive technology", () => {
     render(
       <EditorPanel count={3} icon={<span aria-label="装饰图标" />} title="属性">

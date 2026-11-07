@@ -795,8 +795,8 @@
   padding: 0 var(--xflow-space-2) 0 var(--xflow-space-3);
 }
 
-/* Only the property panel rules off its title from the tab row; the left
- * column's zones sit flush under their 40px bars (mock `.panel-title--bar`). */
+/* §6.0: 属性 / 节点 / 大纲 / 诊断台 all rule off their title bar with the same
+ * token (mock `.panel-title--bar`); the border sits inside the 40px row. */
 .xflow-editor-panel-title--divider {
   border-bottom: 1px solid var(--xflow-border-subtle);
 }

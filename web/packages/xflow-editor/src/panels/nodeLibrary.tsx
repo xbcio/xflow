@@ -259,7 +259,6 @@ export function NodeLibrary({
       bodyClassName="xflow-editor-library__body"
       className="xflow-editor-library"
       count={descriptors.length}
-      divider={false}
       icon={<GridIcon />}
       title="节点"
     >
