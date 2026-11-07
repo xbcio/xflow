@@ -88,6 +88,11 @@ type Store struct {
 	// sweep is throttled once the readiness index has proven it carries work.
 	outboxDiscoveryCalls uint64
 
+	// outboxMetricsWalks holds the per-namespace safety-net walk of OutboxMetrics
+	// (state_outbox_metrics_index.go); the mutex guards the map and its entries.
+	outboxMetricsWalkMu sync.Mutex
+	outboxMetricsWalks  map[namespace.Namespace]*outboxMetricsWalkState
+
 	// outboxIndexOn switches the best-effort readiness index off entirely.
 	// outboxIndexProven records that the index has been observed carrying work
 	// in this process, which is the only state in which the sweep may be

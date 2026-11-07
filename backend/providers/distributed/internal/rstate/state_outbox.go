@@ -426,6 +426,11 @@ func (s *Store) RecordOutboxFailure(ctx context.Context, id types.ExecutionID, e
 		return engine.OutboxDeliveryFailure{}, fmt.Errorf("record outbox failure %q/%q: unexpected result %v", id, entry.ID, result)
 	}
 	failure := engine.OutboxDeliveryFailure{Attempts: int(redisResultInt(result[0])), DeadLettered: redisResultInt(result[1]) == 1}
+	if failure.DeadLettered {
+		// Registered before the TTL refresh so a refresh error cannot skip it:
+		// the script has already written the dead letter.
+		s.markOutboxDeadIndex(ctx, t, id)
+	}
 	if err := s.refreshTransientTTL(ctx, id,
 		outboxReadyKey(t, id),
 		outboxBodyKey(t, id),
@@ -440,7 +445,7 @@ func (s *Store) RecordOutboxFailure(ctx context.Context, id types.ExecutionID, e
 	return failure, nil
 }
 
-// OutboxMetrics scans durable pending and dead-letter indexes to provide
+// OutboxMetrics reads the outbox readiness and dead-letter indexes to provide
 // aggregate backlog metrics. It is a recovery/observability path, not part of
 // the task-delivery hot path.
 func (s *Store) OutboxMetrics(ctx context.Context) (engine.OutboxMetricsSnapshot, error) {
@@ -524,60 +529,66 @@ func (s *Store) scanOutboxMetricsForNamespace(ctx context.Context, t namespace.N
 	// One cutoff for the whole scan: the due-now count is a point-in-time
 	// reading, and re-sampling per key would make the sum span a moving instant.
 	cutoff := strconv.FormatInt(time.Now().UTC().UnixMilli(), 10)
-	keys, err := redisx.ScanAll(ctx, s.rdb, execScanPattern(t, "outbox:ready"), 128)
-	if err != nil {
-		return fmt.Errorf("scan pending outbox indexes: %w", err)
-	}
-	for _, key := range keys {
-		count, err := s.rdb.ZCard(ctx, key).Result()
-		if err != nil {
-			return fmt.Errorf("count pending outbox %q: %w", key, err)
-		}
-		snapshot.Pending += int(count)
-		if count == 0 {
-			continue
-		}
-		// The ready index is scored by availability, so a member scored in the
-		// future is either leased by a live deliverer or waiting out a retry
-		// backoff — neither is deliverable in this tick. ZCOUNT to the cutoff
-		// is what separates "backlog of future work" from "backlog dispatch is
-		// failing to clear", which ZCARD alone cannot.
-		due, err := s.rdb.ZCount(ctx, key, "-inf", cutoff).Result()
-		if err != nil {
-			return fmt.Errorf("count due outbox %q: %w", key, err)
-		}
-		snapshot.Ready += int(due)
-		// ZRangeByScore rather than ZRangeArgs for the Redis 5.0 reason spelled
-		// out on the lease sweep in state_lease.go.
-		head, err := s.rdb.ZRangeByScore(ctx, key, &redis.ZRangeBy{
-			Min: "-inf", Max: "+inf",
-			Offset: 0, Count: outboxMetricsHeadCap,
-		}).Result()
-		if err != nil {
-			return fmt.Errorf("read pending outbox head %q: %w", key, err)
-		}
-		if len(head) == 0 {
-			continue
-		}
-		oldestAt, err := s.oldestOutboxCreatedAt(ctx, outboxBodyKeyFromReadyKey(key), head, &snapshot.DecodeFailures)
-		if err != nil {
+	// The safety-net walk runs first so a key it recovers is counted by this
+	// same call. See state_outbox_metrics_index.go.
+	s.walkOutboxMetricsKeyspace(ctx, t)
+	if s.outboxIndexEnabled() {
+		if err := s.readyOutboxMetricsFromIndex(ctx, t, cutoff, snapshot); err != nil {
 			return err
 		}
-		if !oldestAt.IsZero() && (snapshot.OldestPendingAt.IsZero() || oldestAt.Before(snapshot.OldestPendingAt)) {
-			snapshot.OldestPendingAt = oldestAt
-		}
-	}
-
-	keys, err = redisx.ScanAll(ctx, s.rdb, execScanPattern(t, "outbox:dead"), 128)
-	if err != nil {
-		return fmt.Errorf("scan dead-letter outbox indexes: %w", err)
-	}
-	for _, key := range keys {
-		count, err := s.rdb.ZCard(ctx, key).Result()
+	} else {
+		keys, err := redisx.ScanAll(ctx, s.rdb, execScanPattern(t, "outbox:ready"), 128)
 		if err != nil {
-			return fmt.Errorf("count dead-letter outbox %q: %w", key, err)
+			return fmt.Errorf("scan pending outbox indexes: %w", err)
 		}
-		snapshot.DeadLettered += int(count)
+		for _, key := range keys {
+			if err := s.addReadyOutboxMetrics(ctx, key, cutoff, snapshot); err != nil {
+				return err
+			}
+		}
+	}
+	return s.deadOutboxMetricsFromIndex(ctx, t, snapshot)
+}
+
+// addReadyOutboxMetrics folds one execution's ready ZSET into the snapshot. A
+// key that no longer exists contributes nothing.
+func (s *Store) addReadyOutboxMetrics(ctx context.Context, key, cutoff string, snapshot *engine.OutboxMetricsSnapshot) error {
+	count, err := s.rdb.ZCard(ctx, key).Result()
+	if err != nil {
+		return fmt.Errorf("count pending outbox %q: %w", key, err)
+	}
+	snapshot.Pending += int(count)
+	if count == 0 {
+		return nil
+	}
+	// The ready index is scored by availability, so a member scored in the
+	// future is either leased by a live deliverer or waiting out a retry
+	// backoff — neither is deliverable in this tick. ZCOUNT to the cutoff
+	// is what separates "backlog of future work" from "backlog dispatch is
+	// failing to clear", which ZCARD alone cannot.
+	due, err := s.rdb.ZCount(ctx, key, "-inf", cutoff).Result()
+	if err != nil {
+		return fmt.Errorf("count due outbox %q: %w", key, err)
+	}
+	snapshot.Ready += int(due)
+	// ZRangeByScore rather than ZRangeArgs for the Redis 5.0 reason spelled
+	// out on the lease sweep in state_lease.go.
+	head, err := s.rdb.ZRangeByScore(ctx, key, &redis.ZRangeBy{
+		Min: "-inf", Max: "+inf",
+		Offset: 0, Count: outboxMetricsHeadCap,
+	}).Result()
+	if err != nil {
+		return fmt.Errorf("read pending outbox head %q: %w", key, err)
+	}
+	if len(head) == 0 {
+		return nil
+	}
+	oldestAt, err := s.oldestOutboxCreatedAt(ctx, outboxBodyKeyFromReadyKey(key), head, &snapshot.DecodeFailures)
+	if err != nil {
+		return err
+	}
+	if !oldestAt.IsZero() && (snapshot.OldestPendingAt.IsZero() || oldestAt.Before(snapshot.OldestPendingAt)) {
+		snapshot.OldestPendingAt = oldestAt
 	}
 	return nil
 }
