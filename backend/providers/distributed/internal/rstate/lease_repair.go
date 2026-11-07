@@ -121,6 +121,7 @@ func (s *Store) repairLeaseIndexForNamespace(ctx context.Context, t namespace.Na
 			return reconciled, fmt.Errorf("reconcile lease index %q/%q: %w", executionID, nodeName, err)
 		}
 		if result == 1 {
+			s.markLeaseExpiryIndex(ctx, t, executionID, 0)
 			reconciled++
 		}
 	}

@@ -33,7 +33,7 @@ func TestProductionScansUseClusterAwareHelpers(t *testing.T) {
 		"rstate/entry_activation_index.go":     {scanAll: 1},
 		"rstate/lease_repair.go":               {scanPage: 1},
 		"rstate/receipt_reader.go":             {scanAll: 1},
-		"rstate/state_lease.go":                {scanAll: 1},
+		"rstate/state_lease_index.go":          {scanPage: 1},
 		"rstate/state_outbox.go":               {scanAll: 1, scanPage: 1},
 		"rstate/state_outbox_metrics_index.go": {scanPage: 1},
 		"timeout/monitor.go":                   {scanPage: 1},

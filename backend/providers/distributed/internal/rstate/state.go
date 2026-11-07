@@ -109,6 +109,13 @@ type Store struct {
 	// storm on top of the outage.
 	outboxIndexLogMu   sync.Mutex
 	outboxIndexLastLog time.Time
+	// leaseIndexLastLog rate-limits the lease-expiry index failure log; it
+	// shares outboxIndexLogMu.
+	leaseIndexLastLog time.Time
+	// leaseWalkMu guards leaseWalks, the per-namespace safety-net walk of the
+	// lease-expiry index. See state_lease_index.go.
+	leaseWalkMu sync.Mutex
+	leaseWalks  map[namespace.Namespace]*leaseWalkState
 
 	// outputCompression switches storing node outputs compressed. Written once at
 	// construction and read from every node commit, hence an atomic. The READ

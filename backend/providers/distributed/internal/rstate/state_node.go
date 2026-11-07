@@ -202,6 +202,7 @@ func (s *Store) UpsertNode(ctx context.Context, n *engine.NodeSnapshot) error {
 			if err := s.rdb.ZAdd(ctx, leaseIndexKey, redis.Z{Score: expiryMs, Member: member}).Err(); err != nil {
 				return fmt.Errorf("index lease expiry %q/%q: %w", n.ExecutionID, n.Name, err)
 			}
+			s.markLeaseExpiryIndex(ctx, t, n.ExecutionID, int64(expiryMs))
 		} else if n.Status != types.NodeStatusRunning && n.Status != types.NodeStatusCommitting && n.Status != types.NodeStatusWaiting {
 			// Terminal, suspended, and pending nodes have no recoverable lease.
 			if err := s.rdb.ZRem(ctx, leaseIndexKey, member).Err(); err != nil {

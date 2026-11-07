@@ -298,6 +298,7 @@ func (s *Store) AcquireGroupLease(ctx context.Context, lease *engine.GroupLease)
 	if len(res) >= 2 {
 		lease.Attempt = int(redisResultInt(res[1]))
 	}
+	s.markLeaseExpiryIndex(ctx, t, lease.ExecutionID, deadlineMs)
 	return true, nil
 }
 
