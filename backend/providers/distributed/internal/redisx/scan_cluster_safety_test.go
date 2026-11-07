@@ -35,7 +35,7 @@ func TestProductionScansUseClusterAwareHelpers(t *testing.T) {
 		"rstate/receipt_reader.go":         {scanAll: 1},
 		"rstate/state_lease.go":            {scanAll: 1},
 		"rstate/state_outbox.go":           {scanAll: 2, scanPage: 1},
-		"timeout/monitor.go":               {scanAll: 1},
+		"timeout/monitor.go":               {scanPage: 1},
 		// The legacy v1 key space has no name index, so an Add probes it by
 		// namespace prefix; the namespace is glob-free by validation and the
 		// name match happens in Go, so ScanAll is the only correct helper here

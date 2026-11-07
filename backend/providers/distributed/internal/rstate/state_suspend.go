@@ -103,6 +103,10 @@ func (s *Store) SuspendOrConsume(ctx context.Context, id types.ExecutionID, name
 		// This signal was not pre-delivered; a waiter key was registered.
 		registeredWaiters = append(registeredWaiters, waiterKey(t, id, sigName))
 	}
+	// The last Lua call parked the node and ZADDed its timeout.
+	if timeoutScore > 0 {
+		s.markTimeoutIndex(ctx, t, id)
+	}
 	// Extend TTL to prevent key expiry during suspension.
 	if err := s.extendExecTTL(ctx, id, name, spec, s.suspendTTL(ctx, id, spec)); err != nil {
 		return nil, err
@@ -187,6 +191,9 @@ func (s *Store) suspendOrConsumeMulti(ctx context.Context, id types.ExecutionID,
 	}
 	if _, err := pipe.Exec(ctx); err != nil {
 		return nil, fmt.Errorf("park multi-signal waiter: %w", err)
+	}
+	if spec.Timeout > 0 {
+		s.markTimeoutIndex(ctx, t, id)
 	}
 	if err := s.extendExecTTL(ctx, id, name, spec, ttl); err != nil {
 		return nil, err
@@ -536,6 +543,7 @@ func (s *Store) ResuspendAtomic(ctx context.Context, id types.ExecutionID, nodeN
 		}).Err(); err != nil {
 			return nil, fmt.Errorf("register resuspend timeout %q/%q: %w", id, nodeName, err)
 		}
+		s.markTimeoutIndex(ctx, t, id)
 	}
 	// Extend TTL to prevent key expiry during suspension.
 	if err := s.extendExecTTL(ctx, id, nodeName, spec, s.suspendTTL(ctx, id, spec)); err != nil {

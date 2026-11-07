@@ -17,16 +17,48 @@ import (
 	"github.com/xbcio/xflow/types"
 )
 
-// timeoutKeyPattern is the SCAN glob for per-namespace, per-execution timeout
-// ZSETs. Each execution owns a sharded key
-// xflow:ns:<namespace>:exec:{<id>}:timeouts (sharing the execution hash tag) so
-// the global timeout workload is distributed across Redis Cluster slots instead
-// of funneling onto a single hot key. The monitor iterates the namespace
-// registry so a SCAN never crosses a namespace boundary.
-const timeoutKeyPattern = "xflow:ns:%s:exec:{*}:timeouts"
-
-// timeoutScanCount is the page size used when scanning for timeout keys.
+// timeoutScanCount is the SCAN page size of the safety-net walk.
 const timeoutScanCount = int64(128)
+
+// timeoutDueBatch bounds one index read; timeoutDueMaxBatches bounds how many
+// batches a single tick drains so one namespace cannot monopolise the loop.
+const (
+	timeoutDueBatch      = int64(500)
+	timeoutDueMaxBatches = 10
+)
+
+// Safety-net walk. The timeout index (rstate/timeout_index.go) is written
+// best-effort after each timeout write, so a registration lost to process
+// death, or data written before the index existed, is only found by walking
+// the keyspace for `exec:{*}:timeouts`. That walk used to run in full every
+// tick on every replica (46% of Redis command time at 2.35M keys). It is now
+// incremental with a persistent per-namespace cursor:
+//
+//   - Backfill: until the first full round after process start completes, every
+//     tick advances up to timeoutBackfillPagesPerTick pages, so pre-existing
+//     timeouts are registered quickly after a deploy.
+//   - Steady state: one burst every timeoutWalkEvery, sized (from DBSIZE) so a
+//     full round takes about timeoutWalkRound. A tick between bursts issues no
+//     SCAN at all.
+//
+// Staleness bound for a lost registration: one round, about timeoutWalkRound
+// (10 minutes) plus up to one burst interval; a timeout in that window fires
+// late by at most that bound, never not at all. Keys the walk finds are
+// registered with ZADD NX at score 0 (a valid lower bound, due immediately in
+// this tick) so an existing exact score is not disturbed.
+const (
+	timeoutBackfillPagesPerTick = 2048
+	timeoutWalkEvery            = 30 * time.Second
+	timeoutWalkRound            = 10 * time.Minute
+	timeoutWalkMaxBurstPages    = 4096
+)
+
+// walkState is one namespace's safety-net walk progress.
+type walkState struct {
+	cursors    redisx.Cursors
+	backfilled bool
+	lastBurst  time.Time
+}
 
 // timeoutRetryBackoff is applied when delivering a timeout signal fails. The
 // member is re-added to the ZSET with this delay so the next poll retries
@@ -60,6 +92,9 @@ type Monitor struct {
 	// legacy behavior (registry + default injection). Written once via
 	// SetNamespaces before Run; read-only afterwards, hence no lock.
 	ownedNamespaces []namespace.Namespace
+
+	walkMu sync.Mutex
+	walks  map[namespace.Namespace]*walkState
 }
 
 // SetNamespaces scopes the monitor to exactly the given set. It is the
@@ -165,16 +200,125 @@ func (m *Monitor) scopedNamespaces(ctx context.Context) ([]namespace.Namespace, 
 }
 
 func (m *Monitor) processTimeoutsForNamespace(ctx context.Context, t namespace.Namespace, now time.Time, nowUnix string) {
-	pattern := fmt.Sprintf(timeoutKeyPattern, t)
-	keys, err := redisx.ScanAll(ctx, m.rdb, pattern, timeoutScanCount)
-	if err != nil && err != redis.Nil {
-		if m.logger != nil {
-			m.logger.Error("timeout monitor: scan timeout keys failed", "namespace", string(t), "error", err)
+	m.walkSafetyNet(ctx, t, now)
+
+	// Drain due executions from the namespace index. An execution processed
+	// this tick is re-armed to its exact next timeout, so it is only seen again
+	// within the tick when it still has due members beyond the peek limit; seen
+	// stops that from spinning on one execution.
+	seen := make(map[types.ExecutionID]struct{})
+	for batch := 0; batch < timeoutDueMaxBatches; batch++ {
+		ids, err := rstate.DueTimeoutExecutions(ctx, m.rdb, t, now, timeoutDueBatch)
+		if err != nil {
+			if m.logger != nil {
+				m.logger.Error("timeout monitor: read timeout index failed", "namespace", string(t), "error", err)
+			}
+			return
 		}
+		fresh := 0
+		for _, id := range ids {
+			if _, dup := seen[id]; dup {
+				continue
+			}
+			seen[id] = struct{}{}
+			fresh++
+			m.processTimeoutKey(ctx, t, rstate.TimeoutZSetKey(t, id), now, nowUnix)
+			if err := rstate.RefreshTimeoutIndex(ctx, m.rdb, t, id); err != nil && m.logger != nil {
+				m.logger.Error("timeout monitor: refresh timeout index failed", "namespace", string(t), "execution_id", string(id), "error", err)
+			}
+		}
+		if fresh == 0 || int64(len(ids)) < timeoutDueBatch {
+			return
+		}
+	}
+}
+
+// walkSafetyNet advances the incremental keyspace walk for one namespace and
+// registers every timeout ZSET it meets into the index (see the constants
+// above for cadence and staleness bound).
+func (m *Monitor) walkSafetyNet(ctx context.Context, t namespace.Namespace, now time.Time) {
+	m.walkMu.Lock()
+	defer m.walkMu.Unlock()
+	if m.walks == nil {
+		m.walks = make(map[namespace.Namespace]*walkState)
+	}
+	st := m.walks[t]
+	if st == nil {
+		st = &walkState{}
+		m.walks[t] = st
+	}
+
+	pages := timeoutBackfillPagesPerTick
+	if st.backfilled {
+		if now.Sub(st.lastBurst) < timeoutWalkEvery {
+			return
+		}
+		pages = m.steadyBurstPages(ctx)
+	}
+	st.lastBurst = now
+
+	pattern := rstate.TimeoutScanPattern(t)
+	for i := 0; i < pages; i++ {
+		keys, next, err := redisx.ScanPage(ctx, m.rdb, st.cursors, pattern, timeoutScanCount)
+		if err != nil {
+			if m.logger != nil {
+				m.logger.Error("timeout monitor: scan timeout keys failed", "namespace", string(t), "error", err)
+			}
+			return
+		}
+		m.registerWalkedKeys(ctx, t, keys)
+		st.cursors = next
+		done := true
+		for _, c := range next {
+			if c != 0 {
+				done = false
+			}
+		}
+		if done {
+			st.cursors = nil
+			st.backfilled = true
+			return
+		}
+	}
+}
+
+// steadyBurstPages sizes a steady-state burst so a round takes about
+// timeoutWalkRound: total pages (DBSIZE / page size) spread over the bursts in
+// a round. DBSIZE on a cluster client reaches one master only, which is a
+// good-enough estimate here; on error one page still makes progress.
+func (m *Monitor) steadyBurstPages(ctx context.Context) int {
+	size, err := m.rdb.DBSize(ctx).Result()
+	if err != nil || size <= 0 {
+		return 1
+	}
+	totalPages := size/timeoutScanCount + 1
+	bursts := int64(timeoutWalkRound / timeoutWalkEvery)
+	pages := (totalPages + bursts - 1) / bursts
+	if pages > timeoutWalkMaxBurstPages {
+		pages = timeoutWalkMaxBurstPages
+	}
+	return int(pages)
+}
+
+func (m *Monitor) registerWalkedKeys(ctx context.Context, t namespace.Namespace, keys []string) {
+	if len(keys) == 0 {
 		return
 	}
+	pipe := m.rdb.Pipeline()
+	n := 0
 	for _, key := range keys {
-		m.processTimeoutKey(ctx, t, key, now, nowUnix)
+		id, ok := rstate.TimeoutExecutionID(t, key)
+		if !ok {
+			continue
+		}
+		pipe.ZAddNX(ctx, rstate.TimeoutIndexKey(t), redis.Z{Score: 0, Member: string(id)})
+		n++
+	}
+	if n == 0 {
+		return
+	}
+	if _, err := pipe.Exec(ctx); err != nil && m.logger != nil {
+		m.logger.Error("timeout monitor: register walked timeout keys failed", "namespace", string(t), "error", err)
 	}
 }
 
