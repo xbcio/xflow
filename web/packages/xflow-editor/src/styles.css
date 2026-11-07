@@ -864,8 +864,10 @@
   padding: 0 var(--xflow-space-3) var(--xflow-space-2);
 }
 
-/* §6.0.1 (2026-11-07): the search key is a 24×24 square in the title bar. */
-.xflow-editor .xflow-editor-library__search-key {
+/* §6.0.1 (2026-11-07): the search key is a 24×24 square in the title bar. The
+ * panel collapse rule is `button.xflow-editor-panel-collapse` (0,2,1), so this
+ * one names both classes to stay the winner at the same layer. */
+.xflow-editor button.xflow-editor-panel-collapse.xflow-editor-library__search-key {
   height: 24px;
   min-width: 24px;
   padding-inline: 0;
