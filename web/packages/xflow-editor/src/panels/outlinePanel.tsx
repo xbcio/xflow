@@ -38,7 +38,7 @@ export function OutlinePanel({
   sections?: readonly WorkflowEditorSection[];
   /** The run the canvas cards show; absent when there is none. */
   runtime?: RuntimeSnapshot;
-  /** Draw per-row status dots: only the run view does (§6.0.1 2026-11-07). */
+  /** Draw per-row status dots: only a replayed execution does (§6.0.1 2026-11-07). */
   showStatus?: boolean;
   /** The canvas selection; the tree highlights it and follows it. */
   selectedKey?: string;

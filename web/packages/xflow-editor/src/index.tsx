@@ -5159,6 +5159,13 @@ export function XFlowEditor({
    * library, so the outline fills the column alone and carries the collapse
    * action itself.
    */
+  /**
+   * §6.0.1 (2026-11-07 ruling): the outline's status dots speak only for a
+   * replayed execution — the host's snapshot of a selected one. The edit view,
+   * a live run and a read-only view with no execution draw no dots; a disabled
+   * node still gets its BanIcon.
+   */
+  const replayRuntime = selectedExecution && executionSnapshotRuntime ? executionSnapshotRuntime : undefined;
   const renderNodeZones = (headerAction: React.ReactNode): React.ReactElement => (
     <LeftZones
       dual={editMode}
@@ -5183,10 +5190,10 @@ export function XFlowEditor({
           canLocate={selectedNode !== undefined}
           headerAction={editMode ? undefined : headerAction}
           nodeCategories={nodeCategories}
-          runtime={localRuntime}
+          runtime={replayRuntime ?? localRuntime}
           sections={editorSections}
           selectedKey={selectedKey}
-          showStatus={!editMode}
+          showStatus={replayRuntime !== undefined}
           workflow={draftWorkflow}
           onAddNode={editMode ? openNodeLibrary : undefined}
           onFocusLost={handleOutlineFocusLost}

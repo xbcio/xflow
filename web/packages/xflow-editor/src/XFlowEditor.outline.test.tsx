@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { nodeStatusMeta } from "@xflow/core";
 import type { RuntimeSnapshot, WorkflowDef, WorkflowEditorSection } from "@xflow/core";
 import type { XFlowPreview as RealXFlowPreview } from "@xflow/preview";
-import { XFlowEditor, type XFlowEditorSaveContext } from "./index";
+import { XFlowEditor, type XFlowEditorSaveContext, type XFlowExecution } from "./index";
 
 // E5b (spec §6.0.1): the outline tree in the left column's lower zone. The
 // builder's ordering rules are covered in panels/outline.test.ts; here the tree
@@ -318,13 +318,32 @@ describe("outline status dots (§4, §6.0.1)", () => {
       normal: { status: "skipped" }
     }
   };
-  /** §6.0.1 (2026-11-07): dots belong to the run view, never the edit view. */
-  const runView = (value: WorkflowDef, snapshot?: RuntimeSnapshot) => (
-    <XFlowEditor readOnlyReason="只读回放" runtime={snapshot} value={value} />
+  const disabledWorkflow = (value: WorkflowDef): WorkflowDef => ({
+    ...value,
+    nodes: value.nodes?.map((node) => (node.name === "normal" ? { ...node, disabled: true } : node))
+  });
+  const executionOf = (value: WorkflowDef): XFlowExecution => ({
+    executionId: "exec-outline",
+    status: "running",
+    nodes: (value.nodes ?? []).map((node) => ({ name: node.name, status: runtime.nodes?.[node.name]?.status ?? "pending" }))
+  });
+  /** §6.0.1 (2026-11-07 ruling): dots belong to a replayed execution only. */
+  const replayView = (value: WorkflowDef, snapshot: RuntimeSnapshot = runtime) => (
+    <XFlowEditor
+      executionSnapshotRuntime={snapshot}
+      readOnlyReason="只读回放"
+      runtime={snapshot}
+      selectedExecution={executionOf(value)}
+      value={value}
+    />
+  );
+  /** The same read-only surface with no execution selected: no dots. */
+  const readOnlyView = (value: WorkflowDef) => (
+    <XFlowEditor readOnlyReason="只读回放" runtime={runtime} value={value} />
   );
 
   it("takes each dot's tone from the status table, the same snapshot the canvas reads", () => {
-    render(runView(workflow, runtime));
+    render(replayView(workflow));
 
     for (const [name, status] of [["start", "success"], ["check", "failed"], ["vip", "running"], ["normal", "skipped"]] as const) {
       const row = rowOf(name);
@@ -339,27 +358,35 @@ describe("outline status dots (§4, §6.0.1)", () => {
   });
 
   it("marks a node the run has not reached pending (the status the dashed ring is drawn for), and a skipped one neutral", () => {
-    render(runView(workflow, runtime));
+    render(replayView(workflow));
 
     expect(rowOf("finish").getAttribute("data-status")).toBe("pending");
     expect(rowOf("finish").getAttribute("data-tone")).toBe("neutral");
     expect(rowOf("normal").getAttribute("data-tone")).toBe("neutral");
   });
 
-  it("is all pending when there is no run", () => {
-    render(runView(workflow));
+  it("is all pending when the replay snapshot has no node entries", () => {
+    render(replayView(workflow, { status: "running", nodes: {} }));
 
     expect(items().map((row) => row.getAttribute("data-status"))).toEqual(["pending", "pending", "pending", "pending", "pending"]);
   });
 
   it("reads a disabled node as disabled until the run reports it", () => {
-    render(runView({ ...workflow, nodes: workflow.nodes?.map((node) => (node.name === "normal" ? { ...node, disabled: true } : node)) }));
+    render(replayView(disabledWorkflow(workflow), { status: "running", nodes: {} }));
 
     expect(rowOf("normal").getAttribute("data-status")).toBe("disabled");
   });
 
   it("draws no dots in the edit view, and a BanIcon for a disabled node", () => {
-    render(<XFlowEditor runtime={runtime} value={{ ...workflow, nodes: workflow.nodes?.map((node) => (node.name === "normal" ? { ...node, disabled: true } : node)) }} />);
+    render(<XFlowEditor runtime={runtime} value={disabledWorkflow(workflow)} />);
+
+    expect(items().every((row) => row.getAttribute("data-status") === null)).toBe(true);
+    expect(outlineRegion().querySelector(".xflow-editor-outline__dot")).toBeNull();
+    expect(rowOf("normal").querySelector(".xflow-editor-outline__ban")).toBeTruthy();
+  });
+
+  it("draws no dots in a read-only view with no selected execution, and still bans a disabled node", () => {
+    render(readOnlyView(disabledWorkflow(workflow)));
 
     expect(items().every((row) => row.getAttribute("data-status") === null)).toBe(true);
     expect(outlineRegion().querySelector(".xflow-editor-outline__dot")).toBeNull();
