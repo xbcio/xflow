@@ -2319,10 +2319,16 @@ button.xflow-editor-overview__run:hover {
   width: 100%;
 }
 
-.xflow-editor .xflow-editor-inspector-tabs [role="tab"] {
+/* AntD's flex item is the item wrapper that carries our semantic hook; the
+ * role=tab button is a block inside it, so the equal division lives here. */
+.xflow-editor .xflow-editor-inspector-tabs__item {
   flex: 1 1 0;
-  font-weight: var(--xflow-font-weight-medium);
   justify-content: center;
+  min-width: 0;
+}
+
+.xflow-editor .xflow-editor-inspector-tabs [role="tab"] {
+  font-weight: var(--xflow-font-weight-medium);
   line-height: var(--xflow-line-height-md);
   text-align: center;
 }

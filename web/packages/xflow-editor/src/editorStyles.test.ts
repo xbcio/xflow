@@ -523,11 +523,13 @@ describe("xflow.editor inspector tabs (§6.4)", () => {
     expect(css).toMatch(
       /\.xflow-editor \.xflow-editor-inspector-tabs \[role="tab"\]\[aria-selected="true"\]\s*\{[^}]*color:\s*var\(--xflow-text\)\s*;/
     );
-    // §6.4 (2026-11-07): the three tabs divide the bar equally and centre.
+    // §6.4 (2026-11-07): the three tabs divide the bar equally and centre. The
+    // flex item is AntD's tab wrapper, which carries our semantic __item hook.
     expect(ruleBody(".xflow-editor-inspector-tabs [role=\"tablist\"]")).toMatch(/display:\s*flex\s*;/);
     expect(ruleBody(".xflow-editor-inspector-tabs [role=\"tablist\"]")).toMatch(/width:\s*100%\s*;/);
-    expect(ruleBody(".xflow-editor-inspector-tabs [role=\"tab\"]")).toMatch(/flex:\s*1 1 0\s*;/);
-    expect(ruleBody(".xflow-editor-inspector-tabs [role=\"tab\"]")).toMatch(/justify-content:\s*center\s*;/);
+    expect(ruleBody(".xflow-editor-inspector-tabs__item")).toMatch(/flex:\s*1 1 0\s*;/);
+    expect(ruleBody(".xflow-editor-inspector-tabs__item")).toMatch(/justify-content:\s*center\s*;/);
+    expect(ruleBody(".xflow-editor-inspector-tabs [role=\"tab\"]")).toMatch(/text-align:\s*center\s*;/);
   });
 });
 
