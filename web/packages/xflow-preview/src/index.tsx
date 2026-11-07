@@ -26,6 +26,7 @@ import {
   type Node,
   type NodeProps,
   type OnBeforeDelete,
+  PanOnScrollMode,
   type ReactFlowInstance,
   type ReactFlowState,
   type Viewport as ReactFlowViewport,
@@ -2997,6 +2998,18 @@ export function XFlowPreview({
             selectionMode={SelectionMode.Partial}
             multiSelectionKeyCode={multiSelectEnabled ? ["Meta", "Control"] : undefined}
             panOnDrag={multiSelectEnabled ? [1] : true}
+            // §6.2 wheel/trackpad gestures: an unmodified wheel or two-finger
+            // scroll pans the canvas freely (Shift hands the wheel the other
+            // axis where the platform does not), while ⌘/Ctrl + wheel zooms.
+            // Chrome reports a trackpad pinch as a wheel with ctrlKey set, so
+            // `zoomActivationKeyCode` plus xyflow's pinch branch covers both
+            // the pinch and the modifiers. `zoomOnScroll` stays off: an
+            // unmodified wheel must never zoom.
+            panOnScroll
+            panOnScrollMode={PanOnScrollMode.Free}
+            zoomOnScroll={false}
+            zoomOnPinch
+            zoomActivationKeyCode={["Meta", "Control"]}
             // §6.2: a drag lands on the same 16px lattice the dots paint. The
             // editor commits whatever positions xyflow reports, so a single
             // drag and a whole multi-selection drag arrive already quantized;
@@ -3074,13 +3087,16 @@ export function XFlowPreview({
             ) : null}
             {rulersDrawn ? <CanvasRulers selectedNodeId={selectedNodeId} /> : null}
             {canvasFloat ? (
-              <div className="xflow-preview-canvas-float" {...{ [FLOAT_ATTRIBUTE]: "" }}>
+              // `nowheel`: xyflow's wheel handler ignores events from inside it,
+              // so a float keeps its own wheel behaviour instead of panning the
+              // canvas underneath.
+              <div className="xflow-preview-canvas-float nowheel" {...{ [FLOAT_ATTRIBUTE]: "" }}>
                 {canvasFloat}
               </div>
             ) : null}
             {canvasFloatEnd ? (
               <div
-                className={`xflow-preview-canvas-float xflow-preview-canvas-float--end${canvasFloatEndCompact ? " xflow-preview-canvas-float--compact" : ""}`}
+                className={`xflow-preview-canvas-float xflow-preview-canvas-float--end nowheel${canvasFloatEndCompact ? " xflow-preview-canvas-float--compact" : ""}`}
                 {...{ [FLOAT_ATTRIBUTE]: "" }}
               >
                 {canvasFloatEnd}
@@ -3099,8 +3115,15 @@ export function XFlowPreview({
             {minimapShown ? (
               <MiniMap
                 ariaLabel="缩略图"
+                // `nowheel`: the minimap pans/zooms on its own drag gestures;
+                // a wheel over it must not pan the canvas behind it.
+                className="nowheel"
                 pannable
-                zoomable
+                // §6.2 gives the minimap drag-to-pan and click-to-jump only.
+                // xyflow's `zoomable` adds its own wheel handler on the svg
+                // (which `nowheel` cannot reach), so leaving it on would zoom
+                // the canvas from a wheel over the minimap.
+                zoomable={false}
                 style={MINIMAP_SIZE}
                 maskColor="var(--xflow-preview-minimap-mask)"
                 maskStrokeColor="var(--xflow-preview-minimap-view)"

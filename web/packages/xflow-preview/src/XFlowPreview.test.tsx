@@ -161,8 +161,12 @@ vi.mock("@xyflow/react", async () => {
     Handle,
     MiniMap: (props: Record<string, unknown>) => {
       reactFlowMock.miniMapProps = props as { nodeColor?: (node: unknown) => string };
-      return React.createElement("div", { className: "react-flow__minimap" });
+      // xyflow merges the owner's className into the minimap's own class list.
+      return React.createElement("div", {
+        className: ["react-flow__minimap", props.className].filter(Boolean).join(" ")
+      });
     },
+    PanOnScrollMode: { Free: "free", Vertical: "vertical", Horizontal: "horizontal" },
     Position: { Left: "left", Right: "right" },
     SelectionMode: { Partial: "partial", Full: "full" },
     ReactFlow,
@@ -221,6 +225,11 @@ interface MockFlowProps extends Record<string, unknown> {
   selectionMode?: string;
   multiSelectionKeyCode?: string[];
   panOnDrag?: boolean | number[];
+  panOnScroll?: boolean;
+  panOnScrollMode?: string;
+  zoomOnScroll?: boolean;
+  zoomOnPinch?: boolean;
+  zoomActivationKeyCode?: string[];
   onNodesChange?: (changes: Array<{ id: string; type: "select"; selected: boolean }>) => void;
   onInit?: (instance: MockFlowInstance) => void;
   onConnect?: (connection: {
@@ -1830,7 +1839,10 @@ describe("XFlowPreview canvas surface", () => {
     // Turning it on keeps the interactions and the swatch colour rule.
     expect(reactFlowMock.miniMapProps).toMatchObject({
       pannable: true,
-      zoomable: true,
+      // §6.2: wheel over the minimap must not move the canvas. xyflow's
+      // minimap zoom binds a wheel handler to its own svg, so `nowheel` alone
+      // cannot stop it; the feature stays off.
+      zoomable: false,
       nodeColor: expect.any(Function),
       // xyflow sizes the svg viewBox from style, so the 200x124 box is passed in,
       // not left to CSS (which would crop a 200x150 map).
@@ -2463,6 +2475,24 @@ describe("XFlowPreview canvas chrome", () => {
     expect(within(end as HTMLElement).getByRole("button", { name: "属性" })).toBeTruthy();
     // The end variant is its own slot: the top-left float stays empty.
     expect(container.querySelector(".xflow-preview-canvas-float:not(.xflow-preview-canvas-float--end)")).toBeNull();
+  });
+
+  it("opts the canvas chrome out of the wheel, so it never pans the canvas behind it", () => {
+    const flow = { name: "Chrome", nodes: [{ name: "start", type: "xflow.start" }] };
+    const { container } = render(
+      <XFlowPreview
+        workflow={flow}
+        minimap
+        canvasFloat={<span>添加节点</span>}
+        canvasFloatEnd={<span>属性</span>}
+      />
+    );
+    // xyflow skips wheel events landing inside `.nowheel`; the zoom bar, both
+    // floats and the minimap each own their pointer surface.
+    expect(screen.getByRole("toolbar", { name: "画布缩放" }).classList.contains("nowheel")).toBe(true);
+    expect(container.querySelector(".react-flow__minimap")!.classList.contains("nowheel")).toBe(true);
+    expect(container.querySelector(".xflow-preview-canvas-float")!.classList.contains("nowheel")).toBe(true);
+    expect(container.querySelector(".xflow-preview-canvas-float--end")!.classList.contains("nowheel")).toBe(true);
   });
 });
 
@@ -3262,6 +3292,28 @@ describe("XFlowPreview multi-selection (§6.2)", () => {
     expect(flow.nodes.find((node) => node.id === "a-id")).toMatchObject({ selectable: true, selected: true });
     expect(flow.nodes.find((node) => node.id === "b-id")).toMatchObject({ selectable: true, selected: false });
     expect(flow.nodes.find((node) => node.id === "c-id")).toMatchObject({ selectable: true, selected: true });
+  });
+
+  it("pans on an unmodified wheel and zooms only with a modifier or a pinch", () => {
+    render(
+      <XFlowPreview workflow={multiWorkflow} editable selectedNodeIds={["a-id"]} onSelectionChange={vi.fn()} />
+    );
+
+    const flow = latestFlowProps();
+    // Free mode keeps both wheel axes: a two-finger scroll pans diagonally,
+    // and Shift hands a mouse wheel the other axis where the platform does.
+    expect(flow.panOnScroll).toBe(true);
+    expect(flow.panOnScrollMode).toBe("free");
+    // An unmodified wheel never zooms; ⌘/Ctrl + wheel and a trackpad pinch
+    // (Chrome sends it as a ctrlKey wheel event) still do.
+    expect(flow.zoomOnScroll).toBe(false);
+    expect(flow.zoomOnPinch).toBe(true);
+    expect(flow.zoomActivationKeyCode).toEqual(["Meta", "Control"]);
+    // The multi-select modifier shares Meta/Control but lives on click, so the
+    // two gestures coexist rather than compete.
+    expect(flow.multiSelectionKeyCode).toEqual(["Meta", "Control"]);
+    // Wheel scrolling over the canvas must not scroll the page or a panel.
+    expect(flow.preventScrolling).toBeUndefined();
   });
 
   it("keeps the legacy single-selection contract when no owner set is supplied", () => {

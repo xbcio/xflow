@@ -236,7 +236,9 @@ export function ZoomBar({ onFit, onAutoLayout, ruler, onRulerChange, minimap, on
     void flow.zoomTo(next);
   };
   return (
-    <div className="xflow-preview-zoombar" role="toolbar" aria-label="画布缩放" {...{ [FLOAT_ATTRIBUTE]: "" }}>
+    // `nowheel`: xyflow's wheel handler skips events whose target sits inside
+    // a `nowheel` element, so scrubbing the slider never pans the canvas.
+    <div className="xflow-preview-zoombar nowheel" role="toolbar" aria-label="画布缩放" {...{ [FLOAT_ATTRIBUTE]: "" }}>
       <ChromeButton label="缩小" icon={<MinusIcon />} onClick={() => zoomTo(steppedZoom(zoom, -1))} />
       {/* The baseline's `.zoom-slider` is a native range, not AntD's rail/handle:
           same 96px track, accent-coloured by the primary token. */}
