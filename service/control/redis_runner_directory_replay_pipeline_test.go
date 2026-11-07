@@ -106,6 +106,11 @@ func replayLeasePollRoundTrips(t *testing.T, leases int) int {
 		if err := rdb.HSet(ctx, directory.keys.assignmentSession, id, session.SessionID).Err(); err != nil {
 			t.Fatalf("seed assignment session %q: %v", assignmentID, err)
 		}
+		// FinalizeClaim writes the lease ID next to the metadata; the replay
+		// decides "already executing" from it without reading the metadata.
+		if err := rdb.HSet(ctx, directory.keys.assignmentLeaseID, id, string(lease.LeaseID)).Err(); err != nil {
+			t.Fatalf("seed assignment lease id %q: %v", assignmentID, err)
+		}
 		if err := rdb.HSet(ctx, directory.keys.assignmentData, id, rawAssignment).Err(); err != nil {
 			t.Fatalf("seed assignment payload %q: %v", assignmentID, err)
 		}
@@ -214,5 +219,86 @@ func TestRedisRunnerDirectoryReplayLeaseDoesNotSwallowAReadErrorBehindAPrune(t *
 	}
 	if !strings.Contains(err.Error(), "read lease owner") {
 		t.Fatalf("ClaimForRunner() error = %q, want the existing owner-read wording", err)
+	}
+}
+
+// replayPayloadReadHook records every read of an assignment payload or lease
+// metadata record, the two values that carry a task's full input.
+type replayPayloadReadHook struct {
+	mu        sync.Mutex
+	dataKey   string
+	metaKeyAt string
+	reads     []string
+}
+
+func (h *replayPayloadReadHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h *replayPayloadReadHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		h.observe(cmd)
+		return next(ctx, cmd)
+	}
+}
+
+func (h *replayPayloadReadHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		for _, cmd := range cmds {
+			h.observe(cmd)
+		}
+		return next(ctx, cmds)
+	}
+}
+
+func (h *replayPayloadReadHook) observe(cmd redis.Cmder) {
+	args := cmd.Args()
+	if len(args) < 2 {
+		return
+	}
+	key, _ := args[1].(string)
+	name := strings.ToLower(cmd.Name())
+	if (name == "hget" && key == h.dataKey) || (name == "get" && strings.HasPrefix(key, h.metaKeyAt)) {
+		h.mu.Lock()
+		h.reads = append(h.reads, name+" "+key)
+		h.mu.Unlock()
+	}
+}
+
+// TestRedisRunnerDirectoryReplayLeaseSkipsPayloadOfExecutingLeases pins the
+// read split: a poll whose leases are all executing decides from the small
+// identity fields and never reads a payload or a lease metadata record. Those
+// records carry the task input, megabytes for a batched trigger, and reading
+// them on every poll saturated the directory's Redis shard in production.
+func TestRedisRunnerDirectoryReplayLeaseSkipsPayloadOfExecutingLeases(t *testing.T) {
+	ctx := context.Background()
+	_, rdb := newRedisRunnerDirectoryTestClient(t)
+	directory := NewRedisRunnerDirectory(rdb)
+	session := registerRedisDirectoryRunner(t, ctx, directory, "runner-replay-payload", 4)
+	held := seedRedisDirectoryLeases(t, ctx, directory, session, "exec-replay-payload/runner", 2)
+
+	req := redisDirectoryClaimRequest(session, 1)
+	for _, lease := range held {
+		req.ActiveLeaseIDs = append(req.ActiveLeaseIDs, string(lease.leaseID))
+	}
+	hook := &replayPayloadReadHook{
+		dataKey:   directory.keys.assignmentData,
+		metaKeyAt: directory.keys.assignmentLeaseMetaKey(""),
+	}
+	rdb.AddHook(hook)
+	if _, ok, err := directory.ClaimForRunner(ctx, req); err != nil || ok {
+		t.Fatalf("ClaimForRunner() ok=%v err=%v, want no claim", ok, err)
+	}
+	if len(hook.reads) != 0 {
+		t.Fatalf("poll with every lease executing read payloads %v, want none", hook.reads)
+	}
+
+	// Once the runner stops reporting one as executing, the poll must still
+	// read it and hand it back.
+	req.ActiveLeaseIDs = req.ActiveLeaseIDs[1:]
+	claim, ok, err := directory.ClaimForRunner(ctx, req)
+	if err != nil || !ok || claim.Lease == nil {
+		t.Fatalf("ClaimForRunner() ok=%v err=%v lease=%v, want a replayed lease", ok, err, claim.Lease)
+	}
+	if claim.Lease.LeaseID != held[0].leaseID {
+		t.Fatalf("replayed lease = %q, want %q", claim.Lease.LeaseID, held[0].leaseID)
 	}
 }
