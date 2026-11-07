@@ -527,6 +527,9 @@ describe("xflow.editor inspector tabs (§6.4)", () => {
     // flex item is AntD's tab wrapper, which carries our semantic __item hook.
     expect(ruleBody(".xflow-editor-inspector-tabs [role=\"tablist\"]")).toMatch(/display:\s*flex\s*;/);
     expect(ruleBody(".xflow-editor-inspector-tabs [role=\"tablist\"]")).toMatch(/width:\s*100%\s*;/);
+    // The list is AntD's shrink-wrapped flex row; it must fill the wrap for the
+    // items to divide the bar rather than their own label widths.
+    expect(ruleBody(".xflow-editor-inspector-tabs [role=\"tablist\"] > :first-child > :first-child")).toMatch(/width:\s*100%\s*;/);
     expect(ruleBody(".xflow-editor-inspector-tabs__item")).toMatch(/flex:\s*1 1 0\s*;/);
     expect(ruleBody(".xflow-editor-inspector-tabs__item")).toMatch(/justify-content:\s*center\s*;/);
     expect(ruleBody(".xflow-editor-inspector-tabs [role=\"tab\"]")).toMatch(/text-align:\s*center\s*;/);

@@ -2321,6 +2321,16 @@ button.xflow-editor-overview__run:hover {
   width: 100%;
 }
 
+/* AntD's scroll list is shrink-wrapped, so `flex: 1` on the items alone only
+ * divides the label width. Stretching the list is what makes the three tabs
+ * divide the bar (§6.4, 2026-11-07); the ink bar follows its item's width.
+ * Tabs exposes no semantic hook for the list, and this sheet spends its
+ * `.ant-*` budget on nodes without one, so the row is reached structurally:
+ * role=tablist > scroll wrap > list. */
+.xflow-editor .xflow-editor-inspector-tabs [role="tablist"] > :first-child > :first-child {
+  width: 100%;
+}
+
 /* AntD's flex item is the item wrapper that carries our semantic hook; the
  * role=tab button is a block inside it, so the equal division lives here. */
 .xflow-editor .xflow-editor-inspector-tabs__item {
