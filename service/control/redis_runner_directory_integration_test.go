@@ -69,7 +69,7 @@ func TestRedisRunnerDirectoryRealRedisDurableHandoff(t *testing.T) {
 		keys:     directory.keys,
 	}
 	replay := mustReplayRedisDirectoryLease(t, ctx, recreated, firstSession)
-	if replay.Lease.LeaseToken != lease.LeaseToken || replay.Lease.Input.Data["request_id"] != "real-redis" {
+	if replay.Lease.LeaseToken != lease.LeaseToken || replay.Lease.Input != nil {
 		t.Fatalf("first-session replay = %+v, want complete durable lease", replay.Lease)
 	}
 

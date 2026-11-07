@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/namespace"
 	"github.com/xbcio/xflow/service/protocol"
 )
@@ -441,6 +442,9 @@ func marshalRedisLeaseMeta(lease *engine.TaskLease) (string, error) {
 		return "{}", nil
 	}
 	copy := *lease
+	if !leaseMetaKeepsInput(lease) {
+		copy.Input = nil
+	}
 	payload, err := json.Marshal(redisLeaseMeta{
 		Lease:        &copy,
 		AutoDepth:    lease.Task.AutoDepth,
@@ -450,6 +454,18 @@ func marshalRedisLeaseMeta(lease *engine.TaskLease) (string, error) {
 		return "", fmt.Errorf("marshal lease metadata: %w", err)
 	}
 	return string(payload), nil
+}
+
+// leaseMetaKeepsInput reports whether the persisted lease must carry the task
+// input. Only a suspending node needs it after dispatch: its first suspension
+// stores the input as the node's output (engine/commit.go). Every other reader
+// of the record checks identity only, and a replay rebuilds a missing input
+// through Core's recover path. The input is the bulk of the record -- a batched
+// trigger's sink input is megabytes -- and the record is written on every
+// finalize and read on every report, all on the directory's single
+// hash-tagged shard.
+func leaseMetaKeepsInput(lease *engine.TaskLease) bool {
+	return graph.SuspendingNodeTypes()[lease.NodeType]
 }
 
 func unmarshalRedisLeaseMeta(payload string, task engine.Task) (*engine.TaskLease, error) {

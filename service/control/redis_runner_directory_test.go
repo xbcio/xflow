@@ -520,8 +520,10 @@ func TestRedisRunnerDirectoryReplaysFullLeaseAfterRestartAndReregistration(t *te
 	if replay.Lease.LeaseID != lease.LeaseID || replay.Lease.LeaseToken != lease.LeaseToken || replay.Lease.Attempt != lease.Attempt {
 		t.Fatalf("replayed lease identity = %+v, want %+v", replay.Lease, lease)
 	}
-	if got := replay.Lease.Input.Data["request_id"]; got != "req-1" {
-		t.Fatalf("replayed lease input request_id = %v, want req-1", got)
+	// The directory no longer persists a non-suspending node's input; Core
+	// rebuilds it through recoverTaskLease when it sees a nil one.
+	if replay.Lease.Input != nil {
+		t.Fatalf("replayed lease input = %+v, want nil for a non-suspending node", replay.Lease.Input)
 	}
 	if replay.Lease.Task.AutoDepth != assignment.Task.AutoDepth || replay.Lease.Task.ActivationID != assignment.Task.ActivationID {
 		t.Fatalf("replayed lease task metadata = %+v, want auto depth %d and activation %d", replay.Lease.Task, assignment.Task.AutoDepth, assignment.Task.ActivationID)
