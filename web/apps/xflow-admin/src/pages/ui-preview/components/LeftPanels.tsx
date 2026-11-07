@@ -237,7 +237,13 @@ export function Outline({
               return (
                 <div key={row.id} className="xflow-pv-ol-section" data-cat={row.category}>
                   <span className="xflow-pv-ol-bar" />
-                  {row.todo ? <Todo label={row.todo}>{head}</Todo> : head}
+                  {row.todo ? (
+                    <Todo label={row.todo} placement="inline">
+                      {head}
+                    </Todo>
+                  ) : (
+                    head
+                  )}
                 </div>
               );
             }
