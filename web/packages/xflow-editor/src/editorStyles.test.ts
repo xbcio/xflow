@@ -523,6 +523,11 @@ describe("xflow.editor inspector tabs (§6.4)", () => {
     expect(css).toMatch(
       /\.xflow-editor \.xflow-editor-inspector-tabs \[role="tab"\]\[aria-selected="true"\]\s*\{[^}]*color:\s*var\(--xflow-text\)\s*;/
     );
+    // §6.4 (2026-11-07): the three tabs divide the bar equally and centre.
+    expect(ruleBody(".xflow-editor-inspector-tabs [role=\"tablist\"]")).toMatch(/display:\s*flex\s*;/);
+    expect(ruleBody(".xflow-editor-inspector-tabs [role=\"tablist\"]")).toMatch(/width:\s*100%\s*;/);
+    expect(ruleBody(".xflow-editor-inspector-tabs [role=\"tab\"]")).toMatch(/flex:\s*1 1 0\s*;/);
+    expect(ruleBody(".xflow-editor-inspector-tabs [role=\"tab\"]")).toMatch(/justify-content:\s*center\s*;/);
   });
 });
 
@@ -1176,9 +1181,9 @@ describe("round-2 visual audit fixes", () => {
     expect(css).toMatch(/--xflow-editor-control-ring:\s*color-mix\(in srgb, var\(--xflow-primary\) 18%, transparent\)\s*;/);
   });
 
-  it("draws the inspector cards as baseline shells on the panel ground (D9)", () => {
+  it("draws the inspector blocks as flat sections on the panel ground", () => {
     expect(rule(".xflow-editor .xflow-editor-config")).toMatch(/gap:\s*var\(--xflow-editor-density-sec-gap\)\s*;/);
-    // The density tier owns the card rhythm (§6.4, 2026-11-06): identity, the
+    // The density tier owns the block rhythm (§6.4, 2026-11-06): identity, the
     // params cards and the JSON source read the variables instead of literals.
     expect(rule(".xflow-editor .xflow-editor-config__identity")).toMatch(
       /gap:\s*var\(--xflow-editor-density-field-gap\)\s*;/
@@ -1186,83 +1191,42 @@ describe("round-2 visual audit fixes", () => {
     expect(rule(".xflow-editor .xflow-editor-config__params .xflow-editor-node-form")).toMatch(
       /gap:\s*var\(--xflow-editor-density-sec-gap\)\s*;/
     );
+    // §6.4 (2026-11-07): replaces D9's raised card — no card ground, frame,
+    // radius or shadow; one 1px rule separates the blocks instead.
+    const flat = rule(
+      ".xflow-editor .xflow-editor-inspector .xflow-editor-section-card,\n.xflow-editor .xflow-editor-inspector .xflow-composer-field-group"
+    );
+    expect(flat).toMatch(/background:\s*transparent\s*;/);
+    expect(flat).toMatch(/border:\s*0\s*;/);
+    expect(flat).toMatch(/border-top:\s*1px solid var\(--xflow-border\)\s*;/);
+    expect(flat).toMatch(/border-radius:\s*0\s*;/);
+    expect(flat).toMatch(/box-shadow:\s*none\s*;/);
+    // A 32px head with 12px side padding; the body is 0/12/12.
+    const head = rule(
+      ".xflow-editor .xflow-editor-inspector .xflow-editor-section-card__header,\n.xflow-editor .xflow-editor-inspector .xflow-composer-field-group > .xflow-composer-section-header"
+    );
+    expect(head).toMatch(/(?<![\w-])height:\s*32px\s*;/);
+    expect(head).toMatch(/min-height:\s*32px\s*;/);
+    expect(head).toMatch(/padding:\s*0 var\(--xflow-space-3\)\s*;/);
+    const body = rule(
+      ".xflow-editor .xflow-editor-inspector .xflow-editor-section-card__body,\n.xflow-editor .xflow-editor-inspector .xflow-composer-field-group > .xflow-composer-section-body"
+    );
+    expect(body).toMatch(/padding:\s*0 var\(--xflow-space-3\) var\(--xflow-space-3\)\s*;/);
+    // A foldable head is a hit target, not a hover surface: cursor only.
     expect(
-      rule(
-        ".xflow-editor .xflow-editor-config__params > .xflow-editor-node-form > .xflow-composer-form > .xflow-composer-field-group > .xflow-composer-section-header"
-      )
-    ).toMatch(/min-height:\s*var\(--xflow-editor-density-head-height\)\s*;/);
-    expect(rule(".xflow-editor .xflow-editor-config__params > .xflow-editor-param-source")).toMatch(
-      /padding:\s*var\(--xflow-editor-density-sec-body-y\) var\(--xflow-editor-density-sec-body-x\) var\(--xflow-editor-density-sec-body-b\)\s*;/
-    );
-    // Every card head is the same height: the SectionCard header and the
-    // composer FieldGroup headers both read the one measured value. The
-    // SectionCard head is fixed (not a minimum) so its 22px action keys cannot
-    // make an action-bearing head 1px taller than the rest.
-    expect(rule(".xflow-editor-section-card__header")).toMatch(
-      /height:\s*var\(--xflow-editor-density-head-height\)\s*;/
-    );
-    expect(rule(".xflow-editor .xflow-editor-inspector .xflow-composer-field-group > .xflow-composer-section-header")).toMatch(
-      /min-height:\s*var\(--xflow-editor-density-head-height\)\s*;/
-    );
-    expect(rule(".xflow-editor-section-card__body")).toMatch(
-      /gap:\s*var\(--xflow-editor-density-field-gap\)\s*;/
-    );
-    // The card owns one 1px frame and elev-1; its header/body halves draw none.
-    const card = rule(".xflow-editor .xflow-editor-inspector .xflow-editor-section-card");
-    expect(card).toMatch(/background:\s*var\(--xflow-panel-raised\)\s*;/);
-    expect(card).toMatch(/border:\s*1px solid var\(--xflow-border\)\s*;/);
-    expect(card).toMatch(/box-shadow:\s*var\(--xflow-elev-1\)\s*;/);
-    // The composer cards directly on the tab body take the same shell. The
-    // three-selector list is one rule: settings, run and 备注 (a FieldGroup
-    // under .xflow-editor-node-form, like the parameter cards).
-    const notesSelector =
-      ".xflow-editor .xflow-editor-inspector .xflow-editor-config__notes > .xflow-editor-node-form > .xflow-composer-form > .xflow-composer-field-group";
-    const shellRule = css.match(
-      /(\.xflow-editor \.xflow-editor-inspector \.xflow-editor-config__settings \.xflow-composer-form > \.xflow-composer-field-group[\s\S]*?)\{([^}]*)\}/
-    );
-    const shellSelectors = shellRule?.[1] ?? "";
-    const settingsRun = shellRule?.[2] ?? "";
-    expect(shellSelectors).toContain(notesSelector);
-    for (const shell of [
-      settingsRun,
-      rule(".xflow-editor .xflow-editor-config__params > .xflow-editor-node-form > .xflow-composer-form > .xflow-composer-field-group"),
-      rule(".xflow-editor .xflow-editor-config__params > .xflow-editor-param-source")
-    ]) {
-      expect(shell).toMatch(/background:\s*var\(--xflow-panel-raised\)\s*;/);
-      expect(shell).toMatch(/border:\s*1px solid var\(--xflow-border\)\s*;/);
-      expect(shell).toMatch(/box-shadow:\s*var\(--xflow-elev-1\)\s*;/);
-    }
-    // The 备注 card keeps its header/body divider as spacing too.
-    const dividerRule = css.match(
-      /(\.xflow-editor \.xflow-editor-inspector \.xflow-editor-config__settings \.xflow-composer-form > \.xflow-composer-field-group > \.xflow-composer-section-header[\s\S]*?)\{([^}]*)\}/
-    );
-    expect(dividerRule?.[1] ?? "").toContain(`${notesSelector} > .xflow-composer-section-header`);
-    expect(dividerRule?.[1] ?? "").toContain(
-      ".xflow-editor .xflow-editor-inspector .xflow-editor-config__params > .xflow-editor-node-form > .xflow-composer-form > .xflow-composer-field-group > .xflow-composer-section-header"
-    );
-    expect(dividerRule?.[2] ?? "").toMatch(/border-bottom:\s*0\s*;/);
-    // The body is the panel ground, not the app ground.
-    const body = css.match(
+      rule('.xflow-editor .xflow-editor-inspector .xflow-editor-section-card__header[data-collapsible="true"]')
+    ).toMatch(/cursor:\s*pointer\s*;/);
+    expect(css).not.toMatch(/section-card__header:hover/);
+    expect(css).not.toMatch(/composer-section-header:hover/);
+    // The panel body is the panel ground, not the app ground.
+    const panelBody = css.match(
       /\.xflow-editor \.xflow-editor-inspector > \.xflow-editor-panel__body,\s*\.xflow-editor \.xflow-editor-inspector__body \{([^}]*)\}/
     )?.[1] ?? "";
-    expect(body).toMatch(/background:\s*var\(--xflow-panel\)\s*;/);
-    // D9 deletes the sunken-well overrides so the base field + 1px frame shows:
-    // the count chip, the run code block and the connection wells may not
-    // re-declare an inspector-scoped background of their own.
-    expect(css).not.toMatch(/\.xflow-editor \.xflow-editor-inspector \.xflow-editor-section-card__meta\s*\{/);
-    expect(css).not.toMatch(/\.xflow-editor \.xflow-editor-inspector \.xflow-editor-run-code\s*\{/);
-    expect(css).not.toMatch(
-      /\.xflow-editor \.xflow-editor-connection-actions,\s*\.xflow-editor \.xflow-editor-connection-row\s*\{/
-    );
-    // The meta is a plain text summary (§6.4, 2026-11-06): no chip shell.
+    expect(panelBody).toMatch(/background:\s*var\(--xflow-panel\)\s*;/);
+    // The meta stays plain text (§6.4, 2026-11-06): no chip shell.
     const meta = rule(".xflow-editor-section-card__meta");
     expect(meta).not.toMatch(/border/);
     expect(meta).not.toMatch(/background/);
-    // The overview's stat tiles sat on the app ground as frameless white tiles;
-    // on the panel ground they take the same shell or vanish into it.
-    const stat = rule(".xflow-editor-overview__stat");
-    expect(stat).toMatch(/background:\s*var\(--xflow-panel-raised\)\s*;/);
-    expect(stat).toMatch(/border:\s*1px solid var\(--xflow-border\)\s*;/);
     // xflow-04's badge layout hook must survive the shell change.
     expect(rule(".xflow-editor-section-card__actions")).toMatch(/display:\s*inline-flex\s*;/);
   });

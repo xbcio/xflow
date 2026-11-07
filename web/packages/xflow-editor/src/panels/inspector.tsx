@@ -970,6 +970,7 @@ function NodeHeader({
   canRename,
   renaming,
   renameDraft,
+  parameterToggle,
   onRenameDraft,
   onBeginRename,
   onCancelRename,
@@ -988,6 +989,8 @@ function NodeHeader({
   canRename: boolean;
   renaming: boolean;
   renameDraft: string;
+  /** The parameters JSON toggle, before 复制 / ⋯ (§6.4, 2026-11-07). */
+  parameterToggle?: React.ReactNode;
   onRenameDraft: (value: string) => void;
   onBeginRename: () => void;
   onCancelRename: () => void;
@@ -1063,6 +1066,7 @@ function NodeHeader({
         </div>
       </div>
       {showStatus ? <StatusPill className="xflow-editor-inspector-head__status" status={snapshot.status} /> : null}
+      {parameterToggle}
       <HeaderActions
         disabled={Boolean(node.disabled)}
         editable={editable}
@@ -1826,6 +1830,13 @@ export function Inspector({
           node={selectedNode}
           nodeTypes={nodeTypes}
           nodeCategories={nodeCategories}
+          parameterToggle={
+            <ParameterSourceToggle
+              pressed={parameterTab === "json"}
+              readOnly={!editable}
+              onToggle={() => changeParameterTab(parameterTab === "json" ? "form" : "json")}
+            />
+          }
           renameDraft={renameDraft}
           renaming={headerRenaming}
           runtime={runtime}
@@ -1848,17 +1859,6 @@ export function Inspector({
           id="xflow-editor-inspector"
           items={inspectorTabs}
           size="small"
-          // §2.1: the JSON source toggle sits at the tab bar's right end and
-          // only while 配置 is the active tab.
-          tabBarExtraContent={
-            activeTab === "parameters" ? (
-              <ParameterSourceToggle
-                pressed={parameterTab === "json"}
-                readOnly={!editable}
-                onToggle={() => changeParameterTab(parameterTab === "json" ? "form" : "json")}
-              />
-            ) : undefined
-          }
           onChange={(key) => setActiveTab(key as InspectorTabKey)}
           onFocus={activateFocusedTab}
         />

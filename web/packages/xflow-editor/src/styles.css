@@ -2067,41 +2067,56 @@ button.xflow-editor-overview__run:hover {
   padding: 0;
 }
 
-/* 2026-10-30 用户指示（D9）: restore the baseline `.xflow-pv-sec-card` shell —
- * one 1px frame plus elev-1 on the card itself, the header and body halves
- * drawing no border of their own (reverses E-B's EL-08/EL-09). */
-.xflow-editor .xflow-editor-inspector .xflow-editor-section-card {
-  background: var(--xflow-panel-raised);
-  border: 1px solid var(--xflow-border);
-  box-shadow: var(--xflow-elev-1);
+/* §6.4 (2026-11-07): the inspector's blocks are flat sections, not cards — one
+ * 1px rule between blocks, a 32px head, a 0/12/12 body, and the panel's own
+ * ground throughout (replaces D9's raised card shell). */
+.xflow-editor .xflow-editor-inspector .xflow-editor-section-card,
+.xflow-editor .xflow-editor-inspector .xflow-composer-field-group {
+  background: transparent;
+  border: 0;
+  border-top: 1px solid var(--xflow-border);
+  border-radius: 0;
+  box-shadow: none;
+  overflow: visible;
 }
 
-.xflow-editor .xflow-editor-inspector .xflow-editor-config__settings .xflow-composer-form > .xflow-composer-field-group,
-.xflow-editor .xflow-editor-inspector .xflow-editor-run-panel > .xflow-composer-field-group,
-.xflow-editor .xflow-editor-inspector .xflow-editor-config__notes > .xflow-editor-node-form > .xflow-composer-form > .xflow-composer-field-group {
-  background: var(--xflow-panel-raised);
-  border: 1px solid var(--xflow-border);
-  box-shadow: var(--xflow-elev-1);
+/* The first block of a tab body sits under the head / tab rule; it needs no
+ * second line. Nested blocks keep theirs, so the line still separates the
+ * identity block from the first parameter section, and 执行策略 from 备注. */
+.xflow-editor .xflow-editor-inspector .xflow-editor-config > .xflow-editor-section-card:first-child,
+.xflow-editor .xflow-editor-inspector .xflow-editor-run-panel > .xflow-composer-field-group:first-child,
+.xflow-editor .xflow-editor-inspector .xflow-editor-connection-list > .xflow-editor-section-card:first-child,
+.xflow-editor .xflow-editor-inspector .xflow-editor-overview > .xflow-editor-section-card:first-child {
+  border-top: 0;
 }
 
-/* Inside a card the header/body divider is spacing, not a line — including the
- * per-group parameter cards, which are top-level now. */
-.xflow-editor .xflow-editor-inspector .xflow-editor-config__settings .xflow-composer-form > .xflow-composer-field-group > .xflow-composer-section-header,
-.xflow-editor .xflow-editor-inspector .xflow-editor-run-panel > .xflow-composer-field-group > .xflow-composer-section-header,
-.xflow-editor .xflow-editor-inspector .xflow-editor-config__params > .xflow-editor-node-form > .xflow-composer-form > .xflow-composer-field-group > .xflow-composer-section-header,
-.xflow-editor .xflow-editor-inspector .xflow-editor-config__notes > .xflow-editor-node-form > .xflow-composer-form > .xflow-composer-field-group > .xflow-composer-section-header {
-  border-bottom: 0;
+/* §6.4 (2026-11-07): a foldable head reads as one hit target — cursor only,
+ * no fill, no shadow, and the whole row toggles (the chevron keeps the
+ * keyboard path). */
+.xflow-editor .xflow-editor-inspector .xflow-editor-section-card__header[data-collapsible="true"] {
+  cursor: pointer;
 }
 
-/* Every card head in the panel takes the same density height (§6.4,
- * 2026-11-06): the baseline's `.xflow-pv-wb .xflow-pv-sec-head` measures 29px.
- * The padding comes from the composer host knob on the editor root (4/10), so
- * this rule only pins the height the 13px/20 inner line cannot fill. */
+.xflow-editor .xflow-editor-inspector .xflow-editor-section-card__header,
 .xflow-editor .xflow-editor-inspector .xflow-composer-field-group > .xflow-composer-section-header {
-  min-height: var(--xflow-editor-density-head-height);
+  border-bottom: 0;
+  height: 32px;
+  min-height: 32px;
+  padding: 0 var(--xflow-space-3);
 }
 
-/* Card heads stay on one line (§6.4, 2026-11-06): the composer title ellipsises
+.xflow-editor .xflow-editor-inspector .xflow-editor-section-card__body,
+.xflow-editor .xflow-editor-inspector .xflow-composer-field-group > .xflow-composer-section-body {
+  padding: 0 var(--xflow-space-3) var(--xflow-space-3);
+}
+
+.xflow-editor .xflow-editor-inspector .xflow-composer-field-group > .xflow-composer-section-description,
+.xflow-editor .xflow-editor-inspector .xflow-composer-field-group > .xflow-composer-field-issues {
+  padding-inline: var(--xflow-space-3);
+  padding-top: 0;
+}
+
+/* Card heads stay on one line (§6.4): the composer title ellipsises
  * and its summary shrinks first, the same order as the SectionCard header. */
 .xflow-editor .xflow-editor-inspector .xflow-composer-section-toggle,
 .xflow-editor .xflow-editor-inspector .xflow-composer-section-title {
@@ -2219,13 +2234,11 @@ button.xflow-editor-overview__run:hover {
   padding: 0;
 }
 
-/* The parameters / settings cards (§6.4): the outer SectionCard owns the card
- * chrome, so the composer's FieldGroup cards inside it go flush — no second
- * border, fill or horizontal padding — and the body takes the design's
- * 4 / 12 / 12 rhythm. */
+/* §6.4 (2026-11-07): the 基础信息 block is a flat section like the others —
+ * body 0 / 12 / 12, fields 8 apart. */
 .xflow-editor .xflow-editor-config > .xflow-editor-section-card > .xflow-editor-section-card__body {
   gap: var(--xflow-editor-density-field-gap);
-  padding: var(--xflow-editor-density-sec-body-y) var(--xflow-editor-density-sec-body-x) var(--xflow-editor-density-sec-body-b);
+  padding: 0 var(--xflow-space-3) var(--xflow-space-3);
 }
 
 .xflow-editor .xflow-editor-config .xflow-composer-form {
@@ -2265,8 +2278,9 @@ button.xflow-editor-overview__run:hover {
 }
 
 .xflow-editor .xflow-editor-config__settings .xflow-composer-field-group > .xflow-composer-section-header {
-  min-height: var(--xflow-editor-density-head-height);
-  padding: var(--xflow-editor-density-sec-head-y) var(--xflow-editor-density-sec-head-x);
+  height: 32px;
+  min-height: 32px;
+  padding: 0 var(--xflow-space-3);
 }
 
 /* 卡内分段控件 (§6.4, 2026-11-06): the track is the field ground, not the hover
@@ -2345,10 +2359,19 @@ button.xflow-editor-overview__run:hover {
 }
 
 /* Tab labels are 13/20/500 and the active one keeps the main text colour; only
- * the 2px underline is primary (mock `.tabs button[aria-selected]`). */
+ * the 2px underline is primary (mock `.tabs button[aria-selected]`). The three
+ * tabs divide the bar equally and centre their text (§6.4, 2026-11-07). */
+.xflow-editor .xflow-editor-inspector-tabs [role="tablist"] {
+  display: flex;
+  width: 100%;
+}
+
 .xflow-editor .xflow-editor-inspector-tabs [role="tab"] {
+  flex: 1 1 0;
   font-weight: var(--xflow-font-weight-medium);
+  justify-content: center;
   line-height: var(--xflow-line-height-md);
+  text-align: center;
 }
 
 .xflow-editor .xflow-editor-inspector-tabs [role="tab"][aria-selected="true"] {
@@ -2709,16 +2732,11 @@ button.xflow-editor-overview__run:hover {
   overflow-wrap: anywhere;
 }
 
-/* Design `.sec`: an 8px header row over a 4px/12px body, on the raised card
- * that `.xflow-composer-field-group` already draws. */
-.xflow-editor-run-section > .xflow-composer-section-header {
-  min-height: var(--xflow-editor-density-head-height);
-  padding: var(--xflow-editor-density-sec-head-y) var(--xflow-editor-density-sec-head-x);
-}
-
+/* Design `.sec`: an 8px header row over a 4px/12px body. The flat section
+ * rules above own the head and body padding (§6.4, 2026-11-07); only the body
+ * gap lives here. */
 .xflow-editor-run-section > .xflow-composer-section-body {
   gap: var(--xflow-editor-density-field-gap);
-  padding: var(--xflow-editor-density-sec-body-y) var(--xflow-editor-density-sec-body-x) var(--xflow-editor-density-sec-body-b);
 }
 
 .xflow-editor-run-hint {
@@ -6223,30 +6241,16 @@ button.xflow-editor-overview__run:hover {
   margin: 0;
 }
 
-/* 参数 (§2.2): each descriptor group is a top-level card; there is no
- * 节点参数 wrapper any more, so the FieldGroup owns the frame. */
+/* The parameter FieldGroups take the inspector's flat section shell (§6.4,
+ * 2026-11-07); only their rhythm lives here. */
 .xflow-editor .xflow-editor-config__params .xflow-editor-node-form {
   gap: var(--xflow-editor-density-sec-gap);
 }
 
-.xflow-editor .xflow-editor-config__params > .xflow-editor-node-form > .xflow-composer-form > .xflow-composer-field-group {
-  background: var(--xflow-panel-raised);
-  border: 1px solid var(--xflow-border);
-  box-shadow: var(--xflow-elev-1);
-}
-
-.xflow-editor .xflow-editor-config__params > .xflow-editor-node-form > .xflow-composer-form > .xflow-composer-field-group > .xflow-composer-section-header {
-  min-height: var(--xflow-editor-density-head-height);
-  padding: var(--xflow-editor-density-sec-head-y) var(--xflow-editor-density-sec-head-x);
-}
-
-/* The JSON source view replaces the parameter cards and takes the same frame. */
+/* The JSON source view replaces the parameter cards: a flat body on the panel
+ * ground, inset like a section body. */
 .xflow-editor .xflow-editor-config__params > .xflow-editor-param-source {
-  background: var(--xflow-panel-raised);
-  border: 1px solid var(--xflow-border);
-  border-radius: var(--xflow-radius-md);
-  box-shadow: var(--xflow-elev-1);
-  padding: var(--xflow-editor-density-sec-body-y) var(--xflow-editor-density-sec-body-x) var(--xflow-editor-density-sec-body-b);
+  padding: 0 var(--xflow-space-3) var(--xflow-space-3);
 }
 
 /* 头部 (§2.1): the display name and the neutral 已禁用 chip share the first
