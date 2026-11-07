@@ -178,6 +178,8 @@ export interface PreviewEdgeLabel {
 
 export interface LibraryItem {
   id: string;
+  /** Registry type id, shown in the hover tooltip（§6.0.1 左栏重设计）. */
+  typeId: string;
   label: string;
   hint: string;
   category: Category;
@@ -761,8 +763,8 @@ export const wbLibraryGroups: LibraryGroup[] = [
     label: '触发器',
     count: 5,
     items: [
-      { id: 'webhook', label: 'Webhook', hint: 'HTTP 回调触发', category: 'trigger', icon: 'link' },
-      { id: 'cron', label: '定时 Cron', hint: '按表达式周期触发', category: 'trigger', icon: 'clock' },
+      { id: 'webhook', typeId: 'xflow.webhook', label: 'Webhook', hint: 'HTTP 回调触发', category: 'trigger', icon: 'link' },
+      { id: 'cron', typeId: 'xflow.cron', label: '定时 Cron', hint: '按表达式周期触发', category: 'trigger', icon: 'clock' },
     ],
   },
   {
@@ -770,8 +772,10 @@ export const wbLibraryGroups: LibraryGroup[] = [
     label: '流程控制',
     count: 7,
     items: [
-      { id: 'if', label: '条件判断', hint: 'true / false 两路', category: 'control', icon: 'branch' },
-      { id: 'wait', label: '等待', hint: '延时或等待信号', category: 'control', icon: 'hourglass' },
+      { id: 'if', typeId: 'xflow.if', label: 'If', hint: 'true / false 两路', category: 'control', icon: 'branch' },
+      { id: 'switch', typeId: 'xflow.switch', label: 'Switch', hint: '按条件多路分支', category: 'control', icon: 'branch' },
+      { id: 'merge', typeId: 'xflow.merge', label: '合并', hint: '汇合多条分支', category: 'control', icon: 'connect' },
+      { id: 'wait', typeId: 'xflow.wait', label: '等待', hint: '延时或等待信号', category: 'control', icon: 'hourglass' },
     ],
   },
   {
@@ -779,9 +783,9 @@ export const wbLibraryGroups: LibraryGroup[] = [
     label: '动作',
     count: 5,
     items: [
-      { id: 'http', label: 'HTTP 请求', hint: '调用外部 API', category: 'action', icon: 'globe' },
-      { id: 'database', label: '数据库', hint: '查询与写入', category: 'action', icon: 'db' },
-      { id: 'notification', label: '通知', hint: '邮件 / IM', category: 'action', icon: 'bell' },
+      { id: 'http', typeId: 'xflow.http', label: 'HTTP 请求', hint: '调用外部 API', category: 'action', icon: 'globe' },
+      { id: 'database', typeId: 'xflow.database', label: '数据库', hint: '查询与写入', category: 'action', icon: 'db' },
+      { id: 'notification', typeId: 'xflow.notification', label: '通知', hint: '邮件 / IM', category: 'action', icon: 'bell' },
     ],
   },
   {
@@ -789,17 +793,27 @@ export const wbLibraryGroups: LibraryGroup[] = [
     label: '代码与转换',
     count: 10,
     items: [
-      { id: 'function', label: '函数', hint: '运行注册函数', category: 'code', icon: 'code' },
-      { id: 'filter', label: '过滤', hint: '按条件保留条目', category: 'transform', icon: 'filter' },
+      { id: 'function', typeId: 'xflow.function', label: '函数', hint: '运行注册函数', category: 'code', icon: 'code' },
+      { id: 'set', typeId: 'xflow.set', label: 'Set', hint: '设置字段值', category: 'transform', icon: 'filter' },
+      { id: 'filter', typeId: 'xflow.filter', label: '过滤', hint: '按条件保留条目', category: 'transform', icon: 'filter' },
     ],
   },
   {
     id: 'human',
     label: '人工',
     count: 1,
-    items: [{ id: 'approval', label: '审批', hint: '通过 / 驳回 / 退回', category: 'human', icon: 'user' }],
+    items: [{ id: 'approval', typeId: 'xflow.approval', label: '审批', hint: '通过 / 驳回 / 退回', category: 'human', icon: 'user' }],
   },
 ];
+
+/**
+ * 「常用」组（§6.0.1 左栏重设计）：最近添加的节点类型最多 6 个，不足用默认集
+ * 补齐，默认集依次是 HTTP 请求、If、函数、Switch、Set、合并。本节样例展示
+ * 的就是完整默认集；常用组里的节点在原分组里照样出现。
+ */
+export const wbLibraryCommon: LibraryItem[] = ['http', 'if', 'function', 'switch', 'set', 'merge']
+  .map((id) => wbLibraryGroups.flatMap((group) => group.items).find((item) => item.id === id))
+  .filter((item): item is LibraryItem => !!item);
 
 /**
  * The outline is a view of the same graph, so its rows come from `wbNodes` and

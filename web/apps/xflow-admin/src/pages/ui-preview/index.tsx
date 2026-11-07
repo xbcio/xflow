@@ -11,6 +11,7 @@ import { ComposerSection } from './sections/composer';
 import { EdgeSection } from './sections/edge';
 import { FoundationSection } from './sections/foundation';
 import { InspectorSection } from './sections/inspector';
+import { LeftSamplesSection } from './sections/left';
 import { ListSection } from './sections/list';
 import { ListExecSection } from './sections/list-exec';
 import { PublishSection } from './sections/publish';
@@ -43,6 +44,7 @@ const sections: PreviewSection[] = [
     render: () => (
       <ConfigProvider theme={workbenchDensityTheme}>
         <WorkbenchSection />
+        <LeftSamplesSection />
       </ConfigProvider>
     ),
   },

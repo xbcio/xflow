@@ -15,7 +15,6 @@ import {
   LocateIcon,
   MoreIcon,
   NodeIndexIcon,
-  OutlineIcon,
   PlayIcon,
   PlusIcon,
   RedoIcon,
@@ -46,6 +45,7 @@ import {
 
 import { cx } from '../components/cx';
 import { Minimap } from '../components/Minimap';
+import { NodeLibrary, Outline } from '../components/LeftPanels';
 import { NodeCard } from '../components/NodeCard';
 import { CategoryIcon, FieldHelp, Float, IconButton, Kbd, PanelTitle, SectionLabel, StatusChip, VerticalSep } from '../components/primitives';
 import { Ruler } from '../components/Ruler';
@@ -65,6 +65,7 @@ import {
   wbFrames,
   wbGraphStats,
   wbIssues,
+  wbLibraryCommon,
   wbLibraryGroups,
   wbLibraryTotal,
   wbNodeMix,
@@ -77,7 +78,7 @@ import {
   type PreviewFrame,
 } from '../data';
 import { COMPACT_LEFT, COMPACT_RIGHT, fitScale, FRAME_LABEL_OFFSET, RULER, canvasPanY } from '../metrics';
-import { nodeStatusMeta, typeIcon } from '../meta';
+import { typeIcon } from '../meta';
 import { clampPanelWidth, fitPanelWidths, PANEL_WIDTHS, RAIL_WIDTH, CANVAS_MIN, readStoredWidth, RESIZE_STEP, storePanelWidth, type PanelSide } from './panel-resize';
 
 const wbRun = wbRunVariant;
@@ -189,6 +190,63 @@ function PanelResizer({
       aria-valuemin={min}
       aria-valuemax={Math.max(min, Math.min(max, limit))}
       aria-valuenow={value}
+      tabIndex={0}
+      onPointerDown={onPointerDown}
+      onKeyDown={onKeyDown}
+      onDoubleClick={onReset}
+    />
+  );
+}
+
+/**
+ * 左栏上下分隔线（§6.0.1 左栏重设计）：8px 命中、1px 可见线，role=separator、
+ * aria-orientation=horizontal；↑↓ 每次 28，双击恢复自适应高度。
+ */
+function LibDivider({ onResize, onReset }: { onResize: (delta: number) => void; onReset: () => void }) {
+  const drag = useRef<{ pointerId: number; y: number } | null>(null);
+
+  const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const handle = event.currentTarget;
+    handle.focus();
+    handle.setPointerCapture(event.pointerId);
+    drag.current = { pointerId: event.pointerId, y: event.clientY };
+    const move = (e: PointerEvent) => {
+      const state = drag.current;
+      if (!state || e.pointerId !== state.pointerId) return;
+      // 分隔线上移 → 大纲变高。
+      onResize(state.y - e.clientY);
+      state.y = e.clientY;
+    };
+    const end = (e: PointerEvent) => {
+      if (!state0(e)) return;
+      drag.current = null;
+      handle.removeEventListener('pointermove', move);
+      handle.removeEventListener('pointerup', end);
+      handle.removeEventListener('pointercancel', end);
+    };
+    const state0 = (e: PointerEvent) => drag.current?.pointerId === e.pointerId;
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', end);
+    handle.addEventListener('pointercancel', end);
+  };
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      onResize(28);
+    } else if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      onResize(-28);
+    }
+  };
+
+  return (
+    <div
+      className="xflow-pv-lib-divider"
+      role="separator"
+      aria-orientation="horizontal"
+      aria-label="调整节点库与大纲高度"
       tabIndex={0}
       onPointerDown={onPointerDown}
       onKeyDown={onKeyDown}
@@ -694,6 +752,17 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
   // 展示态：这一页按 mockup 从打开开始；产品默认关（spec §6.2，preview 包实现）。
   const [minimap, setMinimap] = useState(true);
   const [selectedId, setSelectedId] = useState('fetch_profile');
+  /** 左栏上下分隔线拖过之后的大纲高度；null = 按内容自适应（§6.0.1）。 */
+  const [outlineHeight, setOutlineHeight] = useState<number | null>(null);
+  const resizeOutline = (delta: number) => {
+    const lib = libRef.current;
+    const pane = lib?.querySelector<HTMLElement>('.xflow-pv-lib-pane--outline');
+    if (!lib || !pane) return;
+    const max = lib.getBoundingClientRect().height / 2;
+    // 最小 = 标题栏 40 + 3 行 × 28。
+    const next = Math.min(max, Math.max(40 + 3 * 28, pane.getBoundingClientRect().height + delta));
+    setOutlineHeight(next);
+  };
   const metrics = useCanvasMetrics(canvasRef);
   /**
    * Compact layout (§6.0.1): at or below `COMPACT_RIGHT` both panes stop taking
@@ -966,13 +1035,12 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
         </nav>
 
         <aside className="xflow-pv-lib" aria-label="节点与大纲" ref={libRef}>
-          <section className="xflow-pv-lib-pane">
-            <PanelTitle
-              icon={<GridIcon />}
-              title="节点"
-              count={wbLibraryTotal}
-              className="xflow-pv-panel-title--bar"
-            >
+          <NodeLibrary
+            groups={wbLibraryGroups}
+            common={wbLibraryCommon}
+            total={wbLibraryTotal}
+            expanded={['common']}
+            headerExtra={
               <IconButton
                 small
                 label="收起左栏 ⌘B"
@@ -980,112 +1048,25 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
                 active={leftOpen}
                 onClick={collapseLeft}
               />
-            </PanelTitle>
-            <div className="px-3 pb-2.5">
-              <Input
-                className="xflow-pv-search"
-                prefix={<SearchIcon />}
-                placeholder="搜索 Webhook / If / HTTP…"
-                suffix={<Kbd>/</Kbd>}
-              />
-            </div>
-            <div className="xflow-pv-lib-list">
-              {wbLibraryGroups.map((group) => (
-                <Fragment key={group.id}>
-                  <div className="xflow-pv-lib-group">
-                    <span>{group.label}</span>
-                    <span className="xflow-pv-lib-count">{group.count}</span>
-                  </div>
-                  {group.items.map((item) => (
-                    <Button
-                      key={item.id}
-                      type="text"
-                      block
-                      className="xflow-pv-lib-item"
-                    >
-                      <CategoryIcon category={item.category} icon={item.icon} />
-                      <span className="xflow-pv-lib-text">
-                        <span className="xflow-pv-lib-name">{item.label}</span>
-                        <span className="xflow-pv-lib-hint">{item.hint}</span>
-                      </span>
-                    </Button>
-                  ))}
-                </Fragment>
-              ))}
-            </div>
-          </section>
+            }
+          />
 
-          <section className="xflow-pv-lib-pane">
-            {/*
-             * The marker belongs on the panel, not on every row: what needs a new
-             * field is the canvas grouping itself, and only `VIP 审批` has a field
-             * to name on its own row. The old `row.todo ?? '需新字段'` fallback
-             * stamped 入口 and 普通客户 too, which claimed those two groups rest
-             * on nothing — they do not, they are plain visual sections.
-             */}
-            <Todo
-              label="分组需要新字段"
-              className="xflow-pv-todo-wrap--bar"
-              title="画布分区（入口 / VIP 审批 / 普通客户）在 DSL 里没有声明字段；已有的分组字段是 groups[]（组放置与调度语义，见同机执行框），不是这套视觉分区"
-            >
-              <PanelTitle
-                icon={<OutlineIcon />}
-                title="大纲"
-                count={wbOutlineTotal}
-                className="xflow-pv-panel-title--bar"
-              >
-                <IconButton small label="定位选中节点" icon={<LocateIcon />} />
-                <IconButton small label="搜索大纲" icon={<SearchIcon />} />
-              </PanelTitle>
-            </Todo>
-            <div className="xflow-pv-outline" role="tree" aria-label="工作流大纲">
-              {wbOutline.map((row) => {
-                if (row.kind !== 'section') {
-                  return (
-                    <Button
-                      key={row.id}
-                      type="text"
-                      block
-                      role="treeitem"
-                      aria-current={row.current ? 'true' : undefined}
-                      className={cx('xflow-pv-ol-item', row.indent && 'xflow-pv-ol-item--indent')}
-                      data-status={row.status}
-                      data-tone={nodeStatusMeta[row.status].tone}
-                      data-active={row.current ? 'true' : undefined}
-                      onClick={() => setSelectedId(row.id)}
-                    >
-                      <CategoryIcon category={row.category} icon={row.icon} size="sm" />
-                      <span className="xflow-pv-ol-name">
-                        {row.label} <span className="xflow-pv-ol-sub">{row.nodeName}</span>
-                      </span>
-                      <span
-                        className="xflow-pv-ol-dot"
-                        title={nodeStatusMeta[row.status].label}
-                      />
-                    </Button>
-                  );
-                }
-                /*
-                 * The badge is right-aligned to what it tags, so it has to tag
-                 * the full head row: hung off the 2-character label it would
-                 * reach back over the colour bar and out of the pane. Rows with
-                 * no `todo` of their own render the head bare.
-                 */
-                const head = (
-                  <span className="xflow-pv-ol-head">
-                    <span className="xflow-pv-ol-section-label">{row.label}</span>
-                    <span className="xflow-pv-ol-count">{row.count}</span>
-                  </span>
-                );
-                return (
-                  <div key={row.id} className="xflow-pv-ol-section" data-cat={row.category}>
-                    <span className="xflow-pv-ol-bar" />
-                    {row.todo ? <Todo label={row.todo}>{head}</Todo> : head}
-                  </div>
-                );
-              })}
-            </div>
-          </section>
+          <LibDivider onResize={resizeOutline} onReset={() => setOutlineHeight(null)} />
+
+          <Outline
+            rows={wbOutline}
+            total={wbOutlineTotal}
+            mode="run"
+            selectedId={selectedId}
+            onSelect={setSelectedId}
+            style={outlineHeight === null ? undefined : { height: outlineHeight }}
+            headerExtra={<IconButton small label="定位选中节点" icon={<LocateIcon />} />}
+            titleTodo={{
+              label: '分组需要新字段',
+              title:
+                '画布分区（入口 / VIP 审批 / 普通客户）在 DSL 里没有声明字段；已有的分组字段是 groups[]（组放置与调度语义，见同机执行框），不是这套视觉分区',
+            }}
+          />
         </aside>
 
         <main className="xflow-pv-canvas" aria-label="画布" ref={canvasRef}>
