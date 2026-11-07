@@ -18,7 +18,7 @@ import (
 )
 
 // timeoutScanCount is the SCAN page size of the safety-net walk.
-const timeoutScanCount = int64(128)
+const timeoutScanCount = int64(redisx.WalkScanCount)
 
 // timeoutDueBatch bounds one index read; timeoutDueMaxBatches bounds how many
 // batches a single tick drains so one namespace cannot monopolise the loop.
@@ -34,22 +34,28 @@ const (
 // tick on every replica (46% of Redis command time at 2.35M keys). It is now
 // incremental with a persistent per-namespace cursor:
 //
-//   - Backfill: until the first full round after process start completes, every
-//     tick advances up to timeoutBackfillPagesPerTick pages, so pre-existing
-//     timeouts are registered quickly after a deploy.
+//   - Single walker: only one Monitor per namespace walks at a time (the redisx
+//     walk-lock for kind "timeouts"); every other Monitor issues no SCAN and no
+//     DBSIZE for that namespace.
+//   - Backfill: a holder that finds no recent round-done marker advances up to
+//     timeoutBackfillPagesPerTick pages every tick until its first full round
+//     completes, so pre-existing timeouts are registered quickly after a
+//     deploy. A holder that takes over from a previous one (marker present)
+//     skips backfill.
 //   - Steady state: one burst every timeoutWalkEvery, sized (from DBSIZE) so a
 //     full round takes about timeoutWalkRound. A tick between bursts issues no
 //     SCAN at all.
 //
 // Staleness bound for a lost registration: one round, about timeoutWalkRound
-// (10 minutes) plus up to one burst interval; a timeout in that window fires
+// (1 hour) plus up to one burst interval; a timeout in that window fires
 // late by at most that bound, never not at all. Keys the walk finds are
 // registered with ZADD NX at score 0 (a valid lower bound, due immediately in
 // this tick) so an existing exact score is not disturbed.
 const (
 	timeoutBackfillPagesPerTick = 2048
 	timeoutWalkEvery            = 30 * time.Second
-	timeoutWalkRound            = 10 * time.Minute
+	timeoutWalkRound            = redisx.WalkRound
+	timeoutWalkKind             = "timeouts"
 	timeoutWalkMaxBurstPages    = 4096
 )
 
@@ -58,6 +64,7 @@ type walkState struct {
 	cursors    redisx.Cursors
 	backfilled bool
 	lastBurst  time.Time
+	holding    bool
 }
 
 // timeoutRetryBackoff is applied when delivering a timeout signal fails. The
@@ -95,6 +102,8 @@ type Monitor struct {
 
 	walkMu sync.Mutex
 	walks  map[namespace.Namespace]*walkState
+	// walkOwner is this Monitor's token for the cluster-wide walk holder lock.
+	walkOwner string
 }
 
 // SetNamespaces scopes the monitor to exactly the given set. It is the
@@ -131,6 +140,8 @@ func New(rdb redis.Cmdable, engine *engine.Engine, hooks engine.Hooks, logger en
 		logger:   logger,
 		interval: interval,
 		stop:     make(chan struct{}),
+
+		walkOwner: redisx.NewWalkOwner(),
 	}
 }
 
@@ -248,6 +259,21 @@ func (m *Monitor) walkSafetyNet(ctx context.Context, t namespace.Namespace, now 
 		m.walks[t] = st
 	}
 
+	holding, recent, err := redisx.BeginWalk(ctx, m.rdb, string(t), timeoutWalkKind, m.walkOwner, st.holding)
+	if err != nil {
+		if m.logger != nil {
+			m.logger.Error("timeout monitor: acquire walk lock failed", "namespace", string(t), "error", err)
+		}
+		return
+	}
+	if !holding {
+		*st = walkState{}
+		return
+	}
+	if !st.holding {
+		*st = walkState{holding: true, backfilled: recent}
+	}
+
 	pages := timeoutBackfillPagesPerTick
 	if st.backfilled {
 		if now.Sub(st.lastBurst) < timeoutWalkEvery {
@@ -259,6 +285,19 @@ func (m *Monitor) walkSafetyNet(ctx context.Context, t namespace.Namespace, now 
 
 	pattern := rstate.TimeoutScanPattern(t)
 	for i := 0; i < pages; i++ {
+		if i > 0 && i%redisx.WalkRenewEveryPages == 0 {
+			ok, err := redisx.RenewWalkLock(ctx, m.rdb, redisx.WalkLockKey(string(t), timeoutWalkKind), m.walkOwner, redisx.WalkLockTTL)
+			if err != nil {
+				if m.logger != nil {
+					m.logger.Error("timeout monitor: renew walk lock failed", "namespace", string(t), "error", err)
+				}
+				return
+			}
+			if !ok {
+				*st = walkState{}
+				return
+			}
+		}
 		keys, next, err := redisx.ScanPage(ctx, m.rdb, st.cursors, pattern, timeoutScanCount)
 		if err != nil {
 			if m.logger != nil {
@@ -277,6 +316,9 @@ func (m *Monitor) walkSafetyNet(ctx context.Context, t namespace.Namespace, now 
 		if done {
 			st.cursors = nil
 			st.backfilled = true
+			if err := redisx.MarkWalkRoundDone(ctx, m.rdb, redisx.WalkDoneKey(string(t), timeoutWalkKind), now, timeoutWalkRound); err != nil && m.logger != nil {
+				m.logger.Error("timeout monitor: mark walk round done failed", "namespace", string(t), "error", err)
+			}
 			return
 		}
 	}
@@ -291,13 +333,7 @@ func (m *Monitor) steadyBurstPages(ctx context.Context) int {
 	if err != nil || size <= 0 {
 		return 1
 	}
-	totalPages := size/timeoutScanCount + 1
-	bursts := int64(timeoutWalkRound / timeoutWalkEvery)
-	pages := (totalPages + bursts - 1) / bursts
-	if pages > timeoutWalkMaxBurstPages {
-		pages = timeoutWalkMaxBurstPages
-	}
-	return int(pages)
+	return int(min(redisx.WalkPagesPerStep(size, timeoutScanCount, timeoutWalkRound, timeoutWalkEvery), timeoutWalkMaxBurstPages))
 }
 
 func (m *Monitor) registerWalkedKeys(ctx context.Context, t namespace.Namespace, keys []string) {
