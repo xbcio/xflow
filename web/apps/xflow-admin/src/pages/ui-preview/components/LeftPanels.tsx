@@ -1,6 +1,6 @@
 import { BanIcon, DownIcon, GridIcon, OutlineIcon, PlusIcon, SearchIcon } from '@xflow/icons';
-import { Button, Input, Tooltip } from 'antd';
-import { useState, Fragment, type CSSProperties, type ReactNode } from 'react';
+import { Button, Input, Tooltip, type InputRef } from 'antd';
+import { Fragment, useEffect, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react';
 
 import type { LibraryGroup, LibraryItem, OutlineRow, TodoLabel } from '../data';
 import { cx } from './cx';
@@ -18,6 +18,75 @@ function Highlight({ text, query }: { text: string; query: string }) {
       <mark className="xflow-pv-lib-mark">{text.slice(at, at + query.length)}</mark>
       {text.slice(at + query.length)}
     </>
+  );
+}
+
+/**
+ * 可展开搜索（§6.0.1 2026-11-07）：搜索不常驻，标题栏右侧的图标按钮打开一条
+ * 28 高的搜索行并自动聚焦；Esc 或清空后失焦收起，焦点回到图标。`/` 只绑在
+ * 节点库上（`slashShortcut`），同页多个样例不会一起抢焦点。
+ */
+function useExpandedSearch(initial: string, slashShortcut = false) {
+  const [open, setOpen] = useState(initial.length > 0);
+  const [query, setQuery] = useState(initial);
+  const inputRef = useRef<InputRef>(null);
+  const buttonRef = useRef<HTMLAnchorElement | HTMLButtonElement>(null);
+  useEffect(() => {
+    if (open) inputRef.current?.focus();
+  }, [open]);
+  useEffect(() => {
+    if (!slashShortcut) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== '/' || event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target;
+      if (target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))) return;
+      event.preventDefault();
+      setOpen(true);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [slashShortcut]);
+  const close = () => {
+    setOpen(false);
+    setQuery('');
+    buttonRef.current?.focus();
+  };
+  return {
+    open,
+    query,
+    setQuery,
+    inputRef,
+    buttonRef,
+    close,
+    openSearch: () => setOpen(true),
+    onBlur: () => {
+      if (!query.trim()) close();
+    },
+  };
+}
+
+/** 标题栏右侧的搜索入口（24×24）：打开搜索行并聚焦。 */
+function SearchButton({
+  label,
+  buttonRef,
+  onClick,
+}: {
+  label: string;
+  buttonRef: RefObject<HTMLAnchorElement | HTMLButtonElement | null>;
+  onClick: () => void;
+}) {
+  return (
+    <Tooltip title={label}>
+      <Button
+        ref={buttonRef}
+        type="text"
+        size="small"
+        className="xflow-pv-tool"
+        icon={<SearchIcon />}
+        aria-label={label}
+        onClick={onClick}
+      />
+    </Tooltip>
   );
 }
 
@@ -84,9 +153,10 @@ function GroupHeader({
 }
 
 /**
- * 节点库（§6.0.1 左栏重设计）：搜索框常驻标题栏下方（高 28、右侧 `/` 键帽），
- * 最上面是「常用」组，其余分组默认可折叠。有输入时所有组展开、只显示命中项，
- * 命中字高亮；没有命中写「没有匹配的节点」并给「清除搜索」。
+ * 节点库（§6.0.1 左栏重设计）：搜索不常驻，标题栏右侧的搜索图标（或 `/`）打开
+ * 一条 28 高的搜索行并聚焦，Esc 或清空后失焦收起。最上面是「常用」组，其余
+ * 分组默认可折叠。有输入时所有组展开、只显示命中项，命中字高亮；没有命中写
+ * 「没有匹配的节点」并给「清除搜索」。
  */
 export function NodeLibrary({
   groups,
@@ -94,6 +164,7 @@ export function NodeLibrary({
   total,
   expanded = ['common'],
   initialSearch = '',
+  slashShortcut = false,
   headerExtra,
   className,
 }: {
@@ -102,11 +173,16 @@ export function NodeLibrary({
   total: number;
   /** 初始展开的分组 id（spec 默认：常用；触发器组按工作流是否已有触发器）。 */
   expanded?: string[];
+  /** 非空表示样例以「搜索已展开」状态渲染。 */
   initialSearch?: string;
+  /** 绑定 `/` 打开搜索；只给工作台那一份，样例不抢焦点。 */
+  slashShortcut?: boolean;
   headerExtra?: ReactNode;
   className?: string;
 }) {
-  const [query, setQuery] = useState(initialSearch);
+  const search = useExpandedSearch(initialSearch, slashShortcut);
+  const query = search.query;
+  const setQuery = search.setQuery;
   const [open, setOpen] = useState(() => new Set(expanded));
   const q = query.trim().toLowerCase();
   const searching = q.length > 0;
@@ -129,24 +205,32 @@ export function NodeLibrary({
   return (
     <section className={cx('xflow-pv-lib-pane xflow-pv-lib-pane--nodes', className)}>
       <PanelTitle icon={<GridIcon />} title="节点" count={total} className="xflow-pv-panel-title--bar">
+        <SearchButton label="搜索节点" buttonRef={search.buttonRef} onClick={search.openSearch} />
         {headerExtra}
       </PanelTitle>
-      <div className="xflow-pv-lib-search">
-        <Input
-          className="xflow-pv-search"
-          prefix={<SearchIcon />}
-          placeholder="搜索节点，如 HTTP / If / Webhook"
-          suffix={<Kbd>/</Kbd>}
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          aria-label="搜索节点"
-        />
-      </div>
+      {search.open ? (
+        <div className="xflow-pv-lib-search">
+          <Input
+            ref={search.inputRef}
+            className="xflow-pv-search"
+            prefix={<SearchIcon />}
+            placeholder="搜索节点，如 HTTP / If / Webhook"
+            suffix={<Kbd>/</Kbd>}
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            onBlur={search.onBlur}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') search.close();
+            }}
+            aria-label="搜索节点"
+          />
+        </div>
+      ) : null}
       <div className="xflow-pv-lib-list" role="list" aria-label="节点库">
         {hitCount === 0 ? (
           <div className="xflow-pv-lib-empty">
             <p>没有匹配的节点</p>
-            <Button size="small" onClick={() => setQuery('')}>
+            <Button size="small" onClick={search.close}>
               清除搜索
             </Button>
           </div>
@@ -203,9 +287,40 @@ export function Outline({
   className?: string;
   style?: CSSProperties;
 }) {
+  const search = useExpandedSearch('');
+  const q = search.query.trim().toLowerCase();
+  const searching = q.length > 0;
+  const hit = (value: string) => !!q && value.toLowerCase().includes(q);
+  /** 搜索时按分区聚合：分区名命中保留整组，否则只留命中的成员。 */
+  const visible = new Set<number>();
+  if (searching) {
+    const groups: { head: number; members: number[] }[] = [];
+    rows.forEach((row, index) => {
+      if (row.kind === 'section') {
+        groups.push({ head: index, members: [] });
+      } else {
+        const last = groups[groups.length - 1];
+        if (last && last.head >= 0) last.members.push(index);
+        else groups.push({ head: -1, members: [index] });
+      }
+    });
+    for (const entry of groups) {
+      const head = entry.head >= 0 ? rows[entry.head] : null;
+      const headHit = head?.kind === 'section' && hit(head.label);
+      const hits = entry.members.filter((index) => {
+        const row = rows[index];
+        return row.kind === 'item' && (hit(row.label) || hit(row.nodeName));
+      });
+      if (!headHit && hits.length === 0) continue;
+      if (entry.head >= 0) visible.add(entry.head);
+      (headHit ? entry.members : hits).forEach((index) => visible.add(index));
+    }
+  }
+  const isVisible = (index: number) => !searching || visible.has(index);
   const title = (
     <PanelTitle icon={<OutlineIcon />} title="大纲" count={total} className="xflow-pv-panel-title--bar">
       {headerExtra}
+      <SearchButton label="搜索大纲" buttonRef={search.buttonRef} onClick={search.openSearch} />
     </PanelTitle>
   );
   return (
@@ -217,6 +332,23 @@ export function Outline({
       ) : (
         title
       )}
+      {search.open ? (
+        <div className="xflow-pv-lib-search">
+          <Input
+            ref={search.inputRef}
+            className="xflow-pv-search"
+            prefix={<SearchIcon />}
+            placeholder="搜索大纲"
+            value={search.query}
+            onChange={(event) => search.setQuery(event.target.value)}
+            onBlur={search.onBlur}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') search.close();
+            }}
+            aria-label="搜索大纲"
+          />
+        </div>
+      ) : null}
       {rows.length === 0 ? (
         <div className="xflow-pv-ol-empty">
           <p>画布上还没有节点</p>
@@ -224,13 +356,23 @@ export function Outline({
             添加节点
           </Button>
         </div>
+      ) : searching && visible.size === 0 ? (
+        <div className="xflow-pv-lib-empty">
+          <p>没有匹配的节点</p>
+          <Button size="small" onClick={search.close}>
+            清除搜索
+          </Button>
+        </div>
       ) : (
         <div className="xflow-pv-outline" data-mode={mode} role="tree" aria-label="工作流大纲">
-          {rows.map((row) => {
+          {rows.map((row, index) => {
+            if (!isVisible(index)) return null;
             if (row.kind === 'section') {
               const head = (
                 <span className="xflow-pv-ol-head">
-                  <span className="xflow-pv-ol-section-label">{row.label}</span>
+                  <span className="xflow-pv-ol-section-label">
+                    <Highlight text={row.label} query={q} />
+                  </span>
                   <span className="xflow-pv-ol-count">{row.count}</span>
                 </span>
               );
@@ -263,8 +405,14 @@ export function Outline({
                 onClick={() => onSelect?.(row.id)}
               >
                 <CategoryIcon category={row.category} icon={row.icon} size="sm" />
-                <span className="xflow-pv-ol-name">{row.label}</span>
-                {row.label !== row.nodeName ? <span className="xflow-pv-ol-sub">{row.nodeName}</span> : null}
+                <span className="xflow-pv-ol-name">
+                  <Highlight text={row.label} query={q} />
+                </span>
+                {row.label !== row.nodeName ? (
+                  <span className="xflow-pv-ol-sub">
+                    <Highlight text={row.nodeName} query={q} />
+                  </span>
+                ) : null}
                 {mode === 'run' ? (
                   <span className="xflow-pv-ol-dot" title={nodeStatusMeta[row.status].label} />
                 ) : disabled ? (

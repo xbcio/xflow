@@ -1035,6 +1035,7 @@ export function WorkbenchSection({ idPrefix = 'pt' }: { idPrefix?: string } = {}
             common={wbLibraryCommon}
             total={wbLibraryTotal}
             expanded={['common']}
+            slashShortcut
             headerExtra={
               <IconButton
                 small
