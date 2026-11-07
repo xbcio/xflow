@@ -101,8 +101,12 @@ export function LeftZones({
   const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
     event.preventDefault();
-    const height = containerRef.current?.getBoundingClientRect().height ?? 0;
-    const current = ratio ?? (height > 0 ? OUTLINE_MIN_HEIGHT / height : 0.5);
+    const container = containerRef.current;
+    const height = container?.getBoundingClientRect().height ?? 0;
+    // Auto mode starts from the height the outline actually has (its tree), so
+    // the first press moves it one row instead of snapping to the three-row floor.
+    const outlineHeight = container?.lastElementChild?.getBoundingClientRect().height ?? 0;
+    const current = ratio ?? (height > 0 ? outlineHeight / height : 0.5);
     const step = height > 0 ? SPLIT_KEYBOARD_STEP / height : 0;
     updateRatio(current + (event.key === "ArrowUp" ? step : -step));
   };
