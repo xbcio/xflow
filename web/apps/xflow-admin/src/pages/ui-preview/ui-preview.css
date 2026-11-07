@@ -2064,6 +2064,16 @@
    * viewport instead of only at 1280 / 1024 window widths.
    */
   .xflow-pv-compact-frame { max-width: 100%; }
+  /*
+   * 收起成抽屉的属性面板仍按 320 排版：面板此时 visibility:hidden，宽度不
+   * 参与网格，但样例里的三 tab 要量得出等分（2026-11-07 accept-l）。
+   */
+  .xflow-pv-compact-figure .xflow-pv-wb[data-right='collapsed'] .xflow-pv-insp {
+    position: absolute;
+    inset-block: 0;
+    right: 0;
+    width: 320px;
+  }
 
   /* ===================== 5b · edges, ports, exception states ===================== */
   /*
