@@ -626,7 +626,7 @@
   .xflow-pv-lib-list {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: var(--xflow-space-0-5);
     overflow: auto;
     padding: 0 var(--xflow-space-2) var(--xflow-space-2);
     min-height: 0;
@@ -699,7 +699,7 @@
     text-overflow: ellipsis;
   }
   .xflow-pv-lib-mark { background: color-mix(in srgb, var(--xflow-warning) 30%, transparent); color: inherit; border-radius: 2px; }
-  .xflow-pv-lib-tip { display: flex; flex-direction: column; gap: 2px; }
+  .xflow-pv-lib-tip { display: flex; flex-direction: column; gap: var(--xflow-space-0-5); }
   .xflow-pv-lib-empty { display: flex; flex-direction: column; align-items: flex-start; gap: var(--xflow-space-2); padding: var(--xflow-space-3); font-size: var(--xflow-font-sm); color: var(--xflow-text-tertiary); }
   .xflow-pv-lib-empty p { margin: 0; }
   .xflow-pv-ol-empty { display: flex; flex-direction: column; align-items: flex-start; gap: var(--xflow-space-2); padding: var(--xflow-space-3); font-size: var(--xflow-font-sm); color: var(--xflow-text-tertiary); }
