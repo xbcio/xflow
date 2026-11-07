@@ -1,16 +1,28 @@
 import * as React from "react";
 import { BanIcon, LocateIcon, OutlineIcon, SearchIcon } from "@xflow/icons";
-import { Button, Tooltip } from "antd";
+import { Button, Input, Tooltip } from "antd";
 import type { RuntimeSnapshot, WorkflowDef, WorkflowEditorSection } from "@xflow/core";
 import { nodeCategoryMeta, nodeStatusMeta, type NodeStatusKey } from "@xflow/core";
 import { NodeCategoryIcon } from "./categoryIcon";
+import { highlightMatch } from "./highlightMatch";
 import { buildOutline, type OutlineItemRow, type OutlineRow } from "./outline";
+import { filterOutlineRows } from "./outlineSearch";
 import { EditorPanel, editorTooltipClassNames } from "./shared";
+
+const editorOutlineSearchClassNames = {
+  input: "xflow-editor-field__control",
+  prefix: "xflow-editor-outline-search__prefix",
+  root: "xflow-editor-outline-search"
+};
+
+const outlineMatchClass = "xflow-editor-outline__match";
 
 /**
  * The left column's lower zone (spec §6.0.1): 结构浏览与状态总览. The §6.0
- * title bar with its two actions over the topology tree. ⌘K (按名称跳转) stays
- * the other way to reach a node, and 搜索大纲 opens it.
+ * title bar with its actions over the topology tree. Its search key is not a
+ * permanent field (§6.0.1, 2026-11-07): the key unfolds one 28px box under the
+ * head, and the tree filters by section while it has text. ⌘K (按名称跳转)
+ * stays an independent way to reach a node.
  */
 export function OutlinePanel({
   workflow,
@@ -23,7 +35,6 @@ export function OutlinePanel({
   headerAction,
   onAddNode,
   onLocate,
-  onSearch,
   onSelectNode,
   onFocusLost
 }: {
@@ -49,7 +60,6 @@ export function OutlinePanel({
   /** The outline's empty state offers 添加节点 while the editor can add. */
   onAddNode?: () => void;
   onLocate: () => void;
-  onSearch: (trigger: HTMLElement) => void;
   /** A row was chosen: select the node and bring it to the middle of the canvas. */
   onSelectNode: (key: string) => void;
   /**
@@ -64,6 +74,22 @@ export function OutlinePanel({
     [workflow, nodeCategories, sections]
   );
   const count = (workflow.nodes ?? []).length;
+  const [searchOpen, setSearchOpen] = React.useState(false);
+  const [query, setQuery] = React.useState("");
+  const searchId = React.useId();
+  const searchButtonRef = React.useRef<HTMLButtonElement | null>(null);
+  const normalizedQuery = query.trim().toLowerCase();
+  const searching = normalizedQuery !== "";
+  const filtered = React.useMemo(() => filterOutlineRows(rows, normalizedQuery), [rows, normalizedQuery]);
+  const closeSearch = React.useCallback(() => {
+    setQuery("");
+    setSearchOpen(false);
+  }, []);
+  // A close from outside the box must not leave the next open showing the old
+  // filter.
+  React.useEffect(() => {
+    if (!searchOpen) setQuery("");
+  }, [searchOpen]);
   return (
     <EditorPanel
       actions={
@@ -83,18 +109,25 @@ export function OutlinePanel({
               />
             </span>
           </Tooltip>
-          <Tooltip classNames={editorTooltipClassNames} title="搜索大纲（⌘ / Ctrl + K）">
-            {/* ⌘K has nothing to search in an empty workflow, so the key is off. */}
+          <Tooltip classNames={editorTooltipClassNames} title="搜索大纲">
+            {/* Nothing to find in an empty workflow, so the key is off. */}
             <span>
               <Button
+                aria-controls={searchId}
+                aria-expanded={searchOpen}
                 aria-label="搜索大纲"
-                className="xflow-editor-panel-collapse"
+                className="xflow-editor-panel-collapse xflow-editor-outline__search-key"
                 color="default"
+                data-active={searchOpen || searching ? "true" : undefined}
                 disabled={count === 0}
                 icon={<SearchIcon />}
+                ref={searchButtonRef}
                 size="small"
                 variant="text"
-                onClick={(event) => onSearch(event.currentTarget)}
+                onClick={() => {
+                  if (searchOpen) closeSearch();
+                  else setSearchOpen(true);
+                }}
               />
             </span>
           </Tooltip>
@@ -108,15 +141,54 @@ export function OutlinePanel({
       icon={<OutlineIcon />}
       title="大纲"
     >
-      <OutlineTree
-        rows={rows}
-        runtime={runtime}
-        selectedKey={selectedKey}
-        showStatus={showStatus}
-        onAddNode={onAddNode}
-        onFocusLost={onFocusLost}
-        onSelectNode={onSelectNode}
-      />
+      <div className="xflow-editor-outline__search" hidden={!searchOpen} id={searchId}>
+        {searchOpen ? (
+          <Input
+            autoFocus
+            aria-label="搜索大纲"
+            classNames={editorOutlineSearchClassNames}
+            placeholder="搜索大纲"
+            prefix={<SearchIcon />}
+            value={query}
+            onBlur={(event) => {
+              // An empty box folds away, but not when the pointer is on its
+              // key: that key's click closes it and must not be undone by the
+              // blur firing first.
+              if (query.trim() !== "" || event.relatedTarget === searchButtonRef.current) return;
+              closeSearch();
+            }}
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== "Escape") return;
+              event.preventDefault();
+              event.stopPropagation();
+              closeSearch();
+              searchButtonRef.current?.focus({ preventScroll: true });
+            }}
+          />
+        ) : null}
+      </div>
+      {searching && !filtered.matched ? (
+        <div className="xflow-editor-outline__list">
+          <div className="xflow-editor-outline__empty">
+            <p>没有匹配的节点</p>
+            <Button size="small" type="link" onClick={() => setQuery("")}>
+              清除搜索
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <OutlineTree
+          query={normalizedQuery}
+          rows={filtered.rows}
+          runtime={runtime}
+          selectedKey={selectedKey}
+          showStatus={showStatus}
+          onAddNode={onAddNode}
+          onFocusLost={onFocusLost}
+          onSelectNode={onSelectNode}
+        />
+      )}
     </EditorPanel>
   );
 }
@@ -158,6 +230,7 @@ function OutlineTree({
   runtime,
   showStatus,
   selectedKey,
+  query,
   onAddNode,
   onFocusLost,
   onSelectNode
@@ -166,6 +239,8 @@ function OutlineTree({
   runtime?: RuntimeSnapshot;
   showStatus: boolean;
   selectedKey?: string;
+  /** The active filter, so hits are highlighted; empty when not searching. */
+  query: string;
   onAddNode?: () => void;
   onFocusLost?: () => void;
   onSelectNode: (key: string) => void;
@@ -283,8 +358,10 @@ function OutlineTree({
       >
         <NodeCategoryIcon category={item.category} size="sm" type={item.type} />
         <span className="xflow-editor-outline__name">
-          <span className="xflow-editor-outline__label">{item.label}</span>
-          {item.label === item.name ? null : <span className="xflow-editor-outline__sub">{item.name}</span>}
+          <span className="xflow-editor-outline__label">{highlightMatch(item.label, query, outlineMatchClass)}</span>
+          {item.label === item.name ? null : (
+            <span className="xflow-editor-outline__sub">{highlightMatch(item.name, query, outlineMatchClass)}</span>
+          )}
         </span>
         {showStatus ? (
           <span aria-hidden="true" className="xflow-editor-outline__dot" title={meta.label} />
@@ -317,7 +394,7 @@ function OutlineTree({
               style={{ "--xflow-editor-category": `var(--xflow-${nodeCategoryMeta[heading.category].color})` } as React.CSSProperties}
             >
               <span aria-hidden="true" className="xflow-editor-outline__bar" />
-              <span className="xflow-editor-outline__heading-label">{heading.label}</span>
+              <span className="xflow-editor-outline__heading-label">{highlightMatch(heading.label, query, outlineMatchClass)}</span>
               <span className="xflow-editor-outline__count">{heading.count}</span>
             </div>
             {body.map((row) =>

@@ -5198,7 +5198,6 @@ export function XFlowEditor({
           onAddNode={editMode ? openNodeLibrary : undefined}
           onFocusLost={handleOutlineFocusLost}
           onLocate={locateSelectedNode}
-          onSearch={openNodeSearch}
           onSelectNode={selectOutlineNode}
         />
       }

@@ -6,6 +6,7 @@ import { XFLOW_NODE_DRAG_MIME } from "@xflow/preview";
 import type { NodeFormPorts, NodeFormSource } from "../node-form/schema";
 import { nodeLibraryMatches, nodeTilePurpose } from "../nodeLibraryCopy";
 import { NodeCategoryIcon } from "./categoryIcon";
+import { highlightMatch } from "./highlightMatch";
 import { COMMON_NODE_GROUP, expandedGroups, persistGroupOverrides, readGroupOverrides } from "./libraryExpansion";
 import type { NodeLibraryGroup } from "./nodeLibraryGroups";
 import { commonNodeTypes } from "./recentNodeTypes";
@@ -72,24 +73,7 @@ function nodeTileTooltip(descriptor: LibraryNodeDescriptor): React.ReactNode {
   );
 }
 
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-/** The query's hits inside a label or hint; the rest stays plain text. */
-function highlightMatch(text: string, needle: string): React.ReactNode {
-  if (needle === "") return text;
-  const parts = text.split(new RegExp(`(${escapeRegExp(needle)})`, "i"));
-  return parts.map((part, index) =>
-    index % 2 === 1 ? (
-      <mark className="xflow-editor-node-tile__match" key={index}>
-        {part}
-      </mark>
-    ) : (
-      part
-    )
-  );
-}
+const nodeMatchClass = "xflow-editor-node-tile__match";
 
 export function NodeLibrary({
   descriptors,
@@ -193,9 +177,9 @@ export function NodeLibrary({
       >
         <NodeCategoryIcon category={descriptor.category} type={descriptor.type} />
         <span className="xflow-editor-node-tile__content">
-          <strong>{highlightMatch(descriptor.label, normalizedQuery)}</strong>
+          <strong>{highlightMatch(descriptor.label, normalizedQuery, nodeMatchClass)}</strong>
           <small className="xflow-editor-node-tile__hint">
-            {highlightMatch(nodeTilePurpose(descriptor), normalizedQuery)}
+            {highlightMatch(nodeTilePurpose(descriptor), normalizedQuery, nodeMatchClass)}
           </small>
         </span>
         {descriptor.source === "runner" ? (

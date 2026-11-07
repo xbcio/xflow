@@ -459,13 +459,66 @@ describe("dual-zone left column (§6.0.1)", () => {
     expect(search.disabled).toBe(true);
   });
 
-  it("opens the ⌘K node search from 搜索大纲", async () => {
+  it("unfolds the outline search from its key and filters the tree by section", () => {
     render(<XFlowEditor value={workflow} />);
-    expect(screen.queryByRole("combobox", { name: "定位节点" })).toBeNull();
+    const outline = screen.getByRole("region", { name: "大纲" });
+    const key = within(outline).getByRole("button", { name: "搜索大纲" });
+    const box = () => within(outline).queryByRole("textbox", { name: "搜索大纲" });
+    const sections = () => [...outline.querySelectorAll<HTMLElement>(".xflow-editor-outline__section")].map((s) => s.dataset.section);
+    expect(box()).toBeNull();
+    expect(key.getAttribute("aria-expanded")).toBe("false");
 
-    fireEvent.click(within(screen.getByRole("region", { name: "大纲" })).getByRole("button", { name: "搜索大纲" }));
+    // The key unfolds one 28px box under the head and focuses it.
+    fireEvent.click(key);
+    expect(document.activeElement).toBe(box());
+    expect(key.getAttribute("aria-expanded")).toBe("true");
+    expect(key.hasAttribute("data-active")).toBe(true);
 
-    expect(await screen.findByRole("combobox", { name: "定位节点" })).toBeTruthy();
+    // A section-name hit keeps the whole group and drops the others.
+    fireEvent.change(box()!, { target: { value: "流程" } });
+    expect(sections()).toEqual(["middle"]);
+    expect(outline.querySelectorAll('[role="treeitem"]').length).toBe(1);
+    expect(outline.querySelector(".xflow-editor-outline__heading-label mark")?.textContent).toBe("流程");
+
+    // A member hit keeps only the matching node, under its own heading.
+    fireEvent.change(box()!, { target: { value: "fetch" } });
+    expect(sections()).toEqual(["middle"]);
+    expect(outline.querySelector('[role="treeitem"]')?.textContent).toContain("fetch");
+    expect(outline.querySelector(".xflow-editor-outline__label mark")?.textContent).toBe("fetch");
+
+    // No hit: the tree gives way to the empty note.
+    fireEvent.change(box()!, { target: { value: "nope" } });
+    expect(sections()).toEqual([]);
+    expect(within(outline).getByText("没有匹配的节点")).toBeTruthy();
+
+    // 清除搜索 brings the whole tree back.
+    fireEvent.click(within(outline).getByRole("button", { name: "清除搜索" }));
+    expect(sections()).toEqual(["entry", "middle", "end"]);
+
+    // Esc folds the box and hands focus back to the key that owns it.
+    fireEvent.keyDown(box()!, { key: "Escape" });
+    expect(box()).toBeNull();
+    expect(key.getAttribute("aria-expanded")).toBe("false");
+    expect(document.activeElement).toBe(key);
+    // The box does not keep the old filter for its next open.
+    fireEvent.click(key);
+    expect((box() as HTMLInputElement).value).toBe("");
+  });
+
+  it("folds an empty outline search away on blur but keeps a keyword on screen", () => {
+    render(<XFlowEditor value={workflow} />);
+    const outline = screen.getByRole("region", { name: "大纲" });
+    const key = within(outline).getByRole("button", { name: "搜索大纲" });
+    const box = () => within(outline).queryByRole("textbox", { name: "搜索大纲" });
+
+    fireEvent.click(key);
+    fireEvent.blur(box()!, { relatedTarget: document.body });
+    expect(box()).toBeNull();
+
+    fireEvent.click(key);
+    fireEvent.change(box()!, { target: { value: "fetch" } });
+    fireEvent.blur(box()!, { relatedTarget: document.body });
+    expect(box()).not.toBeNull();
   });
 
   it("shows only the outline in a read-only viewer, with 变量 still one rail key away", () => {
@@ -653,11 +706,7 @@ describe("dual-zone left column (§6.0.1)", () => {
     expect(head.parentElement?.querySelector(":scope > .xflow-editor-node-group__title")).toBe(head);
   });
 
-  it("closes the locate modal first when Esc is pressed over the compact drawer", async () => {
-    // rc hands every overlay the constant id "test-id" when NODE_ENV is "test",
-    // which folds the drawer and the modal into one entry of its Esc stack. A
-    // real build gives each its own id, and the stack then closes the top one.
-    vi.stubEnv("NODE_ENV", "development");
+  it("folds the outline search first when Esc is pressed over the compact drawer", async () => {
     const container = mockEditorWidth();
     render(<XFlowEditor value={workflow} />);
     act(() => container.setWidth(1279));
@@ -665,11 +714,12 @@ describe("dual-zone left column (§6.0.1)", () => {
     const dialog = await screen.findByRole("dialog", { name: "节点与大纲" });
 
     fireEvent.click(within(dialog).getByRole("button", { name: "搜索大纲" }));
-    const search = await screen.findByRole("combobox", { name: "定位节点" });
+    const search = within(dialog).getByRole("textbox", { name: "搜索大纲" });
+    fireEvent.change(search, { target: { value: "fetch" } });
     fireEvent.keyDown(search, { key: "Escape", code: "Escape", keyCode: 27 });
 
-    // The modal goes, the drawer under it stays.
-    await waitFor(() => expect(screen.queryByRole("combobox", { name: "定位节点" })).toBeNull());
+    // The box folds; the drawer under it stays.
+    expect(within(dialog).queryByRole("textbox", { name: "搜索大纲" })).toBeNull();
     expect(screen.getByRole("dialog", { name: "节点与大纲" })).toBeTruthy();
   });
 });

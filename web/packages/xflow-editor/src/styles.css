@@ -859,7 +859,8 @@
 
 /* §6.0.1 (2026-11-07): the box is not permanent; its title-bar key unfolds a
  * 28px row under the head, and the list scrolls below it. */
-.xflow-editor-library__search {
+.xflow-editor-library__search,
+.xflow-editor-outline__search {
   flex: 0 0 auto;
   padding: 0 var(--xflow-space-3) var(--xflow-space-2);
 }
@@ -867,7 +868,8 @@
 /* §6.0.1 (2026-11-07): the search key is a 24×24 square in the title bar. The
  * panel collapse rule is `button.xflow-editor-panel-collapse` (0,2,1), so this
  * one names both classes to stay the winner at the same layer. */
-.xflow-editor button.xflow-editor-panel-collapse.xflow-editor-library__search-key {
+.xflow-editor button.xflow-editor-panel-collapse.xflow-editor-library__search-key,
+.xflow-editor button.xflow-editor-panel-collapse.xflow-editor-outline__search-key {
   height: 24px;
   min-width: 24px;
   padding-inline: 0;
@@ -1338,7 +1340,8 @@
 }
 
 /* The search hit: the matched run in primary, never a background. */
-.xflow-editor .xflow-editor-node-tile__match {
+.xflow-editor .xflow-editor-node-tile__match,
+.xflow-editor .xflow-editor-outline__match {
   background: transparent;
   color: var(--xflow-primary-fg);
   font-weight: var(--xflow-font-weight-semibold);
@@ -3745,8 +3748,9 @@ button.xflow-editor-overview__run:hover {
   outline: 2px solid transparent;
 }
 
-/* The library's always-visible search (baseline `.xflow-pv-search`): the AntD
- * affix wrapper is the field, so focus is judged on the wrapper. */
+/* The 节点 search field (baseline `.xflow-pv-search`): the AntD affix wrapper
+ * is the field, so focus is judged on the wrapper. The outline's inline search
+ * (below) is the same box under its own semantic class. */
 .xflow-editor .xflow-editor-library-search {
   background: var(--xflow-field);
   border-color: var(--xflow-border);
@@ -3769,7 +3773,31 @@ button.xflow-editor-overview__run:hover {
   outline: 2px solid transparent;
 }
 
+.xflow-editor .xflow-editor-outline-search {
+  background: var(--xflow-field);
+  border-color: var(--xflow-border);
+  color: var(--xflow-text);
+  font-size: var(--xflow-font-md);
+  height: var(--xflow-editor-density-control-h);
+  outline-color: transparent;
+}
+
+.xflow-editor .xflow-editor-outline-search:hover {
+  border-color: var(--xflow-primary-border-strong);
+}
+
+.xflow-editor .xflow-editor-outline-search:focus-within {
+  border-color: var(--xflow-primary);
+  box-shadow: 0 0 0 3px var(--xflow-editor-control-ring);
+  outline: 2px solid transparent;
+}
+
 .xflow-editor .xflow-editor-library-search__prefix {
+  color: var(--xflow-text-tertiary);
+  font-size: var(--xflow-font-xl);
+}
+
+.xflow-editor .xflow-editor-outline-search__prefix {
   color: var(--xflow-text-tertiary);
   font-size: var(--xflow-font-xl);
 }
@@ -3808,7 +3836,8 @@ button.xflow-editor-overview__run:hover {
   .xflow-editor .xflow-editor-field:focus,
   .xflow-editor .xflow-editor-textarea:focus,
   .xflow-editor .xflow-editor-select__root:focus-within,
-  .xflow-editor .xflow-editor-library-search:focus-within {
+  .xflow-editor .xflow-editor-library-search:focus-within,
+  .xflow-editor .xflow-editor-outline-search:focus-within {
     outline: 2px solid Highlight;
   }
 }
