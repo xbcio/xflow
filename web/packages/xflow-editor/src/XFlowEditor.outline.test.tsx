@@ -1,6 +1,6 @@
 import * as React from "react";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nodeStatusMeta } from "@xflow/core";
 import type { RuntimeSnapshot, WorkflowDef, WorkflowEditorSection } from "@xflow/core";
 import type { XFlowPreview as RealXFlowPreview } from "@xflow/preview";
@@ -32,6 +32,53 @@ beforeEach(() => {
   preview.handle.fitView.mockClear();
   preview.handle.fitNode.mockClear();
 });
+
+const originalResizeObserver = globalThis.ResizeObserver;
+afterEach(() => {
+  globalThis.ResizeObserver = originalResizeObserver;
+});
+
+/** Stands in for the ResizeObserver that measures the editor root (jsdom has no layout). */
+const mockCompactWidth = () => {
+  const observers: { callback: ResizeObserverCallback; targets: Set<Element> }[] = [];
+  class MockResizeObserver {
+    readonly targets = new Set<Element>();
+    readonly callback: ResizeObserverCallback;
+    constructor(callback: ResizeObserverCallback) {
+      this.callback = callback;
+      observers.push(this);
+    }
+    observe(target: Element) {
+      this.targets.add(target);
+    }
+    unobserve(target: Element) {
+      this.targets.delete(target);
+    }
+    disconnect() {
+      this.targets.clear();
+      const index = observers.indexOf(this);
+      if (index >= 0) observers.splice(index, 1);
+    }
+  }
+  globalThis.ResizeObserver = MockResizeObserver as unknown as typeof ResizeObserver;
+  return {
+    setWidth(width: number) {
+      for (const observer of [...observers]) {
+        for (const target of [...observer.targets]) {
+          if (!(target instanceof HTMLElement) || !target.classList.contains("xflow-editor")) continue;
+          observer.callback(
+            [{
+              target,
+              borderBoxSize: [{ blockSize: 800, inlineSize: width }],
+              contentRect: { width, height: 800 }
+            } as unknown as ResizeObserverEntry],
+            observer as unknown as ResizeObserver
+          );
+        }
+      }
+    }
+  };
+};
 
 const workflow: WorkflowDef = {
   id: "wf-outline",
@@ -327,12 +374,12 @@ describe("outline status dots (§4, §6.0.1)", () => {
     status: "running",
     nodes: (value.nodes ?? []).map((node) => ({ name: node.name, status: runtime.nodes?.[node.name]?.status ?? "pending" }))
   });
-  /** §6.0.1 (2026-11-07 ruling): dots belong to a replayed execution only. */
-  const replayView = (value: WorkflowDef, snapshot: RuntimeSnapshot = runtime) => (
+  /** §6.0.1 (2026-11-07 ruling): dots belong to 运行记录, the view that replays it. */
+  const replayView = (value: WorkflowDef, snapshot: RuntimeSnapshot = runtime, mode: "edit" | "runs" = "edit") => (
     <XFlowEditor
       executionSnapshotRuntime={snapshot}
+      mode={mode}
       readOnlyReason="只读回放"
-      runtime={snapshot}
       selectedExecution={executionOf(value)}
       value={value}
     />
@@ -341,38 +388,77 @@ describe("outline status dots (§4, §6.0.1)", () => {
   const readOnlyView = (value: WorkflowDef) => (
     <XFlowEditor readOnlyReason="只读回放" runtime={runtime} value={value} />
   );
+  /**
+   * The docked column swaps the outline for the execution list in 运行记录, so
+   * the tree and its dots are only on screen in the compact drawer left open
+   * while the host flips the mode. Opens that drawer first; the caller then
+   * rerenders with `view("runs")` to enter the replay view.
+   */
+  const mountCompactReplay = async (value: WorkflowDef, snapshot: RuntimeSnapshot = runtime) => {
+    const container = mockCompactWidth();
+    const view = (mode: "edit" | "runs") => replayView(value, snapshot, mode);
+    const utils = render(view("edit"));
+    act(() => container.setWidth(1279));
+    fireEvent.click(
+      within(screen.getByRole("complementary", { name: "紧凑导航" })).getByRole("button", { name: "节点与大纲" })
+    );
+    await screen.findByRole("dialog", { name: "节点与大纲" });
+    return { ...utils, view };
+  };
+  const mountRunsOutline = async (value: WorkflowDef, snapshot: RuntimeSnapshot = runtime) => {
+    const mounted = await mountCompactReplay(value, snapshot);
+    mounted.rerender(mounted.view("runs"));
+    return mounted;
+  };
 
-  it("takes each dot's tone from the status table, the same snapshot the canvas reads", () => {
-    render(replayView(workflow));
+  it("draws the dots only in 运行记录, not in 编辑 even while the host keeps the selection", async () => {
+    const { rerender, view } = await mountCompactReplay(workflow);
+
+    // 编辑: the host has not cleared the previous selection (the admin keeps
+    // it), but the canvas is the draft's all-pending one, so the tree has no
+    // dots to disagree with it.
+    expect(items().every((row) => row.getAttribute("data-status") === null)).toBe(true);
+    expect(outlineRegion().querySelector(".xflow-editor-outline__dot")).toBeNull();
+
+    // 运行记录 is the view that replays the selection: the dots come back.
+    rerender(view("runs"));
+    expect(outlineRegion().querySelectorAll(".xflow-editor-outline__dot").length).toBe(5);
+    expect(rowOf("check").getAttribute("data-status")).toBe("failed");
+
+    // Back to 编辑: the kept selection must not leak replay state into the tree.
+    rerender(view("edit"));
+    expect(outlineRegion().querySelectorAll(".xflow-editor-outline__dot").length).toBe(0);
+  });
+
+  it("takes each dot's tone from the status table", async () => {
+    await mountRunsOutline(workflow);
 
     for (const [name, status] of [["start", "success"], ["check", "failed"], ["vip", "running"], ["normal", "skipped"]] as const) {
       const row = rowOf(name);
       expect(row.getAttribute("data-status")).toBe(status);
       expect(row.getAttribute("data-tone")).toBe(nodeStatusMeta[status].tone);
       expect(row.querySelector(".xflow-editor-outline__dot")?.getAttribute("title")).toBe(nodeStatusMeta[status].label);
-      // The canvas card for the same node says the same thing.
-      expect(canvasNode(name).closest(".xflow-preview-node")?.getAttribute("data-status")).toBe(status);
     }
     expect(rowOf("start").getAttribute("data-tone")).toBe("success");
     expect(rowOf("check").getAttribute("data-tone")).toBe("danger");
   });
 
-  it("marks a node the run has not reached pending (the status the dashed ring is drawn for), and a skipped one neutral", () => {
-    render(replayView(workflow));
+  it("marks a node the run has not reached pending (the status the dashed ring is drawn for), and a skipped one neutral", async () => {
+    await mountRunsOutline(workflow);
 
     expect(rowOf("finish").getAttribute("data-status")).toBe("pending");
     expect(rowOf("finish").getAttribute("data-tone")).toBe("neutral");
     expect(rowOf("normal").getAttribute("data-tone")).toBe("neutral");
   });
 
-  it("is all pending when the replay snapshot has no node entries", () => {
-    render(replayView(workflow, { status: "running", nodes: {} }));
+  it("is all pending when the replay snapshot has no node entries", async () => {
+    await mountRunsOutline(workflow, { status: "running", nodes: {} });
 
     expect(items().map((row) => row.getAttribute("data-status"))).toEqual(["pending", "pending", "pending", "pending", "pending"]);
   });
 
-  it("reads a disabled node as disabled until the run reports it", () => {
-    render(replayView(disabledWorkflow(workflow), { status: "running", nodes: {} }));
+  it("reads a disabled node as disabled until the run reports it", async () => {
+    await mountRunsOutline(disabledWorkflow(workflow), { status: "running", nodes: {} });
 
     expect(rowOf("normal").getAttribute("data-status")).toBe("disabled");
   });

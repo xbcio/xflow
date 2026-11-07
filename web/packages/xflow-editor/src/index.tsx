@@ -5161,11 +5161,12 @@ export function XFlowEditor({
    */
   /**
    * §6.0.1 (2026-11-07 ruling): the outline's status dots speak only for a
-   * replayed execution — the host's snapshot of a selected one. The edit view,
-   * a live run and a read-only view with no execution draw no dots; a disabled
-   * node still gets its BanIcon.
+   * replayed execution, and only while 运行记录 — the view that replays it — is
+   * on screen. 编辑 draws none even when the host still carries the previous
+   * selection (the admin keeps `selectedExecution` after switching back), so
+   * the tree can never disagree with the draft's all-pending canvas.
    */
-  const replayRuntime = selectedExecution && executionSnapshotRuntime ? executionSnapshotRuntime : undefined;
+  const replayRuntime = runsMode && selectedExecution && executionSnapshotRuntime ? executionSnapshotRuntime : undefined;
   const renderNodeZones = (headerAction: React.ReactNode): React.ReactElement => (
     <LeftZones
       dual={editMode}
