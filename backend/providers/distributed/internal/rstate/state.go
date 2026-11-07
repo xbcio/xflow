@@ -116,6 +116,9 @@ type Store struct {
 	// lease-expiry index. See state_lease_index.go.
 	leaseWalkMu sync.Mutex
 	leaseWalks  map[namespace.Namespace]*leaseWalkState
+	// walkOwner is this Store's token for the cluster-wide walk holder locks
+	// (redisx.BeginWalk); it is random per Store so two Stores never share one.
+	walkOwner string
 
 	// outputCompression switches storing node outputs compressed. Written once at
 	// construction and read from every node commit, hence an atomic. The READ
@@ -186,6 +189,7 @@ func New(rdb redis.UniversalClient, db store.Store, execTTL time.Duration, opts 
 		audit:                  noopAuditObserver{},
 		auditCounters:          &auditCounters{},
 		cursorKey:              newCursorSigningKey(),
+		walkOwner:              redisx.NewWalkOwner(),
 	}
 	for _, opt := range opts {
 		opt(s)
