@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/xbcio/xflow/service/protocol"
+	"github.com/xbcio/xflow/types"
 )
 
 // InProcessRunnerClient is the runner protocol bound directly to a control
@@ -109,4 +110,24 @@ func (c *InProcessRunnerClient) ReportMetrics(ctx context.Context, runnerID, ses
 func (c *InProcessRunnerClient) RenewIdentity(ctx context.Context, req protocol.RenewIdentityRequest) (protocol.RenewIdentityResponse, error) {
 	c.stamp(&req.AuthToken)
 	return c.core.renewIdentity(ctx, req, inProcessTransportInfo())
+}
+
+// SeedEntry is the in-process equivalent of POST /v1/executions: it admits one
+// entry-unit seed through this control plane's Core, with the same runner
+// authentication, namespace entitlement, generation fence and result mapping
+// the HTTP face applies. The caller supplies the namespace it was activated in;
+// the server verifies it against the runner's policy rather than trusting it.
+//
+// The token is carried by the client (see InProcessRunnerClient), not by the
+// request, matching every other method here.
+func (c *InProcessRunnerClient) SeedEntry(ctx context.Context, runnerID, ns string, req protocol.SeedExecutionRequest) (types.EntrySeedResponse, error) {
+	return c.core.seedEntryForRunner(ctx, runnerID, c.token, ns, req, inProcessTransportInfo())
+}
+
+// FetchSupply is the in-process equivalent of GET /v1/supplies/{name}: it reads
+// one namespace-scoped supply snapshot from this control plane's store. A
+// missing resource — and a store-less server — answer store.ErrNotFound, which
+// the runner maps to ErrSupplyNotFound.
+func (c *InProcessRunnerClient) FetchSupply(ctx context.Context, runnerID, ns, name string) ([]byte, string, uint64, error) {
+	return c.core.fetchSupplyForRunner(ctx, runnerID, c.token, ns, name, inProcessTransportInfo())
 }

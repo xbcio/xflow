@@ -172,6 +172,11 @@ type Core struct {
 	// the report is accepted but discarded (no aggregation), which is safe: it
 	// is a diagnostic read, never a gate on anything.
 	supplyObserved SupplyObservedSink
+	// supplies, when non-nil, serves the in-process runner transport's supply
+	// reads (the equivalent of GET /v1/supplies/{name}). It is wired
+	// independently of supplyHinter above: a runner can read supply content
+	// without an entry-activation store, so this must not be gated on that.
+	supplies SupplyHintSource
 	// supplyEncryptor, when non-nil, enables AES-256-GCM encryption of supply
 	// content. The key is delivered to runners on registration and rotated via
 	// heartbeat responses.

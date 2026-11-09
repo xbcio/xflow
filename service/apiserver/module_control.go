@@ -783,7 +783,10 @@ type waitTimeoutResponse struct {
 // parked anywhere, so there is no release time to promise. One second is a
 // floor that keeps a client from spinning, not a prediction, and the header is
 // documented that way in the OpenAPI spec.
-const concurrencyRetryAfterSeconds = 1
+//
+// The number itself lives in service/protocol: the in-process seed path answers
+// the same floor to an embedded runner, and two copies would drift.
+const concurrencyRetryAfterSeconds = protocol.ConcurrencyRetryAfterSeconds
 
 // writeConcurrencyRefused answers a submission the workflow's own concurrency
 // limit refused (engine.ErrConcurrencyLimit).
@@ -3458,33 +3461,17 @@ func (m *workflowControlModule) handleSeedExecution(w http.ResponseWriter, r *ht
 	if !decodeSeedJSON(w, r, &req) {
 		return
 	}
-	if req.AdmissionKey == "" || req.WorkflowID == "" || req.EntryUnitID == "" || req.Outcome == "" {
-		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "admission_key, workflow_id, entry_unit_id and outcome are required"})
+	// Wire-to-engine conversion is shared with the in-process entry point so the
+	// required fields and the server-side ResultHash cannot differ between the
+	// two faces. The 400 body is the one this route has always answered with.
+	engReq, err := control.EntrySeedRequestFromWire(req)
+	if err != nil {
+		if errors.Is(err, control.ErrEntrySeedRequestInvalid) {
+			writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+			return
+		}
+		writeSeedAdmissionResult(w, m.log, engine.SeedExecutionFromEntryResponse{}, err)
 		return
-	}
-
-	exits := make([]engine.BoundaryExit, 0, len(req.Exits))
-	for _, ex := range req.Exits {
-		exits = append(exits, engine.BoundaryExit{
-			NodeName: ex.NodeName,
-			Port:     ex.Port,
-			Data:     ex.Data,
-		})
-	}
-	outcome := engine.GroupOutcome(req.Outcome)
-
-	engReq := engine.SeedExecutionFromEntryRequest{
-		AdmissionKey:    engine.AdmissionKey(req.AdmissionKey),
-		WorkflowID:      types.WorkflowID(req.WorkflowID),
-		WorkflowVersion: req.WorkflowVersion,
-		EntryUnitID:     req.EntryUnitID,
-		Outcome:         outcome,
-		Exits:           exits,
-		Error:           req.Error,
-		Generation:      req.Generation,
-		ReplicaIndex:    req.ReplicaIndex,
-		// ResultHash is computed server-side; the client cannot supply it.
-		ResultHash: engine.ComputeResultHash(outcome, exits),
 	}
 
 	// Route through the ControlPlane's Core so the server-side namespace

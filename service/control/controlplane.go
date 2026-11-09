@@ -789,6 +789,15 @@ func NewControlPlane(cfg Config) (*ControlPlane, error) {
 		supplyObserved = observed
 	}
 
+	// The in-process runner transport reads supplies through Core directly
+	// (fetchSupplyForRunner). That path is independent of the heartbeat hint
+	// wiring above: a deployment with no entry-activation store still serves
+	// supply content to an embedded runner, so wire the store on its own.
+	if cfg.Supplies != nil {
+		httpServer.core.supplies = cfg.Supplies
+		grpcServer.core.supplies = cfg.Supplies
+	}
+
 	// Supply content encryption: when enabled, resolve the transport key and
 	// wire it into the Core (for key delivery on register/heartbeat) and the
 	// apiserver supply module (for response encryption).
