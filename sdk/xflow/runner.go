@@ -71,10 +71,9 @@ type RunnerConfig struct {
 	// ServerURL is the control plane's HTTP origin. Required under the HTTP and
 	// gRPC transports: entry seeding and artifact fetch are always HTTP
 	// round-trips to this origin. Under RunnerTransportInProc it may be empty —
-	// the runner protocol no longer needs an origin — but any capability that
-	// does reach the control plane over HTTP (hosted triggers seeding entries,
-	// script/map artifact fetch) still requires it, so leaving it unset is only
-	// valid for a runner that declares neither. See RunnerConfig.Transport.
+	// the runner protocol, entry seeding and supply reads all bypass it; only
+	// artifact fetch still uses it, so leaving it unset is valid for a runner
+	// that declares no script/map capability. See RunnerConfig.Transport.
 	ServerURL string
 
 	// Transport selects the Runner Protocol channel: RunnerTransportHTTP
@@ -406,16 +405,15 @@ type Runner struct {
 //	defer r.Close()
 //	return r.Run(ctx)
 func NewRunner(cfg RunnerConfig, opts ...RunnerOption) (*Runner, error) {
-	// ServerURL is the origin for every HTTP round-trip the runner makes to the
-	// control plane (entry seeding, artifact fetch). The in-process transport
-	// removes the runner-protocol round-trip but not those, so an empty
-	// ServerURL is only permitted under it, and only for a runner that declares
-	// no capability needing them — see the guarded warning in
-	// wireRunnerTriggerHosting and the artifact resolver, which still build an
-	// empty-origin HTTP client that fails at first use. Leaving ServerURL unset
-	// with a hosted trigger or a script/map capability is therefore a
-	// configuration error the runner reports at use time, not one this gate can
-	// see without duplicating the capability analysis.
+	// ServerURL is the origin for the HTTP round-trips that remain on every
+	// transport (artifact fetch) and for the runner protocol itself under HTTP
+	// and gRPC. Under RunnerTransportInProc the runner protocol, entry seeding
+	// and supply reads all bypass it, so an empty ServerURL is permitted when the
+	// declared capabilities need no other HTTP origin — see the artifact
+	// resolver, which still builds an empty-origin HTTP client that fails at
+	// first use. Leaving ServerURL unset with a script/map capability is
+	// therefore a configuration error the runner reports at use time, not one
+	// this gate can see without duplicating the capability analysis.
 	if strings.TrimSpace(cfg.ServerURL) == "" && cfg.Transport != RunnerTransportInProc {
 		return nil, fmt.Errorf("xflow: RunnerConfig.ServerURL is required: it is the " +
 			"control plane server origin for leases, entry seeding, and artifact fetch")
@@ -955,48 +953,69 @@ func buildRunnerServiceConfig(cfg RunnerConfig, opts ...RunnerOption) (runnersvc
 // trigger capability stays passive: the tracker and both supply channels are
 // left nil, which keeps its heartbeat bodies identical to a runner shape that
 // predates this wiring.
+//
+// Both channels — entry-seed admission and supply reads — follow the runner
+// protocol's transport. Under RunnerTransportInProc they go straight into the
+// embedded control plane's Core, so the runner needs neither a ServerURL nor a
+// second credential; under HTTP/gRPC they keep using the control plane's HTTP
+// API.
 func wireRunnerTriggerHosting(svcCfg *runnersvc.Config, cfg RunnerConfig, o *runnerOptions, groupRuntime *runnersvc.GroupRuntime) error {
 	if !runnerHostsTriggers(cfg.Capabilities) {
 		return nil
 	}
-	seedBaseURL := runnerSeedBaseURL(cfg)
-	if seedBaseURL == "" {
-		// This runner advertises a trigger but has no control-plane origin to
-		// seed entries through. Only RunnerTransportInProc permits an empty
-		// ServerURL (NewRunner rejects it elsewhere), so this is an in-process
-		// runner that declared a trigger capability without a seed origin.
-		// Trigger hosting is skipped, and a skipped trigger is indistinguishable
-		// from a quiet one from the outside — so say so rather than degrade in
-		// silence. Entry seeding is still an HTTP round-trip; closing it in
-		// process (the way the runner protocol was) is a separate change.
-		o.logger.Warn("runner declares a trigger capability but has no control-plane origin to seed entries through; trigger hosting is disabled",
-			"capabilities", cfg.Capabilities)
-		return nil
+	// The seed and supply channels follow the runner protocol's transport.
+	// In process they are calls into the embedded control plane's Core — no
+	// ServerURL, token header or loopback listener — which is what makes an
+	// embedded host able to declare a trigger capability at all. HTTP and gRPC
+	// keep the control plane's HTTP API, as before.
+	inProc := cfg.Transport == RunnerTransportInProc
+	var (
+		seedBaseURL string
+		seedToken   string
+		seedClient  *http.Client
+		supplyFetch runnersvc.SupplyFetcher
+		seeder      runnersvc.InProcessEntrySeeder
+	)
+	if inProc {
+		if o.controlPlane == nil {
+			return fmt.Errorf("xflow: RunnerConfig.Transport is %q and the runner declares a trigger capability, "+
+				"but no control plane was supplied: pass WithRunnerControlPlane (a host built on xflow.NewServer "+
+				"uses Server.ControlServer()); falling back to HTTP would silently reintroduce the loopback the "+
+				"in-process transport removes", cfg.Transport)
+		}
+		client := o.controlPlane.InProcessRunnerClient(cfg.Token)
+		seeder = client
+		supplyFetch = &runnersvc.InProcessSupplyFetcher{Reader: client, RunnerID: cfg.RunnerID}
+	} else {
+		seedBaseURL = runnerSeedBaseURL(cfg)
+		// The seed client timeout is deliberately larger than the per-request
+		// context timeout: the context deadline governs normal cancellation, this
+		// is an absolute safety net covering connection setup and full body read.
+		// It tracks SeedRequestTimeout, so raising the admission window does not
+		// leave the client cutting the request off first and reporting a transport
+		// error where the deadline would have reported a timeout.
+		var err error
+		seedClient, seedToken, err = newRunnerOriginHTTPClient(cfg, o.credReloader, seedClientTimeout(cfg))
+		if err != nil {
+			return err
+		}
+		// The supply fetch client shares the seed origin: both talk to the
+		// control plane's HTTP API.
+		supplyFetch = &runnersvc.HTTPSupplyFetcher{
+			BaseURL:  seedBaseURL,
+			Token:    seedToken,
+			RunnerID: cfg.RunnerID,
+			Client:   seedClient,
+		}
 	}
-	// The seed client timeout is deliberately larger than the per-request
-	// context timeout: the context deadline governs normal cancellation, this
-	// is an absolute safety net covering connection setup and full body read.
-	// It tracks SeedRequestTimeout, so raising the admission window does not
-	// leave the client cutting the request off first and reporting a transport
-	// error where the deadline would have reported a timeout.
-	seedClient, seedToken, err := newRunnerOriginHTTPClient(cfg, o.credReloader, seedClientTimeout(cfg))
-	if err != nil {
-		return err
-	}
-	// The supply fetch client shares the seed origin: both talk to the control
-	// plane's HTTP API. The gate publishes into the process-wide supply.Default
-	// (the registry node handlers read through $supplies), unless an in-package
-	// test installed a registry of its own.
+	// The gate publishes into the process-wide supply.Default (the registry node
+	// handlers read through $supplies), unless an in-package test installed a
+	// registry of its own.
 	supplyReg := o.supplyRegistry
 	if supplyReg == nil {
 		supplyReg = supply.Default
 	}
-	gate := runnersvc.NewSupplyGate(&runnersvc.HTTPSupplyFetcher{
-		BaseURL:  seedBaseURL,
-		Token:    seedToken,
-		RunnerID: cfg.RunnerID,
-		Client:   seedClient,
-	}, supplyReg, o.logger)
+	gate := runnersvc.NewSupplyGate(supplyFetch, supplyReg, o.logger)
 	// Pull mode: a requirement declared as xflow.supply.http is fetched by THIS
 	// runner from the declared source, using this process's network position and
 	// credentials; the content goes into the local registry and is never written
@@ -1014,8 +1033,7 @@ func wireRunnerTriggerHosting(svcCfg *runnersvc.Config, cfg RunnerConfig, o *run
 	}
 	gate.SetPullFetcher(pullFetcher)
 
-	handler := runnersvc.NewTriggerActivationHandler(seedBaseURL, seedToken, runnerTriggerLookup{},
-		runnersvc.WithSeedHTTPClient(seedClient),
+	handlerOpts := []runnersvc.TriggerActivationHandlerOption{
 		runnersvc.WithSeedRunnerID(cfg.RunnerID),
 		runnersvc.WithSeedRequestTimeout(cfg.SeedRequestTimeout),
 		runnersvc.WithSupplyGate(gate),
@@ -1028,7 +1046,14 @@ func wireRunnerTriggerHosting(svcCfg *runnersvc.Config, cfg RunnerConfig, o *run
 		// a process-global slot, so a host with no metrics registry gets nil and
 		// an observed one gets its own registry — no install-once guard and no
 		// cross-runner arbitration.
-		runnersvc.WithSeedObserver(runnerSeedObserver(o.metrics)))
+		runnersvc.WithSeedObserver(runnerSeedObserver(o.metrics)),
+	}
+	if seeder != nil {
+		handlerOpts = append(handlerOpts, runnersvc.WithInProcessEntrySeeder(seeder))
+	} else {
+		handlerOpts = append(handlerOpts, runnersvc.WithSeedHTTPClient(seedClient))
+	}
+	handler := runnersvc.NewTriggerActivationHandler(seedBaseURL, seedToken, runnerTriggerLookup{}, handlerOpts...)
 
 	svcCfg.ActivationTracker = runnersvc.NewActivationTracker(handler, o.logger)
 	// The same gate/registry pair feeds the heartbeat's two supply channels:
@@ -1056,9 +1081,9 @@ func seedClientTimeout(cfg RunnerConfig) time.Duration {
 // nil when no metrics registry was configured.
 //
 // The nil case is returned as an untyped nil rather than as a non-nil interface
-// holding a nil *Metrics: the runtime installs whatever it is given into
-// HTTPEntrySeedRuntime.Observer and calls it behind a `!= nil` test, and a
-// typed-nil interface would pass that test and then panic on the first
+// holding a nil *Metrics: the seed runtime installs whatever it is given into
+// its Observer field (on both transports) and calls it behind a `!= nil` test,
+// and a typed-nil interface would pass that test and then panic on the first
 // admission — on the hot path, inside the runner's trigger flush.
 func runnerSeedObserver(m *metrics.Metrics) types.EntrySeedObserver {
 	if m == nil {
@@ -1349,8 +1374,9 @@ func runnerNeedsPool(cfg RunnerConfig) bool {
 }
 
 // runnerSeedBaseURL returns the control-plane origin the hosted trigger's seed
-// runtime posts entry admissions to. Entry seeding is an HTTP round-trip even
-// under the gRPC transport, so it always uses ServerURL.
+// runtime posts entry admissions to. Seeding is an HTTP round-trip only under
+// the HTTP and gRPC transports; RunnerTransportInProc admits in process and
+// never consults this value.
 func runnerSeedBaseURL(cfg RunnerConfig) string {
 	return strings.TrimRight(cfg.ServerURL, "/")
 }
@@ -1573,11 +1599,10 @@ func NewRunnerHTTPClient(cfg RunnerConfig, timeout time.Duration) (*http.Client,
 // The fallback is an HTTP round-trip, so under RunnerTransportInProc with an
 // empty ServerURL the origin below is empty and the fallback fails at first
 // use. Only a runner that declares no script/map capability avoids it —
-// those are the only nodes that resolve artifacts. Closing this in process
-// (serving guest bytes straight from the embedded artifact store, the way the
-// seed fetch must also be closed) is a separate change; until then an in-process
-// runner that does reach a script node needs ServerURL set, and picking the
-// transport does not by itself make it self-contained.
+// those are the only nodes that resolve artifacts. Unlike the seed and supply
+// reads, artifact fetch has NOT been closed in process: an in-process runner
+// that does reach a script node needs ServerURL set, and picking the transport
+// does not by itself make it self-contained.
 //
 // One instance, three consumers — the dispatcher, the group runtime, and the
 // subgraph runtime. The latter two build their own inner backends per attempt,
