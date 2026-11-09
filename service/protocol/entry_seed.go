@@ -78,6 +78,13 @@ type SeedExecutionResponse struct {
 // and a state a runner classifies are the same string; the values are stable
 // wire vocabulary, not an implementation detail.
 const (
+	// ConcurrencyRetryAfterSeconds is the Retry-After floor a concurrency
+	// refusal carries on every face that can express one: the HTTP Retry-After
+	// header, the refusal body's retry_after_seconds, and the in-process
+	// EntrySeedResponse.RetryAfter. One value in one place, because the same
+	// refusal must read the same on every transport.
+	ConcurrencyRetryAfterSeconds = 1
+
 	// SeedStateOverLimit: the workflow is at its concurrency limit and the
 	// refusal is REJECT-mode — nothing was persisted.
 	SeedStateOverLimit = "over_limit"

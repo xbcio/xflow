@@ -136,23 +136,23 @@ var _ types.EntrySeedRuntime = (*HTTPEntrySeedRuntime)(nil)
 // silently dropping it.
 var _ types.TriggerRuntime = (*HTTPEntrySeedRuntime)(nil)
 
-// errNonSeedPathUnsupported is returned by the legacy TriggerRuntime methods.
+// ErrNonSeedPathUnsupported is returned by the legacy TriggerRuntime methods.
 // This runtime only supports the entry-seed admission path.
-var errNonSeedPathUnsupported = errors.New("entry-seed: runtime supports only the entry-seed admission path")
+var ErrNonSeedPathUnsupported = errors.New("entry-seed: runtime supports only the entry-seed admission path")
 
 // Emit is not supported: this runtime only admits via SeedExecutionFromEntry.
 func (h *HTTPEntrySeedRuntime) Emit(context.Context, types.WorkflowID, string, *types.TriggerEvent) (types.ExecutionID, error) {
-	return "", errNonSeedPathUnsupported
+	return "", ErrNonSeedPathUnsupported
 }
 
 // Dedup is not supported on the entry-seed path (admission is server-side).
 func (h *HTTPEntrySeedRuntime) Dedup(context.Context, string, time.Duration) (bool, error) {
-	return false, errNonSeedPathUnsupported
+	return false, ErrNonSeedPathUnsupported
 }
 
 // TryLock is not supported on the entry-seed path.
 func (h *HTTPEntrySeedRuntime) TryLock(context.Context, string, time.Duration) (types.TriggerLock, bool, error) {
-	return nil, false, errNonSeedPathUnsupported
+	return nil, false, ErrNonSeedPathUnsupported
 }
 
 // State is not supported on the entry-seed path; returns nil.
@@ -182,13 +182,18 @@ func (h *HTTPEntrySeedRuntime) observeAdmission(ctx context.Context, resp types.
 	if h.Observer == nil {
 		return
 	}
-	h.Observer.OnEntrySeedAdmission(ctx, admissionOutcome(resp, err), d)
+	h.Observer.OnEntrySeedAdmission(ctx, AdmissionOutcome(resp, err), d)
 }
 
-// admissionOutcome classifies one admission attempt for the metrics label. It
+// AdmissionOutcome classifies one admission attempt for the metrics label. It
 // is a closed enum computed from the response and the error, never from a
 // server-supplied or free-text value, so it cannot open unbounded label
 // cardinality in a process-lifetime registry.
+//
+// It is exported because every EntrySeedRuntime implementation classifies its
+// attempts through this same function: the in-process runtime must report the
+// same outcome vocabulary as the HTTP one, or a fleet's metric would depend on
+// which transport a runner happens to use.
 //
 // "timeout" is separated from "error" deliberately. Both withhold the offset
 // and redeliver the batch, but they call for opposite operator responses: a
@@ -202,7 +207,7 @@ func (h *HTTPEntrySeedRuntime) observeAdmission(ctx context.Context, resp types.
 // admission can be withheld: the workflow's own concurrency policy said no. That
 // is a designed throttle, not a fault, and an operator who cannot see it in its
 // own series reads a correctly-behaving deployment as a broken one.
-func admissionOutcome(resp types.EntrySeedResponse, err error) string {
+func AdmissionOutcome(resp types.EntrySeedResponse, err error) string {
 	switch {
 	case resp.Refused && resp.QueueFull:
 		// Separate from "refused" for the same reason the two refusals get

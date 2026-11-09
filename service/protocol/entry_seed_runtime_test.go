@@ -600,8 +600,8 @@ func TestAdmissionOutcomeClassification(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := admissionOutcome(tc.resp, tc.err); got != tc.want {
-				t.Errorf("admissionOutcome = %q, want %q", got, tc.want)
+			if got := AdmissionOutcome(tc.resp, tc.err); got != tc.want {
+				t.Errorf("AdmissionOutcome = %q, want %q", got, tc.want)
 			}
 		})
 	}
