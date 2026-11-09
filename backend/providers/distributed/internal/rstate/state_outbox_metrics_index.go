@@ -45,10 +45,12 @@ import (
 // script and the index write, a Redis error, data written before this index
 // existed). walkOutboxMetricsKeyspace advances one ScanPage cursor per
 // namespace over `exec:{*}:outbox:*` and registers every ready or dead key it
-// finds. Until the first full round after process start it walks the whole
-// keyspace in one call (backfill); after that it is throttled to roughly one
-// round per outboxMetricsWalkRound. So a lost registration is recovered within
-// outboxMetricsWalkRound plus one metrics interval.
+// finds. Only one Store per namespace walks at a time (the redisx walk-lock for
+// kind "outbox"); the others issue no SCAN and no DBSIZE. A holder that finds
+// no recent round-done marker walks the whole keyspace in one call (backfill);
+// otherwise it is throttled to roughly one round per outboxMetricsWalkRound. So
+// a lost registration is recovered within outboxMetricsWalkRound (1 hour) plus
+// one metrics interval.
 //
 // These are gauges. During backfill, and for up to that bound after a lost
 // registration, an execution can be missing from the reading; the next reading
@@ -63,12 +65,15 @@ const (
 	outboxMetricsIndexPage = 512
 
 	// outboxMetricsWalkPage is the COUNT hint of one safety-net SCAN page.
-	outboxMetricsWalkPage = 1000
+	outboxMetricsWalkPage = redisx.WalkScanCount
 
 	// outboxMetricsWalkRound is the target time for one throttled keyspace
-	// round. At 2.35M keys and a 30s metrics interval this is ~118 pages of
-	// 1000 per call, against two full COUNT-128 walks per call before.
-	outboxMetricsWalkRound = 10 * time.Minute
+	// round. At 2.77M keys and a 30s metrics interval this is ~24 pages of
+	// 1000 per call.
+	outboxMetricsWalkRound = redisx.WalkRound
+
+	// outboxWalkKind names the walk in the holder-lock and round-done keys.
+	outboxWalkKind = "outbox"
 )
 
 // outboxMetricsWalkState is one namespace's safety-net walk.
@@ -77,7 +82,8 @@ type outboxMetricsWalkState struct {
 	backfilled bool
 	last       time.Time
 	// credit is how many keys the walk may examine, accrued from elapsed time.
-	credit float64
+	credit  float64
+	holding bool
 }
 
 func outboxDeadIndexKey(t namespace.Namespace) string {
@@ -185,7 +191,19 @@ func (s *Store) walkOutboxMetricsKeyspace(ctx context.Context, t namespace.Names
 		w = &outboxMetricsWalkState{}
 		s.outboxMetricsWalks[t] = w
 	}
+	holding, recent, err := redisx.BeginWalk(ctx, s.rdb, string(t), outboxWalkKind, s.walkOwner, w.holding)
+	if err != nil {
+		s.noteOutboxMetricsIndexFailure("walk-lock", err)
+		return
+	}
+	if !holding {
+		*w = outboxMetricsWalkState{}
+		return
+	}
 	now := time.Now()
+	if !w.holding {
+		*w = outboxMetricsWalkState{holding: true, backfilled: recent, last: now}
+	}
 	pages := -1 // backfill: until the round completes
 	if w.backfilled {
 		size, err := s.rdb.DBSize(ctx).Result()
@@ -215,6 +233,17 @@ func (s *Store) walkOutboxMetricsKeyspace(ctx context.Context, t namespace.Names
 	}
 	pattern := execScanPattern(t, "outbox:*")
 	for i := 0; pages < 0 || i < pages; i++ {
+		if i > 0 && i%redisx.WalkRenewEveryPages == 0 {
+			ok, err := redisx.RenewWalkLock(ctx, s.rdb, redisx.WalkLockKey(string(t), outboxWalkKind), s.walkOwner, redisx.WalkLockTTL)
+			if err != nil {
+				s.noteOutboxMetricsIndexFailure("walk-renew", err)
+				return
+			}
+			if !ok {
+				*w = outboxMetricsWalkState{}
+				return
+			}
+		}
 		keys, next, err := redisx.ScanPage(ctx, s.rdb, w.cursors, pattern, outboxMetricsWalkPage)
 		if err != nil {
 			s.noteOutboxMetricsIndexFailure("walk", err)
@@ -223,6 +252,9 @@ func (s *Store) walkOutboxMetricsKeyspace(ctx context.Context, t namespace.Names
 		w.cursors = next
 		s.registerOutboxMetricsKeys(ctx, t, keys)
 		if cursorsDone(next) {
+			if err := redisx.MarkWalkRoundDone(ctx, s.rdb, redisx.WalkDoneKey(string(t), outboxWalkKind), now, outboxMetricsWalkRound); err != nil {
+				s.noteOutboxMetricsIndexFailure("walk-done", err)
+			}
 			if !w.backfilled {
 				w.backfilled = true
 				w.last = now

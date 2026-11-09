@@ -16,8 +16,13 @@ import (
 )
 
 type scanCountHook struct {
-	mu sync.Mutex
-	n  int
+	mu     sync.Mutex
+	n      int
+	dbsize int
+	// pages > 0 makes every SCAN take that many round trips: cursors 0..pages-1
+	// return an empty page, and the last one runs the real SCAN. miniredis
+	// ignores COUNT, so this is how tests observe page-by-page walks.
+	pages int
 }
 
 func (h *scanCountHook) DialHook(next redis.DialHook) redis.DialHook { return next }
@@ -25,6 +30,15 @@ func (h *scanCountHook) DialHook(next redis.DialHook) redis.DialHook { return ne
 func (h *scanCountHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 	return func(ctx context.Context, cmd redis.Cmder) error {
 		h.note(cmd)
+		if sc, ok := cmd.(*redis.ScanCmd); ok && h.pages > 0 && strings.EqualFold(cmd.Name(), "scan") {
+			var cursor uint64
+			fmt.Sscan(fmt.Sprint(cmd.Args()[1]), &cursor)
+			if cursor < uint64(h.pages) {
+				sc.SetVal(nil, cursor+1)
+				return nil
+			}
+			cmd.Args()[1] = uint64(0)
+		}
 		return next(ctx, cmd)
 	}
 }
@@ -44,6 +58,19 @@ func (h *scanCountHook) note(cmd redis.Cmder) {
 		h.n++
 		h.mu.Unlock()
 	}
+	if strings.EqualFold(cmd.Name(), "dbsize") {
+		h.mu.Lock()
+		h.dbsize++
+		h.mu.Unlock()
+	}
+}
+
+func (h *scanCountHook) takeDBSize() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := h.dbsize
+	h.dbsize = 0
+	return n
 }
 
 func (h *scanCountHook) take() int {

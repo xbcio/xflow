@@ -89,29 +89,35 @@ import (
 // on a persistent per-namespace cursor, registering each found execution at its
 // exact minimum (via the same re-arm).
 //
-//   - Until the first full round completes after process start, the walk runs a
-//     whole round inside the call (backfill). That is one old-style pass, once.
-//   - Afterwards it takes one step every leaseWalkStepInterval, sized from
-//     DBSIZE so that a full round spans about leaseWalkRound. Calls between
-//     steps issue no SCAN at all.
+//   - Only one Store per namespace walks at a time (the redisx walk-lock for
+//     kind "leases"); every other call issues no SCAN and no DBSIZE.
+//   - A holder that finds no recent round-done marker runs a whole round inside
+//     the call (backfill). That is one old-style pass, once per cluster. With a
+//     marker (handover between replicas) it goes straight to paced steps.
+//   - Paced, it takes one step every leaseWalkStepInterval, sized from DBSIZE
+//     so that a full round spans about leaseWalkRound. Calls between steps
+//     issue no SCAN at all.
 //
 // staleness bound for a lost registration ≈ leaseWalkRound + leaseWalkStepInterval
 //
-// (≈10.5 min), plus the sweeper's own grace. It bounds DELAY of reclamation,
+// (≈1 hour), plus the sweeper's own grace. It bounds DELAY of reclamation,
 // never correctness: the lease is still in its per-execution ZSET.
 const (
 	leaseExpiryExecIndexSuffix = "lease-index"
 
 	// leaseWalkPageCount is the SCAN COUNT hint of one walk page.
-	leaseWalkPageCount = 1024
+	leaseWalkPageCount = redisx.WalkScanCount
 	// leaseWalkStepInterval is the minimum time between two throttled walk
 	// steps in one namespace.
 	leaseWalkStepInterval = 30 * time.Second
 	// leaseWalkRound is the target duration of one throttled full round.
-	leaseWalkRound = 10 * time.Minute
+	leaseWalkRound = redisx.WalkRound
 	// leaseWalkMaxPagesPerStep caps one throttled step so a huge keyspace
 	// lengthens the round instead of producing a burst.
 	leaseWalkMaxPagesPerStep = 256
+
+	// leaseWalkKind names the walk in the holder-lock and round-done keys.
+	leaseWalkKind = "leases"
 )
 
 // leaseExpiryExecIndexKey returns the lease-expiry index for one namespace.
@@ -124,6 +130,7 @@ type leaseWalkState struct {
 	cursors    redisx.Cursors
 	backfilled bool
 	lastStep   time.Time
+	holding    bool
 }
 
 // markLeaseExpiryIndex registers an execution after a transition that added a
@@ -209,6 +216,17 @@ func (s *Store) walkLeaseExpiryKeys(ctx context.Context, t namespace.Namespace) 
 		st = &leaseWalkState{}
 		s.leaseWalks[t] = st
 	}
+	holding, recent, err := redisx.BeginWalk(ctx, s.rdb, string(t), leaseWalkKind, s.walkOwner, st.holding)
+	if err != nil {
+		return fmt.Errorf("acquire lease walk lock: %w", err)
+	}
+	if !holding {
+		*st = leaseWalkState{}
+		return nil
+	}
+	if !st.holding {
+		*st = leaseWalkState{holding: true, backfilled: recent}
+	}
 	now := time.Now()
 	pages := 0
 	if st.backfilled {
@@ -219,11 +237,17 @@ func (s *Store) walkLeaseExpiryKeys(ctx context.Context, t namespace.Namespace) 
 		if err != nil {
 			return fmt.Errorf("size keyspace for lease walk: %w", err)
 		}
-		steps := int64(leaseWalkRound / leaseWalkStepInterval)
-		pages = int((size/leaseWalkPageCount + steps) / steps)
-		pages = max(1, min(pages, leaseWalkMaxPagesPerStep))
+		pages = int(max(1, min(redisx.WalkPagesPerStep(size, leaseWalkPageCount, leaseWalkRound, leaseWalkStepInterval), leaseWalkMaxPagesPerStep)))
 	}
 	for done := 0; !st.backfilled || done < pages; done++ {
+		if done > 0 && done%redisx.WalkRenewEveryPages == 0 {
+			if ok, err := redisx.RenewWalkLock(ctx, s.rdb, redisx.WalkLockKey(string(t), leaseWalkKind), s.walkOwner, redisx.WalkLockTTL); err != nil {
+				return fmt.Errorf("renew lease walk lock: %w", err)
+			} else if !ok {
+				*st = leaseWalkState{}
+				return nil
+			}
+		}
 		keys, next, err := redisx.ScanPage(ctx, s.rdb, st.cursors, execScanPattern(t, "leases"), leaseWalkPageCount)
 		if err != nil {
 			return fmt.Errorf("walk lease indexes: %w", err)
@@ -238,6 +262,9 @@ func (s *Store) walkLeaseExpiryKeys(ctx context.Context, t namespace.Namespace) 
 		}
 		if cursorsAtStart(next) {
 			st.backfilled = true
+			if err := redisx.MarkWalkRoundDone(ctx, s.rdb, redisx.WalkDoneKey(string(t), leaseWalkKind), now, leaseWalkRound); err != nil {
+				s.noteLeaseIndexFailure("walk-done", err)
+			}
 			break
 		}
 	}
