@@ -192,7 +192,7 @@ runner matching、Runner Protocol、lease handoff 和 auth 逻辑仍归
 | 维度 | 说明 |
 |---|---|
 | 工厂 | `xflow.NewRunner(xflow.RunnerConfig{ServerURL, ...}, opts...)` |
-| 必填 | 仅 `ServerURL`（gRPC 传输下也必填：entry seeding 与 artifact fetch 恒走 HTTP） |
+| 必填 | HTTP/gRPC 传输下为 `ServerURL`（gRPC 传输下也必填：entry seeding 与 artifact fetch 恒走 HTTP）；inproc 传输下改由 `WithRunnerControlPlane` 提供控制面，entry seed / supply 读取都在进程内，`ServerURL` 只剩 artifact fetch 需要 |
 | API | `Run(ctx)` / `Close()` / `MetricsHandler()` |
 | 选项 | `WithRunnerLogger` / `WithRunnerTracer` / `WithRunnerMetrics` / `WithRunnerArtifactResolver` / `WithRunnerNodeRegistry` |
 | 重连 | `Run` 内置重连循环（2s 起、30s 封顶、指数退避 + 抖动），只在 ctx 取消时返回 |
