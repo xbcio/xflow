@@ -49,10 +49,10 @@ func TestGroupExecTriggerRuntime_ExecuteGroupRunsRealMembers(t *testing.T) {
 	}
 
 	adapter := &groupExecTriggerRuntime{
-		HTTPEntrySeedRuntime: &protocol.HTTPEntrySeedRuntime{},
-		runtime:              groupRT,
-		pkg:                  pkg,
-		packageHash:          hash,
+		seedRuntime: &protocol.HTTPEntrySeedRuntime{},
+		runtime:     groupRT,
+		pkg:         pkg,
+		packageHash: hash,
 	}
 
 	res, err := adapter.ExecuteGroup(context.Background(), map[string]any{"batch": "b1"})
@@ -67,7 +67,7 @@ func TestGroupExecTriggerRuntime_ExecuteGroupRunsRealMembers(t *testing.T) {
 	}
 
 	// The adapter is ALSO a types.EntrySeedRuntime (via the embedded
-	// HTTPEntrySeedRuntime) and a types.GroupExecRuntime — both capabilities
+	// seedRuntime) and a types.GroupExecRuntime — both capabilities
 	// must be visible through the SAME value, which is what lets
 	// TriggerActivationHandler install one Runtime that a trigger can type-
 	// assert for either.
@@ -139,10 +139,10 @@ func TestGroupExecTriggerRuntime_DeterministicFromMemberClassification(t *testin
 			}
 
 			adapter := &groupExecTriggerRuntime{
-				HTTPEntrySeedRuntime: &protocol.HTTPEntrySeedRuntime{},
-				runtime:              groupRT,
-				pkg:                  pkg,
-				packageHash:          hash,
+				seedRuntime: &protocol.HTTPEntrySeedRuntime{},
+				runtime:     groupRT,
+				pkg:         pkg,
+				packageHash: hash,
 			}
 
 			res, err := adapter.ExecuteGroup(context.Background(), map[string]any{"batch": "b1"})
@@ -207,10 +207,10 @@ func TestGroupExecTriggerRuntime_UnrunnableGroupIsPermanent(t *testing.T) {
 	}
 
 	adapter := &groupExecTriggerRuntime{
-		HTTPEntrySeedRuntime: &protocol.HTTPEntrySeedRuntime{},
-		runtime:              groupRT,
-		pkg:                  pkg,
-		packageHash:          hash,
+		seedRuntime: &protocol.HTTPEntrySeedRuntime{},
+		runtime:     groupRT,
+		pkg:         pkg,
+		packageHash: hash,
 	}
 
 	_, execErr := adapter.ExecuteGroup(context.Background(), map[string]any{"batch": "b1"})

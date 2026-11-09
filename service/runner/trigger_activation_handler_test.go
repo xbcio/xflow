@@ -774,10 +774,10 @@ func (r *recordingSeedObserver) OnEntrySeedAdmission(_ context.Context, outcome 
 }
 
 // TestTriggerActivationHandler_GroupSeedTimeoutReachesTheEmbeddedRuntime is the
-// group-path half of the assertion above: the group runtime embeds
-// HTTPEntrySeedRuntime, and a deadline threaded into only the single-node
-// constructor would leave every group batch on the 15s default — the shape with
-// the largest batch and therefore the one most likely to breach it.
+// group-path half of the assertion above: the group runtime embeds the seed
+// runtime, and a deadline threaded into only the single-node constructor would
+// leave every group batch on the 15s default — the shape with the largest batch
+// and therefore the one most likely to breach it.
 func TestTriggerActivationHandler_GroupSeedTimeoutReachesTheEmbeddedRuntime(t *testing.T) {
 	fh := &groupExecFakeTriggerHandler{}
 	lookup := fakeLookup{handlers: map[string]types.TriggerHandler{"test.grouplocal.trigger": fh}}
@@ -820,10 +820,11 @@ func TestTriggerActivationHandler_GroupSeedTimeoutReachesTheEmbeddedRuntime(t *t
 	if !ok {
 		t.Fatalf("Runtime type = %T, want *groupExecTriggerRuntime", fh.gotInput.Runtime)
 	}
-	if gr.HTTPEntrySeedRuntime == nil {
-		t.Fatal("groupExecTriggerRuntime.HTTPEntrySeedRuntime is nil; the group path has no admission runtime at all")
+	seedRT, ok := gr.seedRuntime.(*protocol.HTTPEntrySeedRuntime)
+	if !ok || seedRT == nil {
+		t.Fatalf("groupExecTriggerRuntime.seedRuntime = %T, want *protocol.HTTPEntrySeedRuntime; the group path has no admission runtime at all", gr.seedRuntime)
 	}
-	if got := gr.HTTPEntrySeedRuntime.RequestTimeout; got != 90*time.Second {
+	if got := seedRT.RequestTimeout; got != 90*time.Second {
 		t.Fatalf("embedded RequestTimeout = %v, want 90s: the group activation path "+
 			"kept the default deadline, and it is the path carrying the largest batch", got)
 	}

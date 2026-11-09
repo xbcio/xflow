@@ -51,6 +51,10 @@ type TriggerActivationHandler struct {
 	// attempt from every runtime this handler installs. nil (the default) means
 	// no admission metrics. Set via WithSeedObserver.
 	seedObserver types.EntrySeedObserver
+	// seeder, when non-nil, switches every seed runtime this handler installs
+	// from the HTTP transport to the in-process one. Set by the SDK under
+	// RunnerTransportInProc; nil keeps the historical HTTP wiring.
+	seeder InProcessEntrySeeder
 
 	// gate, when set, is the activation-time supply readiness gate. nil means no
 	// gating (a runner with no supply-consuming workflows, or an older wiring).
@@ -164,9 +168,19 @@ func WithSeedObserver(o types.EntrySeedObserver) TriggerActivationHandlerOption 
 
 // WithSeedRunnerID declares the runner identity on HTTP entry-seed requests.
 // It is used by enrollment-issued identities; empty preserves static-principal
-// deployments.
+// deployments. The in-process runtime declares the same identity.
 func WithSeedRunnerID(runnerID string) TriggerActivationHandlerOption {
 	return func(h *TriggerActivationHandler) { h.runnerID = runnerID }
+}
+
+// WithInProcessEntrySeeder makes every seed runtime this handler installs admit
+// through seeder instead of posting to seedBaseURL. The SDK sets it under
+// RunnerTransportInProc so a hosted trigger needs no control-plane origin and no
+// second credential — the admission is a call into the same process's Core.
+//
+// When set, seedBaseURL, authToken and the seed HTTP client are unused.
+func WithInProcessEntrySeeder(s InProcessEntrySeeder) TriggerActivationHandlerOption {
+	return func(h *TriggerActivationHandler) { h.seeder = s }
 }
 
 // WithSupplyGate installs the activation-time supply readiness gate. Without it
@@ -197,8 +211,9 @@ func WithArtifactCodeResolver(fn func(ctx context.Context, digest string) ([]byt
 var _ ActivationHandler = (*TriggerActivationHandler)(nil)
 
 // NewTriggerActivationHandler constructs a TriggerActivationHandler. seedBaseURL
-// is the control-plane origin for entry-seed admissions; authToken is the Bearer
-// token sent with each seed request; triggers resolves NodeType to a handler.
+// is the control-plane origin for entry-seed admissions and authToken is the
+// Bearer token sent with each request; both are unused when
+// WithInProcessEntrySeeder is set. triggers resolves NodeType to a handler.
 // Options (e.g. WithSeedHTTPClient) configure optional fields.
 func NewTriggerActivationHandler(seedBaseURL string, authToken string, triggers TriggerHandlerLookup, opts ...TriggerActivationHandlerOption) *TriggerActivationHandler {
 	h := &TriggerActivationHandler{
@@ -300,22 +315,10 @@ func (h *TriggerActivationHandler) Activate(ctx context.Context, d protocol.Acti
 	}
 
 	input := &types.TriggerActivateInput{
-		WorkflowID: types.WorkflowID(d.WorkflowID),
-		NodeName:   d.EntryUnitID,
-		Params:     withEntrySeedParams(d),
-		Runtime: &protocol.HTTPEntrySeedRuntime{
-			BaseURL:      h.seedBaseURL,
-			Client:       h.seedHTTPClient(),
-			Token:        h.authToken,
-			RunnerID:     h.runnerID,
-			Namespace:    d.Namespace,
-			Generation:   d.Generation,
-			ReplicaIndex: d.ReplicaIndex,
-			// Resolved here, not left to the runtime's own fallback, so the
-			// value this handler reports is the value that is applied.
-			RequestTimeout: h.seedRequestTimeoutOrDefault(),
-			Observer:       h.seedObserver,
-		},
+		WorkflowID:       types.WorkflowID(d.WorkflowID),
+		NodeName:         d.EntryUnitID,
+		Params:           withEntrySeedParams(d),
+		Runtime:          h.newSeedRuntime(d),
 		Supplies:         resolveSuppliesForTrigger(d.Supplies, id.supplyNamespace()),
 		WorkflowTimezone: d.WorkflowTimezone,
 	}
@@ -363,20 +366,7 @@ func (h *TriggerActivationHandler) activateGroup(ctx context.Context, d protocol
 		NodeName:   pkg.EntryNode,
 		Params:     withGroupEntrySeedParams(entryNodeDef.Parameters, d),
 		Runtime: &groupExecTriggerRuntime{
-			HTTPEntrySeedRuntime: &protocol.HTTPEntrySeedRuntime{
-				BaseURL:      h.seedBaseURL,
-				Client:       h.seedHTTPClient(),
-				Token:        h.authToken,
-				RunnerID:     h.runnerID,
-				Namespace:    d.Namespace,
-				Generation:   d.Generation,
-				ReplicaIndex: d.ReplicaIndex,
-				// Same resolution as the single-node path above: a group batch
-				// is the larger of the two, so it is the one that most needs
-				// the configured deadline.
-				RequestTimeout: h.seedRequestTimeoutOrDefault(),
-				Observer:       h.seedObserver,
-			},
+			seedRuntime: h.newSeedRuntime(d),
 			runtime:     h.groupRuntime,
 			pkg:         pkg,
 			packageHash: d.PackageHash,
@@ -728,6 +718,39 @@ func (h *TriggerActivationHandler) seedHTTPClient() *http.Client {
 		return h.seedClient
 	}
 	return http.DefaultClient
+}
+
+// newSeedRuntime builds the seed runtime for one activation. It is the single
+// construction point for both the standalone-trigger and trigger-group paths, so
+// generation, replica index, namespace, deadline and observer cannot drift
+// between them. The transport is chosen once per handler: the in-process runtime
+// when a seeder is installed, the HTTP runtime otherwise.
+//
+// RequestTimeout is resolved here rather than left to either runtime's own
+// fallback, so the value this handler reports is the value that is applied.
+func (h *TriggerActivationHandler) newSeedRuntime(d protocol.ActivateDirective) seedRuntime {
+	if h.seeder != nil {
+		return &inProcessEntrySeedRuntime{
+			Seeder:         h.seeder,
+			RunnerID:       h.runnerID,
+			Namespace:      d.Namespace,
+			Generation:     d.Generation,
+			ReplicaIndex:   d.ReplicaIndex,
+			RequestTimeout: h.seedRequestTimeoutOrDefault(),
+			Observer:       h.seedObserver,
+		}
+	}
+	return &protocol.HTTPEntrySeedRuntime{
+		BaseURL:        h.seedBaseURL,
+		Client:         h.seedHTTPClient(),
+		Token:          h.authToken,
+		RunnerID:       h.runnerID,
+		Namespace:      d.Namespace,
+		Generation:     d.Generation,
+		ReplicaIndex:   d.ReplicaIndex,
+		RequestTimeout: h.seedRequestTimeoutOrDefault(),
+		Observer:       h.seedObserver,
+	}
 }
 
 // seedRequestTimeoutOrDefault is the deadline every runtime this handler

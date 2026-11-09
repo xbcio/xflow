@@ -8,7 +8,6 @@ import (
 
 	"github.com/xbcio/xflow/engine/graph"
 	"github.com/xbcio/xflow/execution/subgraph"
-	"github.com/xbcio/xflow/service/protocol"
 	"github.com/xbcio/xflow/types"
 )
 
@@ -19,12 +18,21 @@ import (
 // spec 2026-08-07 §7.3 for the analogous per-record timeout rationale).
 const groupExecBatchDeadline = 30 * time.Second
 
+// seedRuntime is what a trigger activation receives as its Runtime on the
+// entry-seed path: admission plus the fail-closed TriggerRuntime methods every
+// seed-only runtime provides. Naming it lets the group runtime embed either the
+// HTTP runtime or the in-process one without knowing which transport it is on.
+type seedRuntime interface {
+	types.TriggerRuntime
+	types.EntrySeedRuntime
+}
+
 // groupExecTriggerRuntime is the Runtime a trigger-group activation installs
 // on TriggerActivateInput (see TriggerActivationHandler.activateGroup). It
-// embeds *protocol.HTTPEntrySeedRuntime for the entry-seed admission round trip
+// embeds a seedRuntime for the entry-seed admission round trip
 // (SeedExecutionFromEntry) and inherits its fail-closed TriggerRuntime stubs
-// (Emit/Dedup/TryLock/State) unchanged — this runtime, like
-// HTTPEntrySeedRuntime alone, only supports the entry-seed admission path.
+// (Emit/Dedup/TryLock/State) unchanged — this runtime, like the seed runtime
+// alone, only supports the entry-seed admission path.
 //
 // What it ADDS is ExecuteGroup: running the group's real member nodes locally
 // via GroupRuntime and returning the REAL boundary exits, so a Kafka trigger's
@@ -32,7 +40,7 @@ const groupExecBatchDeadline = 30 * time.Second
 // execution results instead of synthesizing exits from the raw batch (spec
 // 2026-08-07 §3.3-§3.4).
 type groupExecTriggerRuntime struct {
-	*protocol.HTTPEntrySeedRuntime
+	seedRuntime
 	runtime     *GroupRuntime
 	pkg         *graph.SubgraphPackage
 	packageHash string
