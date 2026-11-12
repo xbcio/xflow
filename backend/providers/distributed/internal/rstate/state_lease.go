@@ -254,6 +254,12 @@ func (s *Store) scanExpiredLeasesForNamespace(ctx context.Context, t namespace.N
 	if err := s.walkLeaseExpiryKeys(ctx, t); err != nil {
 		s.noteLeaseIndexFailure("walk", err)
 	}
+	// Orphan members are executions whose lease ZSET is gone: no reclaim can
+	// ever match them, yet each one the bounded read below touches spends budget
+	// and serial round trips. Prune them in bulk first, so the budget goes to
+	// real candidates. Best-effort like the walk: a failure must not stop the
+	// reclaim path below.
+	s.pruneOrphanLeaseIndex(ctx, t, max)
 	execIDs, err := s.dueLeaseExecutions(ctx, t, max, budget)
 	if err != nil {
 		return fmt.Errorf("read lease expiry index: %w", err)
