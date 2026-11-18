@@ -216,6 +216,78 @@ func (h *addOnLeaseIndexExistsPipeline) ProcessPipelineHook(next redis.ProcessPi
 	}
 }
 
+// blockingLeaseWalkScanHook parks the first SCAN of the safety-net walk and
+// reports it. Everything the sweep runs before the walk has completed by then,
+// so a test can inspect the index at the exact instant the walk would block the
+// rest of the sweep.
+type blockingLeaseWalkScanHook struct {
+	once    sync.Once
+	started chan struct{}
+	release chan struct{}
+}
+
+func (h *blockingLeaseWalkScanHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h *blockingLeaseWalkScanHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() == "scan" {
+			h.once.Do(func() { close(h.started) })
+			<-h.release
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (h *blockingLeaseWalkScanHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+// TestListExpiredLeasesPrunesOrphansBeforeWalk pins the prune/walk order: one
+// sweep must clear the orphan backlog before it enters the safety-net walk. A
+// walk without a round-done marker backfills inside the call and nothing behind
+// it runs until the whole keyspace has been SCANned; with the prune ordered
+// after it, a long backfill starves the prune precisely while the orphan
+// backlog grows (the production symptom). The walk is parked at its first SCAN
+// here, so the assertion below sees the sweep at that unbounded point.
+func TestListExpiredLeasesPrunesOrphansBeforeWalk(t *testing.T) {
+	state, _, rdb := newTestRedisState(t)
+	ctx := context.Background()
+	base := time.Now().Add(-time.Hour).UTC()
+	seedLeaseIndexOrphans(t, rdb, 200, float64(base.UnixMilli()))
+
+	hook := &blockingLeaseWalkScanHook{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	rdb.AddHook(hook)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(hook.release) }) }
+	defer release()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := state.ListExpiredLeases(ctx, time.Now())
+		done <- err
+	}()
+
+	select {
+	case <-hook.started:
+	case err := <-done:
+		t.Fatalf("ListExpiredLeases returned before the walk's first SCAN: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the safety-net walk never reached its first SCAN")
+	}
+
+	// The walk is parked; the prune must already have run.
+	requireLeaseIndexCard(t, rdb, 0)
+
+	release()
+	if err := <-done; err != nil {
+		t.Fatalf("ListExpiredLeases() error = %v", err)
+	}
+	requireLeaseIndexCard(t, rdb, 0)
+}
+
 // TestLeaseIndexPruneVerifyRestoresConcurrentRegistration pins the prune's
 // verify step: a lease ZSET that appears after the orphan read but before the
 // ZREM must be re-registered in the index, not lost with the orphan.
