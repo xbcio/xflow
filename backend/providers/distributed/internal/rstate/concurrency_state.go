@@ -130,18 +130,21 @@ func concurrencyAdmitKeys(t namespace.Namespace, workflow string) []string {
 		concurrencyQueueSeqKeyForTag(t, tag),
 		concurrencyCapacityKeyForTag(t, tag),
 		concurrencyDeadlineKeyForTag(t, tag),
+		concurrencyQueueArrivalKeyForTag(t, tag),
 	}
 }
 
-// concurrencyReleaseKeys is the key list workflowReleaseLua declares, in order.
-// It is a prefix of the admit list with the sequence counter left out: a
-// release neither reads nor advances the line's order.
+// concurrencyReleaseKeys is the key list workflowReleaseLua and
+// workflowFillLua declare, in order. It is a prefix of the admit list with the
+// sequence counter left out: a release neither reads nor advances the line's
+// order.
 func concurrencyReleaseKeys(t namespace.Namespace, tag string) []string {
 	return []string{
 		concurrencySlotKeyForTag(t, tag),
 		concurrencyQueueKeyForTag(t, tag),
 		concurrencyDeadlineKeyForTag(t, tag),
 		concurrencyCapacityKeyForTag(t, tag),
+		concurrencyQueueArrivalKeyForTag(t, tag),
 	}
 }
 
@@ -484,13 +487,127 @@ func (s *Store) dropParkedOutbox(ctx context.Context, t namespace.Namespace, id 
 // execution the same way: holding a slot while its status still reads queued.
 // Failing the caller instead would report a release that has already been made
 // durable as failed, encouraging a retry that would release someone else's slot.
+// maxConcurrencyPromotionRounds bounds the refill loop completePromotions runs
+// after it reaps promoted members that cannot start. Each round consumes line
+// members, so the loop terminates on its own; the cap only protects a
+// pathological workflow from holding one maintenance call indefinitely. Work
+// left over is exactly what the periodic sweep exists to finish.
+const maxConcurrencyPromotionRounds = 8
+
 func (s *Store) completePromotions(ctx context.Context, t namespace.Namespace, tag string, promoted []string) {
-	for _, raw := range promoted {
-		id := types.ExecutionID(raw)
-		if err := s.promoteExecution(ctx, t, id); err != nil && s.logger != nil {
-			s.logger.Error("workflow_concurrency_promotion_failed", "execution_id", raw, "workflow_tag", tag, "err", err)
+	pending := promoted
+	for round := 0; round < maxConcurrencyPromotionRounds && len(pending) > 0; round++ {
+		refill := false
+		for _, raw := range pending {
+			freed, err := s.promoteOrReap(ctx, t, tag, types.ExecutionID(raw))
+			if err != nil && s.logger != nil {
+				s.logger.Error("workflow_concurrency_promotion_failed", "execution_id", raw, "workflow_tag", tag, "err", err)
+			}
+			if freed {
+				refill = true
+			}
 		}
+		if !refill {
+			return
+		}
+		next, err := s.fillConcurrencySlotsOnce(ctx, t, tag)
+		if err != nil {
+			if s.logger != nil {
+				s.logger.Error("workflow_concurrency_refill_failed", "workflow_tag", tag, "err", err)
+			}
+			return
+		}
+		pending = next
 	}
+}
+
+// promoteOrReap validates one promoted execution against its graph before it
+// is allowed to keep the slot the line handed it. It reports whether the
+// caller should refill the freed capacity.
+//
+// The validation is here, rather than in the Lua scripts, because a promoted
+// execution's status and graph live in its own hash slot: no workflow-slot
+// script can read them, and a promotion that started a graph-less execution
+// would spend a slot on work that can never finish. The promotion itself is
+// still the queue's decision; this call is its admission check.
+func (s *Store) promoteOrReap(ctx context.Context, t namespace.Namespace, tag string, id types.ExecutionID) (bool, error) {
+	probe, err := s.probeExecution(ctx, t, id)
+	if err != nil {
+		return false, err
+	}
+	if !probe.hasStatus {
+		member := &concurrencyMember{id: id, inSlot: true}
+		s.dropOrphanMember(ctx, t, tag, id, member, false, false)
+		s.projectMissingExecutionOrphan(ctx, t, id)
+		candidate := &engine.OrphanReclaimCandidate{
+			ExecutionID: id, Namespace: t, Workflow: s.executionWorkflowID(ctx, t, id),
+			Evidence: engine.OrphanEvidenceExecutionMissing,
+		}
+		s.observeOrphanReclaimed(ctx, candidate, engine.OrphanTriggerPromotion)
+		s.logOrphanReclaimed(candidate, engine.OrphanTriggerPromotion)
+		return true, nil
+	}
+	if types.IsTerminalExecutionStatus(probe.status) {
+		s.dropOrphanMember(ctx, t, tag, id, &concurrencyMember{id: id, inSlot: true}, false, false)
+		return true, nil
+	}
+	if !probe.graphExists {
+		// The promotion already moved the member into the slot. Converge the
+		// execution without a membership, then remove that slot here: releasing
+		// through releaseWorkflowSlot would recurse back into this loop.
+		//
+		// The promotion path applies the same age grace as the sweep. A queue
+		// member that lost its graph inside the grace may be an execution whose
+		// work just committed and whose next task is not leased yet; reaping it
+		// immediately would be the false positive the activity clock exists to
+		// prevent. The member keeps the slot while the grace runs, so the freed
+		// capacity can idle for up to one grace — the deliberate cost of not
+		// terminating live work. It is not stuck: a slot-holding queued member is
+		// exactly what sweepConcurrencySlotSet classifies as a half-finished
+		// promotion, and the orphan sweep judges it again on the next pass.
+		noMembership := &concurrencyMember{id: id}
+		grace := s.concurrencyOrphanGrace
+		if grace <= 0 {
+			grace = engine.DefaultOrphanReclaimGrace
+		}
+		_, reclaimed := s.evaluateLiveOrphan(ctx, t, tag, id, probe, noMembership, engine.OrphanReclaimSweep, grace, false, false, engine.OrphanTriggerPromotion)
+		if !reclaimed {
+			return false, nil
+		}
+		s.dropOrphanMember(ctx, t, tag, id, &concurrencyMember{id: id, inSlot: true}, false, false)
+		return true, nil
+	}
+	if probe.status != types.ExecutionStatusQueued {
+		// Running is a promotion that already completed (a duplicate decision);
+		// paused or canceling is work that still owns its transition.
+		return false, nil
+	}
+	started, err := s.promoteQueuedExecution(ctx, t, id)
+	if err != nil {
+		return false, err
+	}
+	if !started {
+		// The CAS left queued, which means another transition won. Re-read so
+		// this call cannot release a slot a concurrent promotion just started,
+		// and drop the slot only when the execution genuinely cannot use it.
+		after, err := s.probeExecution(ctx, t, id)
+		if err != nil {
+			return false, err
+		}
+		if !after.hasStatus || types.IsTerminalExecutionStatus(after.status) {
+			s.dropOrphanMember(ctx, t, tag, id, &concurrencyMember{id: id, inSlot: true}, false, false)
+			if !after.hasStatus {
+				s.projectMissingExecutionOrphan(ctx, t, id)
+			}
+			return true, nil
+		}
+		return false, nil
+	}
+	// Promotion is a status transition, so the audit mirror is written here,
+	// synchronously: the drift repair compares Redis to SQL and a promotion
+	// that only reached Redis would show up as divergence until it did.
+	s.projectExecutionStatus(namespace.WithNamespace(ctx, t), id, types.ExecutionStatusRunning, "")
+	return false, nil
 }
 
 // promoteExecution starts one promoted execution: the status leaves queued and
@@ -505,6 +622,14 @@ func (s *Store) completePromotions(ctx context.Context, t namespace.Namespace, t
 // write, which would clear them, has not landed yet. See the script for how it
 // identifies those intents.
 func (s *Store) promoteExecution(ctx context.Context, t namespace.Namespace, id types.ExecutionID) error {
+	_, err := s.promoteQueuedExecution(ctx, t, id)
+	return err
+}
+
+// promoteQueuedExecution is promoteExecution with the outcome reported, for
+// callers that must know whether the status actually left queued before they
+// project it or decide the slot is usable.
+func (s *Store) promoteQueuedExecution(ctx context.Context, t namespace.Namespace, id types.ExecutionID) (bool, error) {
 	ttl := s.getExecTTL(ctx, id)
 	if ttl <= 0 {
 		ttl = s.execTTL
@@ -520,17 +645,17 @@ func (s *Store) promoteExecution(ctx context.Context, t namespace.Namespace, id 
 		int(ttl.Seconds()), queuedOutboxHold.UnixMilli(), time.Now().UTC().UnixMilli(),
 	).Slice()
 	if err != nil && err != redis.Nil {
-		return fmt.Errorf("promote execution %q: %w", id, err)
+		return false, fmt.Errorf("promote execution %q: %w", id, err)
 	}
 	if luaReplyInt(reply, 0) != 1 {
-		return nil
+		return false, nil
 	}
 	// The discovery index remembers the score the execution had when it was
 	// created, which is the held one. Re-registering publishes the score that
 	// makes it findable; without it the execution would be started and its work
 	// would still not be discovered until the next keyspace sweep.
 	s.markOutboxReadyIndex(ctx, t, id)
-	return nil
+	return true, nil
 }
 
 // ExpireQueuedExecutions drives every queued execution whose queue timeout has
@@ -582,7 +707,11 @@ func (s *Store) expireQueuedForNamespace(ctx context.Context, t namespace.Namesp
 			break
 		}
 		raw, err := workflowQueueExpireLua.Run(ctx, s.rdb,
-			[]string{concurrencyQueueKeyForTag(t, tag), concurrencyDeadlineKeyForTag(t, tag)},
+			[]string{
+				concurrencyQueueKeyForTag(t, tag),
+				concurrencyDeadlineKeyForTag(t, tag),
+				concurrencyQueueArrivalKeyForTag(t, tag),
+			},
 			now, limit-expired,
 		).StringSlice()
 		if err != nil && err != redis.Nil {

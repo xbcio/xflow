@@ -24,7 +24,7 @@ var _ engine.GroupStateStore = (*Store)(nil)
 // acquireGroupLeaseLua atomically pins a group unit to a runner. It mirrors
 // acquireTaskLeaseLua but keys on the group unit's status/meta. Returns
 // {1} on acquire, {0} when the unit is already running/done or fenced.
-// KEYS: 1=group:status 2=group:meta 3=leases(zset)
+// KEYS: 1=group:status 2=group:meta 3=leases(zset) 4=execution activity_at_ms
 // ARGV: 1=lease_id 2=lease_token 3=attempt 4=ttl_s 5=deadline_ms 6=lease_member
 //
 //	7=group_name 8=entry_node_idx 9=activation_id 10=issued_at_ms 11=lease_ttl_ms
@@ -51,11 +51,20 @@ redis.call('HSET', KEYS[2], 'lease_id', ARGV[1], 'lease_token', ARGV[2], 'attemp
 redis.call('EXPIRE', KEYS[2], ttl)
 redis.call('ZADD', KEYS[3], tonumber(ARGV[5]), ARGV[6])
 redis.call('EXPIRE', KEYS[3], ttl)
+-- A group lease is the strongest form of activity: a runner is working this
+-- unit right now. Stamp the execution's activity clock exactly as
+-- acquireTaskLeaseLua does, so the orphan sweep does not read an execution
+-- between two group leases as abandoned. Same {id} slot, same command.
+local issuedAt = tonumber(ARGV[10] or '0')
+if issuedAt > 0 then
+    redis.call('SET', KEYS[4], issuedAt, 'EX', ttl)
+end
 return {1, attempt}
 `)
 
 // renewGroupLeaseLua extends the deadline only when token still matches.
-// KEYS: 1=group:meta 2=leases(zset)  ARGV: 1=token 2=deadline_ms 3=ttl_s 4=member
+// KEYS: 1=group:meta 2=leases(zset) 3=execution activity_at_ms
+// ARGV: 1=token 2=deadline_ms 3=ttl_s 4=member 5=now_ms
 var renewGroupLeaseLua = redis.NewScript(`
 local token = redis.call('HGET', KEYS[1], 'lease_token') or ''
 if token == '' or token ~= ARGV[1] then
@@ -63,6 +72,13 @@ if token == '' or token ~= ARGV[1] then
 end
 redis.call('ZADD', KEYS[2], tonumber(ARGV[2]), ARGV[4])
 redis.call('EXPIRE', KEYS[2], tonumber(ARGV[3]))
+-- A renewal is the runner saying it is still working the unit; refresh the
+-- execution's activity clock exactly as renewTaskLeaseLua does. Same {id}
+-- slot, same command.
+local nowMs = tonumber(ARGV[5] or '0')
+if nowMs > 0 then
+    redis.call('SET', KEYS[3], nowMs, 'EX', tonumber(ARGV[3]))
+end
 return {1}
 `)
 
@@ -80,7 +96,13 @@ return {1}
 //
 //	6=group:meta 7=leases(zset) 8=outbox:ready 9=outbox:body
 //	10.. = per exit: output key + node meta key (2 keys each), followed by
-//	       per downstream unit: inDegree, active, schedule (3 keys each)
+//	       per downstream unit: inDegree, active, schedule (3 keys each),
+//	       and finally the execution activity_at_ms key as KEYS[#KEYS]
+//
+// The activity clock is appended LAST, after every variable-length section, so
+// it cannot shift the exit base (keypos 10) or the downstream base. It carries
+// the execution's {id} hash tag like the rest, so the extra write stays on one
+// slot.
 //
 // Redis Cluster: all keys share the same {id} hash tag (execution ID) so they
 // map to one slot. The namespace prefix is brace-less and does not participate
@@ -93,7 +115,8 @@ return {1}
 //	6=fatal(0|1) 7=allowCycles(0|1) 8=error 9=exitCount 10=downstreamCount
 //	11.. = per exit: encoded output data + private-output bit (2 args each), followed by
 //	       per unit: arrivalCount, activeCount, mergeMode,
-//	       executeID, executeBody, skipID, skipBody, nodeName (8 args each)
+//	       executeID, executeBody, skipID, skipBody, nodeName (8 args each),
+//	       and finally now_ms (unix milliseconds) as ARGV[#ARGV]
 //
 // Returns {code, done, finalStatus, written, skips}: code 0=stale 1=accepted
 //
@@ -155,6 +178,14 @@ if token == '' or token ~= ARGV[1] or attempt ~= tonumber(ARGV[2]) then
     return {0, 0, '', {}}
 end
 local ttl = tonumber(ARGV[3])
+-- An accepted group commit is work the execution visibly made progress on, the
+-- second half of the orphan sweep's age anchor. The key is KEYS[#KEYS] — after
+-- every variable-length section — and the timestamp is ARGV[#ARGV], so neither
+-- append can perturb the exit/downstream bases above. Same {id} slot.
+local committedAt = tonumber(ARGV[#ARGV] or '0')
+if committedAt > 0 then
+    redis.call('SET', KEYS[#KEYS], committedAt, 'EX', ttl)
+end
 -- F2: boundary outputs are written here, strictly after the fence check
 -- above and before any other mutation, so a stale/duplicate/failed commit
 -- attempt can never reach this point and cannot alter output.
@@ -284,6 +315,7 @@ func (s *Store) AcquireGroupLease(ctx context.Context, lease *engine.GroupLease)
 		groupUnitStatusKey(t, lease.ExecutionID, lease.GroupUnitIdx),
 		groupUnitMetaKey(t, lease.ExecutionID, lease.GroupUnitIdx),
 		leaseExpiryZSetKey(t, lease.ExecutionID),
+		activityAtKey(t, lease.ExecutionID),
 	}, string(lease.LeaseID), string(lease.LeaseToken), lease.Attempt,
 		int(ttl.Seconds()), deadlineMs,
 		groupLeaseMember(lease.ExecutionID, lease.GroupUnitIdx),
@@ -308,7 +340,9 @@ func (s *Store) RenewGroupLease(ctx context.Context, id types.ExecutionID, unitI
 	res, err := renewGroupLeaseLua.Run(ctx, s.rdb, []string{
 		groupUnitMetaKey(t, id, unitIdx),
 		leaseExpiryZSetKey(t, id),
-	}, string(token), deadline.UnixMilli(), int(ttl.Seconds()), groupLeaseMember(id, unitIdx)).Slice()
+		activityAtKey(t, id),
+	}, string(token), deadline.UnixMilli(), int(ttl.Seconds()), groupLeaseMember(id, unitIdx),
+		time.Now().UTC().UnixMilli()).Slice()
 	if err != nil {
 		return false, fmt.Errorf("renew group lease %q/#%d: %w", id, unitIdx, err)
 	}
@@ -404,6 +438,11 @@ func (s *Store) CommitGroup(ctx context.Context, req engine.GroupCommitRequest) 
 		}
 		args = append(args, arrival.ArrivalCount, arrival.ActiveCount, arrival.MergeMode, executeID, executeJSON, skipID, skipJSON, arrival.NodeName)
 	}
+	// The activity clock rides last, after every variable-length section, so it
+	// cannot perturb the exit or downstream argument bases (both addressed from
+	// the FRONT). The commit script writes it only on an accepted transition.
+	keys = append(keys, activityAtKey(t, req.ExecutionID))
+	args = append(args, time.Now().UTC().UnixMilli())
 	res, err := commitGroupLua.Run(ctx, s.rdb, keys, args...).Slice()
 	if err != nil {
 		return engine.GroupCommitResult{}, fmt.Errorf("commit group %q/#%d: %w", req.ExecutionID, req.GroupUnitIdx, err)
@@ -555,6 +594,12 @@ func (s *Store) GetGroupLease(ctx context.Context, id types.ExecutionID, unitIdx
 // expireGroupLeaseLua transitions a running group unit back to pending (retry-ready)
 // only if the token still matches. Returns {1} if expired,
 // {0} if token mismatch/already terminal.
+//
+// It deliberately does not stamp the execution activity clock: this is the
+// sweeper reclaiming an already-expired lease, so it is the one group-lease
+// transition that carries no evidence of live work. The owner that would have
+// used the lease is gone; writing "now" here would make the orphan sweep treat
+// an abandoned execution as active.
 // KEYS: 1=group:status 2=group:meta 3=leases(zset)
 // ARGV: 1=token 2=ttl_s 3=lease_member
 var expireGroupLeaseLua = redis.NewScript(`
@@ -595,6 +640,10 @@ func (s *Store) ExpireGroupLease(ctx context.Context, id types.ExecutionID, unit
 // redelivery write, in one transition. Splitting the two would leave a window
 // where the unit is pending, unleased and unqueued — invisible to the sweeper,
 // which only reports units that still hold a lease.
+//
+// Like expireGroupLeaseLua it does not stamp the activity clock: revocation is
+// the expiry sweeper requeueing a lease it has already judged dead, not a
+// runner doing work.
 // KEYS: 1=group:status 2=group:meta 3=leases(zset) 4=outbox:ready 5=outbox:body
 // ARGV: 1=token 2=ttl_s 3=lease_member 4=entry_id 5=entry_body 6=available_at_ms
 var revokeGroupLeaseWithOutboxLua = redis.NewScript(`

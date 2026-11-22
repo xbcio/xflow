@@ -524,6 +524,7 @@ return {1, '', '', ''}
 //
 // KEYS[1] = node status key, KEYS[2] = node meta hash, KEYS[3] = lease expiry ZSET
 // KEYS[4] = execution status key (read only in route-checked mode)
+// KEYS[5] = execution activity_at_ms key (same {id} hash tag; written on acquire)
 // ARGV[1] = new lease id
 // ARGV[2] = new lease token
 // ARGV[3] = issued-at unix millis
@@ -638,6 +639,15 @@ if nextAttempt <= 0 then
 	nextAttempt = 1
 end
 redis.call('SET', KEYS[1], 'running', 'EX', tonumber(ARGV[4]))
+-- A lease is the strongest form of activity: a runner is working this node
+-- right now. Stamping the execution's activity clock here is what keeps the
+-- orphan sweep from reading a long execution between two leases as idle; the
+-- key shares the execution's {id} slot, so this adds no round trip and no
+-- CROSSSLOT risk. A zero issued-at (a caller that did not stamp the lease) is
+-- not proof of activity, so it writes nothing.
+if nowMs > 0 then
+    redis.call('SET', KEYS[5], nowMs, 'EX', tonumber(ARGV[4]))
+end
 redis.call('HSET', KEYS[2],
 	'lease_id', ARGV[1],
 	'lease_token', ARGV[2],
@@ -832,7 +842,7 @@ return 1
 //
 // KEYS[1] = workflow slot ZSET, KEYS[2] = queue ZSET,
 // KEYS[3] = queue sequence counter, KEYS[4] = capacity string,
-// KEYS[5] = queue deadline ZSET
+// KEYS[5] = queue deadline ZSET, KEYS[6] = queue arrival ZSET
 // ARGV[1] = slot member (the execution ID), ARGV[2] = limit,
 // ARGV[3] = admission score (unix seconds), ARGV[4] = TTL seconds for the keys,
 // ARGV[5] = 1 queue mode / 0 reject mode, ARGV[6] = max_queued (0 unbounded),
@@ -901,6 +911,11 @@ if redis.call('ZSCORE', KEYS[1], member) then
 end
 local rank = redis.call('ZRANK', KEYS[2], member)
 if rank then
+    -- A member queued before the arrival index existed has no age record. Heal
+    -- it with the current instant only if absent: an existing arrival time is
+    -- the member's real age and must not be reset on a retried admission.
+    redis.call('ZADD', KEYS[6], 'NX', now, member)
+    redis.call('PEXPIRE', KEYS[6], lineTTL)
     return {2, rank + 1, 0}
 end
 local holders = redis.call('ZCARD', KEYS[1])
@@ -921,6 +936,8 @@ local seq = redis.call('INCR', KEYS[3])
 redis.call('PEXPIRE', KEYS[3], lineTTL)
 redis.call('ZADD', KEYS[2], seq, member)
 redis.call('PEXPIRE', KEYS[2], lineTTL)
+redis.call('ZADD', KEYS[6], now, member)
+redis.call('PEXPIRE', KEYS[6], lineTTL)
 local deadline = tonumber(ARGV[7])
 if deadline > 0 then
     redis.call('ZADD', KEYS[5], deadline, member)
@@ -935,6 +952,7 @@ while redis.call('ZCARD', KEYS[1]) < limit do
     end
     redis.call('ZADD', KEYS[1], now, head[1])
     redis.call('ZREM', KEYS[5], head[1])
+    redis.call('ZREM', KEYS[6], head[1])
     table.insert(promoted, head[1])
 end
 redis.call('EXPIRE', KEYS[1], ttl)
@@ -950,7 +968,8 @@ return out
 // lets every terminal writer call it unconditionally.
 //
 // KEYS[1] = workflow slot ZSET, KEYS[2] = queue ZSET,
-// KEYS[3] = queue deadline ZSET, KEYS[4] = capacity string
+// KEYS[3] = queue deadline ZSET, KEYS[4] = capacity string,
+// KEYS[5] = queue arrival ZSET
 // ARGV[1] = slot member (the execution ID), ARGV[2] = promotion score
 // (unix seconds), ARGV[3] = TTL seconds for the set
 // Returns {drained, wasQueued, promoted...}: drained is 1 when the workflow's
@@ -977,6 +996,7 @@ var workflowReleaseLua = redis.NewScript(`
 local removed = redis.call('ZREM', KEYS[1], ARGV[1])
 local wasQueued = redis.call('ZREM', KEYS[2], ARGV[1])
 redis.call('ZREM', KEYS[3], ARGV[1])
+redis.call('ZREM', KEYS[5], ARGV[1])
 local promoted = {}
 if removed == 1 then
     local limit = tonumber(redis.call('GET', KEYS[4]) or '0')
@@ -987,6 +1007,7 @@ if removed == 1 then
         end
         redis.call('ZADD', KEYS[1], tonumber(ARGV[2]), head[1])
         redis.call('ZREM', KEYS[3], head[1])
+        redis.call('ZREM', KEYS[5], head[1])
         table.insert(promoted, head[1])
     end
 end
@@ -997,6 +1018,7 @@ if redis.call('ZCARD', KEYS[1]) == 0 then
         redis.call('DEL', KEYS[2])
         redis.call('DEL', KEYS[3])
         redis.call('DEL', KEYS[4])
+        redis.call('DEL', KEYS[5])
         out[1] = 1
     end
 else
@@ -1070,7 +1092,8 @@ return {1, #due, 0}
 // promotion happens on release and a sweep is not a release.
 //
 // KEYS[1] = workflow slot ZSET, KEYS[2] = queue ZSET,
-// KEYS[3] = queue deadline ZSET, KEYS[4] = capacity string
+// KEYS[3] = queue deadline ZSET, KEYS[4] = capacity string,
+// KEYS[5] = queue arrival ZSET
 // ARGV[1] = promotion score (unix seconds), ARGV[2] = TTL seconds
 var workflowFillLua = redis.NewScript(`
 local limit = tonumber(redis.call('GET', KEYS[4]) or '0')
@@ -1083,6 +1106,7 @@ if limit > 0 then
         end
         redis.call('ZADD', KEYS[1], tonumber(ARGV[1]), head[1])
         redis.call('ZREM', KEYS[3], head[1])
+        redis.call('ZREM', KEYS[5], head[1])
         table.insert(filled, head[1])
     end
 end
@@ -1108,19 +1132,46 @@ return filled
 // was promoted, cancelled or expired by someone else, and the deadline is all
 // that is left of it.
 //
-// KEYS[1] = queue ZSET, KEYS[2] = queue deadline ZSET
+// KEYS[1] = queue ZSET, KEYS[2] = queue deadline ZSET,
+// KEYS[3] = queue arrival ZSET
 // ARGV[1] = now (unix milliseconds), ARGV[2] = batch limit
 var workflowQueueExpireLua = redis.NewScript(`
 local due = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', ARGV[1], 'LIMIT', 0, tonumber(ARGV[2]))
 local expired = {}
 for _, id in ipairs(due) do
     redis.call('ZREM', KEYS[2], id)
+    redis.call('ZREM', KEYS[3], id)
     if redis.call('ZSCORE', KEYS[1], id) then
         redis.call('ZREM', KEYS[1], id)
         table.insert(expired, id)
     end
 end
 return expired
+`)
+
+// concurrencyArrivalStampLua dates one line member that has no arrival record.
+//
+// A member can predate the arrival index (an admission written by an older
+// build) or lose its record to a partial expiry; either way the sweep cannot
+// tell how long it has been dangling, and an undatable member used to be
+// skipped forever. The sweep stamps the instant it first sees one, and this is
+// that write: NX so a concurrent retried admission's real timestamp is never
+// replaced by a younger one, and extend-only expiry so a longer wait already
+// registered on the line is not shortened. The key carries the workflow's hash
+// tag, so the write is cluster-safe on its own.
+//
+// KEYS[1] = queue arrival ZSET
+// ARGV[1] = first-seen score (unix seconds), ARGV[2] = member,
+// ARGV[3] = TTL milliseconds
+// Returns 1 when this call dated the member, 0 when it already had a record.
+var concurrencyArrivalStampLua = redis.NewScript(`
+local added = redis.call('ZADD', KEYS[1], 'NX', ARGV[1], ARGV[2])
+local ttl = tonumber(ARGV[3])
+local current = redis.call('PTTL', KEYS[1])
+if current < ttl then
+    redis.call('PEXPIRE', KEYS[1], ttl)
+end
+return added
 `)
 
 // ---------------------------------------------------------------------------

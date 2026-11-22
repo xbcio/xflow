@@ -102,6 +102,7 @@ type config struct {
 	artifactCode            func(ctx context.Context, digest string) ([]byte, error)
 	auditObserver           AuditObserver
 	leaseObserver           LeaseObserver
+	orphanObserver          engine.OrphanReclaimObserver
 	shutdownObserver        ShutdownObserver
 	logger                  engine.Logger
 	transient               bool
@@ -199,6 +200,18 @@ func WithLeaseObserver(obs LeaseObserver) Option {
 	return func(c *config) {
 		if obs != nil {
 			c.leaseObserver = obs
+		}
+	}
+}
+
+// WithOrphanReclaimObserver installs an external observer for applied
+// concurrency-orphan convergences (the periodic sweep, promotion repair,
+// Cancel's self-heal, and the operator reset surface). It is optional and must
+// not block the maintenance path. A nil observer reports nothing.
+func WithOrphanReclaimObserver(obs engine.OrphanReclaimObserver) Option {
+	return func(c *config) {
+		if obs != nil {
+			c.orphanObserver = obs
 		}
 	}
 }
@@ -614,6 +627,7 @@ func New(redisAddr string, db store.Store, opts ...Option) (*Backend, error) {
 	state := rstate.New(rdb, db, cfg.execTTL)
 	state.SetAuditObserver(cfg.auditObserver)
 	state.SetLeaseObserver(cfg.leaseObserver)
+	state.SetOrphanReclaimObserver(cfg.orphanObserver)
 	state.SetLogger(cfg.logger)
 	state.ConfigureTransient(cfg.transient, cfg.transientTTL, cfg.transientCompletionTTL)
 	state.ConfigureOutboxReadyIndex(cfg.outboxReadyIndex)

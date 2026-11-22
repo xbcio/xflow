@@ -286,6 +286,19 @@ var absentWriteCases = map[string]absentCase{
 		h.rdb.Set(ctx, concurrencyCapacityKeyForTag(namespace.Default, tag), "1", time.Hour)
 		_, _ = h.s.ReconcileConcurrencySlots(ctx, 0)
 	},
+	// ReclaimConcurrencyOrphans: the same dangling slot and line member, reclaimed
+	// through the orphan capability. The member is removed and no status key may
+	// be invented for the execution that never existed.
+	"ReclaimConcurrencyOrphans": func(ctx context.Context, h *absentHarness, id types.ExecutionID) {
+		tag := workflowDigestTag(namespace.Default, "absent-orphan")
+		h.s.registerConcurrencyWorkflow(ctx, namespace.Default, tag, 0)
+		old := time.Now().Add(-time.Hour).Unix()
+		h.rdb.ZAdd(ctx, concurrencySlotKeyForTag(namespace.Default, tag), redis.Z{Score: float64(old), Member: concurrencySlotMember(id)})
+		h.rdb.ZAdd(ctx, concurrencyQueueKeyForTag(namespace.Default, tag), redis.Z{Score: 1, Member: concurrencySlotMember(id)})
+		_, _ = h.s.ReclaimConcurrencyOrphans(ctx, engine.OrphanReclaimRequest{
+			Mode: engine.OrphanReclaimForce, Limit: 0,
+		})
+	},
 	// RepairLeaseIndex: a node status and meta left behind with the execution's own
 	// keys gone.
 	"RepairLeaseIndex": func(ctx context.Context, h *absentHarness, id types.ExecutionID) {
@@ -298,6 +311,9 @@ var absentWriteCases = map[string]absentCase{
 // exemptStoreMethods are the exported methods that do not write an execution's
 // status key on behalf of an execution a caller names, with the reason.
 var exemptStoreMethods = map[string]string{
+	// Observer wiring: it installs a callback on this process's store and
+	// writes no execution key (and takes no execution ID).
+	"SetOrphanReclaimObserver": "observer wiring, writes no execution state",
 	// Creation: the purpose is to write the status. The order of what it writes
 	// beside it is pinned by execution_deadline_seed_order_test.go and
 	// TestCreationPathsRememberTheDeadline.

@@ -113,7 +113,7 @@ func TestRetentionFunnelHasNoUnreviewedBypass(t *testing.T) {
 				"from the graph's time budget",
 			"concurrency_state.go:createExecutionAdmitted": "fallback only when getExecTTL reports unbounded " +
 				"(non-positive); the key it writes is the concurrency tag, not the status",
-			"concurrency_state.go:promoteExecution": "fallback only when getExecTTL reports unbounded " +
+			"concurrency_state.go:promoteQueuedExecution": "fallback only when getExecTTL reports unbounded " +
 				"(non-positive); the status TTL otherwise comes from getExecTTL",
 			"concurrency_state.go:concurrencySlotTTL": "lifetime of the slot set, not an execution key",
 			"idempotency.go:idempotencyClaimTTL":      "lifetime of an idempotency claim, not an execution key",

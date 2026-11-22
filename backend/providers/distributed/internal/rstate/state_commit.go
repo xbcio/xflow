@@ -275,6 +275,12 @@ func (s *Store) CommitNode(ctx context.Context, req engine.CommitNodeRequest) (e
 		arrivalIDs = append(arrivalIDs, executeID, skipID)
 	}
 	args = append(args, len(req.Arrivals))
+	// The activity clock rides last, after every variable-length section, so it
+	// cannot perturb the arrival base or the trailing-argument block (both are
+	// addressed from the END of ARGV). commitNodeLua writes it on every accepted
+	// commit: the orphan sweep anchors "recently active" on it, and a commit is
+	// exactly the progress that updated_at_ms cannot see.
+	keys = append(keys, activityAtKey(t, req.ExecutionID))
 	// Three trailing arguments live after the variable-length cyclic outbox and
 	// arrival suffixes, and commitNodeLua reads them from the END of ARGV so
 	// neither the reclaim count nor the privacy/error-detail fields can perturb

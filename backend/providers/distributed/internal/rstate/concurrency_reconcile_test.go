@@ -148,6 +148,81 @@ func TestSweepConcurrencySlotsKeepsLiveHolder(t *testing.T) {
 	}
 }
 
+// TestSweepConcurrencySlotsDatesLegacyQueueMember covers the upgrade gap: a
+// queue member admitted before the arrival index existed has no time record of
+// its own (the line's score is a sequence), and once retention has taken its
+// execution keys there is no status clock either. The sweep used to skip such a
+// member forever because it refused to guess an unknown age. The first sighting
+// now stamps the current instant, and the existing grace still keeps that first
+// pass from reclaiming a possibly in-flight create; a later pass past the grace
+// removes it.
+func TestSweepConcurrencySlotsDatesLegacyQueueMember(t *testing.T) {
+	ctx := context.Background()
+	_, rdb, state := newMiniredisStore(t)
+	g := sweepGraph(t, "conc-sweep-legacy-arrival")
+	tag := workflowDigestTag(namespace.Default, g.Name())
+	queueKey := concurrencyQueueKeyForTag(namespace.Default, tag)
+	arrivalKey := concurrencyQueueArrivalKeyForTag(namespace.Default, tag)
+
+	holder := admitForSweep(t, ctx, state, g, 1)
+	legacy := queueForSweep(t, ctx, state, g, 1)
+
+	// Retention took the execution's keys; the line member is all that is left.
+	if err := rdb.Del(ctx,
+		execKey(namespace.Default, legacy, "status"),
+		execKey(namespace.Default, legacy, "graph"),
+		execKey(namespace.Default, legacy, "updated_at_ms"),
+	).Err(); err != nil {
+		t.Fatalf("delete execution keys: %v", err)
+	}
+	// ...and this member predates the arrival index, so it has no age record.
+	if err := rdb.ZRem(ctx, arrivalKey, string(legacy)).Err(); err != nil {
+		t.Fatalf("drop arrival record: %v", err)
+	}
+
+	swept, err := state.ReconcileConcurrencySlots(ctx, 64)
+	if err != nil {
+		t.Fatalf("ReconcileConcurrencySlots() error = %v", err)
+	}
+	if swept != 0 {
+		t.Fatalf("first sweep = %d, want 0: the member is only being dated", swept)
+	}
+	score, err := rdb.ZScore(ctx, arrivalKey, string(legacy)).Result()
+	if err != nil {
+		t.Fatalf("arrival record after the first sweep error = %v, want the first sighting stamped", err)
+	}
+	if age := time.Since(time.Unix(int64(score), 0)); age > time.Minute {
+		t.Fatalf("stamped arrival age = %v, want the sweep's own first-sighting instant", age)
+	}
+	if members, err := rdb.ZRange(ctx, queueKey, 0, -1).Result(); err != nil || len(members) != 1 || members[0] != string(legacy) {
+		t.Fatalf("queue members after the first sweep = %v (err %v), want [%q] kept inside the grace", members, err, legacy)
+	}
+
+	// Move the first-sighting clock past the grace, the same way the other sweep
+	// cases backdate a slot score.
+	old := time.Now().UTC().Add(-10 * time.Minute).Unix()
+	if err := rdb.ZAdd(ctx, arrivalKey, redis.Z{Score: float64(old), Member: string(legacy)}).Err(); err != nil {
+		t.Fatalf("backdate arrival record: %v", err)
+	}
+
+	swept, err = state.ReconcileConcurrencySlots(ctx, 64)
+	if err != nil {
+		t.Fatalf("ReconcileConcurrencySlots() error = %v", err)
+	}
+	if swept != 1 {
+		t.Fatalf("second sweep = %d, want the now-dated legacy member reclaimed", swept)
+	}
+	if _, err := rdb.ZScore(ctx, queueKey, string(legacy)).Result(); err != redis.Nil {
+		t.Fatalf("queue membership after the second sweep error = %v, want the member removed", err)
+	}
+	if _, err := rdb.ZScore(ctx, arrivalKey, string(legacy)).Result(); err != redis.Nil {
+		t.Fatalf("arrival record after the second sweep error = %v, want it removed with the member", err)
+	}
+	if got := queuedStatus(t, ctx, state, holder); got != types.ExecutionStatusRunning {
+		t.Fatalf("holder status = %q, want untouched running", got)
+	}
+}
+
 // TestSweepConcurrencySlotsRemovesLostRelease covers the other leak: a terminal
 // execution whose release never landed. Unlike the phantom-charge case the
 // execution record is real and says terminal, so the sweep does not have to

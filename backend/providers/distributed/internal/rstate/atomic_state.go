@@ -48,7 +48,11 @@ var commitNodeLua = redis.NewScript(`
 -- source outputs this commit may delete, and the arrival counter triplets
 -- (in-degree, active-inputs, schedule) follow at KEYS[13+reclaimCount] onward,
 -- three per arrival. The reclaim loop below deliberately uses KEYS[12+i] so it
--- cannot reach into the arrival triplets appended after it.
+-- cannot reach into the arrival triplets appended after it. The execution's
+-- activity_at_ms key is always the LAST key (KEYS[#KEYS]): appending it after
+-- every variable-length section keeps it from shifting the indexes above, and
+-- it carries the execution's {id} hash tag like the rest, so the write is
+-- cluster-safe.
 local existingPrivate = redis.call('HGET', KEYS[6], 'private_output') == '1'
 local errorDetails = ARGV[#ARGV] or ''
 local requestedPrivate = tonumber(ARGV[#ARGV - 1] or '0') == 1
@@ -123,6 +127,11 @@ else
     end
 end
 local ttl = tonumber(ARGV[13])
+-- An accepted commit is work the execution visibly made progress on, which is
+-- the second half of the orphan sweep's age anchor. updated_at_ms only moves on
+-- status transitions, so without this a long execution between two leases would
+-- be indistinguishable from an abandoned one. Same {id} slot, same transaction.
+redis.call('SET', KEYS[#KEYS], tonumber(ARGV[18]), 'EX', ttl)
 if tonumber(ARGV[7]) == 1 then
     redis.call('SET', KEYS[7], ARGV[8], 'EX', ttl)
 end

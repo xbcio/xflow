@@ -44,6 +44,20 @@ func execKey(t namespace.Namespace, id types.ExecutionID, suffix string) string 
 	return fmt.Sprintf("xflow:ns:%s:exec:{%s}:%s", t, id, suffix)
 }
 
+// activityAtKey is the execution's activity clock: the wall time of the newest
+// node lease acquisition, lease renewal, or accepted node commit. It is the
+// second half of the orphan-reclaim age anchor (see engine.DefaultOrphanReclaimGrace):
+// updated_at_ms only moves on status transitions, so a long execution between
+// two leases would otherwise look idle for the whole grace even while it commits
+// nodes. It shares the {id} hash tag with the rest of the execution's keys so
+// every Lua script that judges a reclaim can read it in the same slot.
+//
+// Absent on executions created before this key existed; readers fall back to
+// updated_at_ms, which keeps the old behaviour for them.
+func activityAtKey(t namespace.Namespace, id types.ExecutionID) string {
+	return execKey(t, id, "activity_at_ms")
+}
+
 // transientMarkKey holds the per-execution mode marker: field "transient" for
 // an execution that opted out of SQL projection, field "durable" for one whose
 // row is expected there. Creation writes it -- for every execution -- before or
@@ -277,6 +291,21 @@ func concurrencyCapacityKeyForTag(ns namespace.Namespace, workflowTag string) st
 // while their deadlines sort independently here.
 func concurrencyDeadlineKeyForTag(ns namespace.Namespace, workflowTag string) string {
 	return fmt.Sprintf("xflow:ns:%s:conc:{%s}:dl", entryActivationNamespacePath(ns), workflowTag)
+}
+
+// concurrencyQueueArrivalKeyForTag records when each member entered the line,
+// scored by admission time in unix seconds. It exists for the orphan sweep: a
+// queue member whose execution keys have expired has no status clock left to
+// prove its age, and the line's own score is a monotonic sequence, not a time.
+// Without this key the sweep could not tell a member that has been dangling
+// for hours from one admitted a moment ago and still being created, which is
+// exactly the window the reclaim grace protects.
+//
+// It is expired and extended with the same line TTL as the queue itself, and
+// every transition that removes a member from the line removes its arrival
+// record in the same script.
+func concurrencyQueueArrivalKeyForTag(ns namespace.Namespace, workflowTag string) string {
+	return fmt.Sprintf("xflow:ns:%s:conc:{%s}:arrived", entryActivationNamespacePath(ns), workflowTag)
 }
 
 // concurrencyWorkflowIndexKey enumerates the workflow tags that have a slot

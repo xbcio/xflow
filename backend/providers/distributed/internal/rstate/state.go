@@ -76,6 +76,13 @@ type Store struct {
 	// about not multiplying the index reads, not correctness.
 	concurrencySweepMu sync.Mutex
 
+	// concurrencyOrphanGrace is how old a concurrency orphan has to be before
+	// the maintenance sweep converges it. It protects the normal admission
+	// window in which a slot or queue member is charged before the execution
+	// keys are written; explicit force-mode callers bypass it. Set at
+	// construction (engine.DefaultOrphanReclaimGrace unless overridden).
+	concurrencyOrphanGrace time.Duration
+
 	// outboxDiscoveryCursors advance the bounded outbox discovery scan the same
 	// way leaseRepairCursors do: one node-local cursor per Redis master and
 	// namespace, so a resumed scan neither reuses a cursor across masters nor
@@ -132,7 +139,11 @@ type Store struct {
 	audit         AuditObserver
 	auditCounters *auditCounters
 	leaseObserver LeaseObserver
-	logger        engine.Logger
+	// orphanObserver reports each applied concurrency-orphan convergence, so
+	// the repair reaches xflow_orphan_reclaimed_total without this package
+	// importing a metrics exporter. Nil reports nothing.
+	orphanObserver engine.OrphanReclaimObserver
+	logger         engine.Logger
 
 	// cursorKey is a process-local random key used to HMAC-sign opaque
 	// ListDeadLetters pagination cursors. It is generated once at Store
@@ -174,6 +185,18 @@ func WithGraphCache(maxBytes int64, idleTTL time.Duration) Option {
 	}
 }
 
+// WithConcurrencyOrphanGrace overrides how old a concurrency orphan must be
+// before the maintenance sweep converges it. A non-positive value keeps the
+// default (engine.DefaultOrphanReclaimGrace). It does not affect force-mode
+// callers, which never consult the age guard.
+func WithConcurrencyOrphanGrace(grace time.Duration) Option {
+	return func(s *Store) {
+		if grace > 0 {
+			s.concurrencyOrphanGrace = grace
+		}
+	}
+}
+
 func New(rdb redis.UniversalClient, db store.Store, execTTL time.Duration, opts ...Option) *Store {
 	s := &Store{
 		rdb:                    rdb,
@@ -190,6 +213,7 @@ func New(rdb redis.UniversalClient, db store.Store, execTTL time.Duration, opts 
 		auditCounters:          &auditCounters{},
 		cursorKey:              newCursorSigningKey(),
 		walkOwner:              redisx.NewWalkOwner(),
+		concurrencyOrphanGrace: engine.DefaultOrphanReclaimGrace,
 	}
 	for _, opt := range opts {
 		opt(s)

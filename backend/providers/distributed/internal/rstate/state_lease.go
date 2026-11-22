@@ -101,6 +101,7 @@ func (s *Store) acquireTaskLease(ctx context.Context, lease *engine.TaskLease, r
 			nodeMetaKey(t, lease.Task.ExecutionID, lease.Task.NodeName),
 			leaseExpiryZSetKey(t, lease.Task.ExecutionID),
 			execKey(t, lease.Task.ExecutionID, "status"),
+			activityAtKey(t, lease.Task.ExecutionID),
 		},
 		args...,
 	).Slice()
@@ -705,7 +706,7 @@ func (s *Store) SuspendTaskLease(ctx context.Context, lease *engine.TaskLease, o
 // and terminal leases have had their work requeued or finalized, and reviving
 // their deadline would fence out whoever owns the node now.
 //
-// KEYS: 1=node status 2=node meta 3=lease expiry ZSET
+// KEYS: 1=node status 2=node meta 3=lease expiry ZSET 4=execution activity_at_ms
 // ARGV: 1=token 2=deadline_ms 3=exec_ttl_s 4=zset member 5=issued_at_ms
 var renewTaskLeaseLua = redis.NewScript(`
 local status = redis.call('GET', KEYS[1])
@@ -721,6 +722,11 @@ redis.call('HSET', KEYS[2], 'lease_deadline_ms', deadlineMs, 'lease_ttl_ms', ttl
 redis.call('EXPIRE', KEYS[2], tonumber(ARGV[3]))
 redis.call('ZADD', KEYS[3], deadlineMs, ARGV[4])
 redis.call('EXPIRE', KEYS[3], tonumber(ARGV[3]))
+-- A renewal is the runner saying it is still working the node. Refreshing the
+-- execution's activity clock here extends the orphan sweep's age anchor for a
+-- node that legitimately outlives one lease; the key shares the execution's
+-- {id} slot, so this stays one command.
+redis.call('SET', KEYS[4], ARGV[5], 'EX', tonumber(ARGV[3]))
 return {1}
 `)
 
@@ -735,6 +741,7 @@ func (s *Store) RenewTaskLease(ctx context.Context, id types.ExecutionID, name s
 		nodeStatusKey(t, id, name),
 		nodeMetaKey(t, id, name),
 		leaseExpiryZSetKey(t, id),
+		activityAtKey(t, id),
 	}, string(token), deadline.UnixMilli(), int(ttl.Seconds()), leaseExpiryMember(id, name), time.Now().UTC().UnixMilli()).Slice()
 	if err != nil {
 		return false, fmt.Errorf("renew task lease %q/%q: %w", id, name, err)

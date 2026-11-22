@@ -24,6 +24,14 @@ func (s *Store) SetLeaseObserver(o LeaseObserver) {
 	}
 }
 
+// SetOrphanReclaimObserver installs an external observer for applied
+// concurrency-orphan convergences. A nil observer is ignored.
+func (s *Store) SetOrphanReclaimObserver(o engine.OrphanReclaimObserver) {
+	if o != nil {
+		s.orphanObserver = o
+	}
+}
+
 // SetLogger installs the logger used for best-effort audit-write failures.
 func (s *Store) SetLogger(l engine.Logger) { s.logger = l }
 
