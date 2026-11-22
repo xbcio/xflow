@@ -133,6 +133,9 @@ func NewCluster(clusterCfg ClusterConfig, opts ...Option) (*Engine, error) {
 	if cfg.deadlineExpiredObserver != nil {
 		asynqOpts = append(asynqOpts, distributed.WithDeadlineExpiredObserver(cfg.deadlineExpiredObserver))
 	}
+	if cfg.orphanObserver != nil {
+		asynqOpts = append(asynqOpts, distributed.WithOrphanReclaimObserver(cfg.orphanObserver))
+	}
 	db := clusterCfg.Store
 	if db == nil {
 		// The common option set is honoured here so a caller can configure the

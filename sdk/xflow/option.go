@@ -44,6 +44,10 @@ type engineConfig struct {
 	// sweeper, while a NewServer control plane reports through its own observer
 	// and never through this one. Nil reports nothing.
 	deadlineExpiredObserver engine.DeadlineExpiredObserver
+	// orphanObserver receives every applied concurrency-orphan convergence
+	// (sweep, promotion repair, Cancel self-heal and the operator reset
+	// surface). Shared by NewLocal and NewCluster; nil reports nothing.
+	orphanObserver engine.OrphanReclaimObserver
 
 	versionPolicy    execution.VersionPolicy
 	versionPolicySet bool
@@ -203,6 +207,25 @@ func WithDeadlineExpiredObserver(obs engine.DeadlineExpiredObserver) Option {
 	return func(c *engineConfig) {
 		if obs != nil {
 			c.deadlineExpiredObserver = obs
+		}
+	}
+}
+
+// WithOrphanReclaimObserver installs the observer an embedded backend reports
+// applied concurrency-orphan convergences to: the periodic sweep, a promotion
+// reaping work that cannot start, Cancel's self-heal of a torn execution, and
+// ResetWorkflowConcurrency's applied passes.
+//
+// Both NewLocal and NewCluster accept it. A NewServer control plane publishes
+// through its own metrics wiring (Config.Metrics), so callers of NewServer do
+// not need this option. Pass observability/metrics.NewOrphanReclaimMetrics(m)
+// to publish xflow_orphan_reclaimed_total.
+//
+// Nil (the default) records nothing.
+func WithOrphanReclaimObserver(obs engine.OrphanReclaimObserver) Option {
+	return func(c *engineConfig) {
+		if obs != nil {
+			c.orphanObserver = obs
 		}
 	}
 }
