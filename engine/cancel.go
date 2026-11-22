@@ -53,6 +53,15 @@ func (e *Engine) Cancel(ctx context.Context, id types.ExecutionID) error {
 		return fmt.Errorf("load graph for canceled execution %q: %w", id, err)
 	}
 	if !active {
+		// A Cancel may be the only operation a caller ever issues against a
+		// broken execution, so the torn shape — the status key still says the
+		// execution is live while the graph key is gone — is converged here
+		// instead of being refused. Classification is what tells the torn shape
+		// apart from a terminal execution (nothing to do) and from an absent one
+		// (nothing that can be terminated).
+		if e.reclaimGraphLostExecution(ctx, id) {
+			return nil
+		}
 		return fmt.Errorf("execution %q: %w", id, ErrExecutionInactive)
 	}
 
