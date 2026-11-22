@@ -104,6 +104,10 @@ var admissionRoutes = append([]admissionRouteRow{
 		class: routeClassExecution, sample: "POST /v1/executions/exec-missing/resume", bare: true,
 	},
 	{
+		name: "concurrency-reset", method: http.MethodPost, pattern: PathWorkflowConcurrencyReset,
+		class: routeClassExecution, sample: "POST /v1/workflows/wf-missing/concurrency/reset", bare: true,
+	},
+	{
 		name: "rerun", method: http.MethodPost, pattern: PathExecutionRerun,
 		class: routeClassExecution, sample: "POST /v1/executions/exec-missing/rerun", bare: true,
 	},

@@ -113,6 +113,7 @@ var guardSamples = []guardSample{
 	{"PathWorkflowVersions", PathWorkflowVersions, http.MethodGet, "/v1/workflows/wf-1/versions"},
 	{"PathWorkflowVersionByID", PathWorkflowVersionByID, http.MethodGet, "/v1/workflows/wf-1/versions/v1"},
 	{"PathWorkflowRollback", PathWorkflowRollback, http.MethodPost, "/v1/workflows/wf-1/rollback"},
+	{"PathWorkflowConcurrencyReset", PathWorkflowConcurrencyReset, http.MethodPost, "/v1/workflows/wf-1/concurrency/reset"},
 
 	// The schedule routes are probed on the production-shape mux, which is built
 	// WITHOUT a schedule manager: that is deliberate and is what keeps the guard

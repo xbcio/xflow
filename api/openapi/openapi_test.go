@@ -204,6 +204,26 @@ func TestSchemasMatchHandlerTypes(t *testing.T) {
 			value:  apiserver.ExampleRerunExecutionResponse(execID, 2),
 		},
 		{
+			name:   "concurrency reset request",
+			schema: "ConcurrencyResetRequest",
+			value:  apiserver.ExampleConcurrencyResetRequest(),
+		},
+		{
+			// The applied shape: both evidence branches are present, including
+			// the missing-execution candidate whose status is omitted.
+			name:   "concurrency reset response (applied)",
+			schema: "ConcurrencyResetResponse",
+			value:  apiserver.ExampleConcurrencyResetResponse(execID, types.ExecutionID("exec-missing-01H8XG")),
+		},
+		{
+			// The preview shape: applied false and reclaimed 0, which the
+			// schema must accept because that is what the default request
+			// returns.
+			name:   "concurrency reset response (preview)",
+			schema: "ConcurrencyResetResponse",
+			value:  apiserver.ExampleConcurrencyResetPreview(execID),
+		},
+		{
 			name:   "execution list item",
 			schema: "ExecutionListItem",
 			value:  apiserver.ExampleExecutionListItem(execID, "namespaceA", "wf-01H8XG", "health-check", types.ExecutionStatusFailed, "node \"work\" failed", now, now.Add(time.Minute)),

@@ -647,14 +647,24 @@ func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 		if cfg.Blob != nil {
 			return nil, errBlobNoRedis
 		}
-		ccfg.Backend = backendlocal.New(
+		memOpts := []backendlocal.Option{
 			backendlocal.WithConcurrency(cfg.Concurrency),
 			// The same cfg.Logger the distributed branch below has always
 			// received. Without it the in-memory queue drops permanently-failed
 			// and retry-exhausted tasks with no record at all, so a single-node
 			// deployment loses the diagnostics its Redis-backed sibling keeps.
 			backendlocal.WithQueueLogger(cfg.Logger),
-		)
+		}
+		if cfg.Metrics != nil {
+			// The same concurrency-orphan observer the distributed branch
+			// wires: the in-memory store runs the periodic sweep and the
+			// promotion repair too, so a single-node deployment must report
+			// those convergences on xflow_orphan_reclaimed_total as well.
+			memOpts = append(memOpts,
+				backendlocal.WithOrphanReclaimObserver(metrics.NewOrphanReclaimMetrics(cfg.Metrics)),
+			)
+		}
+		ccfg.Backend = backendlocal.New(memOpts...)
 		// In-memory EntryActivation store so the node-generic reconciler runs and
 		// register/deregister derive activations even on the single-node path.
 		ccfg.EntryActivationStore = control.NewMemoryEntryActivationStore()
@@ -692,6 +702,10 @@ func buildControlPlane(cfg Config) (*control.ControlPlane, error) {
 			opts = append(opts,
 				distributed.WithAuditObserver(metrics.NewAuditMetrics(cfg.Metrics)),
 				distributed.WithLeaseObserver(metrics.NewLeaseMetrics(cfg.Metrics)),
+				// Concurrency-orphan convergences (sweep, promotion repair,
+				// Cancel self-heal and the operator reset) are reported from the
+				// store, which holds the narrow observer interface.
+				distributed.WithOrphanReclaimObserver(metrics.NewOrphanReclaimMetrics(cfg.Metrics)),
 				// Queue depth/oldest-pending age: the pre-loss residency signal
 				// that keeps working even when the consumer is too stalled to
 				// report anything itself.

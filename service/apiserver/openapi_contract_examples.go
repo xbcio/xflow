@@ -696,3 +696,58 @@ func ExampleOverviewEmptyKPI() any {
 		TopFailing: []overviewFailingRow{},
 	}
 }
+
+// ExampleConcurrencyResetRequest builds a reset body with both opt-ins set, so
+// the two booleans the schema publishes are validated against the real
+// request fields rather than an empty object.
+func ExampleConcurrencyResetRequest() any {
+	return resetWorkflowConcurrencyRequest{Apply: true, IncludeLive: true}
+}
+
+// ExampleConcurrencyResetResponse builds an APPLIED reset response with one
+// live execution (graph present) and one already-missing execution, so both
+// evidence branches and the optional status field are exercised.
+func ExampleConcurrencyResetResponse(liveID, missingID types.ExecutionID) any {
+	return concurrencyResetResponse{
+		Applied:     true,
+		IncludeLive: true,
+		Inspected:   2,
+		Reclaimed:   2,
+		Candidates: []concurrencyResetCandidate{
+			{
+				ExecutionID: liveID,
+				Workflow:    "health-check",
+				Status:      types.ExecutionStatusRunning,
+				AgeMS:       90_000,
+				Evidence:    engine.OrphanEvidenceGraphMissing,
+			},
+			{
+				ExecutionID: missingID,
+				Workflow:    "health-check",
+				AgeMS:       120_000,
+				Evidence:    engine.OrphanEvidenceExecutionMissing,
+			},
+		},
+	}
+}
+
+// ExampleConcurrencyResetPreview builds the DRY-RUN response: nothing was
+// written, so applied is false and reclaimed is 0, while the candidate list
+// still names what an apply would converge.
+func ExampleConcurrencyResetPreview(id types.ExecutionID) any {
+	return concurrencyResetResponse{
+		Applied:     false,
+		IncludeLive: false,
+		Inspected:   1,
+		Reclaimed:   0,
+		Candidates: []concurrencyResetCandidate{
+			{
+				ExecutionID: id,
+				Workflow:    "health-check",
+				Status:      types.ExecutionStatusQueued,
+				AgeMS:       30_000,
+				Evidence:    engine.OrphanEvidenceGraphMissing,
+			},
+		},
+	}
+}

@@ -211,6 +211,11 @@ func (m *workflowControlModule) RegisterHTTP(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+PathWorkflowVersions, wrap("list_workflow_versions", m.handleListWorkflowVersions))
 	mux.HandleFunc("GET "+PathWorkflowVersionByID, wrap("read_workflow_version", m.handleGetWorkflowVersion))
 	mux.HandleFunc("POST "+PathWorkflowRollback, wrap("rollback_workflow", m.handleRollbackWorkflow))
+	// POST /v1/workflows/{name}/concurrency/reset is the operator reset for one
+	// workflow's concurrency state. It is mounted in both branches like the
+	// other workflow routes; here the namespace is namespace.FromContext's
+	// Default, the same namespace every bare-mode handler in this branch uses.
+	mux.HandleFunc("POST "+PathWorkflowConcurrencyReset, wrap(OpConcurrencyReset, m.handleResetWorkflowConcurrency))
 	// POST /v1/executions is the entry-seed endpoint (runner protocol face,
 	// spec §0.1); the per-execution GET/signal/cancel/wait surface is the
 	// method-qualified patterns below. ServeMux treats exact and {id} patterns
@@ -342,6 +347,13 @@ func (m *workflowControlModule) registerAuthzRoutes(mux *http.ServeMux) {
 	// that can already replace a definition, a silent UI degradation for a route
 	// that grants no more than PUT /v1/workflows/{id} does.
 	mux.HandleFunc("POST "+PathWorkflowRollback, authz(OpWorkflowDefinitionUpdate, true, m.handleRollbackWorkflow, workflowIDResolver()))
+	// POST /v1/workflows/{name}/concurrency/reset reuses the "execution" scope
+	// through its own OpConcurrencyReset: the reset terminates executions the
+	// caller's namespace already owns, so it is an execution control, not a
+	// definition mutation. The namespace the reset acts on is injected into the
+	// request context by the authz wrapper and read via namespace.FromContext —
+	// never from the path or body (IDOR).
+	mux.HandleFunc("POST "+PathWorkflowConcurrencyReset, authz(OpConcurrencyReset, true, m.handleResetWorkflowConcurrency, workflowNameResolver("concurrency/reset")))
 	// Entry-seed endpoint (exact path, POST only). The authz wrapper injects
 	// the principal's namespace into the request context; handleSeedExecution
 	// reads it via namespace.FromContext — never from the client body.

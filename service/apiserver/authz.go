@@ -117,7 +117,15 @@ const (
 	// own (execution.rerun) rather than execution.control, because the trust a
 	// rerun needs is "may start this work again" — which the population that
 	// owns the definition already has — not "may stop what is running".
-	OpExecutionRerun   = "execution.rerun"
+	OpExecutionRerun = "execution.rerun"
+	// OpConcurrencyReset gates POST /v1/workflows/{name}/concurrency/reset. It
+	// maps to the same "execution" scope as cancel/read/signal: the reset
+	// terminates executions the caller's namespace already owns, so it is a
+	// control on this tenant's work, not a definition mutation. It is its own
+	// operation, though, because a denial has to name what was attempted — an
+	// operator reset that terminates live work on purpose (include_live) is
+	// auditable as itself, not as a cancel.
+	OpConcurrencyReset = "concurrency.reset"
 	OpDeadLetterList   = "deadletter.list"
 	OpDeadLetterReplay = "deadletter.replay"
 	// Schedule operations are the runtime overlay surface over a workflow's
@@ -260,7 +268,7 @@ func scopeForOperation(op string) string {
 	case OpWorkflowCreate, OpWorkflowInvoke,
 		OpWorkflowRegister, OpWorkflowDefinitionUpdate:
 		return ScopeWorkflow
-	case OpExecutionRead, OpExecutionSignal, OpExecutionRevoke, OpExecutionCancel, OpExecutionSeed:
+	case OpExecutionRead, OpExecutionSignal, OpExecutionRevoke, OpExecutionCancel, OpExecutionSeed, OpConcurrencyReset:
 		return "execution"
 	case OpOverviewRead:
 		// The dashboard is an aggregate over the same rows execution.read

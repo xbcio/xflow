@@ -1307,6 +1307,116 @@ paths:
         default:
           $ref: "#/components/responses/DefaultError"
 
+  /v1/workflows/{name}/concurrency/reset:
+    post:
+      operationId: resetWorkflowConcurrency
+      summary: Preview or apply a reset of one workflow's concurrency state
+      description: |
+        Judges the concurrency state — slot holders and queue members — of one
+        workflow in the caller's namespace, and with `apply` converges what it
+        judged reclaimable. The namespace is never in the path, query or body:
+        it comes from the authenticated principal, and the concurrency key is
+        namespace plus workflow name, so a caller can only reach its own
+        namespace's state. A name the caller's namespace does not hold inspects
+        nothing and answers an empty candidate list.
+
+        The path segment is the workflow NAME rather than a registry id,
+        because concurrency is keyed by name — admissions charge the slot set
+        under the definition name, and a reset must address that same key.
+
+        The default judgement is the orphan judgement: an execution is
+        reclaimed only when it is `running` or `queued`, its compiled graph is
+        gone, no node or group lease is live, no node is suspended, and its
+        node activity — the latest lease acquisition, lease renewal, or accepted
+        node commit — is older than the reclaim grace (2 minutes). The grace is
+        anchored on the newer of that activity clock and the execution's status
+        transition clock, so a long execution that is working between leases is
+        not mistaken for an abandoned one. With `include_live` the graph, lease,
+        suspension and activity guards are lifted so an explicit operator reset
+        can terminate an execution that still has a graph or is visibly
+        working. Every such convergence is recorded with reason `operator_reset`
+        in the structured log and the `xflow_orphan_reclaimed_total` metric; the
+        metric and the structured log distinguish it from the automatic
+        `orphan_reclaimed` repair.
+
+        `apply` is a positive opt-in: an absent body, `{}`, or `apply: false`
+        is a DRY RUN — the response is the same judgement with `reclaimed: 0`
+        and nothing is written. `include_live` is honored for previews too, so
+        the dry run a console shows first names exactly what an apply would
+        terminate. Inspected executions are collected in batches; a preview
+        and an apply share the judgement path, so they cannot disagree about a
+        candidate they both see.
+      tags: [Workflows]
+      parameters:
+        - $ref: "#/components/parameters/WorkflowName"
+        - $ref: "#/components/parameters/XRequestId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConcurrencyResetRequest"
+      responses:
+        "200":
+          description: |
+            The judgement. `reclaimed` is 0 for a dry run; candidates lists what
+            would be, or was, converged.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/ConcurrencyResetResponse"
+        "400":
+          description: |
+            The workflow name cannot address a workflow (empty, or longer than
+            128 characters) — `invalid_workflow_name`.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                invalidWorkflowName:
+                  summary: The path name cannot be hashed into a concurrency key.
+                  value:
+                    success: false
+                    code: invalid_workflow_name
+                    message: workflow name must be between 1 and 128 characters
+                    trace_id: 0123456789abcdef0123456789abcdef
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
+        "501":
+          description: |
+            The deployment's state store cannot reclaim concurrency state —
+            `concurrency_reset_unsupported`. This is "this deployment has no
+            reset", never "there is nothing to reset".
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              examples:
+                unsupported:
+                  summary: No concurrency-orphan capability in the state store.
+                  value:
+                    success: false
+                    code: concurrency_reset_unsupported
+                    message: concurrency reset is not supported by this deployment
+                    trace_id: 0123456789abcdef0123456789abcdef
+        default:
+          $ref: "#/components/responses/DefaultError"
+
   /v1/workflows/{id}/schedules:
     get:
       operationId: listSchedules
@@ -4473,6 +4583,18 @@ components:
       description: Server-assigned workflow id.
       schema:
         type: string
+    WorkflowName:
+      name: name
+      in: path
+      required: true
+      description: |
+        Workflow NAME — the definition name admissions charge concurrency
+        under, not a registry id. It is scoped to the authenticated
+        principal's namespace; an unknown name inspects nothing.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
     WorkflowVersion:
       name: version
       in: path
@@ -6745,6 +6867,89 @@ components:
           description: |
             True when nothing was written because the requested version already
             was the current one (including on a replayed request).
+
+    ConcurrencyResetRequest:
+      type: object
+      description: |
+        Optional body of `POST /v1/workflows/{name}/concurrency/reset`. The zero
+        value — an absent body or `{}` — is a dry run.
+      properties:
+        apply:
+          type: boolean
+          default: false
+          description: |
+            Perform the convergence. False answers the same judgement without
+            writing anything, which is the default because terminating queued
+            and running work must be a positive choice.
+        include_live:
+          type: boolean
+          default: false
+          description: |
+            Also converge executions whose compiled graph still exists, or whose
+            node activity is inside the reclaim grace. It is honored for dry
+            runs too, so a preview names exactly what an apply would terminate.
+            Every live convergence is recorded with reason `operator_reset`.
+
+    ConcurrencyResetResponse:
+      type: object
+      description: One reset pass over the path workflow's concurrency state.
+      required: [applied, include_live, inspected, reclaimed, candidates]
+      properties:
+        applied:
+          type: boolean
+          description: Mirrors the request's `apply`; false means nothing was written.
+        include_live:
+          type: boolean
+          description: Mirrors the request's `include_live`.
+        inspected:
+          type: integer
+          description: Slot holders and queue members the pass examined.
+        reclaimed:
+          type: integer
+          description: |
+            Executions converged. Always 0 for a dry run; for an apply it
+            counts every execution whose concurrency member was removed and
+            whose status was converged.
+        candidates:
+          type: array
+          description: What was judged reclaimable (dry run) or converged (apply).
+          items:
+            $ref: "#/components/schemas/ConcurrencyResetCandidate"
+
+    ConcurrencyResetCandidate:
+      type: object
+      description: |
+        One execution the reset judged, with the evidence the judgement was
+        made on.
+      required: [execution_id, age_ms, evidence]
+      properties:
+        execution_id:
+          type: string
+        workflow:
+          type: string
+          description: |
+            The persisted workflow name when the execution mirror can supply
+            it, otherwise the workflow tag the concurrency state is keyed by.
+        status:
+          allOf:
+            - $ref: "#/components/schemas/ExecutionStatus"
+          description: |
+            The non-terminal status the execution was reclaimed from. Absent
+            when the execution itself is already gone (`execution_missing`).
+        age_ms:
+          type: integer
+          description: |
+            Age in milliseconds, measured from the execution's status clock or,
+            when that key is gone, from the concurrency member's admission
+            time.
+        evidence:
+          type: string
+          description: |
+            Why the execution was judged reclaimable. `graph_missing` is the
+            torn shape (status live, compiled graph gone); `execution_missing`
+            is the retention-lapsed shape (status key gone, concurrency member
+            still charged).
+          enum: [graph_missing, execution_missing]
 
     WorkflowDef:
       type: object

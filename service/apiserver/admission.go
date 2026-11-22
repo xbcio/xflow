@@ -163,6 +163,11 @@ func admissionRouteClass(op string) (string, bool) {
 		return routeClassExecute, true
 	case OpExecutionSignal, OpExecutionRevoke, OpExecutionCancel,
 		OpExecutionPause, OpExecutionResume, OpExecutionRerun,
+		// A concurrency reset is an operator mutation of the execution
+		// namespace (it can terminate many executions in one request), so it
+		// shares the execution route class rather than being exempt like the
+		// read-only sweep.
+		OpConcurrencyReset,
 		// Replay and backfill both create work: a replay starts a new attempt, a
 		// backfill starts an execution per missed occurrence. The bare path's
 		// backfill label is the same string as OpScheduleBackfill, so one case

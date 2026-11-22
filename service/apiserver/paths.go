@@ -34,6 +34,14 @@ const (
 	// definition update — that is what a rollback changes — so its operation is
 	// the same workflowdefinition.update PUT /v1/workflows/{id} carries.
 	PathWorkflowRollback = "/v1/workflows/{id}/rollback"
+	// PathWorkflowConcurrencyReset is the operator reset for one workflow's
+	// concurrency state: the slot holders and queue members keyed by the
+	// caller's namespace plus the workflow NAME. The segment is {name}, not
+	// {id}, because concurrency is keyed by name — a run is admitted under the
+	// definition name, and the reset must address the same key. The namespace
+	// is never in the path or body: it comes from the authenticated principal
+	// (IDOR), so a caller can only ever reach its own namespace's state.
+	PathWorkflowConcurrencyReset = "/v1/workflows/{name}/concurrency/reset"
 
 	// PathExecutions serves both POST (the entry-seed endpoint, runner protocol
 	// face, spec §0.1) and GET (the offset-paginated execution collection read,
@@ -165,6 +173,7 @@ var UserFacingPaths = []string{
 	PathWorkflowVersions,
 	PathWorkflowVersionByID,
 	PathWorkflowRollback,
+	PathWorkflowConcurrencyReset,
 
 	PathWorkflowSchedules,
 	PathWorkflowScheduleByNode,
