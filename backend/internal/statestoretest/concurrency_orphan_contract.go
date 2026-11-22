@@ -1,0 +1,838 @@
+package statestoretest
+
+import (
+	"context"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/xbcio/xflow/engine"
+	"github.com/xbcio/xflow/engine/graph"
+	"github.com/xbcio/xflow/store"
+	"github.com/xbcio/xflow/types"
+)
+
+// ConcurrencyOrphanBackend bundles a fresh store with the hooks the orphan
+// contract needs to reproduce the torn shape without reaching into backend
+// internals.
+type ConcurrencyOrphanBackend struct {
+	Store engine.StateStore
+	// LoseGraph removes the persisted graph while leaving the status key (and
+	// the concurrency membership) untouched: the torn shape.
+	LoseGraph func(t *testing.T, id types.ExecutionID)
+	// AgeStatus backdates the execution's status clock, which is one half of the
+	// age the sweep judges. Without it a test can only exercise force mode.
+	AgeStatus func(t *testing.T, id types.ExecutionID, age time.Duration)
+	// RecordActivity stamps the execution's node activity clock at "now": the
+	// shape of a node that was just leased or committed, even though no status
+	// transition happened. It is the other half of the age the sweep judges.
+	RecordActivity func(t *testing.T, id types.ExecutionID)
+	// AgeActivity backdates the node activity clock. Together with AgeStatus it
+	// models an execution that has genuinely been inactive for the full grace.
+	AgeActivity func(t *testing.T, id types.ExecutionID, age time.Duration)
+	// ForgetActivity removes the activity clock entirely: the shape of every
+	// execution created before the clock existed. The age guard must then fall
+	// back to the status clock, exactly as it did before the clock was added.
+	ForgetActivity func(t *testing.T, id types.ExecutionID)
+	// ForgetExecution removes the execution's own record while leaving every
+	// concurrency key untouched: the retention-lapsed shape.
+	ForgetExecution func(t *testing.T, id types.ExecutionID)
+	// Mirror is the optional durable store the state mirrors statuses to. When
+	// nil, SQL projection assertions are skipped.
+	Mirror store.Store
+}
+
+// ConcurrencyOrphanStoreFactory returns a fresh backend for one sub-test. The
+// factory must register cleanup for its resources.
+type ConcurrencyOrphanStoreFactory func(t *testing.T) ConcurrencyOrphanBackend
+
+// RunConcurrencyOrphanContract exercises engine.ConcurrencyOrphanReclaimer
+// against a concrete backend. Both backends must pass it, so the in-memory and
+// Redis judgements cannot drift: a running execution whose graph is gone is
+// reclaimed, a queued one is dropped instead of being promoted, and the
+// reclaim never double-releases a slot racing a normal terminal write.
+func RunConcurrencyOrphanContract(t *testing.T, manifest *Manifest, newBackend ConcurrencyOrphanStoreFactory) {
+	t.Helper()
+	manifest.Report(t)
+	manifest.RequireDeclared(t,
+		CapabilityConcurrencyOrphanReclaimer,
+		CapabilityConcurrencyLimitedStateStore,
+	)
+	t.Run("RunningOrphanConvergesAndFreesTheSlot", func(t *testing.T) {
+		orphanRunningConverges(t, newBackend(t))
+	})
+	t.Run("QueuedOrphanIsDroppedNotPromoted", func(t *testing.T) {
+		orphanQueuedIsDropped(t, newBackend(t))
+	})
+	t.Run("LiveGraphIsNeverReclaimed", func(t *testing.T) {
+		orphanLiveGraphIsUntouched(t, newBackend(t))
+	})
+	t.Run("WithinGraceIsLeftAlone", func(t *testing.T) {
+		orphanWithinGraceIsLeftAlone(t, newBackend(t))
+	})
+	t.Run("RecentActivityBlocksSweepAndForce", func(t *testing.T) {
+		orphanRecentActivityBlocksSweepAndForce(t, newBackend(t))
+	})
+	t.Run("BothClocksPastGraceIsReclaimed", func(t *testing.T) {
+		orphanBothClocksPastGraceIsReclaimed(t, newBackend(t))
+	})
+	t.Run("GroupLeaseActivityBlocksSweepAndForce", func(t *testing.T) {
+		orphanGroupLeaseActivityBlocksSweepAndForce(t, newBackend(t))
+	})
+	t.Run("GroupLeaseActivityAgedPastGraceIsReclaimed", func(t *testing.T) {
+		orphanGroupLeaseActivityAgedPastGraceIsReclaimed(t, newBackend(t))
+	})
+	t.Run("GroupUnitExecutionWithoutActivityFallsBackToStatusClock", func(t *testing.T) {
+		orphanGroupUnitExecutionUsesStatusClock(t, newBackend(t))
+	})
+	t.Run("LegacyExecutionWithoutActivityUsesStatusClock", func(t *testing.T) {
+		orphanLegacyExecutionUsesStatusClock(t, newBackend(t))
+	})
+	t.Run("PromotionGraceLeavesHeadThenSweepConverges", func(t *testing.T) {
+		orphanPromotionGraceThenSweep(t, newBackend(t))
+	})
+	t.Run("SecondReclaimIsANoOp", func(t *testing.T) {
+		orphanSecondReclaimIsIdempotent(t, newBackend(t))
+	})
+	t.Run("MissingExecutionMemberIsDroppedAndMirrored", func(t *testing.T) {
+		orphanMissingExecutionMember(t, newBackend(t))
+	})
+	t.Run("ReclaimRacesTerminalWriteWithoutDoubleRelease", func(t *testing.T) {
+		orphanRacesTerminalWrite(t, newBackend(t))
+	})
+	t.Run("WorkflowFilterScopesThePass", func(t *testing.T) {
+		orphanWorkflowFilterScopes(t, newBackend(t))
+	})
+	t.Run("IncludeLiveConvergesGraphPresentExecution", func(t *testing.T) {
+		orphanIncludeLiveConvergesGraphPresent(t, newBackend(t))
+	})
+	t.Run("DryRunWritesNothing", func(t *testing.T) {
+		orphanDryRunWritesNothing(t, newBackend(t))
+	})
+}
+
+func orphanGraph(t *testing.T, name string) *graph.Graph {
+	t.Helper()
+	return concurrencyGraph(t, name)
+}
+
+func orphanAdmission(g *graph.Graph) engine.ConcurrencyAdmission {
+	return engine.ConcurrencyAdmission{
+		Namespace: "default",
+		Workflow:  g.Name(),
+		Limit:     1,
+		Mode:      types.ConcurrencyModeQueue,
+	}
+}
+
+func orphanReclaimer(t *testing.T, state engine.StateStore) engine.ConcurrencyOrphanReclaimer {
+	t.Helper()
+	reclaimer, ok := state.(engine.ConcurrencyOrphanReclaimer)
+	if !ok {
+		t.Fatalf("state store %T implements ConcurrencyLimitedStateStore but not ConcurrencyOrphanReclaimer", state)
+	}
+	return reclaimer
+}
+
+// orphanSubmit submits one execution under the QUEUE-mode admission and returns
+// its ID.
+func orphanSubmit(t *testing.T, state engine.StateStore, ctx context.Context, g *graph.Graph, admission engine.ConcurrencyAdmission) types.ExecutionID {
+	t.Helper()
+	limited := concurrencyCapability(t, state)
+	snap, entries := concurrencySnapshot(t, g)
+	if _, err := limited.CreateExecutionWithConcurrency(ctx, snap, entries, admission); err != nil {
+		t.Fatalf("submission error = %v", err)
+	}
+	return snap.ID
+}
+
+func orphanReclaim(t *testing.T, state engine.StateStore, ctx context.Context, req engine.OrphanReclaimRequest) engine.OrphanReclaimResult {
+	t.Helper()
+	res, err := orphanReclaimer(t, state).ReclaimConcurrencyOrphans(ctx, req)
+	if err != nil {
+		t.Fatalf("ReclaimConcurrencyOrphans(%+v) error = %v", req, err)
+	}
+	return res
+}
+
+func orphanSQLStatus(t *testing.T, mirror store.Store, ctx context.Context, id types.ExecutionID) (types.ExecutionStatus, bool) {
+	t.Helper()
+	if mirror == nil {
+		return "", false
+	}
+	rec, err := mirror.GetExecution(ctx, id)
+	if err != nil || rec == nil {
+		return "", false
+	}
+	return rec.Status, true
+}
+
+func orphanRunningConverges(t *testing.T, backend ConcurrencyOrphanBackend) {
+	t.Helper()
+	ctx := context.Background()
+	g := orphanGraph(t, "orphan-running")
+	admission := orphanAdmission(g)
+	holding := orphanSubmit(t, backend.Store, ctx, g, admission)
+	waiting := orphanSubmit(t, backend.Store, ctx, g, admission)
+	if got := executionStatus(t, backend.Store, ctx, waiting); got != types.ExecutionStatusQueued {
+		t.Fatalf("second submission status = %q, want queued", got)
+	}
+
+	backend.LoseGraph(t, holding)
+	backend.AgeStatus(t, holding, 10*time.Minute)
+	res := orphanReclaim(t, backend.Store, ctx, engine.OrphanReclaimRequest{
+		Mode: engine.OrphanReclaimSweep, Namespace: "default", Limit: 32, Grace: time.Minute,
+	})
+	if res.Reclaimed < 1 {
+		t.Fatalf("Reclaimed = %d, want at least 1 (candidates %+v)", res.Reclaimed, res.Candidates)
+	}
+	if got := executionStatus(t, backend.Store, ctx, holding); got != types.ExecutionStatusCanceled {
+		t.Fatalf("holding execution status = %q, want canceled", got)
+	}
+	// The freed slot must go to the head of the line, which is exactly what a
+	// graph-lost execution would otherwise block forever.
+	if got := executionStatus(t, backend.Store, ctx, waiting); got != types.ExecutionStatusRunning {
+		t.Fatalf("waiting execution status = %q, want running (slot was not freed or not refilled)", got)
+	}
+	if status, ok := orphanSQLStatus(t, backend.Mirror, ctx, holding); ok && status != types.ExecutionStatusCanceled {
+		t.Fatalf("SQL status = %q, want canceled", status)
+	}
+	candidate := orphanCandidateFor(res, holding)
+	if candidate == nil {
+		t.Fatalf("no candidate reported for %q: %+v", holding, res.Candidates)
+	}
+	if candidate.Status != types.ExecutionStatusRunning {
+		t.Fatalf("candidate status = %q, want running", candidate.Status)
+	}
+	if candidate.Evidence != engine.OrphanEvidenceGraphMissing {
+		t.Fatalf("candidate evidence = %q, want %q", candidate.Evidence, engine.OrphanEvidenceGraphMissing)
+	}
+	if candidate.Kind() != engine.OrphanKindRunning {
+		t.Fatalf("candidate kind = %q, want %q", candidate.Kind(), engine.OrphanKindRunning)
+	}
+}
+
+func orphanQueuedIsDropped(t *testing.T, backend ConcurrencyOrphanBackend) {
+	t.Helper()
+	ctx := context.Background()
+	g := orphanGraph(t, "orphan-queued")
+	admission := orphanAdmission(g)
+	holding := orphanSubmit(t, backend.Store, ctx, g, admission)
+	orphan := orphanSubmit(t, backend.Store, ctx, g, admission)
+	behind := orphanSubmit(t, backend.Store, ctx, g, admission)
+
+	backend.LoseGraph(t, orphan)
+	backend.AgeStatus(t, orphan, 10*time.Minute)
+	res := orphanReclaim(t, backend.Store, ctx, engine.OrphanReclaimRequest{
+		Mode: engine.OrphanReclaimSweep, Namespace: "default", Limit: 32, Grace: time.Minute,
+	})
+	if res.Reclaimed < 1 {
+		t.Fatalf("Reclaimed = %d, want at least 1", res.Reclaimed)
+	}
+	if got := executionStatus(t, backend.Store, ctx, orphan); got != types.ExecutionStatusCanceled {
+		t.Fatalf("queued orphan status = %q, want canceled", got)
+	}
+	// The metric kind of a queued reclaim is queued, not running: the status the
+	// execution was reclaimed from is what the bounded label reports.
+	candidate := orphanCandidateFor(res, orphan)
+	if candidate == nil || candidate.Kind() != engine.OrphanKindQueued {
+		t.Fatalf("queued orphan candidate = %+v, want kind %q", candidate, engine.OrphanKindQueued)
+	}
+	if got := executionStatus(t, backend.Store, ctx, holding); got != types.ExecutionStatusRunning {
+		t.Fatalf("holder status = %q, want untouched running", got)
+	}
+	// The holder ends; the line must advance past the canceled member, not
+	// promote it into the slot the release just freed.
+	if err := backend.Store.UpdateExecutionStatus(ctx, holding, types.ExecutionStatusCanceled, ""); err != nil {
+		t.Fatalf("cancel holder error = %v", err)
+	}
+	if got := executionStatus(t, backend.Store, ctx, orphan); got != types.ExecutionStatusCanceled {
+		t.Fatalf("orphan status after promotion = %q, want still canceled", got)
+	}
+	if got := executionStatus(t, backend.Store, ctx, behind); got != types.ExecutionStatusRunning {
+		t.Fatalf("execution behind the orphan status = %q, want running: a canceled orphan held the line", got)
+	}
+}
+
+func orphanLiveGraphIsUntouched(t *testing.T, backend ConcurrencyOrphanBackend) {
+	t.Helper()
+	ctx := context.Background()
+	g := orphanGraph(t, "orphan-live")
+	id := orphanSubmit(t, backend.Store, ctx, g, orphanAdmission(g))
+	res := orphanReclaim(t, backend.Store, ctx, engine.OrphanReclaimRequest{
+		Mode: engine.OrphanReclaimForce, ExecutionID: id, Namespace: "default", Limit: 1,
+	})
+	if res.Reclaimed != 0 {
+		t.Fatalf("Reclaimed = %d, want 0 for an execution with a live graph", res.Reclaimed)
+	}
+	if got := executionStatus(t, backend.Store, ctx, id); got != types.ExecutionStatusRunning {
+		t.Fatalf("status = %q, want running", got)
+	}
+}
+
+func orphanWithinGraceIsLeftAlone(t *testing.T, backend ConcurrencyOrphanBackend) {
+	t.Helper()
+	ctx := context.Background()
+	g := orphanGraph(t, "orphan-grace")
+	id := orphanSubmit(t, backend.Store, ctx, g, orphanAdmission(g))
+	backend.LoseGraph(t, id)
+	backend.AgeStatus(t, id, 10*time.Millisecond)
+	res := orphanReclaim(t, backend.Store, ctx, engine.OrphanReclaimRequest{
+		Mode: engine.OrphanReclaimSweep, ExecutionID: id, Namespace: "default", Limit: 1, Grace: time.Hour,
+	})
+	if res.Reclaimed != 0 {
+		t.Fatalf("Reclaimed = %d, want 0 inside the grace window", res.Reclaimed)
+	}
+	if got := executionStatus(t, backend.Store, ctx, id); got != types.ExecutionStatusRunning {
+		t.Fatalf("status = %q, want running", got)
+	}
+	// Force mode is the explicit operator override: same shape, no grace.
+	res = orphanReclaim(t, backend.Store, ctx, engine.OrphanReclaimRequest{
+		Mode: engine.OrphanReclaimForce, ExecutionID: id, Namespace: "default", Limit: 1,
+	})
+	if res.Reclaimed != 1 {
+		t.Fatalf("force Reclaimed = %d, want 1", res.Reclaimed)
+	}
+	if got := executionStatus(t, backend.Store, ctx, id); got != types.ExecutionStatusCanceled {
+		t.Fatalf("status after force = %q, want canceled", got)
+	}
+}
+
+// orphanRecentActivityBlocksSweepAndForce pins the false-positive fix: the
+// status clock may be hours old while the execution is demonstrably working —
+// a node was leased, renewed, or committed inside the grace — and that activity
+// must block both the periodic sweep and Cancel's force-mode self-heal.
+func orphanRecentActivityBlocksSweepAndForce(t *testing.T, backend ConcurrencyOrphanBackend) {
+	t.Helper()
+	if backend.RecordActivity == nil || backend.AgeActivity == nil {
+		t.Fatalf("backend declares ConcurrencyOrphanReclaimer but supplies no activity-clock hooks")
+	}
+	ctx := context.Background()
+	g := orphanGraph(t, "orphan-activity")
+	id := orphanSubmit(t, backend.Store, ctx, g, orphanAdmission(g))
+	backend.LoseGraph(t, id)
+	backend.AgeStatus(t, id, 10*time.Minute)
+	backend.RecordActivity(t, id)
+
+	sweep := engine.OrphanReclaimRequest{
+		Mode: engine.OrphanReclaimSweep, ExecutionID: id, Namespace: "default", Limit: 1, Grace: time.Minute,
+	}
+	if res := orphanReclaim(t, backend.Store, ctx, sweep); res.Reclaimed != 0 {
+		t.Fatalf("sweep Reclaimed = %d, want 0: node activity is inside the grace", res.Reclaimed)
+	}
+	// Cancel's self-heal is a targeted force pass; force skips the status clock,
+	// never direct evidence that a node is working.
+	force := engine.OrphanReclaimRequest{
+		Mode: engine.OrphanReclaimForce, ExecutionID: id, Namespace: "default", Limit: 1,
+		Reason: engine.OrphanTriggerCancel,
+	}
+	if res := orphanReclaim(t, backend.Store, ctx, force); res.Reclaimed != 0 {
+		t.Fatalf("Cancel self-heal Reclaimed = %d, want 0: node activity is inside the grace", res.Reclaimed)
+	}
+	if got := executionStatus(t, backend.Store, ctx, id); got != types.ExecutionStatusRunning {
+		t.Fatalf("status = %q, want running", got)
+	}
+
+	// Age the activity clock too; the same request now converges. That proves the
+	// block above was the activity clock and not some other guard.
+	backend.AgeActivity(t, id, 10*time.Minute)
+	if res := orphanReclaim(t, backend.Store, ctx, sweep); res.Reclaimed != 1 {
+		t.Fatalf("sweep Reclaimed = %d, want 1 once both clocks are past the grace", res.Reclaimed)
+	}
+	if got := executionStatus(t, backend.Store, ctx, id); got != types.ExecutionStatusCanceled {
+		t.Fatalf("status = %q, want canceled", got)
+	}
+}
+
+// orphanBothClocksPastGraceIsReclaimed is the genuinely stalled shape: the
+// status clock AND the activity clock are both past the grace, so the age guard
+// no longer protects the execution.
+func orphanBothClocksPastGraceIsReclaimed(t *testing.T, backend ConcurrencyOrphanBackend) {
+	t.Helper()
+	if backend.RecordActivity == nil || backend.AgeActivity == nil {
+		t.Fatalf("backend declares ConcurrencyOrphanReclaimer but supplies no activity-clock hooks")
+	}
+	ctx := context.Background()
+	g := orphanGraph(t, "orphan-stalled")
+	id := orphanSubmit(t, backend.Store, ctx, g, orphanAdmission(g))
+	backend.LoseGraph(t, id)
+	backend.AgeStatus(t, id, 10*time.Minute)
+	backend.RecordActivity(t, id)
+	backend.AgeActivity(t, id, 10*time.Minute)
+
+	res := orphanReclaim(t, backend.Store, ctx, engine.OrphanReclaimRequest{
+		Mode: engine.OrphanReclaimSweep, ExecutionID: id, Namespace: "default", Limit: 1, Grace: time.Minute,
+	})
+	if res.Reclaimed != 1 {
+		t.Fatalf("Reclaimed = %d, want 1 for an execution whose newer clock is past the grace", res.Reclaimed)
+	}
+	if got := executionStatus(t, backend.Store, ctx, id); got != types.ExecutionStatusCanceled {
+		t.Fatalf("status = %q, want canceled", got)
+	}
+}
+
+// orphanLegacyExecutionUsesStatusClock pins the compatibility rule: an
+// execution created before the activity clock existed has no activity key, and
+// the sweep must fall back to its status clock exactly as it did before.
+func orphanLegacyExecutionUsesStatusClock(t *testing.T, backend ConcurrencyOrphanBackend) {
+	t.Helper()
+	ctx := context.Background()
+	g := orphanGraph(t, "orphan-legacy")
+	id := orphanSubmit(t, backend.Store, ctx, g, orphanAdmission(g))
+	// No lease or commit happened, so there is no activity clock to record; the
+	// status clock is the only age evidence, and it alone must be enough.
+	backend.LoseGraph(t, id)
+	backend.AgeStatus(t, id, 10*time.Minute)
+
+	res := orphanReclaim(t, backend.Store, ctx, engine.OrphanReclaimRequest{
+		Mode: engine.OrphanReclaimSweep, ExecutionID: id, Namespace: "default", Limit: 1, Grace: time.Minute,
+	})
+	if res.Reclaimed != 1 {
+		t.Fatalf("Reclaimed = %d, want 1 through the updated_at fallback", res.Reclaimed)
+	}
+	if got := executionStatus(t, backend.Store, ctx, id); got != types.ExecutionStatusCanceled {
+		t.Fatalf("status = %q, want canceled", got)
+	}
+}
+
+// orphanGroupGraph compiles a two-unit workflow. The group contract needs the
+// execution to survive an accepted group commit, so there must be a second unit
+// to keep remaining_nodes above zero: after committing unit 0, one unit is
+// still outstanding and the execution stays running with no group lease held —
+// the between-two-leases shape.
+func orphanGroupGraph(t *testing.T, name string) *graph.Graph {
+	t.Helper()
+	g, err := graph.Compile(&types.WorkflowDef{
+		Name:    name,
+		Version: "1",
+		Nodes: []types.NodeDef{
+			{Name: "start", Type: "test.echo"},
+			{Name: "end", Type: "test.echo"},
+		},
+		Connections: types.Connections{
+			"start": {"main": types.PortConnections{Targets: []types.Connection{{Node: "end", Input: "main"}}}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Compile(%s) error = %v", name, err)
+	}
+	return g
+}
+
+// orphanGroupLeaseCycle drives one real group-unit lease through acquire,
+// renew and an accepted commit using only the store's public GroupStateStore
+// surface. No backend-specific hook is needed, and the cycle leaves no
+// unexpired lease behind: the accepted commit removes the unit from the lease
+// index while the execution stays running on its second unit.
+func orphanGroupLeaseCycle(t *testing.T, state engine.StateStore, ctx context.Context, id types.ExecutionID) {
+	t.Helper()
+	groups, ok := state.(engine.GroupStateStore)
+	if !ok {
+		t.Fatalf("state store %T implements ConcurrencyOrphanReclaimer but not GroupStateStore", state)
+	}
+	lease := &engine.GroupLease{
+		LeaseID: "orphan-group-lease", LeaseToken: "orphan-group-token", Attempt: 1,
+		ExecutionID: id, GroupUnitIdx: 0, GroupName: "group", EntryNodeIdx: 0,
+		IssuedAt: time.Now().UTC(), TTL: time.Minute,
+	}
+	acquired, err := groups.AcquireGroupLease(ctx, lease)
+	if err != nil || !acquired {
+		t.Fatalf("AcquireGroupLease(%q) acquired=%v err=%v, want true/nil", id, acquired, err)
+	}
+	renewed, err := groups.RenewGroupLease(ctx, id, 0, lease.LeaseToken, time.Now().UTC().Add(2*time.Minute))
+	if err != nil || !renewed {
+		t.Fatalf("RenewGroupLease(%q) renewed=%v err=%v, want true/nil", id, renewed, err)
+	}
+	committed, err := groups.CommitGroup(ctx, engine.GroupCommitRequest{
+		ExecutionID:  id,
+		GroupUnitIdx: 0,
+		GroupID:      "group",
+		LeaseID:      lease.LeaseID,
+		LeaseToken:   lease.LeaseToken,
+		Attempt:      lease.Attempt,
+		Outcome:      engine.GroupOutcomeSuccess,
+	})
+	if err != nil {
+		t.Fatalf("CommitGroup(%q) error = %v", id, err)
+	}
+	if !committed.Applied {
+		t.Fatalf("CommitGroup(%q) = %+v, want an applied commit", id, committed)
+	}
+	if committed.ExecutionDone {
+		t.Fatalf("CommitGroup(%q) finalized the execution; the fixture needs it between two leases", id)
+	}
+}
+
+// orphanGroupActivityFixture submits a two-unit execution, tears its graph out,
+// ages the status clock, and leaves one group lease cycle in its wake: recent
+// group activity, no unexpired lease, and no status transition.
+func orphanGroupActivityFixture(t *testing.T, backend ConcurrencyOrphanBackend, name string) (context.Context, types.ExecutionID) {
+	t.Helper()
+	ctx := context.Background()
+	g := orphanGroupGraph(t, name)
+	id := orphanSubmit(t, backend.Store, ctx, g, orphanAdmission(g))
+	backend.LoseGraph(t, id)
+	backend.AgeStatus(t, id, 10*time.Minute)
+	orphanGroupLeaseCycle(t, backend.Store, ctx, id)
+	return ctx, id
+}
+
+// orphanGroupLeaseActivityBlocksSweepAndForce is the group-unit counterpart of
+// RecentActivityBlocksSweepAndForce: the status clock is very old and no lease
+// is held, but a group unit was just acquired, renewed and committed. That
+// activity must block both the periodic sweep and Cancel's force-mode
+// self-heal, or a healthy group execution waiting for its next unit would be
+// converged as an orphan.
+func orphanGroupLeaseActivityBlocksSweepAndForce(t *testing.T, backend ConcurrencyOrphanBackend) {
+	t.Helper()
+	ctx, id := orphanGroupActivityFixture(t, backend, "orphan-group-activity")
+
+	sweep := engine.OrphanReclaimRequest{
+		Mode: engine.OrphanReclaimSweep, ExecutionID: id, Namespace: "default", Limit: 1, Grace: time.Minute,
+	}
+	if res := orphanReclaim(t, backend.Store, ctx, sweep); res.Reclaimed != 0 {
+		t.Fatalf("sweep Reclaimed = %d, want 0: group activity is inside the grace", res.Reclaimed)
+	}
+	force := engine.OrphanReclaimRequest{
+		Mode: engine.OrphanReclaimForce, ExecutionID: id, Namespace: "default", Limit: 1,
+		Reason: engine.OrphanTriggerCancel,
+	}
+	if res := orphanReclaim(t, backend.Store, ctx, force); res.Reclaimed != 0 {
+		t.Fatalf("Cancel self-heal Reclaimed = %d, want 0: group activity is inside the grace", res.Reclaimed)
+	}
+	if got := executionStatus(t, backend.Store, ctx, id); got != types.ExecutionStatusRunning {
+		t.Fatalf("status = %q, want running", got)
+	}
+}
+
+// orphanGroupLeaseActivityAgedPastGraceIsReclaimed is the genuinely stalled
+// group shape: the status clock and the group activity clock are both past the
+// grace, no lease is held, so the age guard no longer protects the execution.
+func orphanGroupLeaseActivityAgedPastGraceIsReclaimed(t *testing.T, backend ConcurrencyOrphanBackend) {
+	t.Helper()
+	if backend.AgeActivity == nil {
+		t.Fatalf("backend declares ConcurrencyOrphanReclaimer but supplies no activity-clock hooks")
+	}
+	ctx, id := orphanGroupActivityFixture(t, backend, "orphan-group-aged")
+	backend.AgeActivity(t, id, 10*time.Minute)
+
+	res := orphanReclaim(t, backend.Store, ctx, engine.OrphanReclaimRequest{
+		Mode: engine.OrphanReclaimSweep, ExecutionID: id, Namespace: "default", Limit: 1, Grace: time.Minute,
+	})
+	if res.Reclaimed != 1 {
+		t.Fatalf("Reclaimed = %d, want 1 once group activity is past the grace", res.Reclaimed)
+	}
+	if got := executionStatus(t, backend.Store, ctx, id); got != types.ExecutionStatusCanceled {
+		t.Fatalf("status = %q, want canceled", got)
+	}
+}
+
+// orphanGroupUnitExecutionUsesStatusClock pins the compatibility rule for group
+// executions: an execution whose activity clock is absent (everything created
+// before the clock existed) falls back to updated_at exactly as before, even
+// when its group unit has been leased before. The group cycle is what leaves
+// the unit keys behind; deleting the activity clock is what makes it legacy.
+func orphanGroupUnitExecutionUsesStatusClock(t *testing.T, backend ConcurrencyOrphanBackend) {
+	t.Helper()
+	if backend.ForgetActivity == nil {
+		t.Fatalf("backend declares ConcurrencyOrphanReclaimer but supplies no ForgetActivity hook")
+	}
+	ctx, id := orphanGroupActivityFixture(t, backend, "orphan-group-legacy")
+	backend.ForgetActivity(t, id)
+
+	res := orphanReclaim(t, backend.Store, ctx, engine.OrphanReclaimRequest{
+		Mode: engine.OrphanReclaimSweep, ExecutionID: id, Namespace: "default", Limit: 1, Grace: time.Minute,
+	})
+	if res.Reclaimed != 1 {
+		t.Fatalf("Reclaimed = %d, want 1 through the updated_at fallback", res.Reclaimed)
+	}
+	if got := executionStatus(t, backend.Store, ctx, id); got != types.ExecutionStatusCanceled {
+		t.Fatalf("status = %q, want canceled", got)
+	}
+}
+
+// orphanPromotionGraceThenSweep covers the promotion path's age gate and the
+// liveness of the queue behind it: a graph-lost head promoted inside the grace
+// keeps the slot it was just handed (capacity may idle for up to one grace),
+// and the next sweep — after the clocks pass the grace — converges it and
+// promotes the execution behind it. The queue therefore cannot deadlock.
+func orphanPromotionGraceThenSweep(t *testing.T, backend ConcurrencyOrphanBackend) {
+	t.Helper()
+	ctx := context.Background()
+	g := orphanGraph(t, "orphan-promotion-grace")
+	admission := orphanAdmission(g)
+	holder := orphanSubmit(t, backend.Store, ctx, g, admission)
+	head := orphanSubmit(t, backend.Store, ctx, g, admission)
+	behind := orphanSubmit(t, backend.Store, ctx, g, admission)
+	backend.LoseGraph(t, head)
+
+	// The holder ends and the release promotes the line. The head is inside the
+	// grace (no status transition or activity older than it), so the promotion
+	// must refuse to converge it.
+	if err := backend.Store.UpdateExecutionStatus(ctx, holder, types.ExecutionStatusCanceled, ""); err != nil {
+		t.Fatalf("cancel holder error = %v", err)
+	}
+	if got := executionStatus(t, backend.Store, ctx, head); got != types.ExecutionStatusQueued {
+		t.Fatalf("head status = %q, want queued inside the grace", got)
+	}
+	if got := executionStatus(t, backend.Store, ctx, behind); got != types.ExecutionStatusQueued {
+		t.Fatalf("execution behind the head status = %q, want queued", got)
+	}
+
+	// Past the grace the next sweep must converge the head and hand the capacity
+	// to the member behind it, or the workflow would stay stuck forever.
+	backend.AgeStatus(t, head, 10*time.Minute)
+	res := orphanReclaim(t, backend.Store, ctx, engine.OrphanReclaimRequest{
+		Mode: engine.OrphanReclaimSweep, Namespace: "default", Limit: 16, Grace: time.Minute,
+	})
+	if res.Reclaimed < 1 {
+		t.Fatalf("Reclaimed = %d, want at least the graph-lost head", res.Reclaimed)
+	}
+	if got := executionStatus(t, backend.Store, ctx, head); got != types.ExecutionStatusCanceled {
+		t.Fatalf("head status after sweep = %q, want canceled", got)
+	}
+	if got := executionStatus(t, backend.Store, ctx, behind); got != types.ExecutionStatusRunning {
+		t.Fatalf("execution behind the head status = %q, want running: the line deadlocked", got)
+	}
+}
+
+func orphanSecondReclaimIsIdempotent(t *testing.T, backend ConcurrencyOrphanBackend) {
+	t.Helper()
+	ctx := context.Background()
+	g := orphanGraph(t, "orphan-idempotent")
+	id := orphanSubmit(t, backend.Store, ctx, g, orphanAdmission(g))
+	backend.LoseGraph(t, id)
+	req := engine.OrphanReclaimRequest{Mode: engine.OrphanReclaimForce, ExecutionID: id, Namespace: "default", Limit: 1}
+	if res := orphanReclaim(t, backend.Store, ctx, req); res.Reclaimed != 1 {
+		t.Fatalf("first Reclaimed = %d, want 1", res.Reclaimed)
+	}
+	if res := orphanReclaim(t, backend.Store, ctx, req); res.Reclaimed != 0 {
+		t.Fatalf("second Reclaimed = %d, want 0 (already terminal)", res.Reclaimed)
+	}
+}
+
+func orphanRacesTerminalWrite(t *testing.T, backend ConcurrencyOrphanBackend) {
+	t.Helper()
+	ctx := context.Background()
+	g := orphanGraph(t, "orphan-race")
+	admission := orphanAdmission(g)
+	holding := orphanSubmit(t, backend.Store, ctx, g, admission)
+	first := orphanSubmit(t, backend.Store, ctx, g, admission)
+	second := orphanSubmit(t, backend.Store, ctx, g, admission)
+	backend.LoseGraph(t, holding)
+
+	var wg sync.WaitGroup
+	var reclaimErr, terminalErr error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, reclaimErr = orphanReclaimer(t, backend.Store).ReclaimConcurrencyOrphans(ctx, engine.OrphanReclaimRequest{
+			Mode: engine.OrphanReclaimForce, ExecutionID: holding, Namespace: "default", Limit: 1,
+		})
+	}()
+	go func() {
+		defer wg.Done()
+		terminalErr = backend.Store.UpdateExecutionStatus(ctx, holding, types.ExecutionStatusCanceled, "")
+	}()
+	wg.Wait()
+	if reclaimErr != nil {
+		t.Fatalf("reclaim error = %v", reclaimErr)
+	}
+	if terminalErr != nil {
+		t.Fatalf("terminal write error = %v", terminalErr)
+	}
+
+	if got := executionStatus(t, backend.Store, ctx, holding); got != types.ExecutionStatusCanceled {
+		t.Fatalf("holding status = %q, want canceled", got)
+	}
+	// Exactly one slot existed. If both the reclaim and the terminal write
+	// released it, both waiters would be running and the limit would be broken
+	// silently.
+	running := 0
+	statuses := make([]types.ExecutionStatus, 0, 2)
+	for _, id := range []types.ExecutionID{first, second} {
+		status := executionStatus(t, backend.Store, ctx, id)
+		statuses = append(statuses, status)
+		if status == types.ExecutionStatusRunning {
+			running++
+		}
+	}
+	if running != 1 {
+		t.Fatalf("running waiters = %d, want exactly 1: the slot was released twice (statuses %q, %q)", running, statuses[0], statuses[1])
+	}
+}
+
+// orphanMissingExecutionMember covers the retention-lapsed shape: the
+// concurrency member survives but there is no execution left to converge. The
+// member is removed and the durable mirror is written directly, because the
+// ordinary drift repair skips the missing row as not_found. No status is
+// invented: a bare status key without the rest of a creation would read as a
+// live execution with no time budget.
+func orphanMissingExecutionMember(t *testing.T, backend ConcurrencyOrphanBackend) {
+	t.Helper()
+	if backend.ForgetExecution == nil {
+		t.Fatalf("backend declares ConcurrencyOrphanReclaimer but supplies no ForgetExecution hook")
+	}
+	ctx := context.Background()
+	g := orphanGraph(t, "orphan-missing")
+	admission := orphanAdmission(g)
+	holding := orphanSubmit(t, backend.Store, ctx, g, admission)
+	gone := orphanSubmit(t, backend.Store, ctx, g, admission)
+	if got := executionStatus(t, backend.Store, ctx, gone); got != types.ExecutionStatusQueued {
+		t.Fatalf("gone submission status = %q, want queued", got)
+	}
+	backend.ForgetExecution(t, gone)
+
+	// Force mode: the member's own age is the only clock this shape has, and the
+	// admission hook does not expose it. The judgement being tested is the
+	// missing execution, not the age guard.
+	res := orphanReclaim(t, backend.Store, ctx, engine.OrphanReclaimRequest{
+		Mode: engine.OrphanReclaimForce, Namespace: "default", Limit: 32,
+	})
+	if res.Reclaimed < 1 {
+		t.Fatalf("Reclaimed = %d, want at least 1", res.Reclaimed)
+	}
+	candidate := orphanCandidateFor(res, gone)
+	if candidate == nil || candidate.Evidence != engine.OrphanEvidenceExecutionMissing {
+		t.Fatalf("candidate = %+v, want evidence %q", candidate, engine.OrphanEvidenceExecutionMissing)
+	}
+	if candidate.Kind() != engine.OrphanKindMissing {
+		t.Fatalf("candidate kind = %q, want %q", candidate.Kind(), engine.OrphanKindMissing)
+	}
+	// The holder keeps its slot; the dangling member is gone from the line.
+	if got := executionStatus(t, backend.Store, ctx, holding); got != types.ExecutionStatusRunning {
+		t.Fatalf("holder status = %q, want running", got)
+	}
+	// The SQL row is the SAS-visible symptom: it must not be left queued.
+	if status, ok := orphanSQLStatus(t, backend.Mirror, ctx, gone); ok && status != types.ExecutionStatusCanceled {
+		t.Fatalf("SQL status = %q, want canceled", status)
+	}
+	// Ending the holder must not promote the execution that no longer exists.
+	if err := backend.Store.UpdateExecutionStatus(ctx, holding, types.ExecutionStatusCanceled, ""); err != nil {
+		t.Fatalf("cancel holder error = %v", err)
+	}
+	snap, err := backend.Store.GetExecution(ctx, gone)
+	if err != nil || (snap != nil && snap.Status == types.ExecutionStatusRunning) {
+		t.Fatalf("gone execution = %+v (err %v), want no running execution: a dangling member was promoted", snap, err)
+	}
+}
+
+// orphanWorkflowFilterScopes proves a Workflow-scoped pass reads exactly that
+// workflow's slot set and leaves every other workflow's state alone. This is
+// the judgement the operator reset API exposes, so it must not depend on the
+// store's namespace-wide workflow index being complete.
+func orphanWorkflowFilterScopes(t *testing.T, backend ConcurrencyOrphanBackend) {
+	t.Helper()
+	ctx := context.Background()
+	gA := orphanGraph(t, "orphan-filter-a")
+	gB := orphanGraph(t, "orphan-filter-b")
+	a := orphanSubmit(t, backend.Store, ctx, gA, orphanAdmission(gA))
+	b := orphanSubmit(t, backend.Store, ctx, gB, orphanAdmission(gB))
+	backend.LoseGraph(t, a)
+	backend.LoseGraph(t, b)
+	backend.AgeStatus(t, a, 10*time.Minute)
+	backend.AgeStatus(t, b, 10*time.Minute)
+
+	res := orphanReclaim(t, backend.Store, ctx, engine.OrphanReclaimRequest{
+		Mode: engine.OrphanReclaimForce, Namespace: "default", Workflow: gA.Name(), Limit: 32,
+	})
+	if res.Reclaimed != 1 {
+		t.Fatalf("Reclaimed = %d, want exactly 1 for a workflow-scoped pass (candidates %+v)", res.Reclaimed, res.Candidates)
+	}
+	if got := executionStatus(t, backend.Store, ctx, a); got != types.ExecutionStatusCanceled {
+		t.Fatalf("scoped workflow execution status = %q, want canceled", got)
+	}
+	if got := executionStatus(t, backend.Store, ctx, b); got != types.ExecutionStatusRunning {
+		t.Fatalf("other workflow's execution status = %q, want untouched running", got)
+	}
+}
+
+// orphanIncludeLiveConvergesGraphPresent covers the explicit operator-reset
+// override: include_live lists a graph-present execution in a dry run without
+// writing, and converges it when applied, terminalizing the execution and its
+// durable mirror.
+func orphanIncludeLiveConvergesGraphPresent(t *testing.T, backend ConcurrencyOrphanBackend) {
+	t.Helper()
+	ctx := context.Background()
+	g := orphanGraph(t, "orphan-include-live")
+	id := orphanSubmit(t, backend.Store, ctx, g, orphanAdmission(g))
+
+	preview := orphanReclaim(t, backend.Store, ctx, engine.OrphanReclaimRequest{
+		Mode: engine.OrphanReclaimForce, DryRun: true, Namespace: "default",
+		Workflow: g.Name(), IncludeLive: true, Limit: 8,
+	})
+	if preview.Reclaimed != 0 {
+		t.Fatalf("preview Reclaimed = %d, want 0", preview.Reclaimed)
+	}
+	candidate := orphanCandidateFor(preview, id)
+	if candidate == nil {
+		t.Fatalf("include_live preview did not list the live execution: %+v", preview.Candidates)
+	}
+	if candidate.Evidence != engine.OrphanEvidenceGraphMissing {
+		t.Fatalf("candidate evidence = %q, want %q", candidate.Evidence, engine.OrphanEvidenceGraphMissing)
+	}
+	if candidate.Kind() != engine.OrphanKindRunning {
+		t.Fatalf("candidate kind = %q, want %q", candidate.Kind(), engine.OrphanKindRunning)
+	}
+	if got := executionStatus(t, backend.Store, ctx, id); got != types.ExecutionStatusRunning {
+		t.Fatalf("status after preview = %q, want running: a dry run must not write", got)
+	}
+
+	res := orphanReclaim(t, backend.Store, ctx, engine.OrphanReclaimRequest{
+		Mode: engine.OrphanReclaimForce, Namespace: "default",
+		Workflow: g.Name(), IncludeLive: true, Limit: 8,
+	})
+	if res.Reclaimed != 1 {
+		t.Fatalf("include_live Reclaimed = %d, want 1", res.Reclaimed)
+	}
+	if got := executionStatus(t, backend.Store, ctx, id); got != types.ExecutionStatusCanceled {
+		t.Fatalf("status after include_live apply = %q, want canceled", got)
+	}
+	if status, ok := orphanSQLStatus(t, backend.Mirror, ctx, id); ok && status != types.ExecutionStatusCanceled {
+		t.Fatalf("SQL status = %q, want canceled", status)
+	}
+}
+
+// orphanDryRunWritesNothing pins the preview contract: the same request that
+// lists a candidate leaves authoritative state byte-for-byte unchanged, and
+// the identical request with DryRun cleared converges exactly that candidate.
+func orphanDryRunWritesNothing(t *testing.T, backend ConcurrencyOrphanBackend) {
+	t.Helper()
+	ctx := context.Background()
+	g := orphanGraph(t, "orphan-dry-run")
+	id := orphanSubmit(t, backend.Store, ctx, g, orphanAdmission(g))
+	backend.LoseGraph(t, id)
+	backend.AgeStatus(t, id, 10*time.Minute)
+
+	req := engine.OrphanReclaimRequest{
+		Mode: engine.OrphanReclaimForce, DryRun: true, Namespace: "default",
+		Workflow: g.Name(), Limit: 8,
+	}
+	res := orphanReclaim(t, backend.Store, ctx, req)
+	if res.Reclaimed != 0 {
+		t.Fatalf("dry-run Reclaimed = %d, want 0", res.Reclaimed)
+	}
+	if orphanCandidateFor(res, id) == nil {
+		t.Fatalf("dry run did not list the orphan: %+v", res.Candidates)
+	}
+	if got := executionStatus(t, backend.Store, ctx, id); got != types.ExecutionStatusRunning {
+		t.Fatalf("status after dry run = %q, want running", got)
+	}
+
+	req.DryRun = false
+	if res := orphanReclaim(t, backend.Store, ctx, req); res.Reclaimed != 1 {
+		t.Fatalf("apply Reclaimed = %d, want 1 for the candidate the dry run listed", res.Reclaimed)
+	}
+	if got := executionStatus(t, backend.Store, ctx, id); got != types.ExecutionStatusCanceled {
+		t.Fatalf("status after apply = %q, want canceled", got)
+	}
+}
+
+func orphanCandidateFor(res engine.OrphanReclaimResult, id types.ExecutionID) *engine.OrphanReclaimCandidate {
+	for i := range res.Candidates {
+		if res.Candidates[i].ExecutionID == id {
+			return &res.Candidates[i]
+		}
+	}
+	return nil
+}

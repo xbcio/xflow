@@ -85,6 +85,14 @@ const (
 	CapabilityConcurrencyQueueExpirer               Capability = "ConcurrencyQueueExpirer"
 	CapabilityConcurrencyQueueInspector             Capability = "ConcurrencyQueueInspector"
 	CapabilityConcurrencyLimitedEntryAdmissionStore Capability = "ConcurrencyLimitedEntryAdmissionStore"
+	// CapabilityConcurrencyOrphanReclaimer is engine.ConcurrencyOrphanReclaimer:
+	// the store can judge a graph-lost execution (or a concurrency member whose
+	// execution is gone) from its own authoritative state and converge it to
+	// canceled, releasing the slot it held. The interface carries the judgement
+	// contract; RunConcurrencyOrphanContract proves the behaviours the engine
+	// relies on: a sweep reclaims without a live lease, promotion validates the
+	// graph, and a reclaim races a normal terminal write without double release.
+	CapabilityConcurrencyOrphanReclaimer Capability = "ConcurrencyOrphanReclaimer"
 
 	CapabilityDeadLetterStore       Capability = "DeadLetterStore"
 	CapabilityOutboxFailureRecorder Capability = "OutboxFailureRecorder"
@@ -356,6 +364,14 @@ var capabilitySpecs = map[Capability]capabilitySpec{
 		summary: "concurrency slots on the entry-seed path (SeedExecutionFromEntryWithConcurrency)",
 		implements: func(v any) bool {
 			_, ok := v.(engine.ConcurrencyLimitedEntryAdmissionStore)
+			return ok
+		},
+	},
+	CapabilityConcurrencyOrphanReclaimer: {
+		iface:   "engine.ConcurrencyOrphanReclaimer",
+		summary: "atomic judgement and convergence of graph-lost executions and dangling concurrency members (ReclaimConcurrencyOrphans)",
+		implements: func(v any) bool {
+			_, ok := v.(engine.ConcurrencyOrphanReclaimer)
 			return ok
 		},
 	},
