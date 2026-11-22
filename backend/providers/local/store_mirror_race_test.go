@@ -704,7 +704,7 @@ func TestStoreMirrorPromotionDuringPendingCreateKeepsIntentsHeld(t *testing.T) {
 
 	holderID := types.ExecutionID("mirror-holder")
 	if _, err := state.CreateExecutionWithConcurrency(ctx, &engine.ExecutionSnapshot{
-		ID: holderID, Status: types.ExecutionStatusRunning,
+		ID: holderID, Graph: mirrorSingleNodeGraph(t), Status: types.ExecutionStatusRunning,
 	}, nil, admission); err != nil {
 		t.Fatalf("holder CreateExecutionWithConcurrency() error = %v", err)
 	}
@@ -716,7 +716,7 @@ func TestStoreMirrorPromotionDuringPendingCreateKeepsIntentsHeld(t *testing.T) {
 	createErr := make(chan error, 1)
 	go func() {
 		_, err := state.CreateExecutionWithConcurrency(ctx, &engine.ExecutionSnapshot{
-			ID: promotedID, Status: types.ExecutionStatusRunning,
+			ID: promotedID, Graph: mirrorSingleNodeGraph(t), Status: types.ExecutionStatusRunning,
 		}, []engine.OutboxEntry{entry}, admission)
 		createErr <- err
 	}()

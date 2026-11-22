@@ -93,6 +93,14 @@ func (s *memoryState) AcquireGroupLease(_ context.Context, lease *engine.GroupLe
 	st.execID, st.unitIdx = lease.ExecutionID, lease.GroupUnitIdx
 	st.groupName, st.entryNodeIdx, st.activationID = lease.GroupName, lease.EntryNodeIdx, lease.ActivationID
 	st.issuedAt, st.ttl = lease.IssuedAt, lease.TTL
+	// A group lease is the strongest form of activity: a runner is working this
+	// unit right now. This mirrors acquireGroupLeaseLua's activity_at_ms stamp
+	// and keeps the orphan sweep from reading an execution between two group
+	// leases as idle. A zero IssuedAt is not proof of activity, so it records
+	// nothing — the same rule the script applies.
+	if !lease.IssuedAt.IsZero() {
+		s.activityAt[lease.ExecutionID] = lease.IssuedAt
+	}
 	lease.Attempt = attempt
 	return true, nil
 }
@@ -105,6 +113,9 @@ func (s *memoryState) RenewGroupLease(_ context.Context, id types.ExecutionID, u
 		return false, nil
 	}
 	st.deadline = deadline
+	// A renewal is the runner saying it is still working the unit; refresh the
+	// activity clock exactly as renewGroupLeaseLua does.
+	s.activityAt[id] = time.Now().UTC()
 	return true, nil
 }
 
@@ -156,6 +167,10 @@ func (s *memoryState) RevokeGroupLeaseWithOutbox(_ context.Context, id types.Exe
 
 // expireGroupLeaseLocked transitions a running group unit back to retry-ready
 // under a token fence. Caller must hold s.mu.
+//
+// It deliberately does not stamp the activity clock: this is the sweeper
+// reclaiming an already-expired lease, the one group-lease transition that
+// carries no evidence of live work (mirrors expireGroupLeaseLua).
 func (s *memoryState) expireGroupLeaseLocked(id types.ExecutionID, unitIdx int, token engine.LeaseToken) bool {
 	st := s.groupUnits[groupKey(id, unitIdx)]
 	if st == nil || st.status != groupUnitRunning || st.leaseToken != token {
@@ -187,6 +202,7 @@ func (s *memoryState) CommitGroup(ctx context.Context, req engine.GroupCommitReq
 	if result.ExecutionDone {
 		s.mirrorExecutionStatus(ctx, req.ExecutionID)
 	}
+	s.flushOrphanProjections(ctx)
 	return result, nil
 }
 
@@ -205,6 +221,10 @@ func (s *memoryState) commitGroupLocked(req engine.GroupCommitRequest) engine.Gr
 	if entry == nil || isTerminalStatus(entry.snap.Status) {
 		return engine.GroupCommitResult{Applied: false, Outcome: engine.CommitOutcomeExecutionInactive}
 	}
+	// An accepted commit is work the execution visibly made progress on, which
+	// is the second half of the orphan sweep's age anchor. Mirrors
+	// commitGroupLua's activity_at_ms write; the fence has already passed.
+	s.activityAt[req.ExecutionID] = time.Now().UTC()
 	// req.Transient (groups[].mode: transient) is deliberately not acted on.
 	// The mode's only effect is retention: the group's artifacts — its boundary
 	// exits, unit status and lease fence — are held for a completion TTL once

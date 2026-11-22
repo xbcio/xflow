@@ -828,6 +828,7 @@ func (s *memoryState) rollbackCreatedExecution(id types.ExecutionID) {
 
 	entry := s.executions[id]
 	delete(s.executions, id)
+	delete(s.activityAt, id)
 	if done, ok := s.doneCh[id]; ok {
 		if entry == nil || !entry.closed {
 			close(done)

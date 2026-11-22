@@ -47,6 +47,7 @@ var memoryCapabilities = []statestoretest.Capability{
 	statestoretest.CapabilityConcurrencyQueueExpirer,
 	statestoretest.CapabilityConcurrencyQueueInspector,
 	statestoretest.CapabilityConcurrencyLimitedEntryAdmissionStore,
+	statestoretest.CapabilityConcurrencyOrphanReclaimer,
 	statestoretest.CapabilityDeadLetterStore,
 	statestoretest.CapabilityOutboxFailureRecorder,
 	statestoretest.CapabilityReplayReceiptReader,

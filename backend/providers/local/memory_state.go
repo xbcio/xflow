@@ -79,6 +79,29 @@ type memoryState struct {
 	workflowSlots map[string]*workflowSlot
 	slotHolders   map[types.ExecutionID]*workflowSlot
 	queued        map[types.ExecutionID]*queuedExecution
+	// slotChargedAt and queuedAt date the two kinds of concurrency membership,
+	// so the orphan sweep can apply the same grace a Redis slot score or queue
+	// arrival score provides. They are maintained wherever membership is
+	// granted or revoked.
+	slotChargedAt map[types.ExecutionID]time.Time
+	queuedAt      map[types.ExecutionID]time.Time
+	// activityAt is the execution's node activity clock: the newest lease
+	// acquisition, lease renewal, or accepted node commit. It is the second half
+	// of the orphan sweep's age anchor, mirroring the Redis backend's
+	// activity_at_ms key: snap.UpdatedAt moves only on status transitions, so a
+	// long execution between two leases would otherwise look idle. Missing means
+	// the execution predates the clock (or never leased/committed); the sweep
+	// falls back to UpdatedAt.
+	activityAt map[types.ExecutionID]time.Time
+	// concurrencyOrphanGrace is how old a graph-lost live execution, or a
+	// concurrency member whose execution is gone, must be before the sweep
+	// reclaims it. Age is measured from the newer of UpdatedAt and activityAt.
+	// Force mode ignores the status clock but not recent activity.
+	concurrencyOrphanGrace time.Duration
+	// promotionOrphans records graph-lost executions promotion converged to
+	// canceled while s.mu was held. Each public entry point projects them once
+	// it releases the lock: the store mirror must not be called under s.mu.
+	promotionOrphans map[types.ExecutionID]struct{}
 
 	// done channels allow Wait() callers to block until execution completes.
 	doneCh        map[types.ExecutionID]chan struct{}
@@ -98,6 +121,10 @@ type memoryState struct {
 	// logger reports failed best-effort projections. nil is permitted and
 	// leaves those failures observable only through the store itself.
 	logger engine.Logger
+	// orphanObserver reports each applied concurrency-orphan convergence, so
+	// the repair reaches xflow_orphan_reclaimed_total without this package
+	// importing a metrics exporter. Nil reports nothing.
+	orphanObserver engine.OrphanReclaimObserver
 	// mirrorLocks serializes every store write for one execution, and
 	// mirrorSkip records the executions that must not be projected at all
 	// (transient workflows and seed-ID collisions with a previous process).
@@ -164,6 +191,11 @@ func newMemoryState() *memoryState {
 		rolledBack:             make(map[types.ExecutionID]bool),
 		deadlines:              make(map[types.ExecutionID]time.Time),
 		subWorkflowConclusions: make(map[string]*engine.SubWorkflowConclusion),
+		slotChargedAt:          make(map[types.ExecutionID]time.Time),
+		queuedAt:               make(map[types.ExecutionID]time.Time),
+		activityAt:             make(map[types.ExecutionID]time.Time),
+		concurrencyOrphanGrace: engine.DefaultOrphanReclaimGrace,
+		promotionOrphans:       make(map[types.ExecutionID]struct{}),
 	}
 }
 
@@ -314,6 +346,7 @@ func (s *memoryState) CreateExecutionWithConcurrency(ctx context.Context, e *eng
 		s.releaseInitialMirrorHold(e.ID)
 	}
 	s.pruneTransientSkipAfterTerminal(e.ID)
+	s.flushOrphanProjections(ctx)
 	return result, nil
 }
 
@@ -347,6 +380,17 @@ func (s *memoryState) chargeSlotLocked(slot *workflowSlot, id types.ExecutionID)
 		s.slotHolders = make(map[types.ExecutionID]*workflowSlot)
 	}
 	s.slotHolders[id] = slot
+	if s.slotChargedAt == nil {
+		s.slotChargedAt = make(map[types.ExecutionID]time.Time)
+	}
+	s.slotChargedAt[id] = time.Now().UTC()
+}
+
+// unchargeSlotLocked reverses chargeSlotLocked without promoting anyone.
+func (s *memoryState) unchargeSlotLocked(slot *workflowSlot, id types.ExecutionID) {
+	delete(s.slotHolders, id)
+	delete(slot.holders, id)
+	delete(s.slotChargedAt, id)
 }
 
 // slotForLocked returns the workflow's slot state, creating it on first use.
@@ -387,6 +431,10 @@ func (s *memoryState) parkOrChargeLocked(slot *workflowSlot, id types.ExecutionI
 	if s.queued == nil {
 		s.queued = make(map[types.ExecutionID]*queuedExecution)
 	}
+	if s.queuedAt == nil {
+		s.queuedAt = make(map[types.ExecutionID]time.Time)
+	}
+	s.queuedAt[id] = time.Now().UTC()
 	var deadline time.Time
 	if admission.QueueTimeout > 0 {
 		deadline = time.Now().UTC().Add(admission.QueueTimeout)
@@ -494,10 +542,10 @@ func (s *memoryState) releaseInitialMirrorHold(id types.ExecutionID) {
 func (s *memoryState) releaseWorkflowSlotLocked(id types.ExecutionID) {
 	slot, held := s.slotHolders[id]
 	if held {
-		delete(s.slotHolders, id)
-		delete(slot.holders, id)
+		s.unchargeSlotLocked(slot, id)
 	} else if waiting, ok := s.queued[id]; ok {
 		delete(s.queued, id)
+		delete(s.queuedAt, id)
 		waiting.slot.removeQueued(id)
 		s.dropHeldOutboxLocked(id)
 		slot = waiting.slot
@@ -531,18 +579,66 @@ func (slot *workflowSlot) removeQueued(id types.ExecutionID) {
 // It loops because a single promotion can free the capacity another promotion
 // needs — a workflow admitted below its limit after a limit raise, or a
 // reconciler-repaired set, promotes as many as fit rather than one per event.
+//
+// A promotion is validated against the graph before the slot is charged: a
+// member whose graph is gone can never start, so parking it in the slot would
+// spend capacity on work that cannot finish. It is converged to canceled
+// instead, and the loop moves on to the next in line.
 func (s *memoryState) promoteLocked(slot *workflowSlot) {
+	grace := s.concurrencyOrphanGrace
+	if grace <= 0 {
+		grace = engine.DefaultOrphanReclaimGrace
+	}
+	now := time.Now().UTC()
 	for slot.limit > 0 && len(slot.holders) < slot.limit && len(slot.queued) > 0 {
 		id := slot.queued[0]
+		entry := s.executions[id]
+		if entry != nil && !isTerminalStatus(entry.snap.Status) && entry.snap.Graph == nil &&
+			!s.orphanPastGraceLocked(id, entry, grace, now) {
+			// The head lost its graph but its newer age clock is inside the
+			// grace: a node may have just committed and the next task not yet
+			// been leased, so reaping it now would be the false positive the
+			// activity clock exists to prevent. Leave it at the head and stop;
+			// the next sweep re-evaluates it, and once past the grace this same
+			// path reclaims it and continues down the line.
+			break
+		}
 		slot.queued = slot.queued[1:]
 		delete(s.queued, id)
-		slot.holders[id] = true
-		if s.slotHolders == nil {
-			s.slotHolders = make(map[types.ExecutionID]*workflowSlot)
+		delete(s.queuedAt, id)
+		if entry == nil || isTerminalStatus(entry.snap.Status) {
+			s.dropHeldOutboxLocked(id)
+			if entry == nil {
+				// The member named an execution that no longer exists. Report the
+				// reap under the promotion trigger, matching the Redis backend:
+				// otherwise this reclaim point is the one convergence the metric
+				// never sees.
+				s.reportPromotedMissingOrphanLocked(id)
+			}
+			continue
 		}
-		s.slotHolders[id] = slot
+		if entry.snap.Graph == nil {
+			s.convergePromotedOrphanLocked(id, entry)
+			continue
+		}
+		s.chargeSlotLocked(slot, id)
 		s.completePromotionLocked(id)
 	}
+}
+
+// orphanPastGraceLocked reports whether an execution's newer age clock — the
+// status transition or node activity clock, falling back to the member's arrival
+// time — is older than the grace. An undatable member is never "past grace": the
+// guard refuses rather than guesses, exactly like the sweep's unknown-age rule.
+// Callers must hold s.mu.
+func (s *memoryState) orphanPastGraceLocked(id types.ExecutionID, entry *execEntry, grace time.Duration, now time.Time) bool {
+	anchor, known := s.orphanAgeAnchorLocked(id, entry.snap.UpdatedAt)
+	if !known {
+		if arrived, ok := s.queuedAt[id]; ok {
+			anchor, known = arrived, true
+		}
+	}
+	return known && now.Sub(anchor) >= grace
 }
 
 // completePromotionLocked starts a promoted execution.
@@ -633,6 +729,7 @@ func (s *memoryState) ExpireQueuedExecutions(ctx context.Context, limit int) (in
 	for _, id := range projected {
 		s.mirrorExecutionStatus(ctx, id)
 	}
+	s.flushOrphanProjections(ctx)
 	return len(expired), nil
 }
 
@@ -715,6 +812,7 @@ func (s *memoryState) UpdateExecutionStatus(ctx context.Context, id types.Execut
 		// The projection reads the status current when it reaches the store, so
 		// a later transition can never be overwritten by this one.
 		s.mirrorExecutionStatus(ctx, id)
+		s.flushOrphanProjections(ctx)
 	}
 	return nil
 }
@@ -1303,6 +1401,14 @@ func (s *memoryState) acquireTaskLeaseLocked(lease *engine.TaskLease) (*engine.N
 	attempt := 1
 	if current != nil && current.ActivationID == lease.Task.ActivationID {
 		attempt = current.Attempt + 1
+	}
+	// A lease is the strongest form of activity: a runner is working this node
+	// right now. This mirrors the Redis acquireTaskLeaseLua stamp of
+	// activity_at_ms and keeps the orphan sweep from reading a long execution
+	// between two leases as idle. A zero IssuedAt is not proof of activity, so
+	// it records nothing — the same rule the script applies.
+	if !lease.IssuedAt.IsZero() {
+		s.activityAt[lease.Task.ExecutionID] = lease.IssuedAt
 	}
 	privateOutput := s.preserveOutputPrivacyLocked(key, false)
 	// startedAt is the FIRST lease's issue time: a retry (same activation) and a
@@ -2212,6 +2318,10 @@ func (s *memoryState) RenewTaskLease(_ context.Context, id types.ExecutionID, na
 		ttl = 0
 	}
 	ns.LeaseTTL = ttl
+	// A renewal is the runner saying it is still working the node; refresh the
+	// activity clock exactly as renewTaskLeaseLua does, so a node that outlives
+	// one lease keeps the orphan sweep's age anchor current.
+	s.activityAt[id] = time.Now().UTC()
 	return true, nil
 }
 

@@ -66,6 +66,7 @@ func (s *memoryState) seedExecutionFromEntry(ctx context.Context, req engine.See
 		s.releaseInitialMirrorHold(id)
 		s.pruneTransientSkipAfterTerminal(id)
 	}
+	s.flushOrphanProjections(ctx)
 	return result, err
 }
 

@@ -110,6 +110,7 @@ func (s *memoryState) CommitNode(ctx context.Context, req engine.CommitNodeReque
 			s.mirrorExecutionStatus(ctx, req.ExecutionID)
 		}
 	}
+	s.flushOrphanProjections(ctx)
 	return result, nil
 }
 
@@ -175,6 +176,12 @@ func (s *memoryState) commitNodeLocked(req engine.CommitNodeRequest) engine.Comm
 		}
 	}
 
+	// An accepted commit is work the execution visibly made progress on, which
+	// is the second half of the orphan sweep's age anchor. UpdatedAt only moves
+	// on status transitions, so without this a long execution between two leases
+	// would be indistinguishable from an abandoned one. Mirrors commitNodeLua's
+	// activity_at_ms write.
+	s.activityAt[req.ExecutionID] = time.Now().UTC()
 	privateOutput := s.preserveOutputPrivacyLocked(key, req.PrivateOutput)
 	// ErrorDetails is cloned like Output: the caller's map must not stay
 	// aliased into stored state, where a later mutation would rewrite history.

@@ -26,6 +26,7 @@ type config struct {
 	store                   store.Store
 	tracer                  tracing.Tracer
 	deadlineExpiredObserver engine.DeadlineExpiredObserver
+	orphanObserver          engine.OrphanReclaimObserver
 }
 
 // WithConcurrency sets the number of in-memory queue consumer goroutines. Default is 4.
@@ -174,6 +175,18 @@ func WithDeadlineExpiredObserver(obs engine.DeadlineExpiredObserver) Option {
 	}
 }
 
+// WithOrphanReclaimObserver installs an observer for applied concurrency-orphan
+// convergences (the sweep, promotion repair, Cancel's self-heal, and the
+// operator reset surface). It is optional and must not block the maintenance
+// path.
+func WithOrphanReclaimObserver(obs engine.OrphanReclaimObserver) Option {
+	return func(c *config) {
+		if obs != nil {
+			c.orphanObserver = obs
+		}
+	}
+}
+
 // WithRegistry injects an external handler registry. Use this when the inner
 // engine must resolve handlers registered outside its own backend (e.g. group
 // runtime injecting the outer runner's member handlers).
@@ -217,6 +230,7 @@ func New(opts ...Option) *Backend {
 	state := newMemoryState()
 	state.db = cfg.store
 	state.logger = cfg.logger
+	state.orphanObserver = cfg.orphanObserver
 
 	return &Backend{
 		state:            state,
