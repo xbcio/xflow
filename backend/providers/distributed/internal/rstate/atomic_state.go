@@ -847,6 +847,26 @@ return {1, auditID, nodeName, entryActivation}
 // resetNodeForRetryWithOutboxLua combines the legacy retry reset with the
 // durable retry delivery intent so a process crash cannot leave a pending node
 // without a task to execute.
+//
+// KEYS[1] = node status key
+// KEYS[2] = node metadata hash
+// KEYS[3] = execution lease-expiry ZSET
+// KEYS[4] = execution outbox-ready ZSET
+// KEYS[5] = execution outbox-body hash
+// KEYS[#KEYS] = execution activity_at_ms key, appended last so the legacy key
+// order above is unchanged
+// ARGV[1] = lease token
+// ARGV[2] = status TTL seconds
+// ARGV[3] = lease-expiry member
+// ARGV[4] = outbox entry ID
+// ARGV[5] = encoded outbox body
+// ARGV[6] = outbox availability (unix milliseconds)
+// ARGV[#ARGV] = now (unix milliseconds), the activity stamp
+//
+// The retry reset removes the node's lease. A backoff whose lease is gone has
+// no renewal left to refresh the activity clock, so the reset stamps it here:
+// without that, an execution whose graph was lost during the backoff would
+// look idle to the orphan sweep and be converged inside the retry window.
 var resetNodeForRetryWithOutboxLua = redis.NewScript(`
 local status = redis.call('GET', KEYS[1])
 if status ~= 'running' and status ~= 'committing' and status ~= 'waiting' then
@@ -865,6 +885,7 @@ redis.call('HSETNX', KEYS[5], ARGV[4], ARGV[5])
 redis.call('ZADD', KEYS[4], tonumber(ARGV[6]), ARGV[4])
 redis.call('EXPIRE', KEYS[4], ttl)
 redis.call('EXPIRE', KEYS[5], ttl)
+redis.call('SET', KEYS[#KEYS], ARGV[#ARGV], 'EX', ttl)
 return 1
 `)
 

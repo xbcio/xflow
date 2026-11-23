@@ -1465,6 +1465,11 @@ func (s *memoryState) ResetNodeForRetryWithOutbox(_ context.Context, id types.Ex
 	if !s.resetNodeForRetryLocked(id, name, token) {
 		return false, nil
 	}
+	// The reset removes the lease, so nothing else will refresh the activity
+	// clock during the backoff. Stamp it here, mirroring
+	// resetNodeForRetryWithOutboxLua: an execution whose graph is lost during
+	// the retry window must not look idle to the orphan sweep.
+	s.activityAt[id] = time.Now().UTC()
 	s.putOutboxLocked(id, entry.ID, entry.Task, entry.AvailableAt)
 	return true, nil
 }

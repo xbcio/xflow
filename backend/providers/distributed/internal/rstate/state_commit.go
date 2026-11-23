@@ -63,7 +63,13 @@ func (s *Store) ResetNodeForRetryWithOutbox(ctx context.Context, id types.Execut
 		leaseExpiryZSetKey(t, id),
 		outboxReadyKey(t, id),
 		outboxBodyKey(t, id),
-	}, string(token), int(ttl.Seconds()), leaseExpiryMember(id, nodeName), entry.ID, encoded, availableAt).Int64()
+		// Appended last so the script's legacy key order is untouched. The
+		// reset removes the lease, so nothing else will refresh the activity
+		// clock during the backoff; the script stamps it in the same
+		// transition (TTL of the status key).
+		activityAtKey(t, id),
+	}, string(token), int(ttl.Seconds()), leaseExpiryMember(id, nodeName), entry.ID, encoded, availableAt,
+		time.Now().UTC().UnixMilli()).Int64()
 	if err != nil && err != redis.Nil {
 		return false, fmt.Errorf("reset node for retry with outbox %q/%q: %w", id, nodeName, err)
 	}
