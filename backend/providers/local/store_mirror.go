@@ -317,6 +317,23 @@ func (s *memoryState) mirrorExecutionStatus(ctx context.Context, id types.Execut
 	s.projectExecutionStatus(ctx, id)
 }
 
+// projectTerminalResidue mirrors the current status unless the durable row is
+// already terminal. It is the in-memory counterpart of rstate's
+// projectTerminalResidue: the sweep repairs a membership a lost terminal write
+// left behind, and the row that write never projected is repaired with it.
+// Skipping an already-terminal row keeps repeated sweeps write-free; a missing
+// row stays the ordinary ErrNotFound case projectExecutionStatus already
+// tolerates.
+func (s *memoryState) projectTerminalResidue(ctx context.Context, id types.ExecutionID) {
+	if s.db == nil {
+		return
+	}
+	if rec, err := s.db.GetExecution(ctx, id); err == nil && rec != nil && store.IsTerminalExecutionStatus(rec.Status) {
+		return
+	}
+	s.mirrorExecutionStatus(ctx, id)
+}
+
 // mirrorNode projects the current snapshot of one node. Only the state in
 // force is projected: a stale transition that lost its CAS has no mirror call
 // at all, and the snapshot is read (and the SQL record built) under s.mu so no

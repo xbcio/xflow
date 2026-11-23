@@ -87,7 +87,7 @@ func (s *memoryState) ReclaimConcurrencyOrphans(ctx context.Context, req engine.
 	}()
 
 	for _, id := range projects {
-		s.mirrorExecutionStatus(ctx, id)
+		s.projectTerminalResidue(ctx, id)
 	}
 	for _, id := range missingIDs {
 		if s.mirrorSkipped(id) {
@@ -172,6 +172,14 @@ func (s *memoryState) evaluateOrphanLocked(id types.ExecutionID, reqNS namespace
 	if isTerminalStatus(entry.snap.Status) {
 		if inSlot || inQueue {
 			s.releaseWorkflowSlotLocked(id)
+			// The terminal write that produced this status released the slot
+			// itself; a member still naming the execution means that path never
+			// finished, so it was the terminal projection that was lost with
+			// it. The caller mirrors the in-force status after the lock is
+			// dropped (projectTerminalResidue), which repairs the durable row.
+			// A dry run still releases the members it always released here,
+			// but it must not add the projection write.
+			return nil, false, !dryRun, false
 		}
 		return nil, false, false, false
 	}
