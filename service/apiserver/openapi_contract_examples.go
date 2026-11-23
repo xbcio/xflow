@@ -697,11 +697,12 @@ func ExampleOverviewEmptyKPI() any {
 	}
 }
 
-// ExampleConcurrencyResetRequest builds a reset body with both opt-ins set, so
-// the two booleans the schema publishes are validated against the real
-// request fields rather than an empty object.
+// ExampleConcurrencyResetRequest builds a reset body with both opt-ins set and
+// the workflow-name confirmation they require, so the two booleans and
+// confirm_workflow the schema publishes are validated against the real request
+// fields rather than an empty object.
 func ExampleConcurrencyResetRequest() any {
-	return resetWorkflowConcurrencyRequest{Apply: true, IncludeLive: true}
+	return resetWorkflowConcurrencyRequest{Apply: true, IncludeLive: true, ConfirmWorkflow: "health-check"}
 }
 
 // ExampleConcurrencyResetResponse builds an APPLIED reset response with one

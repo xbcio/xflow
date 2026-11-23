@@ -1346,6 +1346,16 @@ paths:
         terminate. Inspected executions are collected in batches; a preview
         and an apply share the judgement path, so they cannot disagree about a
         candidate they both see.
+
+        Because `include_live` lifts the guards that keep automatic reclaim from
+        touching work that may still be progressing, `apply: true` with
+        `include_live: true` also requires `confirm_workflow`, an exact echo of
+        the path workflow name. That is the one request shape that can
+        terminate executions whose graph still exists, so the caller must name
+        the target it means to converge rather than rely on the path alone. A
+        preview (even with `include_live: true`) and an apply without
+        `include_live` write nothing beyond the orphan judgement and need no
+        confirmation.
       tags: [Workflows]
       parameters:
         - $ref: "#/components/parameters/WorkflowName"
@@ -1375,8 +1385,14 @@ paths:
                         $ref: "#/components/schemas/ConcurrencyResetResponse"
         "400":
           description: |
-            The workflow name cannot address a workflow (empty, or longer than
-            128 characters) — `invalid_workflow_name`.
+            The request cannot be applied. The workflow name cannot address a
+            workflow (empty, or longer than 128 characters) —
+            `invalid_workflow_name`. Or `apply` and `include_live` are both
+            true and `confirm_workflow` is absent (`confirm_workflow_required`)
+            or does not equal the path workflow name
+            (`confirm_workflow_mismatch`). The confirmation rule applies to no
+            other shape: a preview writes nothing, and an apply without
+            `include_live` stays inside the orphan judgement.
           headers:
             X-Request-Id:
               $ref: "#/components/headers/XRequestId"
@@ -1391,6 +1407,20 @@ paths:
                     success: false
                     code: invalid_workflow_name
                     message: workflow name must be between 1 and 128 characters
+                    trace_id: 0123456789abcdef0123456789abcdef
+                confirmWorkflowRequired:
+                  summary: A live apply arrived without the workflow-name echo.
+                  value:
+                    success: false
+                    code: confirm_workflow_required
+                    message: confirm_workflow is required when apply and include_live are both true
+                    trace_id: 0123456789abcdef0123456789abcdef
+                confirmWorkflowMismatch:
+                  summary: The confirmation names a different workflow.
+                  value:
+                    success: false
+                    code: confirm_workflow_mismatch
+                    message: confirm_workflow does not match the path workflow name
                     trace_id: 0123456789abcdef0123456789abcdef
         "413":
           $ref: "#/components/responses/RequestTooLarge"
@@ -6889,6 +6919,17 @@ components:
             node activity is inside the reclaim grace. It is honored for dry
             runs too, so a preview names exactly what an apply would terminate.
             Every live convergence is recorded with reason `operator_reset`.
+        confirm_workflow:
+          type: string
+          description: |
+            Required when `apply` and `include_live` are both true, and then
+            must equal the path workflow name byte for byte; otherwise the
+            request is refused with `confirm_workflow_required` (absent) or
+            `confirm_workflow_mismatch` (different name). A live apply can
+            terminate executions whose graph still exists, so the caller
+            echoes the target it means to converge. Ignored for previews and
+            for applies without `include_live`.
+          example: health-check
 
     ConcurrencyResetResponse:
       type: object

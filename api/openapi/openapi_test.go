@@ -805,6 +805,65 @@ func TestExecutionListUnsupportedContract(t *testing.T) {
 	}
 }
 
+// TestConcurrencyResetContract pins the confirmation rule published for the
+// reset route: the request schema carries confirm_workflow as a string, and the
+// 400 response names both refusal codes with an example each. Without them the
+// handler's new 400s would be undocumented and a client could not tell a
+// missing echo from a bad path name.
+func TestConcurrencyResetContract(t *testing.T) {
+	spec := loadSpec(t)
+	path := spec.Paths.Value("/v1/workflows/{name}/concurrency/reset")
+	if path == nil || path.Post == nil {
+		t.Fatal("POST /v1/workflows/{name}/concurrency/reset is missing")
+	}
+	op := path.Post
+	if op.RequestBody == nil || op.RequestBody.Value == nil {
+		t.Fatal("reset route has no request body")
+	}
+	media := op.RequestBody.Value.Content.Get("application/json")
+	if media == nil || media.Schema == nil {
+		t.Fatal("reset request has no application/json schema")
+	}
+	if got, want := media.Schema.Ref, "#/components/schemas/ConcurrencyResetRequest"; got != want {
+		t.Fatalf("reset request schema ref = %q, want %q", got, want)
+	}
+	schema := spec.Components.Schemas["ConcurrencyResetRequest"]
+	if schema == nil || schema.Value == nil {
+		t.Fatal("ConcurrencyResetRequest schema is missing")
+	}
+	confirm := schema.Value.Properties["confirm_workflow"]
+	if confirm == nil || confirm.Value == nil || confirm.Value.Type == nil || !confirm.Value.Type.Is("string") {
+		t.Fatal("ConcurrencyResetRequest.confirm_workflow is not published as a string")
+	}
+	response := op.Responses.Value("400")
+	if response == nil || response.Value == nil {
+		t.Fatal("reset route does not declare the 400 a rejected confirmation returns")
+	}
+	errorMedia := response.Value.Content.Get("application/json")
+	if errorMedia == nil || errorMedia.Schema == nil || errorMedia.Schema.Ref != "#/components/schemas/ErrorEnvelope" {
+		t.Fatal("reset 400 is not an ErrorEnvelope")
+	}
+	description := strings.ToLower(strings.Join(strings.Fields(derefString(response.Value.Description)), " "))
+	for _, code := range []string{"confirm_workflow_required", "confirm_workflow_mismatch"} {
+		if !strings.Contains(description, code) {
+			t.Errorf("reset 400 description does not name %s:\n%s", code, description)
+		}
+		found := false
+		for _, example := range errorMedia.Examples {
+			if example == nil || example.Value == nil {
+				continue
+			}
+			if value, ok := example.Value.Value.(map[string]any); ok && value["code"] == code {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("reset 400 has no %s example", code)
+		}
+	}
+}
+
 // TestWorkflowListItemMetadataContract pins the two zero-cost metadata
 // projections on a workflow row. Both are optional (a definition may have no
 // description and no cron node), and JSON Schema tolerates undeclared

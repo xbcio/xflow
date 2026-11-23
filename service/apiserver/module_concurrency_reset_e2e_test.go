@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/xbcio/xflow/engine"
@@ -129,13 +130,30 @@ func TestResetWorkflowConcurrencyEndToEnd(t *testing.T) {
 		}
 	}
 
+	// A live apply without the workflow-name echo is refused before the store is
+	// touched, so neither execution converges.
+	resp = resetE2EDo(t, httpSrv.URL, "tok-a", path, map[string]any{"apply": true, "include_live": true})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unconfirmed live apply status = %d, want 400", resp.StatusCode)
+	}
+	if raw := readAll(t, resp); !strings.Contains(string(raw), "confirm_workflow_required") {
+		t.Fatalf("unconfirmed live apply body = %s, want confirm_workflow_required", raw)
+	}
+	for _, id := range []types.ExecutionID{running, queued} {
+		if got := resetE2EStatus(t, ctxA, state, id); got != types.ExecutionStatusRunning && got != types.ExecutionStatusQueued {
+			t.Fatalf("unconfirmed live apply converged %q to %q", id, got)
+		}
+	}
+
 	// Apply include_live: both converge, and the metric records both under
 	// reason operator_reset. The kind split is NOT pinned: the pass frees the
 	// holder's slot, which promotes the queued member in the same pass, so the
 	// queued execution may be judged before or after that promotion and its
 	// kind label follows the status it was actually reclaimed from. The
 	// deterministic kind coverage lives in the store observer tests.
-	resp = resetE2EDo(t, httpSrv.URL, "tok-a", path, map[string]any{"apply": true, "include_live": true})
+	resp = resetE2EDo(t, httpSrv.URL, "tok-a", path, map[string]any{
+		"apply": true, "include_live": true, "confirm_workflow": g.Name(),
+	})
 	applied := resetE2EDecode(t, resp)
 	if !applied.Applied || !applied.IncludeLive || applied.Reclaimed != 2 || len(applied.Candidates) != 2 {
 		t.Fatalf("applied response = %+v, want two reclaimed", applied)
@@ -155,5 +173,10 @@ func TestResetWorkflowConcurrencyEndToEnd(t *testing.T) {
 	}
 	if !log.mentions(engine.OrphanTriggerReset) {
 		t.Fatal("applied reset's audit/log output does not carry reason operator_reset")
+	}
+	// The audit line names the verified caller and records the live apply as
+	// confirmed. recordingLogger concatenates operands with fmt.Sprint.
+	if !log.mentionsAll("workflow_concurrency_reset", "principal", "op-a", "confirmedtrue") {
+		t.Fatalf("applied reset's audit line lacks principal op-a or confirmed=true: %v", log.all())
 	}
 }

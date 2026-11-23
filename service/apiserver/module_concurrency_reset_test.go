@@ -47,6 +47,22 @@ func newResetMux(eng control.EngineFacade) http.Handler {
 	return mux
 }
 
+// newAuthzResetMux mounts the reset route through the real authorization
+// wrapper, which is the only mount that has a verified principal to put in the
+// request context. The stub engine reaches exactly ResetWorkflowConcurrency, so
+// a request the wrapper lets through cannot wander into another method.
+func newAuthzResetMux(eng control.EngineFacade, log engine.Logger) http.Handler {
+	m := &workflowControlModule{eng: eng, log: log}
+	m.principalAuth = staticPrincipalAuth{principal: Principal{
+		Subject: "op-a", Namespace: "namespaceA", Scopes: []string{"execution"},
+	}}
+	m.authorizer = ScopeAuthorizer{}
+	m.audit = NewInMemoryAuditSink()
+	mux := http.NewServeMux()
+	m.registerAuthzRoutes(mux)
+	return mux
+}
+
 // TestResetWorkflowConcurrencyDefaultsToDryRun pins the safe default: an absent
 // body reaches the engine with Apply=false and the response says so. A caller
 // that forgets the body must preview, never terminate work.
@@ -102,7 +118,7 @@ func TestResetWorkflowConcurrencyApplyIncludeLivePassesThrough(t *testing.T) {
 	mux := newResetMux(f)
 
 	resp := doJSON(t, mux, http.MethodPost, "/v1/workflows/wf-1/concurrency/reset",
-		map[string]any{"apply": true, "include_live": true})
+		map[string]any{"apply": true, "include_live": true, "confirm_workflow": "wf-1"})
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -120,6 +136,131 @@ func TestResetWorkflowConcurrencyApplyIncludeLivePassesThrough(t *testing.T) {
 	}
 	if len(body.Candidates) != 1 || body.Candidates[0].Workflow != "wf-1" || body.Candidates[0].AgeMS != 90000 {
 		t.Fatalf("candidates = %+v, want the engine candidate mapped", body.Candidates)
+	}
+}
+
+// TestResetWorkflowConcurrencyLiveApplyRequiresConfirm pins the acknowledgement
+// gated in front of the one request shape that can terminate executions whose
+// graph still exists: apply + include_live. Both refusals are 400s with stable
+// codes, and neither reaches the engine (the stub's call count stays zero), so
+// a forgotten or misdirected confirmation can never converge anything.
+func TestResetWorkflowConcurrencyLiveApplyRequiresConfirm(t *testing.T) {
+	cases := []struct {
+		name      string
+		confirm   string
+		sendEmpty bool
+		wantCode  string
+	}{
+		{name: "absent", wantCode: "confirm_workflow_required"},
+		{name: "explicitly empty", sendEmpty: true, wantCode: "confirm_workflow_required"},
+		{name: "mismatch", confirm: "wf-2", wantCode: "confirm_workflow_mismatch"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &resetFacadeStub{}
+			mux := newResetMux(f)
+			body := map[string]any{"apply": true, "include_live": true}
+			if tc.sendEmpty {
+				body["confirm_workflow"] = ""
+			} else if tc.confirm != "" {
+				body["confirm_workflow"] = tc.confirm
+			}
+			resp := doJSON(t, mux, http.MethodPost, "/v1/workflows/wf-1/concurrency/reset", body)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", resp.StatusCode)
+			}
+			if env := decodeEnvelope(t, resp, nil); env.Code != tc.wantCode {
+				t.Fatalf("code = %q, want %q", env.Code, tc.wantCode)
+			}
+			if f.call != 0 {
+				t.Fatalf("engine called %d time(s) for a refused confirmation", f.call)
+			}
+		})
+	}
+}
+
+// TestResetWorkflowConcurrencyConfirmationNotRequiredWithoutLiveApply pins the
+// two shapes whose confirmation is deliberately not required: a preview writes
+// nothing, and an apply without include_live stays inside the orphan judgement.
+// Both must reach the engine with the flags they carried.
+func TestResetWorkflowConcurrencyConfirmationNotRequiredWithoutLiveApply(t *testing.T) {
+	cases := []struct {
+		name      string
+		body      map[string]any
+		wantApply bool
+		wantLive  bool
+	}{
+		{
+			name:      "dry run with include_live",
+			body:      map[string]any{"include_live": true},
+			wantApply: false,
+			wantLive:  true,
+		},
+		{
+			name:      "apply without include_live",
+			body:      map[string]any{"apply": true},
+			wantApply: true,
+			wantLive:  false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &resetFacadeStub{}
+			mux := newResetMux(f)
+			resp := doJSON(t, mux, http.MethodPost, "/v1/workflows/wf-1/concurrency/reset", tc.body)
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200", resp.StatusCode)
+			}
+			if f.call != 1 || f.opts.Apply != tc.wantApply || f.opts.IncludeLive != tc.wantLive {
+				t.Fatalf("engine call = %d opts = %+v, want apply=%v include_live=%v",
+					f.call, f.opts, tc.wantApply, tc.wantLive)
+			}
+		})
+	}
+}
+
+// TestResetWorkflowConcurrencyLogsPrincipalAndConfirmation covers the audit
+// line's caller identity: the verified subject reaches the log, and a live
+// apply is visible as confirmed. recordingLogger concatenates operands with
+// fmt.Sprint, so "confirmedtrue" is the exact rendering of a true boolean.
+func TestResetWorkflowConcurrencyLogsPrincipalAndConfirmation(t *testing.T) {
+	log := &recordingLogger{}
+	f := &resetFacadeStub{res: engine.OrphanReclaimResult{Inspected: 1, Reclaimed: 1}}
+	mux := newAuthzResetMux(f, log)
+
+	resp := doJSON(t, mux, http.MethodPost, "/v1/workflows/wf-1/concurrency/reset",
+		map[string]any{"apply": true, "include_live": true, "confirm_workflow": "wf-1"})
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if f.ns != namespace.Namespace("namespaceA") {
+		t.Fatalf("engine saw namespace %q, want the principal's namespaceA", f.ns)
+	}
+	if !log.mentionsAll("workflow_concurrency_reset", "principal", "op-a", "confirmedtrue") {
+		t.Fatalf("audit line lacks principal op-a or confirmed=true: %v", log.all())
+	}
+}
+
+// TestResetWorkflowConcurrencyLogsUnknownPrincipalWhenUnauthenticatedMount
+// pins the fallback: the bare mount has no authenticated principal, and the
+// audit line says unknown instead of dropping the field or inventing a caller.
+func TestResetWorkflowConcurrencyLogsUnknownPrincipalWhenUnauthenticatedMount(t *testing.T) {
+	log := &recordingLogger{}
+	m := &workflowControlModule{eng: &resetFacadeStub{}, log: log}
+	mux := http.NewServeMux()
+	m.RegisterHTTP(mux)
+
+	resp := doJSON(t, mux, http.MethodPost, "/v1/workflows/wf-1/concurrency/reset",
+		map[string]any{"apply": true, "confirm_workflow": "wf-1"})
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if !log.mentionsAll("workflow_concurrency_reset", "principalunknown", "confirmedfalse") {
+		t.Fatalf("audit line lacks the unknown-principal fallback: %v", log.all())
 	}
 }
 

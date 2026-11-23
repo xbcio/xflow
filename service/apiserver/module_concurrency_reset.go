@@ -36,6 +36,13 @@ type concurrencyResetter interface {
 type resetWorkflowConcurrencyRequest struct {
 	Apply       bool `json:"apply"`
 	IncludeLive bool `json:"include_live"`
+	// ConfirmWorkflow echoes the path workflow name. It is required only for
+	// Apply + IncludeLive, the one shape that can terminate an execution whose
+	// graph still exists: the caller has to name the target it means to
+	// converge instead of relying on the path alone. Previews and applies
+	// without IncludeLive ignore it, because they write nothing or only
+	// converge work the engine can no longer route.
+	ConfirmWorkflow string `json:"confirm_workflow"`
 }
 
 // concurrencyResetCandidate is one execution the reset judged. It carries the
@@ -80,15 +87,22 @@ type concurrencyResetResponse struct {
 //
 // The judgement itself lives in the engine (engine.ResetWorkflowConcurrency):
 // the default reclaims only executions the engine can no longer route, and only
-// Apply + IncludeLive converges executions whose graph still exists. Every such
-// convergence is recorded with reason operator_reset in the structured log and
-// the xflow_orphan_reclaimed_total metric; this handler adds the request-level
+// Apply + IncludeLive converges executions whose graph still exists. That last
+// shape is additionally gated at this boundary by confirm_workflow, an echo of
+// the path workflow name (see confirmLiveReset); the engine option itself is
+// unchanged, because the confirmation is an HTTP-caller safeguard over an
+// in-process API that is already trusted. Every such convergence is recorded
+// with reason operator_reset in the structured log and the
+// xflow_orphan_reclaimed_total metric; this handler adds the request-level
 // audit line naming the caller, the scope, and what the pass did.
 func (m *workflowControlModule) handleResetWorkflowConcurrency(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimSpace(r.PathValue("name"))
 
 	var req resetWorkflowConcurrencyRequest
 	if !decodeOptionalJSON(w, r, &req) {
+		return
+	}
+	if !confirmLiveReset(w, r, name, req) {
 		return
 	}
 
@@ -114,11 +128,24 @@ func (m *workflowControlModule) handleResetWorkflowConcurrency(w http.ResponseWr
 		// each converged execution's own log and metric carry, so a tenant's
 		// whole reset — the request and the executions it ended — can be
 		// correlated by one reason without reading the response body.
+		//
+		// principal is the authenticated subject the authz wrapper put in the
+		// request context. It is the stable identity, never a credential. The
+		// bare (no-authenticator) mount has no principal, and that is logged as
+		// unknown rather than omitted: an audit line without a caller is a fact
+		// an operator must be able to see. confirmed mirrors the accepted
+		// confirmation rule above, so a live apply is visible as such.
+		principal := "unknown"
+		if p, ok := principalFromRequest(r); ok && p.Subject != "" {
+			principal = p.Subject
+		}
 		m.log.Info("workflow_concurrency_reset",
 			"namespace", string(ns),
 			"workflow", name,
+			"principal", principal,
 			"apply", req.Apply,
 			"include_live", req.IncludeLive,
+			"confirmed", req.Apply && req.IncludeLive,
 			"inspected", res.Inspected,
 			"reclaimed", res.Reclaimed,
 			"reason", engine.OrphanTriggerReset,
@@ -142,6 +169,37 @@ func (m *workflowControlModule) handleResetWorkflowConcurrency(w http.ResponseWr
 		})
 	}
 	writeData(w, r, http.StatusOK, resp)
+}
+
+// confirmLiveReset enforces the acknowledgement that a live apply needs.
+//
+// Apply alone converges work the engine already judges unroutable; IncludeLive
+// lifts every guard and can terminate executions whose graph still exists and
+// whose nodes are still working. That shape requires the caller to echo the
+// path workflow name byte for byte, so a request aimed at one workflow cannot
+// be replayed against another by editing only the path. A preview
+// (Apply=false) writes nothing and an apply without IncludeLive stays inside
+// the orphan judgement, so neither requires the echo.
+//
+// It answers the two refusals itself and returns false; on success the caller
+// proceeds. The comparison is against the parsed path name (the same value the
+// engine receives), not the raw path segment, and neither message echoes the
+// supplied confirmation.
+func confirmLiveReset(w http.ResponseWriter, r *http.Request, name string, req resetWorkflowConcurrencyRequest) bool {
+	if !req.Apply || !req.IncludeLive {
+		return true
+	}
+	if req.ConfirmWorkflow == "" {
+		writeFail(w, r, http.StatusBadRequest, "confirm_workflow_required",
+			"confirm_workflow is required when apply and include_live are both true")
+		return false
+	}
+	if req.ConfirmWorkflow != name {
+		writeFail(w, r, http.StatusBadRequest, "confirm_workflow_mismatch",
+			"confirm_workflow does not match the path workflow name")
+		return false
+	}
+	return true
 }
 
 // writeConcurrencyResetFail maps reset refusals onto stable failure shapes.

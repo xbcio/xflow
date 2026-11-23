@@ -515,6 +515,34 @@ func (l *recordingLogger) mentions(needle string) bool {
 	return false
 }
 
+// mentionsAll reports whether one logged line contains every needle, which is
+// how a test binds fields to the same log record rather than to the log as a
+// whole.
+func (l *recordingLogger) mentionsAll(needles ...string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, line := range l.lines {
+		matched := true
+		for _, needle := range needles {
+			if !strings.Contains(line, needle) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+
+// all returns a copy of the captured lines for failure diagnostics.
+func (l *recordingLogger) all() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.lines...)
+}
+
 // TestWebhookEntryNeverLogsTheSecretOrTheSignature covers the half of the
 // route's confidentiality claim that a response body cannot: the log lines the
 // rejected paths emit. Every rejection is logged (that log line is the only
