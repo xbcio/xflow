@@ -37,6 +37,17 @@ type ConcurrencyOrphanBackend struct {
 	// ForgetExecution removes the execution's own record while leaving every
 	// concurrency key untouched: the retention-lapsed shape.
 	ForgetExecution func(t *testing.T, id types.ExecutionID)
+	// TerminalStatusWithoutRelease rewrites the execution's status to canceled
+	// while leaving its concurrency member charged and its durable mirror
+	// untouched. It is the shape a crash between the terminal write (in
+	// rstate, the Lua half) and the Go-side release/projection leaves behind.
+	TerminalStatusWithoutRelease func(t *testing.T, id types.ExecutionID)
+	// ReconcileSlots runs one maintenance pass over the workflow slot sets.
+	// rstate wires ReconcileConcurrencySlots; the in-memory backend wires the
+	// sweep of ReclaimConcurrencyOrphans, which performs the same repair under
+	// its state mutex. The observable outcomes are what the contract asserts;
+	// the two entry points count differently.
+	ReconcileSlots func(t *testing.T)
 	// Mirror is the optional durable store the state mirrors statuses to. When
 	// nil, SQL projection assertions are skipped.
 	Mirror store.Store
@@ -108,6 +119,15 @@ func RunConcurrencyOrphanContract(t *testing.T, manifest *Manifest, newBackend C
 	})
 	t.Run("DryRunWritesNothing", func(t *testing.T) {
 		orphanDryRunWritesNothing(t, newBackend(t))
+	})
+	t.Run("TerminalResidueIsMirroredAfterReconcile", func(t *testing.T) {
+		orphanTerminalResidueIsMirrored(t, newBackend(t))
+	})
+	t.Run("RetryBackoffWithFreshActivityIsNotReclaimed", func(t *testing.T) {
+		orphanRetryBackoffFreshActivityIsNotReclaimed(t, newBackend(t))
+	})
+	t.Run("RetryBackoffReclaimedOnlyAfterGracePastActivity", func(t *testing.T) {
+		orphanRetryBackoffReclaimedAfterGrace(t, newBackend(t))
 	})
 }
 
@@ -835,4 +855,159 @@ func orphanCandidateFor(res engine.OrphanReclaimResult, id types.ExecutionID) *e
 		}
 	}
 	return nil
+}
+
+// orphanTerminalResidueIsMirrored pins the crash window between a terminal
+// write and its Go-side side effects. The Lua half (or the in-memory terminal
+// transition) landed, then the process died: authority says canceled, the
+// concurrency member is still charged, the line is still behind it, and the
+// durable mirror still reads running. One maintenance pass must repair all
+// three — release the member, promote the head of the line, and project the
+// terminal status the terminal write never mirrored. Repairing only the
+// membership would leave the SQL row wrong until the drift worker finds it.
+func orphanTerminalResidueIsMirrored(t *testing.T, backend ConcurrencyOrphanBackend) {
+	t.Helper()
+	if backend.TerminalStatusWithoutRelease == nil || backend.ReconcileSlots == nil {
+		t.Fatalf("backend declares ConcurrencyOrphanReclaimer but supplies no terminal-residue/reconcile hooks")
+	}
+	if backend.Mirror == nil {
+		t.Fatalf("backend supplies no durable mirror; the terminal projection cannot be verified")
+	}
+	ctx := context.Background()
+	g := orphanGraph(t, "orphan-terminal-residue")
+	admission := orphanAdmission(g)
+	holder := orphanSubmit(t, backend.Store, ctx, g, admission)
+	waiting := orphanSubmit(t, backend.Store, ctx, g, admission)
+	if got := executionStatus(t, backend.Store, ctx, waiting); got != types.ExecutionStatusQueued {
+		t.Fatalf("waiting submission status = %q, want queued", got)
+	}
+
+	backend.TerminalStatusWithoutRelease(t, holder)
+	if got := executionStatus(t, backend.Store, ctx, holder); got != types.ExecutionStatusCanceled {
+		t.Fatalf("holder status after the terminal half = %q, want canceled", got)
+	}
+	// The fixture is only meaningful when the skipped projection is visible:
+	// a mirror that already reads terminal would pass the final assertion
+	// without the reconcile doing anything.
+	before, ok := orphanSQLStatus(t, backend.Mirror, ctx, holder)
+	if !ok {
+		t.Fatalf("holder has no durable row after admission; the projection cannot be verified")
+	}
+	if before == types.ExecutionStatusCanceled {
+		t.Fatalf("holder SQL before reconcile = %q, want the unprojected running row", before)
+	}
+
+	backend.ReconcileSlots(t)
+
+	if got := executionStatus(t, backend.Store, ctx, holder); got != types.ExecutionStatusCanceled {
+		t.Fatalf("holder status after reconcile = %q, want canceled", got)
+	}
+	if got := executionStatus(t, backend.Store, ctx, waiting); got != types.ExecutionStatusRunning {
+		t.Fatalf("waiting status after reconcile = %q, want running: the freed slot was not handed to the line", got)
+	}
+	after, ok := orphanSQLStatus(t, backend.Mirror, ctx, holder)
+	if !ok {
+		t.Fatalf("holder durable row disappeared during reconcile")
+	}
+	if after != types.ExecutionStatusCanceled {
+		t.Fatalf("holder SQL after reconcile = %q, want canceled: the terminal residue was not mirrored", after)
+	}
+}
+
+// orphanResetForRetry performs one real retry reset through the store's public
+// interfaces: a running node with a lease token, then the fenced
+// ResetNodeForRetryWithOutbox the engine retry path calls. The reset removes
+// the lease and must refresh the activity clock in the same transition; no
+// renewal follows during the backoff.
+func orphanResetForRetry(t *testing.T, state engine.StateStore, ctx context.Context, id types.ExecutionID) {
+	t.Helper()
+	const (
+		node  = "start"
+		token = engine.LeaseToken("orphan-retry-token")
+	)
+	if err := state.UpsertNode(ctx, &engine.NodeSnapshot{
+		ExecutionID:   id,
+		Name:          node,
+		Status:        types.NodeStatusRunning,
+		LeaseID:       engine.LeaseID("orphan-retry-lease"),
+		LeaseToken:    token,
+		LeaseIssuedAt: time.Now().UTC().Add(-time.Minute),
+		LeaseTTL:      time.Minute,
+	}); err != nil {
+		t.Fatalf("UpsertNode(%q/%q) error = %v", id, node, err)
+	}
+	atomic, ok := state.(engine.AtomicStateStore)
+	if !ok {
+		t.Fatalf("state store %T implements ConcurrencyOrphanReclaimer but not AtomicStateStore", state)
+	}
+	scheduled, err := atomic.ResetNodeForRetryWithOutbox(ctx, id, node, token, engine.OutboxEntry{
+		ID:   "retry/" + string(id) + "/" + node + "/0/1",
+		Task: engine.Task{ExecutionID: id, NodeName: node, NodeIdx: 0, Type: engine.TaskTypeNodeExec},
+	})
+	if err != nil || !scheduled {
+		t.Fatalf("ResetNodeForRetryWithOutbox(%q/%q) scheduled=%v err=%v, want true/nil", id, node, scheduled, err)
+	}
+}
+
+// orphanRetryBackoffFreshActivityIsNotReclaimed pins the false-positive fix
+// for the retry window: the execution's graph is gone and its status clock is
+// very old, but a retry reset just happened and removed the lease. Without the
+// reset's activity stamp the execution looks idle and both the periodic sweep
+// and Cancel's force-mode self-heal would converge a node that is waiting to
+// be retried.
+func orphanRetryBackoffFreshActivityIsNotReclaimed(t *testing.T, backend ConcurrencyOrphanBackend) {
+	t.Helper()
+	if backend.LoseGraph == nil || backend.AgeStatus == nil {
+		t.Fatalf("backend declares ConcurrencyOrphanReclaimer but supplies no graph/status hooks")
+	}
+	ctx := context.Background()
+	g := orphanGraph(t, "orphan-retry-backoff")
+	id := orphanSubmit(t, backend.Store, ctx, g, orphanAdmission(g))
+	backend.LoseGraph(t, id)
+	backend.AgeStatus(t, id, 10*time.Minute)
+	orphanResetForRetry(t, backend.Store, ctx, id)
+
+	sweep := engine.OrphanReclaimRequest{
+		Mode: engine.OrphanReclaimSweep, ExecutionID: id, Namespace: "default", Limit: 1, Grace: time.Minute,
+	}
+	if res := orphanReclaim(t, backend.Store, ctx, sweep); res.Reclaimed != 0 {
+		t.Fatalf("sweep Reclaimed = %d, want 0: the retry reset's activity is inside the grace", res.Reclaimed)
+	}
+	force := engine.OrphanReclaimRequest{
+		Mode: engine.OrphanReclaimForce, ExecutionID: id, Namespace: "default", Limit: 1,
+		Reason: engine.OrphanTriggerCancel,
+	}
+	if res := orphanReclaim(t, backend.Store, ctx, force); res.Reclaimed != 0 {
+		t.Fatalf("Cancel self-heal Reclaimed = %d, want 0: the retry reset's activity is inside the grace", res.Reclaimed)
+	}
+	if got := executionStatus(t, backend.Store, ctx, id); got != types.ExecutionStatusRunning {
+		t.Fatalf("status = %q, want running", got)
+	}
+}
+
+// orphanRetryBackoffReclaimedAfterGrace proves the block above was the
+// activity clock and nothing else: age that clock past the grace and the same
+// sweep converges the execution.
+func orphanRetryBackoffReclaimedAfterGrace(t *testing.T, backend ConcurrencyOrphanBackend) {
+	t.Helper()
+	if backend.LoseGraph == nil || backend.AgeStatus == nil || backend.AgeActivity == nil {
+		t.Fatalf("backend declares ConcurrencyOrphanReclaimer but supplies no activity-clock hooks")
+	}
+	ctx := context.Background()
+	g := orphanGraph(t, "orphan-retry-backoff-aged")
+	id := orphanSubmit(t, backend.Store, ctx, g, orphanAdmission(g))
+	backend.LoseGraph(t, id)
+	backend.AgeStatus(t, id, 10*time.Minute)
+	orphanResetForRetry(t, backend.Store, ctx, id)
+	backend.AgeActivity(t, id, 10*time.Minute)
+
+	res := orphanReclaim(t, backend.Store, ctx, engine.OrphanReclaimRequest{
+		Mode: engine.OrphanReclaimSweep, ExecutionID: id, Namespace: "default", Limit: 1, Grace: time.Minute,
+	})
+	if res.Reclaimed != 1 {
+		t.Fatalf("Reclaimed = %d, want 1 once the reset's activity is past the grace", res.Reclaimed)
+	}
+	if got := executionStatus(t, backend.Store, ctx, id); got != types.ExecutionStatusCanceled {
+		t.Fatalf("status = %q, want canceled", got)
+	}
 }

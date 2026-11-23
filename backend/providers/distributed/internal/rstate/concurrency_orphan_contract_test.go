@@ -30,8 +30,9 @@ func miniredisOrphanBackend(t *testing.T) statestoretest.ConcurrencyOrphanBacken
 func rstateOrphanBackend(t *testing.T, rdb redis.UniversalClient, mirror *memstore.Store) statestoretest.ConcurrencyOrphanBackend {
 	t.Helper()
 	ctx := context.Background()
+	state := New(rdb, mirror, time.Minute)
 	return statestoretest.ConcurrencyOrphanBackend{
-		Store:  New(rdb, mirror, time.Minute),
+		Store:  state,
 		Mirror: mirror,
 		LoseGraph: func(t *testing.T, id types.ExecutionID) {
 			t.Helper()
@@ -74,6 +75,22 @@ func rstateOrphanBackend(t *testing.T, rdb redis.UniversalClient, mirror *memsto
 				activityAtKey(namespace.Default, id),
 			).Err(); err != nil {
 				t.Fatalf("forget execution %q: %v", id, err)
+			}
+		},
+		TerminalStatusWithoutRelease: func(t *testing.T, id types.ExecutionID) {
+			t.Helper()
+			// The Lua half of a reclaim writes exactly this status and stops;
+			// the membership and the durable mirror are untouched, which is the
+			// crash residue the reconcile pass must repair.
+			if err := rdb.Set(ctx, execKey(namespace.Default, id, "status"),
+				string(types.ExecutionStatusCanceled), 0).Err(); err != nil {
+				t.Fatalf("write terminal residue for %q: %v", id, err)
+			}
+		},
+		ReconcileSlots: func(t *testing.T) {
+			t.Helper()
+			if _, err := state.ReconcileConcurrencySlots(ctx, 64); err != nil {
+				t.Fatalf("ReconcileConcurrencySlots() error = %v", err)
 			}
 		},
 	}
