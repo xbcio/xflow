@@ -102,6 +102,26 @@ import (
 //
 // (≈1 hour), plus the sweeper's own grace. It bounds DELAY of reclamation,
 // never correctness: the lease is still in its per-execution ZSET.
+//
+// ---------------------------------------------------------------------------
+// Orphan members, and the prune step
+// ---------------------------------------------------------------------------
+//
+// The per-execution ZSET is deleted when the execution ends (TTL or terminal
+// cleanup), but its index member is not: the index has no per-execution TTL and
+// no commit path removes from it. Until a sweep drops it, the member is a pure
+// orphan — it is not due unless its score has passed, and when it is, the
+// reclaim path still pays a serial per-member read plus re-arm and consumes one
+// unit of leaseIndexBatchLimit. At production scale those orphans dominated the
+// index (millions of members), so the bounded reclaim path spent its whole
+// budget and most of its Redis round trips on executions that no longer exist,
+// and the index kept growing faster than the sweep drained it.
+//
+// pruneOrphanLeaseIndex is therefore run before the reclaim read: one ZRANGEBYSCORE
+// page and one non-transactional pipeline of per-key EXISTS per round, then one
+// variadic ZREM for the whole round's orphans. It is an accelerator, not part of
+// the reclaim contract — the walk recovers anything a failed prune drops (see
+// the verify note above the function).
 const (
 	leaseExpiryExecIndexSuffix = "lease-index"
 
@@ -118,6 +138,17 @@ const (
 
 	// leaseWalkKind names the walk in the holder-lock and round-done keys.
 	leaseWalkKind = "leases"
+
+	// leaseIndexPruneChunk is the number of index members one prune round
+	// examines, and leaseIndexPruneRounds caps the rounds in one sweep. Together
+	// they clear at most 8192 members per 10s sweep (≈800/s), far above the
+	// measured ≈30/s of new registrations, without lengthening the sweep. The
+	// members of one round travel in one pipeline, so the round-trip count does
+	// not scale with the chunk; the rounds only bound how many chunks one call
+	// examines. The scan offset stays at most chunk*rounds: ZRANGEBYSCORE's LIMIT
+	// offset is O(offset) and the production index holds millions of members.
+	leaseIndexPruneChunk  = 2048
+	leaseIndexPruneRounds = 4
 )
 
 // leaseExpiryExecIndexKey returns the lease-expiry index for one namespace.
@@ -200,6 +231,96 @@ func (s *Store) dueLeaseExecutions(ctx context.Context, t namespace.Namespace, m
 	return s.rdb.ZRangeByScore(ctx, leaseExpiryExecIndexKey(t), &redis.ZRangeBy{
 		Min: "-inf", Max: maxMs, Offset: 0, Count: int64(limit),
 	}).Result()
+}
+
+// pruneOrphanLeaseIndex drops index members whose per-execution lease ZSET no
+// longer exists. It is a best-effort accelerator ahead of the reclaim read: a
+// failure is logged and the sweep continues, exactly like the walk. It runs
+// detached from the caller's cancellation because the sweep may be abandoned
+// while the prune is still useful work.
+//
+// Old members are examined in rounds. kept counts the members this call found
+// alive, and is the next round's offset: executions with a real expired lease
+// whose reclaim has not completed stay at the head of the index (their members
+// are never removed unless the lease goes away), so an offset of 0 would read
+// the same head members every round and never reach the orphans behind them.
+// The offset only ever grows to chunk*rounds, never to the size of the index.
+//
+// Each round reads the members with one ZRANGEBYSCORE, checks them with one
+// pipeline of single-key EXISTS, and removes every orphan with one variadic
+// ZREM. The pipeline is deliberately the non-transactional one, and each EXISTS
+// names exactly one key: the per-execution keys carry {exec-id} hash tags and
+// sit on different slots, and MULTI is unavailable on the cluster proxy, so no
+// command may span several of them.
+func (s *Store) pruneOrphanLeaseIndex(ctx context.Context, t namespace.Namespace, maxMs string) {
+	ctx, cancel := detachedIndexContext(ctx)
+	defer cancel()
+	indexKey := leaseExpiryExecIndexKey(t)
+	kept := 0
+	for round := 0; round < leaseIndexPruneRounds; round++ {
+		members, err := s.rdb.ZRangeByScore(ctx, indexKey, &redis.ZRangeBy{
+			Min: "-inf", Max: maxMs, Offset: int64(kept), Count: int64(leaseIndexPruneChunk),
+		}).Result()
+		if err != nil {
+			s.noteLeaseIndexFailure("prune", err)
+			return
+		}
+		if len(members) == 0 {
+			return
+		}
+		pipe := s.rdb.Pipeline()
+		exists := make([]*redis.IntCmd, len(members))
+		for i, member := range members {
+			exists[i] = pipe.Exists(ctx, leaseExpiryZSetKey(t, types.ExecutionID(member)))
+		}
+		if _, err := pipe.Exec(ctx); err != nil {
+			s.noteLeaseIndexFailure("prune", err)
+			return
+		}
+		orphans := make([]string, 0, len(members))
+		for i, cmd := range exists {
+			if cmd.Val() == 0 {
+				orphans = append(orphans, members[i])
+				continue
+			}
+			kept++
+		}
+		if len(orphans) == 0 {
+			return
+		}
+		removals := make([]any, len(orphans))
+		for i, orphan := range orphans {
+			removals[i] = orphan
+		}
+		if err := s.rdb.ZRem(ctx, indexKey, removals...).Err(); err != nil {
+			s.noteLeaseIndexFailure("prune", err)
+			return
+		}
+		// Verify, the same closure the re-arm uses. A producer writes the
+		// per-execution ZSET before it registers in the index. One whose
+		// registration landed before this ZREM had it removed with the orphans,
+		// but its ZSET is visible here and it is re-armed to its exact minimum.
+		// One whose ZSET appeared after the EXISTS above but whose ZADD lands
+		// after this ZREM simply survives; the re-arm is then only a duplicate
+		// ZADD. Neither ordering can lose a live lease.
+		verify := s.rdb.Pipeline()
+		alive := make([]*redis.IntCmd, len(orphans))
+		for i, orphan := range orphans {
+			alive[i] = verify.Exists(ctx, leaseExpiryZSetKey(t, types.ExecutionID(orphan)))
+		}
+		if _, err := verify.Exec(ctx); err != nil {
+			s.noteLeaseIndexFailure("prune", err)
+			return
+		}
+		for i, cmd := range alive {
+			if cmd.Val() != 0 {
+				s.rearmLeaseExpiryIndex(ctx, t, types.ExecutionID(orphans[i]))
+			}
+		}
+		if len(members) < leaseIndexPruneChunk {
+			return
+		}
+	}
 }
 
 // walkLeaseExpiryKeys advances the safety-net walk for one namespace, if it is

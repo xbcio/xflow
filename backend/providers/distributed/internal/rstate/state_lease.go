@@ -249,9 +249,22 @@ func (s *Store) scanExpiredLeasesForNamespace(ctx context.Context, t namespace.N
 		return nil
 	}
 	start := len(*out)
+	// Orphan members are executions whose lease ZSET is gone: no reclaim can
+	// ever match them, yet each one the bounded read below touches spends budget
+	// and serial round trips. Prune them in bulk first, so the budget goes to
+	// real candidates.
+	//
+	// Before the walk, not after it: the prune depends on nothing the walk
+	// produces, while the walk's first round after start is one long SCAN over
+	// the whole keyspace and the sweep runs nothing behind it until it returns.
+	// Ordered after the walk, the prune was starved for the entire backfill —
+	// exactly the window in which the orphan backlog grows.
+	// Best-effort like the walk: a failure must not stop the reclaim path below.
+	s.pruneOrphanLeaseIndex(ctx, t, max)
 	// The safety-net walk registers executions whose registration was lost; it
 	// is a full round on the first call after start and throttled afterwards.
-	// Its failure must not stop the index read below, which is the main path.
+	// It runs after the prune, which does not depend on it. Its failure must not
+	// stop the index read below, which is the main path.
 	if err := s.walkLeaseExpiryKeys(ctx, t); err != nil {
 		s.noteLeaseIndexFailure("walk", err)
 	}
