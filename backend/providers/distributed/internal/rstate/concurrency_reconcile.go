@@ -184,6 +184,10 @@ func (s *Store) sweepConcurrencySlotSet(ctx context.Context, t namespace.Namespa
 	type staleRemoval struct {
 		member *concurrencyMember
 		cmds   []*redis.IntCmd
+		// terminal is the status the execution already carried when the member
+		// was found stale. It is non-empty only for the terminal-residue shape,
+		// and it is what the durable mirror is repaired from below.
+		terminal types.ExecutionStatus
 	}
 	stale := make([]staleRemoval, 0, len(order))
 	stranded := make([]string, 0, len(order))
@@ -258,7 +262,7 @@ func (s *Store) sweepConcurrencySlotSet(ctx context.Context, t namespace.Namespa
 		}
 		status := types.ExecutionStatus(rawStatus)
 		if types.IsTerminalExecutionStatus(status) {
-			stale = append(stale, staleRemoval{member: member})
+			stale = append(stale, staleRemoval{member: member, terminal: status})
 			continue
 		}
 		if !graphExists {
@@ -311,6 +315,20 @@ func (s *Store) sweepConcurrencySlotSet(ctx context.Context, t namespace.Namespa
 	if _, err := removePipe.Exec(ctx); err != nil && err != redis.Nil {
 		return reclaimed, fmt.Errorf("sweep concurrency members for %q: %w", slotKey, err)
 	}
+	// A terminal member is the residue of a terminal write that landed without
+	// its side effects: the crash that lost the slot release also lost the SQL
+	// projection, so the durable mirror can still read running while Redis has
+	// already converged. Repairing only the membership would leave the audit
+	// row wrong until the drift worker finds it minutes later, which is the
+	// drift the sweep is here to close. The projection is idempotent: a row
+	// already terminal is not rewritten, and a missing row is the ordinary
+	// not-found case the projection tolerates.
+	for i := range stale {
+		if stale[i].terminal == "" {
+			continue
+		}
+		s.projectTerminalResidue(ctx, t, stale[i].member.id, stale[i].terminal)
+	}
 	removed := 0
 	for i := range stale {
 		for _, cmd := range stale[i].cmds {
@@ -335,6 +353,25 @@ func (s *Store) sweepConcurrencySlotSet(ctx context.Context, t namespace.Namespa
 		s.dropConcurrencyIndexIfIdle(ctx, t, tag)
 	}
 	return reclaimed + removed, s.fillConcurrencySlots(ctx, t, tag)
+}
+
+// projectTerminalResidue mirrors a terminal status that a lost release left
+// unprojected. It is idempotent in the way the reconciliation needs: a durable
+// row that already reads terminal is left untouched, so a repeated sweep (or a
+// concurrent one) performs no write, while a row that still reads live is
+// brought to the authoritative Redis status.
+//
+// store.ErrNotFound is deliberately not special-cased here: the projection
+// itself knows what it means (writeExecutionStatusProjection counts it as OK),
+// and a transient execution has no row by construction.
+func (s *Store) projectTerminalResidue(ctx context.Context, t namespace.Namespace, id types.ExecutionID, status types.ExecutionStatus) {
+	if s.db == nil || status == "" {
+		return
+	}
+	if rec, err := s.db.GetExecution(ctx, id); err == nil && rec != nil && types.IsTerminalExecutionStatus(rec.Status) {
+		return
+	}
+	s.projectExecutionStatus(namespace.WithNamespace(ctx, t), id, status, "")
 }
 
 // stampMissingQueueArrival dates the sweep's first sighting of a line member
