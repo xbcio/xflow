@@ -126,14 +126,13 @@ func (r *deadlineRaceRig) listSuspended(ctx context.Context, id types.ExecutionI
 // and finishes, and the execution ends success with its deadline withdrawn and
 // nothing left behind.
 //
-// Each subtest drives its own run of the scenario, so the known-residue
-// observation can be selected alone with -run without the invariants subtest
-// having run first.
+// Each subtest drives its own run of the scenario, so either can be selected
+// alone with -run.
 func TestTimerThatFiresBeforeTheDeadlineResumesTheNode(t *testing.T) {
 	ctx := context.Background()
 
 	// run drives the scenario once on a rig of its own, asserts everything that
-	// must hold, and returns what the residue observation reads.
+	// must hold, and returns what the invariants subtest reads.
 	run := func(t *testing.T) (nodeAfter types.NodeStatus, residue []string) {
 		rig := newDeadlineRaceRig(t)
 		g := raceGraphWithTimeout(t, "deadline-suspend-timer", time.Hour, 0, types.NodeDef{Name: "park", Type: "test.race_park"})
@@ -185,27 +184,15 @@ func TestTimerThatFiresBeforeTheDeadlineResumesTheNode(t *testing.T) {
 	}
 
 	t.Run("invariants", func(t *testing.T) {
-		run(t)
-	})
-
-	// suspended_residue_as_it_stands pins a KNOWN, UNDECIDED defect so that
-	// fixing it is a visible, deliberate change. A timer wakeup reaches the node
-	// through the outbox, and nothing on that path removes the node from the
-	// suspended index the signal paths maintain, so the index keeps naming a node
-	// that has already run to success. It does no harm to the node: the cancel
-	// cascade skips a node that is no longer suspended, and a late signal that
-	// matches the stale entry queues a resume the engine then refuses.
-	//
-	// When the defect is fixed, this subtest turns red on purpose: change it to
-	// require that the index is empty and move that assertion into invariants.
-	t.Run("suspended_residue_as_it_stands", func(t *testing.T) {
 		nodeAfter, residue := run(t)
 		if nodeAfter != types.NodeStatusSuccess {
 			t.Fatalf("node after the timer resume = %q, want success", nodeAfter)
 		}
-		if !slices.Contains(residue, "park") {
-			t.Fatalf("suspended index = %v after the timer resume; the residue this subtest records is gone, "+
-				"so assert the index is cleaned up instead", residue)
+		// The timer wakeup reaches the node through the outbox, and the accepted
+		// resume acquire is the transition that ends the wait: it deletes the
+		// suspended-index entry in the same locked step that sets the node running.
+		if slices.Contains(residue, "park") {
+			t.Fatalf("suspended index = %v after the timer resume, want empty: the resume acquire must clear the entry", residue)
 		}
 	})
 }

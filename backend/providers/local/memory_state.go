@@ -1395,6 +1395,18 @@ func (s *memoryState) acquireTaskLeaseLocked(lease *engine.TaskLease) (*engine.N
 		}
 	}
 
+	// An accepted acquire of a suspended node IS its resume, so the wait ends
+	// here. Signal delivery already removes the suspension when it consumes a
+	// waiter and records the resume intent; the timer/timeout wake path only
+	// parks a delayed outbox entry and reaches this transition later, so without
+	// this the entry outlived its wait forever. A stale entry would keep
+	// hasSuspendedLocked protecting a graph-lost execution in which nothing is
+	// suspended. It is cleared only after every guard above has passed, so the
+	// whole parked-to-resume window keeps its protection. Mirrors the SREM in
+	// acquireTaskLeaseLua.
+	if current != nil && current.Status == types.NodeStatusSuspended {
+		delete(s.suspended, key)
+	}
 	// Mirrors acquireTaskLeaseLua: attempt counts retries within one activation
 	// and restarts at 1 on a cyclic re-entry (a higher ActivationID), so a
 	// looping node cannot exhaust MaxAttempts across activations.
@@ -1700,6 +1712,12 @@ func (s *memoryState) SuspendTaskLease(_ context.Context, lease *engine.TaskLeas
 		s.suspended[key] = spec
 	} else {
 		delete(s.suspended, key)
+		// A pre-delivered signal turned this park into an immediate resume, so
+		// the suspension member is gone and no lease exists until the resume is
+		// acquired. Stamp the activity clock with the same semantics as a lease
+		// acquisition, mirroring the Redis suspend-with-outbox script: without
+		// it the orphan sweep would read the resume-pending window as idle.
+		s.activityAt[lease.Task.ExecutionID] = time.Now().UTC()
 	}
 
 	cp := *node
@@ -1928,6 +1946,12 @@ func (s *memoryState) DeliverSignalWithOutbox(_ context.Context, id types.Execut
 // rather than relying on the caller's snapshot, mirroring the Redis Lua path's
 // authoritative read that closes the TOCTOU window.
 func (s *memoryState) scheduleResumeOutbox(id types.ExecutionID, nodeName string, intent engine.ResumeIntent, payload *types.SignalPayload) {
+	// A committed resume is work, exactly like a lease acquisition: refresh the
+	// activity clock. Delivery has just cleared the suspension member and no
+	// lease exists until the resume is acquired, so without this stamp a
+	// graph-lost execution would look idle to the orphan sweep inside that
+	// window. Mirrors deliverSignalWithOutboxLua's activity write.
+	s.activityAt[id] = time.Now().UTC()
 	activationID := intent.ActivationID
 	if node, ok := s.nodes[string(id)+"/"+nodeName]; ok {
 		activationID = node.ActivationID

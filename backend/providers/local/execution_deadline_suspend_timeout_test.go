@@ -78,27 +78,16 @@ func TestNodeTimeoutThatFiresBeforeTheDeadlineResumesTheNode(t *testing.T) {
 	}
 
 	t.Run("invariants", func(t *testing.T) {
-		run(t)
-	})
-
-	// suspended_residue_as_it_stands pins the same KNOWN, UNDECIDED defect as the
-	// timer test: the node's Timeout wakeup reaches the node through the outbox,
-	// nothing on that path removes the node from the suspended index, and the
-	// signal wait it registered is still there after the node ran to success.
-	// It does no harm to the node: the cancel cascade skips a node that is no
-	// longer suspended, and a late "go" that matches the stale entry queues a
-	// resume the engine then refuses.
-	//
-	// When the defect is fixed, this subtest turns red on purpose: change it to
-	// require that the index is empty and move that assertion into invariants.
-	t.Run("suspended_residue_as_it_stands", func(t *testing.T) {
 		nodeAfter, residue := run(t)
 		if nodeAfter != types.NodeStatusSuccess {
 			t.Fatalf("node after the node timeout = %q, want success", nodeAfter)
 		}
-		if !slices.Contains(residue, "park") {
-			t.Fatalf("suspended index = %v after the node timeout; the residue this subtest records is gone, "+
-				"so assert the index is cleaned up instead", residue)
+		// The timeout wakeup reaches the node through the outbox, and the accepted
+		// resume acquire is the transition that ends the wait: it deletes the
+		// suspended-index entry, which is also this backend's only waiter index, in
+		// the same locked step that sets the node running.
+		if slices.Contains(residue, "park") {
+			t.Fatalf("suspended index = %v after the node timeout, want empty: the resume acquire must clear the entry", residue)
 		}
 	})
 }
