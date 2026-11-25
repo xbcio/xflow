@@ -68,6 +68,7 @@ func RunConcurrencyOrphanContract(t *testing.T, manifest *Manifest, newBackend C
 	manifest.RequireDeclared(t,
 		CapabilityConcurrencyOrphanReclaimer,
 		CapabilityConcurrencyLimitedStateStore,
+		CapabilityDurableSignalDeliverer,
 	)
 	t.Run("RunningOrphanConvergesAndFreesTheSlot", func(t *testing.T) {
 		orphanRunningConverges(t, newBackend(t))
@@ -128,6 +129,12 @@ func RunConcurrencyOrphanContract(t *testing.T, manifest *Manifest, newBackend C
 	})
 	t.Run("RetryBackoffReclaimedOnlyAfterGracePastActivity", func(t *testing.T) {
 		orphanRetryBackoffReclaimedAfterGrace(t, newBackend(t))
+	})
+	t.Run("SignalDeliveryRefreshesActivityClock", func(t *testing.T) {
+		orphanSignalDeliveryRefreshesActivityClock(t, newBackend(t))
+	})
+	t.Run("TimerResumeClearsSuspensionAndConverges", func(t *testing.T) {
+		orphanTimerResumeClearsSuspension(t, newBackend(t))
 	})
 }
 
@@ -1006,6 +1013,256 @@ func orphanRetryBackoffReclaimedAfterGrace(t *testing.T, backend ConcurrencyOrph
 	})
 	if res.Reclaimed != 1 {
 		t.Fatalf("Reclaimed = %d, want 1 once the reset's activity is past the grace", res.Reclaimed)
+	}
+	if got := executionStatus(t, backend.Store, ctx, id); got != types.ExecutionStatusCanceled {
+		t.Fatalf("status = %q, want canceled", got)
+	}
+}
+
+// orphanSignalDeliveryRefreshesActivityClock covers the window between a signal
+// delivery and the resume lease acquisition. Delivery consumes the waiter,
+// removes the suspension registration and records a durable resume intent;
+// nothing holds a lease until that resume is acquired. The delivery must
+// therefore refresh the execution's activity clock exactly as a lease
+// acquisition does, or a graph-lost execution whose resume is already durable
+// and pending looks idle to the sweep.
+//
+// The fixture uses only the public Store surface: the execution is admitted
+// through the concurrency-limited create, a real lease is acquired and claimed,
+// the node parks on a signal wait through DurableLeaseSuspender, and the
+// delivery goes through DurableSignalDeliverer. Both age clocks are pushed past
+// the grace before delivery, so the guarded half can only pass through the
+// stamp the delivery itself writes; aging that stamp afterwards proves the
+// block was the activity clock and nothing else.
+func orphanSignalDeliveryRefreshesActivityClock(t *testing.T, backend ConcurrencyOrphanBackend) {
+	t.Helper()
+	if backend.LoseGraph == nil || backend.AgeStatus == nil || backend.AgeActivity == nil {
+		t.Fatalf("backend declares ConcurrencyOrphanReclaimer but supplies no graph/activity hooks")
+	}
+	suspender, ok := backend.Store.(engine.DurableLeaseSuspender)
+	if !ok {
+		t.Fatalf("state store %T does not implement engine.DurableLeaseSuspender", backend.Store)
+	}
+	deliverer, ok := backend.Store.(engine.DurableSignalDeliverer)
+	if !ok {
+		t.Fatalf("state store %T does not implement engine.DurableSignalDeliverer", backend.Store)
+	}
+
+	ctx := context.Background()
+	g := orphanGraph(t, "orphan-signal-activity")
+	id := orphanSubmit(t, backend.Store, ctx, g, orphanAdmission(g))
+	nodeIdx, ok := g.NodeIndex("start")
+	if !ok {
+		t.Fatal("graph has no start node")
+	}
+	unitIdx := g.UnitIndexForNode(nodeIdx)
+	lease := &engine.TaskLease{
+		LeaseID:    engine.LeaseID("orphan-signal-activity-lease"),
+		LeaseToken: engine.LeaseToken("orphan-signal-activity-token"),
+		IssuedAt:   time.Now().UTC().Truncate(time.Millisecond),
+		TTL:        time.Minute,
+		Task: engine.Task{
+			ExecutionID:  id,
+			NodeName:     "start",
+			NodeIdx:      nodeIdx,
+			UnitIdx:      unitIdx,
+			Type:         engine.TaskTypeNodeExec,
+			ActivationID: 1,
+		},
+	}
+	if _, acquired, err := backend.Store.AcquireTaskLease(ctx, lease); err != nil || !acquired {
+		t.Fatalf("AcquireTaskLease acquired=%v err=%v, want true/nil", acquired, err)
+	}
+	node, err := backend.Store.GetNode(ctx, id, "start")
+	if err != nil || node == nil {
+		t.Fatalf("GetNode(start) node=%v err=%v, want the leased node", node, err)
+	}
+	lease.Attempt = node.Attempt
+	if _, claimed, err := backend.Store.ClaimTaskLease(ctx, lease); err != nil || !claimed {
+		t.Fatalf("ClaimTaskLease claimed=%v err=%v, want true/nil", claimed, err)
+	}
+	committed, err := suspender.SuspendTaskLeaseWithOutbox(ctx, lease, nil, false, false,
+		&types.SuspendSpec{Mode: types.ModeSignal, Signals: []string{"go"}}, "")
+	if err != nil || !committed {
+		t.Fatalf("SuspendTaskLeaseWithOutbox committed=%v err=%v, want true/nil", committed, err)
+	}
+
+	// The harshest clock: graph gone, status clock past the grace, and the
+	// acquire's activity stamp aged past the grace too.
+	backend.LoseGraph(t, id)
+	backend.AgeStatus(t, id, 10*time.Minute)
+	backend.AgeActivity(t, id, 10*time.Minute)
+
+	target, err := deliverer.PeekResumeTarget(ctx, id, "go")
+	if err != nil || target != "start" {
+		t.Fatalf("PeekResumeTarget = (%q, %v), want (start, nil)", target, err)
+	}
+	resumeNode, _, committed, err := deliverer.DeliverSignalWithOutbox(ctx, id, "go",
+		map[string]any{"ok": true},
+		engine.ResumeIntent{NodeName: target, NodeIdx: nodeIdx, UnitIdx: unitIdx})
+	if err != nil || !committed || resumeNode != "start" {
+		t.Fatalf("DeliverSignalWithOutbox = (%q, committed=%v, err=%v), want (start, true, nil)", resumeNode, committed, err)
+	}
+
+	sweep := engine.OrphanReclaimRequest{
+		Mode: engine.OrphanReclaimSweep, ExecutionID: id, Namespace: "default", Limit: 1, Grace: time.Minute,
+	}
+	if res := orphanReclaim(t, backend.Store, ctx, sweep); res.Reclaimed != 0 {
+		t.Fatalf("sweep Reclaimed = %d, want 0: the delivery must refresh the activity clock", res.Reclaimed)
+	}
+	force := engine.OrphanReclaimRequest{
+		Mode: engine.OrphanReclaimForce, ExecutionID: id, Namespace: "default", Limit: 1,
+		Reason: engine.OrphanTriggerCancel,
+	}
+	if res := orphanReclaim(t, backend.Store, ctx, force); res.Reclaimed != 0 {
+		t.Fatalf("Cancel self-heal Reclaimed = %d, want 0: the delivery must refresh the activity clock", res.Reclaimed)
+	}
+	if got := executionStatus(t, backend.Store, ctx, id); got != types.ExecutionStatusRunning {
+		t.Fatalf("status = %q, want running", got)
+	}
+
+	// Age the delivery stamp; the same request now converges, which proves the
+	// block above was the activity clock and nothing else.
+	backend.AgeActivity(t, id, 10*time.Minute)
+	if res := orphanReclaim(t, backend.Store, ctx, sweep); res.Reclaimed != 1 {
+		t.Fatalf("sweep Reclaimed = %d, want 1 once the delivery stamp is past the grace", res.Reclaimed)
+	}
+	if got := executionStatus(t, backend.Store, ctx, id); got != types.ExecutionStatusCanceled {
+		t.Fatalf("status = %q, want canceled", got)
+	}
+}
+
+// orphanTimerResumeClearsSuspension covers the timer wake path, which is the
+// asymmetric half of the suspension bookkeeping: the park registers the node in
+// the suspended set, but the wake is a delayed outbox entry that only reaches
+// the node at its due time, through an ordinary acquire. The acquire is where
+// the wait actually ends, so it must clear the member in the same transition
+// that sets the node running — exactly what signal delivery does when it
+// consumes a waiter and writes the resume intent.
+//
+// Without that, the member outlives the wait and the reclaim judge's
+// suspended-node guard keeps sparing a graph-lost execution in which nothing is
+// suspended: over-protection, so the orphan never heals. The fixture therefore
+// asserts the member is gone after the resume acquire, then constructs the same
+// torn shape the parked execution is protected from — graph lost, both clocks
+// past the grace, no lease — and requires convergence. The lease is revoked
+// rather than left to expire so the only possible blocker is the stale member.
+//
+// Mutation: removing the SREM from the acquire transition makes the member
+// assertion and the final reclaim both red.
+func orphanTimerResumeClearsSuspension(t *testing.T, backend ConcurrencyOrphanBackend) {
+	t.Helper()
+	if backend.LoseGraph == nil || backend.AgeStatus == nil || backend.AgeActivity == nil {
+		t.Fatalf("backend declares ConcurrencyOrphanReclaimer but supplies no graph/status/activity hooks")
+	}
+	suspender, ok := backend.Store.(engine.DurableLeaseSuspender)
+	if !ok {
+		t.Fatalf("state store %T does not implement engine.DurableLeaseSuspender", backend.Store)
+	}
+	leaser, ok := backend.Store.(engine.OutboxLeaser)
+	if !ok {
+		t.Fatalf("state store %T does not implement engine.OutboxLeaser", backend.Store)
+	}
+
+	ctx := context.Background()
+	g := orphanGraph(t, "orphan-timer-resume")
+	id := orphanSubmit(t, backend.Store, ctx, g, orphanAdmission(g))
+	nodeIdx, ok := g.NodeIndex("start")
+	if !ok {
+		t.Fatal("graph has no start node")
+	}
+	unitIdx := g.UnitIndexForNode(nodeIdx)
+	lease := &engine.TaskLease{
+		LeaseID:    engine.LeaseID("orphan-timer-resume-lease"),
+		LeaseToken: engine.LeaseToken("orphan-timer-resume-token"),
+		IssuedAt:   time.Now().UTC().Truncate(time.Millisecond),
+		TTL:        time.Minute,
+		Task: engine.Task{
+			ExecutionID:  id,
+			NodeName:     "start",
+			NodeIdx:      nodeIdx,
+			UnitIdx:      unitIdx,
+			Type:         engine.TaskTypeNodeExec,
+			ActivationID: 1,
+		},
+	}
+	if _, acquired, err := backend.Store.AcquireTaskLease(ctx, lease); err != nil || !acquired {
+		t.Fatalf("AcquireTaskLease acquired=%v err=%v, want true/nil", acquired, err)
+	}
+	node, err := backend.Store.GetNode(ctx, id, "start")
+	if err != nil || node == nil {
+		t.Fatalf("GetNode(start) node=%v err=%v, want the leased node", node, err)
+	}
+	lease.Attempt = node.Attempt
+	if _, claimed, err := backend.Store.ClaimTaskLease(ctx, lease); err != nil || !claimed {
+		t.Fatalf("ClaimTaskLease claimed=%v err=%v, want true/nil", claimed, err)
+	}
+	committed, err := suspender.SuspendTaskLeaseWithOutbox(ctx, lease, nil, false, false,
+		&types.SuspendSpec{Mode: types.ModeTimer, Timer: 10 * time.Millisecond}, "")
+	if err != nil || !committed {
+		t.Fatalf("SuspendTaskLeaseWithOutbox committed=%v err=%v, want true/nil", committed, err)
+	}
+	members, err := backend.Store.ListSuspendedNodes(ctx, id)
+	if err != nil {
+		t.Fatalf("ListSuspendedNodes after the park: %v", err)
+	}
+	if !containsString(members, "start") {
+		t.Fatalf("suspended nodes after the park = %v, want start: the fixture is not a timer wait", members)
+	}
+
+	// The timer entry is delayed; wait for it to become due and claim it the way
+	// the outbox flush does.
+	var resume *engine.Task
+	for attempt := 0; attempt < 50 && resume == nil; attempt++ {
+		entries, err := leaser.LeaseOutbox(ctx, id, time.Now().UTC(), 8)
+		if err != nil {
+			t.Fatalf("LeaseOutbox: %v", err)
+		}
+		for i := range entries {
+			if entries[i].Task.Type == engine.TaskTypeNodeResume && entries[i].Task.NodeName == "start" {
+				task := entries[i].Task
+				resume = &task
+				break
+			}
+		}
+		if resume == nil {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if resume == nil {
+		t.Fatal("the timer park wrote no due resume intent: the wake path under test never starts")
+	}
+	resumeLease := &engine.TaskLease{
+		LeaseID:    engine.LeaseID("orphan-timer-resume-wake-lease"),
+		LeaseToken: engine.LeaseToken("orphan-timer-resume-wake-token"),
+		IssuedAt:   time.Now().UTC().Truncate(time.Millisecond),
+		TTL:        time.Minute,
+		Task:       *resume,
+	}
+	if _, acquired, err := backend.Store.AcquireTaskLease(ctx, resumeLease); err != nil || !acquired {
+		t.Fatalf("resume AcquireTaskLease acquired=%v err=%v, want true/nil", acquired, err)
+	}
+	members, err = backend.Store.ListSuspendedNodes(ctx, id)
+	if err != nil {
+		t.Fatalf("ListSuspendedNodes after the resume: %v", err)
+	}
+	if containsString(members, "start") {
+		t.Fatal("the resume acquire left the node in the suspended set: nothing is suspended but the reclaim guard still sees it")
+	}
+
+	// Make the execution the torn shape a parked wait is protected from. The
+	// lease is revoked so no unexpired lease can mask a stale-member failure.
+	backend.LoseGraph(t, id)
+	backend.AgeStatus(t, id, 10*time.Minute)
+	backend.AgeActivity(t, id, 10*time.Minute)
+	if revoked, err := backend.Store.RevokeLease(ctx, id, "start", resumeLease.LeaseToken); err != nil || !revoked {
+		t.Fatalf("RevokeLease revoked=%v err=%v, want true/nil", revoked, err)
+	}
+	res := orphanReclaim(t, backend.Store, ctx, engine.OrphanReclaimRequest{
+		Mode: engine.OrphanReclaimSweep, ExecutionID: id, Namespace: "default", Limit: 1, Grace: time.Minute,
+	})
+	if res.Reclaimed != 1 {
+		t.Fatalf("Reclaimed = %d, want 1: the resumed execution has nothing suspended and is graph-lost", res.Reclaimed)
 	}
 	if got := executionStatus(t, backend.Store, ctx, id); got != types.ExecutionStatusCanceled {
 		t.Fatalf("status = %q, want canceled", got)
