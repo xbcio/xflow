@@ -21,6 +21,7 @@ const (
 	metricNodeRetried               = "xflow_node_retried_total"
 	metricExecutionCompleted        = "xflow_execution_completed_total"
 	metricCommitOutcomes            = "xflow_commit_outcomes_total"
+	metricCommitDiscarded           = "xflow_commit_discarded_total"
 	metricOutboxRetries             = "xflow_outbox_retries_total"
 	metricOutboxDeadLettersTotal    = "xflow_outbox_dead_letters_total"
 	metricOutboxDeadLetters         = "xflow_outbox_dead_letters"
@@ -495,7 +496,21 @@ func (c CommitMetrics) OnCommitOutcome(ctx context.Context, outcome engine.Commi
 	c.Metrics.Inc(metricCommitOutcomes, withNamespace(ctx, map[string]string{"outcome": string(outcome)}))
 }
 
+// OnCommitDiscarded records one runner result the engine discarded because its
+// execution was no longer active, partitioned by the commit entry point (kind)
+// and the classification that discarded it (reason; today only
+// execution_inactive). The group commit path feeds only this method — it never
+// reaches OnCommitOutcome — so this is the one series where a discarded group
+// submission is visible.
+func (c CommitMetrics) OnCommitDiscarded(ctx context.Context, kind engine.CommitDiscardKind, outcome engine.CommitOutcome) {
+	c.Metrics.Inc(metricCommitDiscarded, withNamespace(ctx, map[string]string{
+		"kind":   string(kind),
+		"reason": string(outcome),
+	}))
+}
+
 var _ engine.CommitObserver = CommitMetrics{}
+var _ engine.CommitDiscardObserver = CommitMetrics{}
 
 // OutboxMetrics observes durable outbox delivery failures and periodic backlog
 // snapshots. It intentionally does not expose entry, execution, or error IDs.
