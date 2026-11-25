@@ -86,12 +86,16 @@ func (s *Store) acquireTaskLease(ctx context.Context, lease *engine.TaskLease, r
 		leaseExpiryMember(lease.Task.ExecutionID, lease.Task.NodeName), int(lease.Task.Type),
 		payloadJSON, lease.Task.NodeIdx, lease.Task.UnitIdx, lease.Task.Generation,
 	}
+	// ARGV[14] is the node name: the acquire clears a suspended node's
+	// suspended_nodes member (a resume starts here), and the set member is the
+	// node name. It is always present.
+	args = append(args, lease.Task.NodeName)
 	if route != nil {
 		allowCycles := 0
 		if route.AllowCycles {
 			allowCycles = 1
 		}
-		// ARGV[14]'s presence is what selects route-checked mode; omitting it
+		// ARGV[15]'s presence is what selects route-checked mode; omitting it
 		// keeps the legacy script behavior byte for byte.
 		args = append(args, allowCycles)
 	}
@@ -102,6 +106,7 @@ func (s *Store) acquireTaskLease(ctx context.Context, lease *engine.TaskLease, r
 			leaseExpiryZSetKey(t, lease.Task.ExecutionID),
 			execKey(t, lease.Task.ExecutionID, "status"),
 			activityAtKey(t, lease.Task.ExecutionID),
+			suspendedNodesKey(t, lease.Task.ExecutionID),
 		},
 		args...,
 	).Slice()

@@ -23,7 +23,10 @@ var _ engine.DurableLeaseSuspender = (*Store)(nil)
 //
 // KEYS: status, meta, output, lease index, suspended set, resume lock,
 // old waiter, waiter spec, signal batch, outbox ready, outbox body, then
-// signal/waiter key pairs. All keys share the execution hash tag.
+// signal/waiter key pairs, and finally the execution activity_at_ms key
+// appended at KEYS[#KEYS]. All keys share the execution hash tag.
+// ARGV: fixed header, delayed entries, signal names, then the private-output
+// bit at ARGV[#ARGV-1] and the activity stamp at ARGV[#ARGV].
 var suspendTaskLeaseWithOutboxLua = redis.NewScript(`
 local terminal = function(value)
     return value == 'success' or value == 'failed' or value == 'skipped' or value == 'canceled' or value == 'continued' or value == 'pinned'
@@ -42,7 +45,7 @@ local ttl = tonumber(ARGV[5])
 if tonumber(ARGV[7]) == 1 then
     redis.call('SET', KEYS[3], ARGV[8], 'EX', ttl)
 end
-if tonumber(ARGV[#ARGV] or '0') == 1 then
+if tonumber(ARGV[#ARGV - 1] or '0') == 1 then
     redis.call('HSET', KEYS[2], 'private_output', '1')
 end
 redis.call('SET', KEYS[1], 'suspended', 'EX', ttl)
@@ -140,6 +143,12 @@ local scheduleSignal = function(name, raw, allJSON)
         finalBody = cjson.encode(entry)
     end
     addOutbox(ARGV[14], finalBody, tonumber(ARGV[16]))
+    -- A pre-delivered signal that turns this park into an immediate resume is
+    -- delivery too: the waiter is gone and no lease exists until the resume is
+    -- acquired, so stamp the activity clock in the same transition (same
+    -- semantics as a lease acquisition). The key is appended last and shares
+    -- the {id} hash tag.
+    redis.call('SET', KEYS[#KEYS], ARGV[#ARGV], 'EX', ttl)
 end
 if multi then
     local values = redis.call('HGETALL', KEYS[9])
@@ -240,6 +249,11 @@ func (s *Store) SuspendTaskLeaseWithOutbox(ctx context.Context, lease *engine.Ta
 	for _, signalName := range spec.Signals {
 		keys = append(keys, waiterKey(t, lease.Task.ExecutionID, signalName))
 	}
+	// Appended last so the script's legacy key order is untouched. A park that
+	// consumes a pre-delivered signal schedules its resume in the same
+	// transition; stamping the activity clock there keeps the resume-pending
+	// window out of the orphan sweep's idle judgement.
+	keys = append(keys, activityAtKey(t, lease.Task.ExecutionID))
 	store := 0
 	if storeOutput {
 		store = 1
@@ -268,9 +282,10 @@ func (s *Store) SuspendTaskLeaseWithOutbox(ctx context.Context, lease *engine.Ta
 	if privateOutput {
 		private = 1
 	}
-	// Keep this after the delayed entries and signal names: the Lua script uses
-	// their existing offsets to construct durable resume intents.
-	args = append(args, private)
+	// Keep the private bit and the activity stamp after the delayed entries and
+	// signal names: the Lua script uses those existing offsets to construct
+	// durable resume intents, and addresses these two from the end.
+	args = append(args, private, now.UnixMilli())
 	result, err := suspendTaskLeaseWithOutboxLua.Run(ctx, s.rdb, keys, args...).Int64()
 	if err != nil && err != redis.Nil {
 		return false, fmt.Errorf("suspend task lease with outbox %q/%q: %w", lease.Task.ExecutionID, lease.Task.NodeName, err)

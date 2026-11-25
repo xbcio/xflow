@@ -101,12 +101,14 @@ return collected
 // KEYS[4] = signal batch hash (multi), KEYS[5] = waiter spec key,
 // KEYS[6] = resume lock key, KEYS[7] = outbox ready ZSET, KEYS[8] = outbox body hash,
 // KEYS[9] = timeout ZSET, KEYS[10] = node meta hash (live activation source),
-// KEYS[11..] = multi waiter keys (cleanup on quorum).
+// KEYS[11..(#KEYS-1)] = multi waiter keys (cleanup on quorum),
+// KEYS[#KEYS] = execution activity_at_ms key (appended last; same {id} hash tag).
 // ARGV[1] = signal data JSON, ARGV[2] = ttl seconds, ARGV[3] = node name,
 // ARGV[4] = (unused, empty), ARGV[5] = outbox entry body JSON (activation_id absent),
 // ARGV[6] = now ms, ARGV[7] = multi flag, ARGV[8] = quorum,
 // ARGV[9] = signal name, ARGV[10] = timeout member,
-// ARGV[11] = execution id, ARGV[12] = node name, ARGV[13] = signal name (for entryID).
+// ARGV[11] = execution id, ARGV[12] = node name, ARGV[13] = signal name (for entryID),
+// ARGV[#ARGV] = now (unix milliseconds), the activity stamp of a committed resume.
 // Returns nodeName (committed) or "" (stored / quorum not reached).
 var deliverSignalWithOutboxLua = redis.NewScript(`
 local signalKey = KEYS[1]
@@ -176,6 +178,13 @@ local writeOutbox = function(body)
     redis.call('ZADD', outboxReady, nowMs, entryID)
     redis.call('EXPIRE', outboxReady, ttl)
     redis.call('EXPIRE', outboxBody, ttl)
+    -- A committed resume is work, exactly like a lease acquisition: stamp the
+    -- execution's activity clock in the same transition. Without it the window
+    -- between delivery and the resume acquire holds no lease and no suspended
+    -- member, so a graph-lost execution with an already-durable resume would be
+    -- converged as an orphan. The key is appended last and carries the same {id}
+    -- hash tag, so the legacy key/arg order and cluster safety are unchanged.
+    redis.call('SET', KEYS[#KEYS], ARGV[#ARGV], 'EX', ttl)
 end
 
 if multi then
@@ -214,7 +223,7 @@ if multi then
     -- Patch ID and stamp activation into the final body after All splice.
     finalBody = patchID(finalBody)
     finalBody = stampActivation(finalBody)
-    for i = 11, #KEYS do
+    for i = 11, #KEYS - 1 do
         redis.call('DEL', KEYS[i])
     end
     redis.call('DEL', waiterSpecKey, batchKey, resumeLockKey)
@@ -525,6 +534,7 @@ return {1, '', '', ''}
 // KEYS[1] = node status key, KEYS[2] = node meta hash, KEYS[3] = lease expiry ZSET
 // KEYS[4] = execution status key (read only in route-checked mode)
 // KEYS[5] = execution activity_at_ms key (same {id} hash tag; written on acquire)
+// KEYS[6] = execution suspended_nodes SET (same {id} hash tag; a resume SREMs the member)
 // ARGV[1] = new lease id
 // ARGV[2] = new lease token
 // ARGV[3] = issued-at unix millis
@@ -538,7 +548,8 @@ return {1, '', '', ''}
 // ARGV[11] = queued task node index
 // ARGV[12] = queued task unit index
 // ARGV[13] = queued task generation
-// ARGV[14] = allowCycles 0/1 (optional; present = route-checked mode)
+// ARGV[14] = node name (the suspended-set member; always present)
+// ARGV[15] = allowCycles 0/1 (optional; present = route-checked mode)
 // Returns {acquired, prev_status, prev_attempt, prev_activation_id,
 // prev_auto_depth, prev_lease_token, prev_issued_at_ms, prev_lease_ttl_ms,
 // exec_status}. exec_status is the execution status observed by this command,
@@ -553,7 +564,8 @@ local prevIssuedAtMs = tonumber(redis.call('HGET', KEYS[2], 'lease_issued_at_ms'
 local prevLeaseTTLms = tonumber(redis.call('HGET', KEYS[2], 'lease_ttl_ms') or '0')
 local taskActivation = tonumber(ARGV[5] or '0')
 local nowMs = tonumber(ARGV[3] or '0')
-local allowCycles = ARGV[14]
+local nodeName = ARGV[14]
+local allowCycles = ARGV[15]
 
 local function isTerminalNode(s)
     return s == 'success' or s == 'failed' or s == 'skipped' or s == 'canceled' or s == 'continued' or s == 'pinned'
@@ -637,6 +649,17 @@ if prevActivation == taskActivation then
 end
 if nextAttempt <= 0 then
 	nextAttempt = 1
+end
+-- An accepted acquire of a suspended node IS its resume, so the wait ends in
+-- this same transition. Signal delivery already SREMs the member when it
+-- consumes a waiter and writes the resume intent; the timer/timeout wake path
+-- only parks a delayed outbox entry and reaches this transition later, so
+-- without this the member outlived its wait forever. A stale member would keep
+-- the reclaim script's SCARD guard protecting a graph-lost execution in which
+-- nothing is suspended. The member is cleared only here, after every guard
+-- above has passed, so the whole parked-to-resume window keeps its protection.
+if status == 'suspended' then
+    redis.call('SREM', KEYS[6], nodeName)
 end
 redis.call('SET', KEYS[1], 'running', 'EX', tonumber(ARGV[4]))
 -- A lease is the strongest form of activity: a runner is working this node

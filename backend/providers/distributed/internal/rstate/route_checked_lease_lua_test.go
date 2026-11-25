@@ -83,13 +83,13 @@ func argString(v any) string {
 }
 
 // acquireScriptArgs finds the acquire script's argument vector among the
-// recorded calls: it is the one declaring exactly five KEYS and starting at
+// recorded calls: it is the one declaring exactly six KEYS and starting at
 // nodeStatusKey. EVAL and EVALSHA share the same prefix layout
 // (name, script-or-sha, numkeys, keys..., args...).
 func acquireScriptArgs(t *testing.T, calls [][]string, wantStatusKey string) []string {
 	t.Helper()
 	for _, args := range calls {
-		if len(args) < 3 || args[2] != "5" {
+		if len(args) < 3 || args[2] != "6" {
 			continue
 		}
 		if args[6] != wantStatusKey {
@@ -97,7 +97,7 @@ func acquireScriptArgs(t *testing.T, calls [][]string, wantStatusKey string) []s
 		}
 		return args
 	}
-	t.Fatalf("no EVAL/EVALSHA carrying five KEYS and the execution status key %q was issued; captured calls: %v",
+	t.Fatalf("no EVAL/EVALSHA carrying six KEYS and the execution status key %q was issued; captured calls: %v",
 		wantStatusKey, calls)
 	return nil
 }
@@ -105,10 +105,14 @@ func acquireScriptArgs(t *testing.T, calls [][]string, wantStatusKey string) []s
 // TestAcquireTaskLeaseCheckedScriptCarriesRouteInputs pins the wire contract of
 // the route-checked acquire Lua:
 //
-//   - KEYS[4] is the execution status key and KEYS[5] the execution activity
-//     clock, both on the execution's {id} hash tag, so no CROSSSLOT;
-//   - ARGV[14] is allowCycles, '0' for an acyclic graph and '1' for a cyclic one;
-//   - the legacy AcquireTaskLease omits ARGV[14] entirely, which is what keeps
+//   - KEYS[4] is the execution status key, KEYS[5] the execution activity
+//     clock, and KEYS[6] the suspended_nodes set, all on the execution's {id}
+//     hash tag, so no CROSSSLOT;
+//   - ARGV[14] is the node name, always present, because an accepted acquire of
+//     a suspended node clears its suspended_nodes member;
+//   - ARGV[15] is allowCycles, '0' for an acyclic graph and '1' for a cyclic
+//     one;
+//   - the legacy AcquireTaskLease omits ARGV[15] entirely, which is what keeps
 //     its script behavior (and the call sites that rely on it) unchanged.
 func TestAcquireTaskLeaseCheckedScriptCarriesRouteInputs(t *testing.T) {
 	state, _, rdb := newTestRedisState(t)
@@ -152,9 +156,9 @@ func TestAcquireTaskLeaseCheckedScriptCarriesRouteInputs(t *testing.T) {
 			}
 			statusKey := execKey(namespace.Default, id, "status")
 			args := acquireScriptArgs(t, hook.scriptCalls(), statusKey)
-			// name, script-or-sha, numkeys, 5 keys, 14 args
-			if want := 3 + 5 + 14; len(args) != want {
-				t.Fatalf("script argument vector length = %d, want %d (5 KEYS + 14 ARGV): %v", len(args), want, args)
+			// name, script-or-sha, numkeys, 6 keys, 15 args
+			if want := 3 + 6 + 15; len(args) != want {
+				t.Fatalf("script argument vector length = %d, want %d (6 KEYS + 15 ARGV): %v", len(args), want, args)
 			}
 			if got := args[6]; got != statusKey {
 				t.Fatalf("KEYS[4] = %q, want the execution status key %q", got, statusKey)
@@ -162,8 +166,14 @@ func TestAcquireTaskLeaseCheckedScriptCarriesRouteInputs(t *testing.T) {
 			if wantActivity := activityAtKey(namespace.Default, id); args[7] != wantActivity {
 				t.Fatalf("KEYS[5] = %q, want the execution activity key %q", args[7], wantActivity)
 			}
+			if wantSuspended := suspendedNodesKey(namespace.Default, id); args[8] != wantSuspended {
+				t.Fatalf("KEYS[6] = %q, want the execution suspended_nodes key %q", args[8], wantSuspended)
+			}
+			if got := args[len(args)-2]; got != "start" {
+				t.Fatalf("ARGV[14] = %q, want the node name %q", got, "start")
+			}
 			if got := args[len(args)-1]; got != tc.wantArg {
-				t.Fatalf("ARGV[14] = %q, want %q (allowCycles for a %s graph)", got, tc.wantArg, tc.name)
+				t.Fatalf("ARGV[15] = %q, want %q (allowCycles for a %s graph)", got, tc.wantArg, tc.name)
 			}
 		})
 	}
@@ -181,11 +191,14 @@ func TestAcquireTaskLeaseCheckedScriptCarriesRouteInputs(t *testing.T) {
 		}
 		statusKey := execKey(namespace.Default, id, "status")
 		args := acquireScriptArgs(t, hook.scriptCalls(), statusKey)
-		// name, script-or-sha, numkeys, 5 keys, 13 legacy args: no ARGV[14], so
+		// name, script-or-sha, numkeys, 6 keys, 14 legacy args: no ARGV[15], so
 		// the script takes the legacy branch and skips every route guard.
-		if want := 3 + 5 + 13; len(args) != want {
+		if want := 3 + 6 + 14; len(args) != want {
 			t.Fatalf("legacy script argument vector length = %d, want %d (no allowCycles argument): %v",
 				len(args), want, args)
+		}
+		if got := args[len(args)-1]; got != "start" {
+			t.Fatalf("legacy ARGV[14] = %q, want the node name %q", got, "start")
 		}
 	})
 }

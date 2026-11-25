@@ -27,8 +27,8 @@ func TestNodeTimeoutThatFiresBeforeTheDeadlineResumesTheNodeOnRedis(t *testing.T
 	ctx := context.Background()
 
 	// run drives the scenario once on a rig of its own, asserts everything that
-	// must hold, and returns what the residue observation reads. Each subtest
-	// calls it, so either can be selected alone with -run.
+	// must hold, and returns what the invariant and residue observations read.
+	// Each subtest calls it, so either can be selected alone with -run.
 	run := func(t *testing.T) (nodeAfter types.NodeStatus, residue []string, waiterAfter int64) {
 		rig := newDeadlineRaceRig(t)
 		g := raceGraphWithTimeout(t, "deadline-suspend-node-timeout", time.Hour, 0, types.NodeDef{Name: "park", Type: "test.race_park"})
@@ -78,28 +78,34 @@ func TestNodeTimeoutThatFiresBeforeTheDeadlineResumesTheNodeOnRedis(t *testing.T
 	}
 
 	t.Run("invariants", func(t *testing.T) {
-		run(t)
+		nodeAfter, residue, _ := run(t)
+		if nodeAfter != types.NodeStatusSuccess {
+			t.Fatalf("node after the node timeout = %q, want success", nodeAfter)
+		}
+		// The timeout wakeup reaches the node through the outbox, and the accepted
+		// resume acquire is the transition that ends the wait: it SREMs the
+		// suspended-set member in the same step that sets the node running.
+		if slices.Contains(residue, "park") {
+			t.Fatalf("suspended set = %v after the node timeout, want empty: the resume acquire must clear the member", residue)
+		}
 	})
 
-	// suspended_residue_as_it_stands pins the same KNOWN, UNDECIDED defect as the
-	// timer test: the node's Timeout wakeup reaches the node through the outbox,
-	// nothing on that path removes the node from the suspended set, and the
-	// signal wait it registered (waiter:go) is still there after the node ran to
-	// success. It does no harm to the node: the cancel cascade skips a node that
-	// is no longer suspended, and a late "go" that matches the stale waiter
-	// queues a resume the engine then refuses.
+	// stale_signal_waiter_as_it_stands keeps a separate KNOWN defect visible. The
+	// suspended-set residue above is closed by the acquire SREM, but the
+	// signal-name-keyed waiter the park registered (waiter:go) is still there
+	// after the node ran to success: retiring it needs the spec's signal names,
+	// which the acquire does not carry. It does no harm to the node: a late "go"
+	// that matches the stale waiter queues a resume the engine then refuses.
 	//
-	// When the defect is fixed, this subtest turns red on purpose: change it to
-	// require that the set is empty and the waiter key gone, and move those
-	// assertions into invariants.
-	t.Run("suspended_residue_as_it_stands", func(t *testing.T) {
+	// When that cleanup is implemented, this subtest turns red on purpose: require
+	// the waiter gone and move that assertion into invariants.
+	t.Run("stale_signal_waiter_as_it_stands", func(t *testing.T) {
 		nodeAfter, residue, waiterAfter := run(t)
 		if nodeAfter != types.NodeStatusSuccess {
 			t.Fatalf("node after the node timeout = %q, want success", nodeAfter)
 		}
-		if !slices.Contains(residue, "park") {
-			t.Fatalf("suspended set = %v after the node timeout; the residue this subtest records is gone, "+
-				"so assert the set is cleaned up instead", residue)
+		if slices.Contains(residue, "park") {
+			t.Fatalf("suspended set = %v after the node timeout, want empty", residue)
 		}
 		if waiterAfter != 1 {
 			t.Fatalf("EXISTS waiter:go = %d after the node timeout; the residue this subtest records is gone, "+

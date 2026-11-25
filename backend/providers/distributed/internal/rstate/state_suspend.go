@@ -442,10 +442,16 @@ func (s *Store) DeliverSignalWithOutbox(ctx context.Context, id types.ExecutionI
 			keys = append(keys, waiterKey(t, id, sig))
 		}
 	}
+	// Appended last so the script's legacy key order is untouched. A committed
+	// delivery stamps the activity clock in the same Lua transition: between the
+	// signal being consumed and the resume lease being acquired nothing else
+	// refreshes it, and the orphan sweep would otherwise see an idle execution.
+	keys = append(keys, activityAtKey(t, id))
 	args := []any{
 		string(dataJSON), int(ttl), intent.NodeName,
 		"", entryBody, nowMs, multi, quorum, signalName, timeoutMemberStr,
 		string(id), intent.NodeName, signalName, // ARGV[11..13]: entryID components for Lua
+		nowMs, // ARGV[#ARGV]: activity stamp
 	}
 
 	result, err := deliverSignalWithOutboxLua.Run(ctx, s.rdb, keys, args...).Result()

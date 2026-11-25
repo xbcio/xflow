@@ -246,17 +246,13 @@ func (r *deadlineRaceRig) drainProblem(workflow string, ids ...types.ExecutionID
 		if err != nil {
 			return fmt.Sprintf("%s suspended nodes unreadable: %v", id, err)
 		}
-		// A member is a leak unless its node already finished successfully. A node
-		// woken by its timer or its Timeout is resumed through the outbox, which
-		// never touches the set, so the member stays after the node ran to success.
-		// That residue is a known, undecided defect (the suspended_residue_as_it_stands
-		// subtests pin it); a node that is still suspended, canceled, running or
-		// missing is not residue and is reported.
+		// Every wake path clears the member in the transition that ends the wait:
+		// signal delivery when it consumes the waiter, and timer or Timeout in the
+		// accepted resume acquire. The execution has ended, so any member left is
+		// a leak.
 		for _, name := range members {
 			node, err := r.state.GetNode(context.Background(), id, name)
-			if err != nil || node == nil || node.Status != types.NodeStatusSuccess {
-				return fmt.Sprintf("%s has suspended node %s left (node %+v, err %v)", id, name, node, err)
-			}
+			return fmt.Sprintf("%s has suspended node %s left (node %+v, err %v)", id, name, node, err)
 		}
 	}
 	return ""
