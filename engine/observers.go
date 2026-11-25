@@ -17,6 +17,40 @@ type CommitObserver interface {
 	OnCommitOutcome(ctx context.Context, outcome CommitOutcome)
 }
 
+// CommitDiscardKind names the result-commit entry point that discarded a
+// submission, so a late result dropped because its execution was already over
+// can be told apart from one rejected by its lease fence.
+type CommitDiscardKind string
+
+const (
+	// CommitDiscardKindNode is Engine.CommitTaskResultWithOutcome, including a
+	// batch payload that delegates to CommitSubgraphResult.
+	CommitDiscardKindNode CommitDiscardKind = "node"
+	// CommitDiscardKindGroup is Engine.CommitGroupResult.
+	CommitDiscardKindGroup CommitDiscardKind = "group"
+)
+
+// CommitDiscardObserver receives one observation per runner result the engine
+// discarded because the execution it belonged to was no longer active (already
+// terminal, or its state gone). Such a commit applies nothing and returns a nil
+// error, so without this observation the only trace of a worker's late result
+// is a classification the caller may drop on the floor.
+//
+// It is an optional extension of CommitObserver rather than a method on it:
+// CommitObserver predates this and must keep compiling for implementations
+// that only care about the outcome classification. The engine type-asserts the
+// installed CommitObserver, so this rides the existing WithCommitObserver
+// wiring and a deployment that installs no commit observer observes nothing.
+//
+// It fires from the public commit entry points, not from their internal
+// inactive returns, so one discarded submission is reported exactly once — a
+// batch payload delegated to CommitSubgraphResult included.
+//
+// Implementations must be non-blocking and must not affect scheduling.
+type CommitDiscardObserver interface {
+	OnCommitDiscarded(ctx context.Context, kind CommitDiscardKind, outcome CommitOutcome)
+}
+
 // OutboxObserver receives durable outbox delivery and backlog observations.
 // Implementations must be non-blocking and must not affect scheduling.
 type OutboxObserver interface {
@@ -462,6 +496,28 @@ func (e *Engine) notifyCommitOutcome(ctx context.Context, outcome CommitOutcome)
 	}
 	safeHook(ctx, e.logger, func(observerCtx context.Context) {
 		e.commitObserver.OnCommitOutcome(observerCtx, outcome)
+	})
+}
+
+// notifyCommitDiscarded reports one submission the engine discarded because
+// its execution was no longer active. The log line is Debug: a reclaim that
+// races a slow worker can produce one per in-flight assignment, and the
+// counter is what an operator alerts on, not the log.
+func (e *Engine) notifyCommitDiscarded(ctx context.Context, kind CommitDiscardKind, outcome CommitOutcome, lease *TaskLease) {
+	if e.logger != nil && lease != nil {
+		e.logger.Debug("result commit discarded: execution inactive",
+			"execution_id", string(lease.Task.ExecutionID),
+			"kind", string(kind),
+			"node", lease.Task.NodeName,
+			"unit", lease.Task.UnitIdx,
+			"outcome", string(outcome))
+	}
+	observer, ok := e.commitObserver.(CommitDiscardObserver)
+	if !ok {
+		return
+	}
+	safeHook(ctx, e.logger, func(observerCtx context.Context) {
+		observer.OnCommitDiscarded(observerCtx, kind, outcome)
 	})
 }
 

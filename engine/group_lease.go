@@ -293,7 +293,16 @@ func (e *Engine) committedGroupDeadline(ctx context.Context, lease *TaskLease, g
 // the GroupStateStore. It maps the GroupResult to the internal commit request,
 // validates exit ports against the compiled boundary outputs, and propagates
 // downstream arrivals.
-func (e *Engine) CommitGroupResult(ctx context.Context, lease *TaskLease, res GroupResult) (CommitOutcome, error) {
+func (e *Engine) CommitGroupResult(ctx context.Context, lease *TaskLease, res GroupResult) (outcome CommitOutcome, err error) {
+	// Both inactive exits below — the pre-commit liveness read and a group
+	// timeout the execution's own deadline settles — are the same discarded
+	// submission. Observing the final classification here keeps the count at
+	// one per submission instead of one per return site.
+	defer func() {
+		if outcome == CommitOutcomeExecutionInactive {
+			e.notifyCommitDiscarded(ctx, CommitDiscardKindGroup, outcome, lease)
+		}
+	}()
 	if lease == nil {
 		return "", fmt.Errorf("nil lease")
 	}

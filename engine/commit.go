@@ -24,6 +24,14 @@ func (e *Engine) CommitTaskResult(ctx context.Context, lease *TaskLease, result 
 func (e *Engine) CommitTaskResultWithOutcome(ctx context.Context, lease *TaskLease, result TaskResult) (outcome CommitOutcome, err error) {
 	defer func() {
 		e.notifyCommitOutcome(ctx, outcome)
+		// Every internal inactive return — a missing graph, the pre-commit
+		// liveness probe, the acyclic/legacy/suspend commits, and the batch
+		// delegation to CommitSubgraphResult — funnels through this one
+		// classification, so the discard is observed exactly once here rather
+		// than at each return site.
+		if outcome == CommitOutcomeExecutionInactive {
+			e.notifyCommitDiscarded(ctx, CommitDiscardKindNode, outcome, lease)
+		}
 	}()
 
 	if lease == nil {
