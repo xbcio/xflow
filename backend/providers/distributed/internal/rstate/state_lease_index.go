@@ -2,6 +2,7 @@ package rstate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -117,11 +118,19 @@ import (
 // budget and most of its Redis round trips on executions that no longer exist,
 // and the index kept growing faster than the sweep drained it.
 //
-// pruneOrphanLeaseIndex is therefore run before the reclaim read: one ZRANGEBYSCORE
-// page and one non-transactional pipeline of per-key EXISTS per round, then one
-// variadic ZREM for the whole round's orphans. It is an accelerator, not part of
-// the reclaim contract — the walk recovers anything a failed prune drops (see
-// the verify note above the function).
+// pruneOrphanLeaseIndex is therefore run before the reclaim read: per round one
+// ZRANGEBYSCORE page, one non-transactional pipeline of per-key EXISTS, one
+// variadic ZREM for the round's orphans, and one verify pipeline. A call runs at
+// most leaseIndexPruneRounds rounds, each on its own detached
+// outboxIndexWriteTimeout context, under one leaseIndexPruneBudget wall-clock
+// cap, so a slow store loses at most one round instead of the whole call. The
+// per-Store chunk halves after a round that timed out and doubles after one that
+// completed, so the prune converges to what the store can answer instead of
+// making no progress at a chunk it can never finish. It is an accelerator, not
+// part of the reclaim contract — the walk recovers anything a failed prune drops
+// (see the verify note above the function). Every call that removed members or
+// failed logs one structured line with the counts, the elapsed time, the current
+// chunk and, on failure, the stage and error.
 const (
 	leaseExpiryExecIndexSuffix = "lease-index"
 
@@ -139,16 +148,24 @@ const (
 	// leaseWalkKind names the walk in the holder-lock and round-done keys.
 	leaseWalkKind = "leases"
 
-	// leaseIndexPruneChunk is the number of index members one prune round
-	// examines, and leaseIndexPruneRounds caps the rounds in one sweep. Together
-	// they clear at most 8192 members per 10s sweep (≈800/s), far above the
-	// measured ≈30/s of new registrations, without lengthening the sweep. The
-	// members of one round travel in one pipeline, so the round-trip count does
-	// not scale with the chunk; the rounds only bound how many chunks one call
-	// examines. The scan offset stays at most chunk*rounds: ZRANGEBYSCORE's LIMIT
-	// offset is O(offset) and the production index holds millions of members.
-	leaseIndexPruneChunk  = 2048
-	leaseIndexPruneRounds = 4
+	// leaseIndexPruneChunkMax is the largest number of index members one prune
+	// round examines, and leaseIndexPruneChunkMin the floor the per-Store
+	// adaptive chunk shrinks to. With leaseIndexPruneRounds they clear at most
+	// 8192 members per 10s sweep (≈800/s), far above the measured ≈30/s of new
+	// registrations, without lengthening the sweep. The members of one round
+	// travel in one pipeline, so the round-trip count does not scale with the
+	// chunk; the rounds only bound how many chunks one call examines. The scan
+	// offset stays at most chunk*rounds: ZRANGEBYSCORE's LIMIT offset is
+	// O(offset) and the production index holds millions of members.
+	leaseIndexPruneChunkMax = 2048
+	leaseIndexPruneChunkMin = 128
+	leaseIndexPruneRounds   = 4
+
+	// leaseIndexPruneBudget caps one whole prune call. Each round runs on its
+	// own outboxIndexWriteTimeout context, and this is the wall-clock cap over
+	// all of them: the sweeper runs the prune inline and must never be held for
+	// longer than this.
+	leaseIndexPruneBudget = 15 * time.Second
 )
 
 // leaseExpiryExecIndexKey returns the lease-expiry index for one namespace.
@@ -252,50 +269,83 @@ func (s *Store) dueLeaseExecutions(ctx context.Context, t namespace.Namespace, m
 // names exactly one key: the per-execution keys carry {exec-id} hash tags and
 // sit on different slots, and MULTI is unavailable on the cluster proxy, so no
 // command may span several of them.
+//
+// Each round runs on its own outboxIndexWriteTimeout context so an earlier
+// round's slow commands cannot consume a later round's budget, and the whole
+// call is capped by leaseIndexPruneBudget so the sweeper is never held past it.
+// The chunk this Store uses adapts: a round that fails on a deadline halves it
+// for the next sweep, and a completed round doubles it back up to
+// leaseIndexPruneChunkMax. Every call that removed members or failed emits one
+// structured line; noteLeaseIndexFailure's rate limit stays on the other index
+// operations and never hides a prune failure.
 func (s *Store) pruneOrphanLeaseIndex(ctx context.Context, t namespace.Namespace, maxMs string) {
-	ctx, cancel := detachedIndexContext(ctx)
+	started := time.Now()
+	base, cancel := context.WithTimeout(context.WithoutCancel(ctx), leaseIndexPruneBudget)
 	defer cancel()
 	indexKey := leaseExpiryExecIndexKey(t)
+
+	var (
+		rounds, checked, orphans, removed, rearmed int
+		failedStage                                string
+		failedErr                                  error
+	)
+	chunk := s.leasePruneChunk()
 	kept := 0
 	for round := 0; round < leaseIndexPruneRounds; round++ {
-		members, err := s.rdb.ZRangeByScore(ctx, indexKey, &redis.ZRangeBy{
-			Min: "-inf", Max: maxMs, Offset: int64(kept), Count: int64(leaseIndexPruneChunk),
+		rounds++
+		used := chunk
+		roundCtx, roundCancel := context.WithTimeout(base, outboxIndexWriteTimeout)
+		members, err := s.rdb.ZRangeByScore(roundCtx, indexKey, &redis.ZRangeBy{
+			Min: "-inf", Max: maxMs, Offset: int64(kept), Count: int64(used),
 		}).Result()
 		if err != nil {
-			s.noteLeaseIndexFailure("prune", err)
-			return
+			roundCancel()
+			failedStage, failedErr = "zrange", err
+			break
 		}
 		if len(members) == 0 {
-			return
+			roundCancel()
+			chunk = s.growLeasePruneChunk(used)
+			break
 		}
+		checked += len(members)
 		pipe := s.rdb.Pipeline()
 		exists := make([]*redis.IntCmd, len(members))
 		for i, member := range members {
-			exists[i] = pipe.Exists(ctx, leaseExpiryZSetKey(t, types.ExecutionID(member)))
+			exists[i] = pipe.Exists(roundCtx, leaseExpiryZSetKey(t, types.ExecutionID(member)))
 		}
-		if _, err := pipe.Exec(ctx); err != nil {
-			s.noteLeaseIndexFailure("prune", err)
-			return
+		if _, err := pipe.Exec(roundCtx); err != nil {
+			roundCancel()
+			failedStage, failedErr = "exists", err
+			break
 		}
-		orphans := make([]string, 0, len(members))
+		roundOrphans := make([]string, 0, len(members))
 		for i, cmd := range exists {
 			if cmd.Val() == 0 {
-				orphans = append(orphans, members[i])
+				roundOrphans = append(roundOrphans, members[i])
 				continue
 			}
 			kept++
 		}
-		if len(orphans) == 0 {
-			return
+		orphans += len(roundOrphans)
+		if len(roundOrphans) == 0 {
+			// Nothing to remove in this round: stop, as the prune always has.
+			// The round itself completed cleanly, so the chunk may grow.
+			roundCancel()
+			chunk = s.growLeasePruneChunk(used)
+			break
 		}
-		removals := make([]any, len(orphans))
-		for i, orphan := range orphans {
+		removals := make([]any, len(roundOrphans))
+		for i, orphan := range roundOrphans {
 			removals[i] = orphan
 		}
-		if err := s.rdb.ZRem(ctx, indexKey, removals...).Err(); err != nil {
-			s.noteLeaseIndexFailure("prune", err)
-			return
+		n, err := s.rdb.ZRem(roundCtx, indexKey, removals...).Result()
+		if err != nil {
+			roundCancel()
+			failedStage, failedErr = "zrem", err
+			break
 		}
+		removed += int(n)
 		// Verify, the same closure the re-arm uses. A producer writes the
 		// per-execution ZSET before it registers in the index. One whose
 		// registration landed before this ZREM had it removed with the orphans,
@@ -304,23 +354,83 @@ func (s *Store) pruneOrphanLeaseIndex(ctx context.Context, t namespace.Namespace
 		// after this ZREM simply survives; the re-arm is then only a duplicate
 		// ZADD. Neither ordering can lose a live lease.
 		verify := s.rdb.Pipeline()
-		alive := make([]*redis.IntCmd, len(orphans))
-		for i, orphan := range orphans {
-			alive[i] = verify.Exists(ctx, leaseExpiryZSetKey(t, types.ExecutionID(orphan)))
+		alive := make([]*redis.IntCmd, len(roundOrphans))
+		for i, orphan := range roundOrphans {
+			alive[i] = verify.Exists(roundCtx, leaseExpiryZSetKey(t, types.ExecutionID(orphan)))
 		}
-		if _, err := verify.Exec(ctx); err != nil {
-			s.noteLeaseIndexFailure("prune", err)
-			return
+		if _, err := verify.Exec(roundCtx); err != nil {
+			roundCancel()
+			failedStage, failedErr = "verify", err
+			break
 		}
 		for i, cmd := range alive {
-			if cmd.Val() != 0 {
-				s.rearmLeaseExpiryIndex(ctx, t, types.ExecutionID(orphans[i]))
+			if cmd.Val() == 0 {
+				continue
 			}
+			// A re-arm detaches again on its own outboxIndexWriteTimeout, so
+			// stop starting them once the call budget is spent; the walk
+			// recovers the registrations exactly like any failed re-arm.
+			if base.Err() != nil {
+				failedStage, failedErr = "verify", base.Err()
+				break
+			}
+			s.rearmLeaseExpiryIndex(roundCtx, t, types.ExecutionID(roundOrphans[i]))
+			rearmed++
 		}
-		if len(members) < leaseIndexPruneChunk {
-			return
+		roundCancel()
+		if failedErr != nil {
+			break
+		}
+		chunk = s.growLeasePruneChunk(used)
+		if len(members) < used {
+			break
 		}
 	}
+	if failedErr != nil && errors.Is(failedErr, context.DeadlineExceeded) {
+		chunk = s.shrinkLeasePruneChunk(chunk)
+	}
+	if (failedErr != nil || removed > 0) && s.logger != nil {
+		fields := []any{
+			"namespace", string(t),
+			"rounds", rounds,
+			"checked", checked,
+			"orphans", orphans,
+			"removed", removed,
+			"rearmed", rearmed,
+			"elapsed", time.Since(started),
+			"chunk", chunk,
+		}
+		if failedErr != nil {
+			s.logger.Error("lease index prune did not finish; the next sweep resumes it",
+				append(fields, "stage", failedStage, "err", failedErr)...)
+			return
+		}
+		s.logger.Info("lease index prune removed orphan members", fields...)
+	}
+}
+
+// leasePruneChunk reports the current adaptive prune chunk, clamped to the
+// package bounds; zero (a fresh Store) means the default.
+func (s *Store) leasePruneChunk() int {
+	n := int(s.leaseIndexPruneChunk.Load())
+	if n == 0 {
+		return leaseIndexPruneChunkMax
+	}
+	return max(min(n, leaseIndexPruneChunkMax), leaseIndexPruneChunkMin)
+}
+
+// growLeasePruneChunk doubles the chunk after a completed round, capped at the
+// max, and reports the new value.
+func (s *Store) growLeasePruneChunk(cur int) int {
+	s.leaseIndexPruneChunk.Store(int64(min(cur*2, leaseIndexPruneChunkMax)))
+	return s.leasePruneChunk()
+}
+
+// shrinkLeasePruneChunk halves the chunk after a round that timed out, floored
+// at the min, and reports the new value.
+func (s *Store) shrinkLeasePruneChunk(cur int) int {
+	s.leaseIndexPruneChunk.Store(int64(max(cur/2, leaseIndexPruneChunkMin)))
+	return s.leasePruneChunk()
 }
 
 // walkLeaseExpiryKeys advances the safety-net walk for one namespace, if it is

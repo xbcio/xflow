@@ -119,6 +119,11 @@ type Store struct {
 	// leaseIndexLastLog rate-limits the lease-expiry index failure log; it
 	// shares outboxIndexLogMu.
 	leaseIndexLastLog time.Time
+	// leaseIndexPruneChunk is the adaptive number of index members one lease
+	// prune round examines, kept in
+	// [leaseIndexPruneChunkMin, leaseIndexPruneChunkMax]. Zero means the package
+	// default (the max). See state_lease_index.go.
+	leaseIndexPruneChunk atomic.Int64
 	// leaseWalkMu guards leaseWalks, the per-namespace safety-net walk of the
 	// lease-expiry index. See state_lease_index.go.
 	leaseWalkMu sync.Mutex

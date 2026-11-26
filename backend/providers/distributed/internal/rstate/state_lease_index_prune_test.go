@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -284,6 +285,295 @@ func TestListExpiredLeasesPrunesOrphansBeforeWalk(t *testing.T) {
 	release()
 	if err := <-done; err != nil {
 		t.Fatalf("ListExpiredLeases() error = %v", err)
+	}
+	requireLeaseIndexCard(t, rdb, 0)
+}
+
+// leasePruneFaultHook drives individual prune commands for the timeout and
+// diagnostics tests. It matches on the command name (zrangebyscore, the EXISTS
+// pipeline, zrem), never on internal state, so it stays valid across prune
+// implementation changes.
+type leasePruneFaultHook struct {
+	mu       sync.Mutex
+	zrange   int
+	exists   int
+	zrem     int
+	onZRange func(ctx context.Context, n int) error
+	onExists func(ctx context.Context, n int) error
+	onZRem   func(ctx context.Context, n int) error
+}
+
+func (h *leasePruneFaultHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h *leasePruneFaultHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		h.mu.Lock()
+		var (
+			n  int
+			fn func(context.Context, int) error
+		)
+		switch cmd.Name() {
+		case "zrangebyscore":
+			h.zrange++
+			n, fn = h.zrange, h.onZRange
+		case "zrem":
+			h.zrem++
+			n, fn = h.zrem, h.onZRem
+		}
+		h.mu.Unlock()
+		if fn != nil {
+			if err := fn(ctx, n); err != nil {
+				return err
+			}
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (h *leasePruneFaultHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		if len(cmds) == 0 || cmds[0].Name() != "exists" {
+			return next(ctx, cmds)
+		}
+		h.mu.Lock()
+		h.exists++
+		n := h.exists
+		fn := h.onExists
+		h.mu.Unlock()
+		if fn != nil {
+			if err := fn(ctx, n); err != nil {
+				return err
+			}
+		}
+		return next(ctx, cmds)
+	}
+}
+
+// TestLeaseIndexPruneKeepsCompletedRoundsWhenALaterRoundTimesOut pins the
+// per-round timeout budget. The first two rounds each spend real time inside
+// their ZREM (under the per-round budget, but more than one shared budget would
+// allow for both), and the third round's ZRANGEBYSCORE fails with
+// context.DeadlineExceeded. The rounds that finished before the failure must
+// have already removed their orphans. One call-wide timeout, as the prune used
+// to have, cannot get past the second round here.
+func TestLeaseIndexPruneKeepsCompletedRoundsWhenALaterRoundTimesOut(t *testing.T) {
+	state, _, rdb := newTestRedisState(t)
+	ctx := context.Background()
+	// leaseIndexPruneChunkMax: one round examines at most this many members.
+	const chunk, seeded = leaseIndexPruneChunkMax, 5000
+	base := time.Now().Add(-time.Hour).UTC()
+	seedLeaseIndexOrphans(t, rdb, seeded, float64(base.UnixMilli()))
+
+	rdb.AddHook(&leasePruneFaultHook{
+		onZRem: func(context.Context, int) error {
+			time.Sleep(2750 * time.Millisecond)
+			return nil
+		},
+		onZRange: func(_ context.Context, n int) error {
+			if n >= 3 {
+				return context.DeadlineExceeded
+			}
+			return nil
+		},
+	})
+
+	state.pruneOrphanLeaseIndex(ctx, namespace.Default, fmt.Sprintf("%d", time.Now().UnixMilli()))
+
+	// Rounds 1 and 2 completed and are durably gone; round 3 failed before
+	// removing anything.
+	requireLeaseIndexCard(t, rdb, seeded-2*chunk)
+	if _, ok := leaseIndexScore(t, rdb, types.ExecutionID(fmt.Sprintf("orphan-%05d", 2*chunk))); !ok {
+		t.Fatal("an orphan from the failed round 3 was removed")
+	}
+}
+
+// leasePruneLogCapture records every logger call so a test can assert on the
+// prune's structured line without depending on a logging backend.
+type leasePruneLogCapture struct {
+	mu      sync.Mutex
+	entries []leasePruneLogEntry
+}
+
+type leasePruneLogEntry struct {
+	level string
+	msg   string
+	args  []any
+}
+
+func (l *leasePruneLogCapture) record(level, msg string, args []any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.entries = append(l.entries, leasePruneLogEntry{level: level, msg: msg, args: append([]any(nil), args...)})
+}
+
+func (l *leasePruneLogCapture) snapshot() []leasePruneLogEntry {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]leasePruneLogEntry(nil), l.entries...)
+}
+
+func (l *leasePruneLogCapture) Debug(string, ...any)  {}
+func (l *leasePruneLogCapture) Debugf(string, ...any) {}
+func (l *leasePruneLogCapture) Info(msg string, args ...any) {
+	l.record("info", msg, args)
+}
+func (l *leasePruneLogCapture) Infof(format string, args ...any) {
+	l.record("info", fmt.Sprintf(format, args...), nil)
+}
+func (l *leasePruneLogCapture) Warn(msg string, args ...any) {
+	l.record("warn", msg, args)
+}
+func (l *leasePruneLogCapture) Warnf(format string, args ...any) {
+	l.record("warn", fmt.Sprintf(format, args...), nil)
+}
+func (l *leasePruneLogCapture) Error(msg string, args ...any) {
+	l.record("error", msg, args)
+}
+func (l *leasePruneLogCapture) Errorf(format string, args ...any) {
+	l.record("error", fmt.Sprintf(format, args...), nil)
+}
+func (l *leasePruneLogCapture) Panic(string, ...any)  {}
+func (l *leasePruneLogCapture) Panicf(string, ...any) {}
+
+func leasePruneLogField(args []any, key string) (any, bool) {
+	for i := 0; i+1 < len(args); i += 2 {
+		if k, ok := args[i].(string); ok && k == key {
+			return args[i+1], true
+		}
+	}
+	return nil, false
+}
+
+// TestLeaseIndexPruneLogsEveryFailureAndDeletion pins the prune's diagnostics:
+// a call that removed members logs one structured line, every failed call logs
+// one (never through noteLeaseIndexFailure's rate limit, so two consecutive
+// failures produce two lines), the failure line names the stage and carries the
+// elapsed field, and a call with nothing to examine logs nothing.
+func TestLeaseIndexPruneLogsEveryFailureAndDeletion(t *testing.T) {
+	state, _, rdb := newTestRedisState(t)
+	ctx := context.Background()
+	log := &leasePruneLogCapture{}
+	state.logger = log
+	base := time.Now().Add(-time.Hour).UTC()
+
+	var failing atomic.Bool
+	rdb.AddHook(&leasePruneFaultHook{onExists: func(context.Context, int) error {
+		if failing.Load() {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}})
+
+	// A successful call that removed orphans reports them.
+	seedLeaseIndexOrphans(t, rdb, 4, float64(base.UnixMilli()))
+	state.pruneOrphanLeaseIndex(ctx, namespace.Default, fmt.Sprintf("%d", time.Now().UnixMilli()))
+	entries := log.snapshot()
+	if len(entries) != 1 {
+		t.Fatalf("deletion call logged %d lines, want 1: %+v", len(entries), entries)
+	}
+	checkPruneLog(t, entries[0], map[string]any{
+		"namespace": string(namespace.Default),
+		"removed":   4,
+	})
+
+	// Two consecutive failures both log, with the failing stage and elapsed.
+	failing.Store(true)
+	seedLeaseIndexOrphans(t, rdb, 1, float64(base.UnixMilli()))
+	for i := 0; i < 2; i++ {
+		state.pruneOrphanLeaseIndex(ctx, namespace.Default, fmt.Sprintf("%d", time.Now().UnixMilli()))
+	}
+	entries = log.snapshot()
+	if len(entries) != 3 {
+		t.Fatalf("two failed calls produced %d log lines in total, want 3: %+v", len(entries), entries)
+	}
+	for _, entry := range entries[1:] {
+		checkPruneLog(t, entry, map[string]any{
+			"namespace": string(namespace.Default),
+			"stage":     "exists",
+			"removed":   0,
+		})
+		if errValue, ok := leasePruneLogField(entry.args, "err"); !ok || errValue == nil {
+			t.Fatalf("failure line has no err field: %+v", entry)
+		}
+	}
+
+	// Nothing to examine: no line, even though a stale failure would still be
+	// inside noteLeaseIndexFailure's rate-limit window.
+	if err := rdb.ZRem(ctx, leaseExpiryExecIndexKey(namespace.Default), "orphan-00000").Err(); err != nil {
+		t.Fatal(err)
+	}
+	state.pruneOrphanLeaseIndex(ctx, namespace.Default, fmt.Sprintf("%d", time.Now().UnixMilli()))
+	if got := len(log.snapshot()); got != 3 {
+		t.Fatalf("empty call logged a line: total %d, want 3", got)
+	}
+}
+
+// checkPruneLog asserts the entry is the structured prune line carrying every
+// required field, with the listed fields matching want.
+func checkPruneLog(t *testing.T, entry leasePruneLogEntry, want map[string]any) {
+	t.Helper()
+	for _, key := range []string{"namespace", "rounds", "checked", "orphans", "removed", "rearmed", "elapsed", "chunk"} {
+		if _, ok := leasePruneLogField(entry.args, key); !ok {
+			t.Fatalf("prune log line has no %q field: %+v", key, entry)
+		}
+	}
+	for key, wantValue := range want {
+		gotValue, ok := leasePruneLogField(entry.args, key)
+		if !ok || fmt.Sprint(gotValue) != fmt.Sprint(wantValue) {
+			t.Fatalf("prune log %q = %v ok=%v, want %v: %+v", key, gotValue, ok, wantValue, entry)
+		}
+	}
+}
+
+// TestLeaseIndexPruneChunkAdaptsToTimeouts pins the per-Store adaptive chunk: a
+// round that fails on context.DeadlineExceeded halves it (floored at
+// leaseIndexPruneChunkMin), a completed round doubles it (capped at
+// leaseIndexPruneChunkMax), and a failure that is not a deadline leaves it
+// alone.
+func TestLeaseIndexPruneChunkAdaptsToTimeouts(t *testing.T) {
+	state, _, rdb := newTestRedisState(t)
+	ctx := context.Background()
+	base := time.Now().Add(-time.Hour).UTC()
+	maxMs := fmt.Sprintf("%d", time.Now().UnixMilli())
+
+	const (
+		failNone = iota
+		failDeadline
+		failOther
+	)
+	var mode atomic.Int32
+	rdb.AddHook(&leasePruneFaultHook{onExists: func(context.Context, int) error {
+		switch mode.Load() {
+		case failDeadline:
+			return context.DeadlineExceeded
+		case failOther:
+			return fmt.Errorf("injected exists failure")
+		}
+		return nil
+	}})
+	seedLeaseIndexOrphans(t, rdb, 1, float64(base.UnixMilli()))
+
+	state.leaseIndexPruneChunk.Store(512)
+	mode.Store(failOther)
+	state.pruneOrphanLeaseIndex(ctx, namespace.Default, maxMs)
+	if got := state.leasePruneChunk(); got != 512 {
+		t.Fatalf("chunk after a non-deadline failure = %d, want unchanged 512", got)
+	}
+
+	mode.Store(failDeadline)
+	for _, want := range []int{256, 128, 128} {
+		state.pruneOrphanLeaseIndex(ctx, namespace.Default, maxMs)
+		if got := state.leasePruneChunk(); got != want {
+			t.Fatalf("chunk after a timed-out round = %d, want %d", got, want)
+		}
+	}
+
+	mode.Store(failNone)
+	for _, want := range []int{256, 512, 1024, 2048, 2048} {
+		state.pruneOrphanLeaseIndex(ctx, namespace.Default, maxMs)
+		if got := state.leasePruneChunk(); got != want {
+			t.Fatalf("chunk after a completed round = %d, want %d", got, want)
+		}
 	}
 	requireLeaseIndexCard(t, rdb, 0)
 }
